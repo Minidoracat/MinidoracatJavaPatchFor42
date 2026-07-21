@@ -41,13 +41,17 @@ $lfSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\zombie\mdc\LogFilter.clas
 Add-Content -Path "$R\dist\manifest.txt" -Value "zombie/mdc/LogFilter.class`t-`t$lfSha`t0hits" -NoNewline
 Add-Content -Path "$R\dist\manifest.txt" -Value "`n" -NoNewline
 
-Write-Host "[4/5] 連結驗證..."
-java -cp "$R\work\out" LoadCheck "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
+Write-Host "[4/6] 連結驗證（-Xverify:all）..."
+java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
 Assert-Ok "LoadCheck"
 
-Write-Host "[5/5] JVMS 資料流驗證（CheckClassAdapter）..."
+Write-Host "[5/6] JVMS 資料流驗證（CheckClassAdapter）..."
 java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
 Assert-Ok "BytecodeVerify"
+
+Write-Host "[6/6] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
+java -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
+Assert-Ok "SmokeCheck"
 
 Copy-Item "$R\deploy\install.sh", "$R\deploy\uninstall.sh" "$R\dist\" -Force
 Write-Host "完成：dist\java（loose classes）＋ dist\manifest.txt ＋ install/uninstall.sh"

@@ -98,6 +98,26 @@ clamp）。MP 的結構性問題是「**進水快、出水慢**」：多玩家�
 
 ---
 
+## 2c. 防崩潰頭部守衛（2 項，codex 對抗審查定案）
+
+**原理**：MP 的 hit 封包用 CharacterID 延遲解析目標角色；stale／型別混淆的參照會讓
+`getZombie()`（=tryCastTo，可回 null）或傳入的 `character` 為 null，而原版 setter 鏈無任何檢查
+→ NPE。手術＝方法最前插入 4 條指令的 null 守衛（`aload; [invokevirtual]; ifnonnull L; return; L:[F_SAME]`），
+堆疊峰值 1、locals 不變、原 frames 照舊。
+
+| 位置 | 守衛 | 順序關鍵 |
+|---|---|---|
+| hit/Zombie.process()V | `getZombie()==null → return` | **在 `super.process()` 之前**——否則 character-null 先在父類 NPE、type-confusion 會把殭屍狀態先寫進錯誤角色 |
+| hit/Fall.process(IsoGameCharacter)V | `character==null → return` | 縱深防禦定位：封包 pipeline 後續仍會用 target，不宣稱端到端防崩 |
+
+**驗證（build 第 6 步）**：行為 smoke＋負對照（原版必拋 NPE、修補版必須安靜返回——行為級證明
+guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9 setter 未增減）。
+
+**將來評估**（更根本的修復點，未做）：`Zombie.isConsistent()` 加 `getZombie()!=null`（現只驗 ID
+存在不驗型別）；`hit/Player` 有對稱風險應一起審。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。

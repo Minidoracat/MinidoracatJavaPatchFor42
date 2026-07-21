@@ -32,10 +32,18 @@ public final class Patcher {
     record Site(int opcode, String owner, String name, String desc, String redirectName) {}
     record ConstChange(Object from, Object to) {}
 
+    /**
+     * 方法頭部 null 守衛：aload &lt;slot&gt;［; invokevirtual owner.name desc］; ifnonnull L; return; L:[F_SAME]。
+     * 插在原第一條指令前（含 super 呼叫之前）；堆疊峰值 1、locals 不變、原 frames 照舊——
+     * 新 branch target 只需補一個 F_SAME（與初始 frame 等價，後續壓縮 frame 的 delta 鏈不受影響）。
+     */
+    record HeadGuard(int varSlot, String callOwner, String callName, String callDesc) {}
+
     static final class MethodOps {
         final String name, desc;
         final List<Site> redirects = new ArrayList<>();
         final List<ConstChange> consts = new ArrayList<>();
+        HeadGuard headGuard = null;
         int expectedHits = 0;
         int actualHits = 0;
         MethodOps(String name, String desc) { this.name = name; this.desc = desc; }
@@ -77,6 +85,23 @@ public final class Patcher {
         MethodSurgeon(MethodVisitor mv, MethodOps ops) {
             super(Opcodes.ASM9, mv);
             this.ops = ops;
+        }
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            HeadGuard g = ops.headGuard;
+            if (g != null) {
+                super.visitVarInsn(Opcodes.ALOAD, g.varSlot());
+                if (g.callOwner() != null) {
+                    super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, g.callOwner(), g.callName(), g.callDesc(), false);
+                }
+                org.objectweb.asm.Label cont = new org.objectweb.asm.Label();
+                super.visitJumpInsn(Opcodes.IFNONNULL, cont);
+                super.visitInsn(Opcodes.RETURN);
+                super.visitLabel(cont);
+                super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
+                ops.actualHits++;
+            }
         }
         @Override
         public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {

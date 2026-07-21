@@ -96,6 +96,24 @@ public final class PatchConfig {
         a3.expectedHits = 1;
         patches.add(animal);
 
+        // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
+
+        // hit 封包 stale/type-confused reference：getZombie()=tryCastTo 可回 null，原版 9 個 setter 無檢查；
+        // 守衛必須在 super.process() 之前（否則 character-null 先在父類 NPE、type-confusion 先寫錯角色）
+        Patcher.ClassPatch hitZ = new Patcher.ClassPatch("zombie/network/fields/hit/Zombie");
+        Patcher.MethodOps hz = hitZ.method("process", "()V");
+        hz.headGuard = new Patcher.HeadGuard(0, "zombie/network/fields/hit/Zombie", "getZombie",
+                "()Lzombie/characters/IsoZombie;");
+        hz.expectedHits = 1;
+        patches.add(hitZ);
+
+        // Fall.process 對傳入 character 無 null 檢查；守衛＝縱深防禦（封包 pipeline 後續仍可能用 target）
+        Patcher.ClassPatch hitF = new Patcher.ClassPatch("zombie/network/fields/hit/Fall");
+        Patcher.MethodOps hf = hitF.method("process", "(Lzombie/characters/IsoGameCharacter;)V");
+        hf.headGuard = new Patcher.HeadGuard(1, null, null, null);
+        hf.expectedHits = 1;
+        patches.add(hitF);
+
         return patches;
     }
 
