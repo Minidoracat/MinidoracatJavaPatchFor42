@@ -1,0 +1,28 @@
+{
+  "className": "zombie/popman/NetworkZombieManager",
+  "kind": "noise",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": {
+        "name": "moveZombie",
+        "desc": "(Lzombie/characters/IsoZombie;Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)V"
+      },
+      "site": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/debug/DebugLog",
+        "name": "log",
+        "desc": "(Ljava/lang/String;)V",
+        "expectedCount": 1
+      },
+      "filter": {
+        "matchMode": "contains",
+        "patterns": ["moveZombie: There are no zombies in nz.zombies."]
+      },
+      "rationale": "MP 伺服器上殭屍擁有權轉移（moveZombie）時，若舊 owner 的 NetworkZombie.zombies LinkedList 中找不到該殭屍（remove 回傳 false），就刷一行 DebugLog.log。這在擁有權快速切換／殭屍剛生成或死亡的競態下屬常態，會大量噴 log。原呼叫是 static 的 DebugLog.log(String)，redirect 到注入的同簽名靜態 helper (Ljava/lang/String;)V（無 receiver，堆疊形狀不變），helper 比對訊息含完整噪音字串則丟棄，否則轉發原 DebugLog.log。訊息是 ldc 字串常數、無動態內容，用完整字串比對零誤傷。",
+      "evidence": "moveZombie: 196: aload 5 | 198: getfield #314 // Field zombie/popman/NetworkZombieList$NetworkZombie.zombies:Ljava/util/LinkedList; | 201: aload_1 | 202: invokevirtual #320 // Method java/util/LinkedList.remove:(Ljava/lang/Object;)Z | 205: ifne 214 | 208: ldc_w #326 // String moveZombie: There are no zombies in nz.zombies. | 211: invokestatic #328 // Method zombie/debug/DebugLog.log:(Ljava/lang/String;)V"
+    }
+  ],
+  "behaviorNotes": "純 log 抑制，不改任何擁有權轉移邏輯：remove 失敗後本來就只印 log 然後照常走 214 之後的新 owner 指派流程（nz2.zombies.add、setOwner、setOwnerPlayer、resetSpeedLimiter），patch 後行為完全一致。整個 class 對 DebugLog.log(Ljava/lang/String;)V 的呼叫僅此一處（另一處 DebugLog.log 位於他法、為雙參數 (Lzombie/debug/DebugType;Ljava/lang/String;)V 變體，descriptor 不同、不受本 site 影響），expectedCount=1 可做 patch 完整性驗證。helper 收到與原呼叫相同的單一 String 參數。",
+  "verification": "部署後開 MP 伺服器、多名玩家在殭屍群附近移動或開車經過（觸發殭屍擁有權頻繁轉移），伺服器 console.txt 不應再出現 'moveZombie: There are no zombies in nz.zombies.' 行；同時確認殭屍同步行為正常（殭屍不瞬移、不凍結、跨玩家追擊順暢），且其他 DebugLog 訊息（如本 class 內經 DebugType 路徑的 error/log）仍正常輸出。"
+}

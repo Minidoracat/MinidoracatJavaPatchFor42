@@ -1,0 +1,16 @@
+{
+  "className": "zombie/popman/ZombieCountOptimiser",
+  "kind": "behavior",
+  "patches": [
+    {
+      "op": "const-change",
+      "method": { "name": "incrementZombie", "desc": "(Lzombie/characters/IsoZombie;)V" },
+      "constChange": { "from": 10, "to": 6 },
+      "site": { "opcode": "BIPUSH", "expectedCount": 1 },
+      "rationale": "此常數是 Rand.AdjustForFramerate(10) 的引數，控制「超過刪除閾值時、每 frame 每隻合格殭屍被排入刪除佇列的機率」。伺服器路徑上 AdjustForFramerate(chance) = (int)(chance * 0.33333334F)（見 zombie/core/random/RandInterface.AdjustForFramerate，GameServer.server 分支），故原值 10 → Next(3)==0 → 每 frame 1/3 機率；改 6 → (int)(6*0.33333334)=2 → Next(2)==0 → 1/2 機率，culling 回收速率提高 1.5 倍。刻意不選 ≤5：5 以下伺服器端會算成 1（Next(1) 恆為 0 → 100% 全刪，單 frame 大幅超殺）；≤2 會算成 0，而 RandAbstract.Next(max<=0) 直接回傳 0（已驗證，非例外），同樣退化成 100% 全刪。6 是最保守的一階加速。注意：incrementZombie 方法內 BIPUSH 10 僅此一處（offset 6）；canBeDeletedUnnoticed 另有一個 BIPUSH 10（螢幕距離換算），patcher 必須以 method name+desc 限定範圍，勿全類別替換。",
+      "evidence": "public static void incrementZombie(zombie.characters.IsoZombie);\n    Code:\n       0: getstatic     #55                 // Field zombieCountForDelete:I\n       3: ifle          62\n       6: bipush        10\n       8: invokestatic  #61                 // Method zombie/core/random/Rand.AdjustForFramerate:(I)I\n      11: invokestatic  #67                 // Method zombie/core/random/Rand.Next:(I)I\n      14: ifne          62"
+    }
+  ],
+  "behaviorNotes": "類別行為：MovingObjectUpdateScheduler.startFrame() 每 frame（僅 GameServer.server）呼叫 startCount()，計算 zombieCountForDelete = (int)(1.0F * max(0, cell殭屍總數 - SandboxOptions.zombieConfig.zombiesCountBeforeDeletion))；隨後對每隻殭屍呼叫 incrementZombie()：當 zombieCountForDelete > 0（純閘門，從不遞減——javap 確認 incrementZombie 無 putstatic #55）且通過隨機取樣（本 patch 目標）、非 reanimated player、無攻擊目標（getTarget()==null）、在戶外無屋頂（isOutside）、且距離所有玩家都超出 relevant-range 換算的螢幕距離（canBeDeletedUnnoticed，任一玩家看得到就不刪）時，排入 zombiesForDelete；frame 尾端 deleteZombies() 經 NetworkZombiePacker.deleteZombie + removeFromWorld/removeFromSquare 移除。為什麼安全：(1) 只改取樣速率，五道安全條件全數保留——尤其「所有玩家視野外」與「無目標」保證玩家不會目擊消失、不會中斷戰鬥；(2) 觸發前提仍是殭屍總數超過 sandbox 閾值，閾值本身未動且每 frame 重算，數量降回閾值下即自動停止；(3) canBeDeletedUnnoticed 在 !GameServer.server 時恆 false，故單機/客戶端本 patch 完全無效果（伺服器專屬）；(4) 單一常數、單一方法、可直接回退。備註：startCount 的 fconst_1（1.0F 乘數）不值得改——zombieCountForDelete 只被當 >0 閘門使用、從不遞減，縮放它不改變任何行為；若要降低觸發門檻，正路是 sandbox 選項 ZombieConfig.zombiesCountBeforeDeletion（伺服器設定即可調，無需 patch）。canBeDeletedUnnoticed 的 iconst_2/bipush 10/fconst_2（安全距離公式）刻意不動：縮小會讓玩家看見殭屍憑空消失，違反保守原則。",
+  "verification": "部署後在正式伺服器：(1) 觀察 GameStatistic zombiesCulled 計數器（incrementZombie 每次排入即 increase()），同等超額殭屍量下上升速率應約為 patch 前 1.5 倍；(2) 用 sandbox 設定將 zombiesCountBeforeDeletion 暫調低於當前殭屍數，確認殭屍總數（伺服器統計面板/Lua getStats）較快收斂回閾值下；(3) 反向驗證：玩家視野內、室內、或有目標的殭屍不消失（在玩家附近聚怪觀察不掉隻）；(4) 回退驗證：還原 jar 後行為回到 1/3 取樣。"
+}

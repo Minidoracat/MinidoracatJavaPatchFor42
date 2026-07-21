@@ -1,0 +1,32 @@
+{
+  "className": "zombie/characters/animals/IsoAnimal",
+  "kind": "behavior",
+  "patches": [
+    {
+      "op": "const-change",
+      "method": { "name": "updateStress", "desc": "()V" },
+      "constChange": { "from": 5500.0, "to": 2750.0 },
+      "site": { "opcode": "LDC_W", "expectedCount": 1 },
+      "rationale": "此常數是被動壓力衰減的除數：updateStress() 每 tick 檢查五種壓力源（被抱著/載具>5km/h/飢渴>0.8/在高處/淋雨），當本 tick 無任何壓力源觸發（incStress 保持 true）時執行 changeStress(-(GameTime.getMultiplier()/5500.0F))。5500→2750 使閒置衰減速率加倍，直接對治「MP 上累積快、恢復慢」的不對稱。為什麼安全：(1) 只在「無壓力源」分支生效——動物仍在受壓時完全不受影響，壓力源判定邏輯一字未動；(2) changeStress 內建 Math.min(100,Math.max(0,·)) clamp（offset 95-110 javap 確認），加速衰減不可能產生非法狀態；(3) 純幅度調整、同一程式碼路徑；(4) 5500.0f 在整個 class 僅此一處 LDC（全檔 grep 確認唯一），無誤中風險。刻意不動 heldBy 的 3000.0f（抱著已是主動安撫手段，速率合理）。",
+      "evidence": "     212: iload_1\n     213: ifeq          231\n     216: aload_0\n     217: invokestatic  #367                // Method zombie/GameTime.getInstance:()Lzombie/GameTime;\n     220: invokevirtual #372                // Method zombie/GameTime.getMultiplier:()F\n     223: ldc_w         #849                // float 5500.0f\n     226: fdiv\n     227: fneg\n     228: invokevirtual #797                // Method changeStress:(F)V\n     231: return"
+    },
+    {
+      "op": "const-change",
+      "method": { "name": "respondToSound", "desc": "()V" },
+      "constChange": { "from": 20.0, "to": 60.0 },
+      "site": { "opcode": "LDC_W", "expectedCount": 1 },
+      "rationale": "此常數是聲音壓力除數：動物對 WorldSound（槍聲、喊叫、警報等）反應並逃跑時執行 changeStress(sound.radius/20.0F)——槍聲 radius 常見 70-150，單發即 +3.5~7.5（stress 基因 allele 再乘 (1+v) 放大）。MP 多玩家環境槍戰/活動密度高，此路徑是壓力尖峰主因。20→60 使單次聲音壓力降為 1/3。為什麼安全：(1) 逃跑行為完全保留——soundSourceTarget、timeSinceFleeFromSound、animalRunning、pathToLocation 全不動，動物照樣被嚇跑，只是恐慌累積較慢；(2) 仍為正增量，方向與語意不變，clamp 保留；(3) float 20.0f 在 respondToSound 方法內僅此一處（offset 463，後接 fdiv + invokevirtual #797 changeStress）。警告：constant pool 條目 #1003（20.0f）另被 getAcceptanceLevel、tryLure、getPlayerAcceptance、shouldStartFollowWall 共用——patcher 必須改寫方法內的 LDC 指令運算元（重建常數池），絕不可直接改 pool 條目，且必須以 method name+desc 限定範圍。",
+      "evidence": "     457: aload_0\n     458: aload_1\n     459: getfield      #948                // Field zombie/WorldSoundManager$WorldSound.radius:I\n     462: i2f\n     463: ldc_w         #1003               // float 20.0f\n     466: fdiv\n     467: invokevirtual #797                // Method changeStress:(F)V"
+    },
+    {
+      "op": "const-change",
+      "method": { "name": "killed", "desc": "(Lzombie/characters/IsoPlayer;)V" },
+      "constChange": { "from": 30.0, "to": 15.0 },
+      "site": { "opcode": "LDC_W", "expectedCount": 1 },
+      "rationale": "宰殺連鎖壓力上限：killed() 對同一 designation zone 內所有動物執行 changeStress(Rand.Next(10.0F,30.0F))，平均 +20/隻/次。MP 農場例行屠宰數隻即可把整群推過 80（thump 閾值）。30→15 使範圍變 Rand.Next(10,15)，平均 20→12.5、上限砍半。為什麼安全：(1) Rand.Next(float,float) 之 min(10)<max(15) 仍為合法區間，無例外風險；(2) 群體受驚語意保留（仍加壓、近距離仍 forceFleeFromChr 逃離屠夫），只降幅度；(3) float 30.0f 在 killed 方法內僅此一處。警告：killed 方法內 float 10.0f（#376）出現兩次（offset 46 為 Rand 下界、offset 68 為 DistToProper 距離判定），刻意不改 10.0f 以避免歧義誤中。",
+      "evidence": "      44: aload         4\n      46: ldc_w         #376                // float 10.0f\n      49: ldc_w         #1711               // float 30.0f\n      52: invokestatic  #1050               // Method zombie/core/random/Rand.Next:(FF)F\n      55: invokevirtual #797                // Method changeStress:(F)V"
+    }
+  ],
+  "behaviorNotes": "類別壓力模型（javap+反編譯源交叉確認）：stressLevel（float field，存檔/同步皆含，output.putFloat/input.getFloat）由 changeStress(F)V 統一進出——正增量乘 stress 基因 (1+allele.currentValue)、負增量乘 allele.currentValue，'highstress' 缺陷再對正增量 /10 負增量 x10，最後 Math.min(100,Math.max(0,·)) clamp；isInvincible 時擋負增量。加壓路徑：(a) respondToSound 聲音逃跑 +radius/20【本次 patch2】；(b) killed 同 zone 連鎖 +Rand(10,30)【patch3】；(c) Hit 被打 setDebugStress(+Rand(20,40))（直寫 field 繞過基因與 clamp 前段，僅 clamp 於下次 changeStress——刻意不動：被攻擊高壓是核心防虐待機制）；(d) updateStress 慢性源：載具/50000、飢渴/50000、高處/10000、雨/40000（幅度小，不動）。減壓路徑：閒置 -mult/5500【patch1，唯一自然恢復管道】、被抱 -mult/3000、摸 -(7~11+perk)（15~25 秒冷卻）、手餵 -(1~4+perk/5)。高壓後果：>=80 animalShouldThump→tryThump 撞毀圍籬（MP 最痛損失）、>80/60/40 誘導失敗率遞增、>50 stressed 叫聲、>20 影響 shouldStartFollowWall。MP 問題根因：多玩家的槍聲/喊叫密度使 (a) 尖峰頻繁 + (b) 例行屠宰連鎖，而唯一自然衰減 /5500 過慢，長期滯留高壓區間。三個 patch 合力：進水減 2/3（聲音）與 37.5%（屠宰）、出水加倍，全部是既有常數的幅度調整——無新程式碼路徑、無指令插入、clamp 與所有行為（逃跑/動畫/尋路/XP）原樣，逐一可獨立回退。不採 early-return updateStress（會同時殺掉衰減，反效果）；不採 call-suppress changeStress（會誤傷減壓呼叫）；不動 changeStress 本體（基因/缺陷常數 10.0f 具共享語意）。伺服器端生效：MP 動物由伺服器權威、stressLevel 經 AnimalSynchronizationManager 同步覆蓋 client，僅 patch 伺服器 jar 即全域生效。",
+  "verification": "部署後於正式伺服器（admin 或 debug 模式，動物檢視面板 getStressTxt cheat=true 會顯示精確 stressLevel 數值）：(1) 聲音測試：在牲畜 zone 旁開槍一發，壓力增量應約為原本 1/3（radius/60 而非 radius/20），動物仍會受驚逃跑（行為不變是負向驗證重點）；(2) 衰減測試：餵飽給水、室內無雨的動物，由高壓降回 Calm 的時間應約減半；(3) 屠宰測試：同 zone 宰殺一隻，其餘動物單次壓力增量不超過 15（原上限 30）；(4) 迴歸驗證：飢渴>0.8 或淋雨動物壓力仍會上升、>=80 仍會撞柵欄；(5) 健康檢查：server 啟動 log 無 VerifyError/ClassFormatError，動物正常生成、移動、存讀檔。回退：還原 jar 三項行為即回原值。"
+}

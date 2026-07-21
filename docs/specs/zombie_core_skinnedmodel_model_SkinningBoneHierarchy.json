@@ -1,0 +1,30 @@
+{
+  "className": "zombie/core/skinnedmodel/model/SkinningBoneHierarchy",
+  "kind": "noise",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": {
+        "name": "buildBoneHierarchy",
+        "desc": "(Lzombie/core/skinnedmodel/model/SkinningData;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/debug/DebugType",
+        "name": "warn",
+        "desc": "(Ljava/lang/String;[Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "filter": {
+        "matchMode": "contains",
+        "patterns": [
+          "SkeletonBone not resolved for bone:"
+        ]
+      },
+      "rationale": "buildBoneHierarchy 對每根無法解析為 SkeletonBone enum 的骨骼名各 warn 一次（DebugType.Ragdoll 頻道）。含 mod 模型骨架時開機刷屏。redirect-log 改為 INVOKESTATIC 到注入的同 class 靜態 helper，helper 收 (DebugType, String format, Object[] args)；比對格式字串（格式化前），命中即丟棄，否則轉發原 DebugType.warn。格式字串是編譯期 LDC 常數，contains 比對 'SkeletonBone not resolved for bone:' 足夠特異，不會誤傷其他警告。",
+      "evidence": "150: getstatic #105 // Field zombie/debug/DebugType.Ragdoll:Lzombie/debug/DebugType;\n153: ldc #111 // String SkeletonBone not resolved for bone: %s, defaulting to SkeletonBone.None\n155: iconst_1\n156: anewarray #2 // class java/lang/Object\n159: dup\n160: iconst_0\n161: aload 5\n163: aastore\n164: invokevirtual #113 // Method zombie/debug/DebugType.warn:(Ljava/lang/String;[Ljava/lang/Object;)V"
+    }
+  ],
+  "behaviorNotes": "純日誌抑制，零行為變更：warn 呼叫點在 if_acmpne (bc 147) 守衛內，僅當 bone.skeletonBone == SkeletonBone.None 時執行，且 warn 是該分支唯一動作（bc 150-164），之後 goto 45 繼續迴圈。骨骼欄位賦值（index/name/skeletonBone/children）、parent/children 掛接、boneHierarchyValid 旗標皆不受影響。全 class 僅此一處 DebugType.warn（javap grep 確認 #113 只出現一次），無其他方法會被誤改。helper 堆疊形狀：INVOKEVIRTUAL 的 receiver (DebugType.Ragdoll) 變 INVOKESTATIC 第一參數，desc 為 (Lzombie/debug/DebugType;Ljava/lang/String;[Ljava/lang/Object;)V。",
+  "verification": "部署後啟動遊戲（或 server），確認 console/log 不再出現 'SkeletonBone not resolved for bone: ... , defaulting to SkeletonBone.None' 行；同時確認 Ragdoll 頻道其他警告（若有）仍正常輸出，且角色/殭屍模型動畫與 ragdoll 表現正常（骨架階層建構結果未變）。"
+}

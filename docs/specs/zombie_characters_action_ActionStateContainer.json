@@ -1,0 +1,28 @@
+{
+  "className": "zombie/characters/action/ActionStateContainer",
+  "kind": "noise",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": {
+        "name": "tryInsertChildState",
+        "desc": "(Lzombie/characters/action/ActionContext;Lzombie/characters/action/ActionState;)Z"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/debug/DebugType",
+        "name": "warn",
+        "desc": "(Ljava/lang/String;[Ljava/lang/Object;)V",
+        "expectedCount": 2
+      },
+      "filter": {
+        "matchMode": "contains",
+        "patterns": ["Transition's target state \"%s\" not supported by parent:"]
+      },
+      "rationale": "tryInsertChildState 在兩處判定子 state 無法插入時對 DebugType.ActionSystem 發出 warn 後 return false：(1) currentStateSupportsChildState 不成立（parent 為 currentState）、(2) 掃描 childStates 時既有 lowerState 不接受 nextState（parent 為該 lowerState）。伺服器上大量 MOD 動作組合常態性觸發，每分鐘刷數十行。兩個呼叫點使用同一個 ldc #239 格式字串常數，redirect 到注入的靜態 helper（簽名 (Lzombie/debug/DebugType;Ljava/lang/String;[Ljava/lang/Object;)V，receiver 變第一參數），helper 比對 format 字串含 'Transition's target state \"%s\" not supported by parent:' 即丟棄，其餘轉發原 warn。行為不變：兩個分支 warn 後本就 return false，抑制 log 不影響回傳值與插入邏輯。filter 保留格式佔位符 \"%s\" 使樣式高度特異，不會誤傷本 class 其他 5 個 warn:(String,Object[]) 呼叫點（皆在其他 method 且格式字串不同）。",
+      "evidence": "bci 18-60: 18: getstatic #129 // Field zombie/debug/DebugType.ActionSystem:Lzombie/debug/DebugType; | 21: ldc #239 // String %s> Transition\\'s target state \\\"%s\\\" not supported by parent: \\\"%s\\\" | 23: iconst_3 | 24: anewarray #2 // class java/lang/Object | ... | 56: invokevirtual #146 // Method zombie/debug/DebugType.warn:(Ljava/lang/String;[Ljava/lang/Object;)V | 59: iconst_0 | 60: ireturn ; bci 126-166: 126: getstatic #129 | 129: ldc #239 (同字串) | ... | 162: invokevirtual #146 // Method zombie/debug/DebugType.warn:(Ljava/lang/String;[Ljava/lang/Object;)V | 165: iconst_0 | 166: ireturn"
+    }
+  ],
+  "behaviorNotes": "純 log 抑制，不改變 tryInsertChildState 語意：兩個 warn 分支原本即 warn 後 return false，patch 後仍 return false，state 插入判定完全不變。全 class warn:(Ljava/lang/String;[Ljava/lang/Object;)V 共 7 個呼叫點，本 method 內恰 2 個（bci 56、162），expectedCount=2 可做 patch 完整性驗證；其餘 5 個在其他 method（updateChildStates 等）不受影響。另有 1 個 warn:(Ljava/lang/Object;)V（不同 descriptor）與 1 個 trace:(Ljava/lang/String;[Ljava/lang/Object;)V，皆不符 site 條件。helper 收到的堆疊參數與原呼叫相同：DebugType receiver（ActionSystem）、format String、Object[3]（ownerUID、nextState 名、parent 名）；比對僅用 format 字串常數，varargs 不需展開。",
+  "verification": "部署後重啟伺服器，觀察 console.txt / server log：不應再出現 'Transition's target state \"...\" not supported by parent: \"...\"' 行（patch 前每分鐘數十行，最易驗證）。同時抽查 ActionSystem 頻道其他警告（如 updateChildStates 相關 warn）在 debug 模式下仍正常輸出，確認未誤壓；遊戲內角色/殭屍動作（進食、攻擊、爬窗等複合動作）行為與 patch 前一致、無新增 error。"
+}

@@ -1,0 +1,28 @@
+{
+  "className": "zombie/inventory/ItemPickInfo",
+  "kind": "noise",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": {
+        "name": "GetPickInfo",
+        "desc": "(Lzombie/inventory/ItemContainer;Lzombie/inventory/ItemPickInfo$Caller;)Lzombie/inventory/ItemPickInfo;"
+      },
+      "site": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/debug/DebugLog",
+        "name": "log",
+        "desc": "(Ljava/lang/String;)V",
+        "expectedCount": 9
+      },
+      "filter": {
+        "matchMode": "prefix",
+        "patterns": ["ItemPickInfo -> cannot get ID for "]
+      },
+      "rationale": "GetPickInfo 對每個 loot roll 觸發：容器/房間/區域名稱查不到 ItemConfigurator ID 時無條件 DebugLog.log（不受 Core.debug 閘控），MOD 地圖的自訂 container/room/zone 常態性未註冊，導致 'ItemPickInfo -> cannot get ID for container/room/zone: ...' 大量刷 log。方法內共 9 個 INVOKESTATIC DebugLog.log(String) 呼叫點（offset 69/267/401/542/630/665/682/717/739），全部改道到注入的靜態 helper（簽名 (Ljava/lang/String;)V，靜態呼叫無 receiver、堆疊僅一個 String）。helper 以 prefix 'ItemPickInfo -> cannot get ID for ' 比對：命中即丟棄（涵蓋 container/room/tile/zone 四種噪音變體，經 javap -v 常數池 #370/#372/#374/#376 確認皆為此前綴），未命中則轉發原 DebugLog.log——offset 665/682/717/739 四處為 Core.debug 閘控的診斷訊息（'unable to set source grid pick info'、'Outermost Container:'、'Vehicle:'、'unable to set pick info: container == null'，常數池 #378/#380/#382/#384），前綴不符、不受影響。",
+      "evidence": "GetPickInfo: 69: invokestatic #180 // Method zombie/debug/DebugLog.log:(Ljava/lang/String;)V（container，前接 64: invokedynamic #176 makeConcatWithConstants）| 267: invokestatic #180（room）| 401: invokestatic #180（tile）| 542: invokestatic #180（zone.type）| 630: invokestatic #180（zone.name）| 665/682/717/739: invokestatic #180（Core.debug 閘控診斷）。常數池：#370 = String 'ItemPickInfo -> cannot get ID for container: \\u0001'、#372 = '...for room: \\u0001'、#374 = '...for tile: \\u0001'、#376 = '...for zone: \\u0001'、#378 = 'ItemPickInfo -> unable to set source grid pick info, Caller: \\u0001, for Container: \\u0001'"
+    }
+  ],
+  "behaviorNotes": "純 log 抑制，不改 GetPickInfo 語意：ID 查不到時 containerId/roomId 維持 -1、zone/tile 直接略過，isMatch() 的 selector 比對行為與 patch 前完全相同（-1 不會命中任何 selectorID）。噪音五站中 offset 69（container）與 267（room）在 log 後仍走原流程（僅少一行輸出）；offset 401（tile）實為 dead code——前置條件 getID() >= 0 已保證 tileID != -1，但呼叫點仍存在於 bytecode、計入 expectedCount。四個 Core.debug 閘控站（665/682/717/739）prefix 不符、helper 原樣轉發，debug 模式診斷能力不受影響。expectedCount=9 為 patch 完整性檢核：全 class 僅 GetPickInfo 含 DebugLog.log 呼叫，數量不符即代表版本漂移，應中止 patch。",
+  "verification": "部署後以含自訂地圖 MOD 的存檔開伺服器/單機並觸發 loot 生成（進入未探索的 MOD 地圖建築開容器），console.txt 不應再出現任何 'ItemPickInfo -> cannot get ID for' 開頭的行（container/room/zone 三種變體皆消失）；對照組：以 -debug 模式對 null container 路徑觸發時，'ItemPickInfo -> unable to set pick info' 等診斷行仍應正常輸出。遊戲行為驗證：MOD 地圖容器的 loot 內容與 patch 前一致（未註冊 ID 本來就 fallback 到 default distribution，patch 不改變此行為）。"
+}

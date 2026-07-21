@@ -1,0 +1,28 @@
+{
+  "className": "zombie/core/skinnedmodel/advancedanimation/AnimationSet",
+  "kind": "noise",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": {
+        "name": "GetState",
+        "desc": "(Ljava/lang/String;)Lzombie/core/skinnedmodel/advancedanimation/AnimState;"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/debug/DebugType",
+        "name": "warn",
+        "desc": "(Ljava/lang/String;[Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "filter": {
+        "matchMode": "contains",
+        "patterns": ["AnimState not found:"]
+      },
+      "rationale": "GetState 查不到 AnimState 時對 DebugType.Animation 發出 warn，遊玩期（MOD 動畫集常態性缺 state）大量刷 log。redirect 到注入的靜態 helper（簽名 (Lzombie/debug/DebugType;Ljava/lang/String;[Ljava/lang/Object;)V，receiver 變第一參數），helper 依 format 字串比對 'AnimState not found:' 丟棄，其餘轉發原 warn。行為不變：呼叫後仍回傳 new AnimState() fallback。filter 比對的是 varargs 前的 format 字串常數 'AnimState not found: %s'，contains 'AnimState not found:' 即可精準命中且不誤傷其他 warn。",
+      "evidence": "GetState: 24: getstatic #76 // Field zombie/debug/DebugType.Animation:Lzombie/debug/DebugType; | 27: ldc #82 // String AnimState not found: %s | 29: iconst_1 | 30: anewarray #2 // class java/lang/Object | 33: dup | 34: iconst_0 | 35: aload_1 | 36: aastore | 37: invokevirtual #84 // Method zombie/debug/DebugType.warn:(Ljava/lang/String;[Ljava/lang/Object;)V"
+    }
+  ],
+  "behaviorNotes": "純 log 抑制，不改變 GetState 語意：查無 state 時仍回傳 new AnimState()（空 fallback），呼叫端行為完全不變。全 class 僅此一處 DebugType.warn（Load 走 debugln、不受影響），expectedCount=1 可做 patch 完整性驗證。helper 收到的堆疊參數與原呼叫相同：DebugType receiver、format String、Object[] args；比對僅用 format 字串（varargs 內容不需展開）。",
+  "verification": "部署後啟動遊戲進入存檔（尤其含自訂動畫 MOD 的角色/殭屍動作觸發時），console.txt 不應再出現 'AnimState not found:' 行；同時確認 'Loading AnimSet:' 等其他 Animation 頻道訊息（debug 模式下）仍正常輸出，且動畫 fallback 行為（缺 state 時不 crash、播放預設）與 patch 前一致。"
+}

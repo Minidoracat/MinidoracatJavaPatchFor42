@@ -1,0 +1,25 @@
+{
+  "className": "zombie/network/PacketsCache",
+  "kind": "behavior",
+  "patches": [
+    {
+      "op": "redirect-log",
+      "method": { "name": "<init>", "desc": "()V" },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/debug/DebugType",
+        "name": "warn",
+        "desc": "(Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "filter": {
+        "matchMode": "prefix",
+        "patterns": ["No packet handler for type:"]
+      },
+      "rationale": "建構子掃描全部 PacketTypes$PacketType，凡 handler == null 者累積名字，最後以 DebugType.Packet.warn(sb.toString()) 印出一長串 WARN。多個 PacketType 在 vanilla 本來就無 handler class（走 GameClient/GameServer 內建 switch 處理），故此 WARN 每次建構 PacketsCache（每個玩家連線）必刷且無資訊價值。此呼叫點純 log、不觸碰 packets/hashes/limits 三個 map，改道到同 class 靜態過濾 helper（收 (Lzombie/debug/DebugType;Ljava/lang/Object;)V，receiver 變第一參數）後，訊息以 prefix 'No packet handler for type:' 比對（源碼 line 37 insert(0, ...) 保證訊息必以此字面值開頭）命中即丟棄、否則轉發原 warn。<init> 內另一個 log 是 printException（不同方法名，不受影響）；isLimitExceeded 的 warn 是 (Ljava/lang/String;[Ljava/lang/Object;)V 不同 descriptor，expectedCount=1 保證不誤傷。堆疊形狀：呼叫點時堆疊為 [DebugType, Object]，INVOKESTATIC helper 簽名完全對應，無需搬移。",
+      "evidence": "  protected zombie.network.PacketsCache();\n     177: aload_1\n     178: iconst_0\n     179: ldc           #87                 // String No packet handler for type: \n     181: invokevirtual #89                 // Method java/lang/StringBuilder.insert:(ILjava/lang/String;)Ljava/lang/StringBuilder;\n     185: getstatic     #69                 // Field zombie/debug/DebugType.Packet:Lzombie/debug/DebugType;\n     188: aload_1\n     189: invokevirtual #93                 // Method java/lang/StringBuilder.toString:()Ljava/lang/String;\n     192: invokevirtual #96                 // Method zombie/debug/DebugType.warn:(Ljava/lang/Object;)V\n（grep 全 class：warn:(Ljava/lang/Object;)V 僅此 1 處；isLimitExceeded 164: invokevirtual #190 // Method zombie/debug/DebugType.warn:(Ljava/lang/String;[Ljava/lang/Object;)V 為不同 overload）"
+    }
+  ],
+  "behaviorNotes": "類別行為：PacketsCache 是抽象基底（GameClient/GameServer 端各自繼承），建構時把每個 PacketType.handler 反射 new 一份放入 packets map 當 handler 快取；hashes 用於增量比對；limits 是每型別 1 秒滑動窗速率統計，容量上限取 ServerOptions.maxPacketsPerSecond（IntegerServerOption）。速率/容量相關：1000L（1 秒窗）位於 synthetic lambda$isLimitExceeded$0（ldc2_w #232 // long 1000l），容量則完全來自 ServerOptions.maxPacketsPerSecond——這是伺服器 ini 可調選項（servertest.ini 的 MaxPacketsPerSecond），與地圖串流「黑邊」若有關聯，正確做法是調高該 ini 選項並觀察，不需要也不建議 bytecode const-change（改 1000L 窗口會扭曲所有封包型別的速率語意，風險高收益低，故不提出）。本 patch 僅移除一條每次連線必刷、內容固定的資訊性 WARN，不改任何 map 內容、不影響封包處理路徑；printException（handler 建立失敗）與 'Packets limit has exceeded'（真實限流事件）兩類有價值的 log 完整保留。",
+  "verification": "部署後重啟伺服器並讓玩家連線：1) server console / DebugLog 不再出現 'No packet handler for type: ...' 長串 WARN；2) 若人為填錯 handler，'Error creating packet type:' 仍會印出（printException 未動）；3) 高流量時 'Packets limit has exceeded for ...' 仍照常出現，證明 isLimitExceeded 的 warn overload 未被誤傷；4) 玩家連線/同步行為與 patch 前一致。"
+}
