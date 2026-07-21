@@ -63,7 +63,9 @@ for pass in mdc rest; do
     done < "$MF"
 done
 cp "$MF" "$SF/java/patch-manifest.txt"
-chown pzserver:pzserver "$SF/java/patch-manifest.txt" 2>/dev/null || true
+# mkdir -p 產生的中間層目錄也要歸 pzserver——LinuxGSM 啟動前有擁有權檢查，root 擁有的目錄會 FAIL。
+# java/zombie 樹只含本 patch 檔案（遊戲 class 都在 jar 內），遞迴範圍精確
+chown -R pzserver:pzserver "$SF/java/zombie" "$SF/java/patch-manifest.txt" 2>/dev/null || true
 
 echo "已安裝 $count 個 class；下次伺服器重啟生效"
 echo "移除：bash uninstall.sh（依 $SF/java/patch-manifest.txt 精確清除）"
