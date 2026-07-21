@@ -37,23 +37,6 @@ public final class LogFilter {
         "ItemPickInfo -> cannot get ID for ",                                            // ItemPickInfo（debug 診斷前綴不同、照常轉發）
     };
 
-    /** IsoCell.PlaceLot 的 java.util.logging 呼叫點——只攔已知永久缺失的 taibei 材質家族。 */
-    private static final String[] JUL_PREFIX = {
-        "Missing tile definition: taibei",      // Taibeiroad/Trapalaketown/KillMingLake 共用的未上架材質包
-        "Missing tile definition: d_taibei",
-    };
-
-    public static void julLog(java.util.logging.Logger logger, java.util.logging.Level level, String message) {
-        if (message != null) {
-            for (String p : JUL_PREFIX) {
-                if (message.startsWith(p)) {
-                    return;
-                }
-            }
-        }
-        logger.log(level, message);
-    }
-
     public static void warnFmt(DebugType type, String format, Object[] args) {
         if (format != null) {
             for (String p : FMT_EXACT) {

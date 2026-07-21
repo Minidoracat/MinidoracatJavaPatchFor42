@@ -48,7 +48,6 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 | 5 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
 | 6 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
 | 7 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
-| 9 | IsoCell.PlaceLot ×2（JUL SEVERE） | `Missing tile definition: taibei`／`d_taibei` 前綴（未上架材質包的永久缺失；Taibeiroad 移除後 Trapalaketown/KillMingLake 仍引用） | 其他 tilesheet 的缺失照常輸出 |
 | 8 | PacketTypes$PacketType.onServerPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）；反作弊警告 `The packet %s is not valid` 照常輸出** |
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，
