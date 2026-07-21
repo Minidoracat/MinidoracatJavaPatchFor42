@@ -1,0 +1,13 @@
+{
+  "className": "zombie/network/fields/hit/Fall",
+  "kind": "guard",
+  "patches": [
+    { "op": "head-guard",
+      "method": { "name": "process", "desc": "(Lzombie/characters/IsoGameCharacter;)V" },
+      "guard": "aload_1; ifnonnull L; return; L:[F_SAME]",
+      "rationale": "process(character) 在 dropPositionX/Y 非零時直接 character.getHitReactionNetworkAI() 無 null 檢查（Fall.java:52-53；既有 ifnull 檢查的是 getHitReactionNetworkAI() 回傳值、不是 character 本身）。守衛＝縱深防禦：呼叫端（PlayerHitZombiePacket/VehicleHitZombiePacket/HitCharacter pipeline）同一封包生命週期後續仍會使用 target，本守衛不能宣稱端到端防崩（codex 對抗審查定位）。",
+      "evidence": "原版 process: 0-15: dropPositionX/Y 為 0 即短路跳 49 return | 18: aload_1 | 19: invokevirtual getHitReactionNetworkAI() ← character null 時 NPE | 49: return。smoke 負對照需先以反射設 dropPositionX/Y=1.0f 迫使走到解參照路徑。" }
+  ],
+  "behaviorNotes": "頭部插入同 hit/Zombie 模式。null 時 no-op 與原方法「其他條件不成立時 no-op」語意一致。",
+  "verification": "build [6/6] SmokeCheck：原版 process(null)（座標非零）必拋 NPE、修補版安靜返回；結構斷言 guard 序列在最前。"
+}

@@ -1,0 +1,13 @@
+{
+  "className": "zombie/network/fields/hit/Zombie",
+  "kind": "guard",
+  "patches": [
+    { "op": "head-guard",
+      "method": { "name": "process", "desc": "()V" },
+      "guard": "aload_0; invokevirtual getZombie()Lzombie/characters/IsoZombie;; ifnonnull L; return; L:[F_SAME]",
+      "rationale": "getZombie()=Type.tryCastTo(getCharacter(),IsoZombie.class) 可回 null（unresolved ID 或 type-confusion）。原版第一行 super.process()（Character.process）自身就多次 getCharacter().setXxx() 無檢查、之後 9 個 IsoZombie setter 也無檢查。守衛必須在 super 之前（codex 對抗審查定案）：同時擋 unresolved-ID（否則 super 先 NPE）與 type-confusion（否則殭屍 hit 狀態先寫進錯誤角色才發現 null）。guard-before-super 仍保留原版『generic character state → zombie-specific state』的合法順序——null 時整包 hit 狀態不套用。",
+      "evidence": "原版 process()V: 0: aload_0 | 1: invokespecial #84 Character.process:()V | 4: aload_0 | 5: invokevirtual #87 getZombie() | ... 9 個 IsoZombie.set*：setAttackOutcome/setPlayerAttackPosition/setStaggerBack/setFakeDead/setBecomeCrawler/setCrawler/setKnifeDeath/setJawStabAttach/setAttackDidDamage | 178: return。CharacterID.getCharacter()（fields/character/CharacterID.java:161）switch(type) 無匹配回 null。" }
+  ],
+  "behaviorNotes": "頭部插入、堆疊峰值 1、locals 不變、原 frames 照舊（新 branch target 補 F_SAME，後續壓縮 frame delta 鏈因守衛 frame 與初始 frame 等價而不受影響）。維持 ClassWriter(0)，不用 COMPUTE_FRAMES。更根本的修復點（未做、將來評估）：Zombie.isConsistent() 加 getZombie()!=null（現只驗 ID 存在不驗型別）；hit/Player 有對稱風險。",
+  "verification": "build [6/6] SmokeCheck：原版 new Zombie().process() 必拋 NPE（負對照）、修補版安靜返回（行為級證明 guard 在 super 前）；結構斷言 guard 序列在最前、invokespecial Character.process 恰一次且在 guard 後、9 setter 未增減。部署後：server console 不再出現 hit.Zombie.process 相關 NPE stack。"
+}
