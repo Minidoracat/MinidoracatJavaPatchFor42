@@ -6,7 +6,7 @@ PZ B42 專用伺服器 loose-class 優化 patch——自製、可重生、帶同
 
 PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路徑的 loose `.class`
 會覆蓋 jar 內的原版。本專案**不重編譯反編譯原始碼**，而是用 ASM 直接對 jar 內的原版
-bytecode 做三種「堆疊形狀不變」的手術（log 呼叫改道／方法內常數替換／早退），
+bytecode 做兩種「堆疊形狀不變」的手術（log 呼叫改道／方法內常數替換），
 StackMapFrames 原樣保留；過濾邏輯寫在普通 Java 類 `zombie/mdc/LogFilter.java`
 （javac 對遊戲 jar 編譯，隨 patch 出貨）。
 
