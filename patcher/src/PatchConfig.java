@@ -96,6 +96,19 @@ public final class PatchConfig {
         a3.expectedHits = 1;
         patches.add(animal);
 
+        // IsoCell.PlaceLot 的 Missing tile definition（JUL SEVERE）——taibei 家族為未上架材質包的
+        // 永久缺失（Taibeiroad 移除後 Trapalaketown/KillMingLake 仍引用），選擇性抑制、其他 tilesheet 照常
+        Patcher.ClassPatch cell = new Patcher.ClassPatch("zombie/iso/IsoCell");
+        Patcher.MethodOps pl1 = cell.method("PlaceLot", "(Lzombie/iso/IsoLot;IIILzombie/iso/IsoChunk;II[Z)I");
+        pl1.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/logging/Logger", "log",
+                "(Ljava/util/logging/Level;Ljava/lang/String;)V", "julLog"));
+        pl1.expectedHits = 1;
+        Patcher.MethodOps pl2 = cell.method("PlaceLot", "(Lzombie/iso/IsoLot;IIIZ)V");
+        pl2.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/logging/Logger", "log",
+                "(Ljava/util/logging/Level;Ljava/lang/String;)V", "julLog"));
+        pl2.expectedHits = 1;
+        patches.add(cell);
+
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
 
         // hit 封包 stale/type-confused reference：getZombie()=tryCastTo 可回 null，原版 9 個 setter 無檢查；

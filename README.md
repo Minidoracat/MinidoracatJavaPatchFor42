@@ -10,9 +10,9 @@ bytecode 做兩種「堆疊形狀不變」的手術（log 呼叫改道／方法�
 StackMapFrames 原樣保留；過濾邏輯寫在普通 Java 類 `zombie/mdc/LogFilter.java`
 （javac 對遊戲 jar 編譯，隨 patch 出貨）。
 
-## 內容（12 class、14 處手術、24 個命中點）
+## 內容（13 class、16 處手術、26 個命中點）
 
-- **抑噪 8 項**：ActionStateContainer／AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／
+- **抑噪 9 項**：ActionStateContainer／AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／
   ItemPickInfo／NetworkZombieManager／PacketsCache／PacketTypes$PacketType——只攔已知噪音樣式，
   未知警告與反作弊警告照常輸出。
 - **防崩潰守衛 2 項**：hit/Zombie（guard-before-super）與 hit/Fall（縱深防禦）的 null 頭部守衛。
