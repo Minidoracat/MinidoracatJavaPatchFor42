@@ -1,0 +1,42 @@
+{
+  "className": "zombie/LootRespawn",
+  "kind": "repair",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "respawnInChunk",
+        "desc": "(Lzombie/iso/IsoChunk;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/iso/IsoGridSquare",
+        "name": "getZone",
+        "desc": "()Lzombie/iso/zones/Zone;",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/LogFilter.getLootRespawnZone(Lzombie/iso/IsoGridSquare;)Lzombie/iso/zones/Zone;",
+      "rationale": "原版只接受 TownZone/TownZones/TrailerPark，且 Zone.haveConstruction 是黏性整區旗標。只有同一垂直欄位確有未搬動原生固定容器時才提供合格 gate Zone；原 Zone 合格且無 construction 時完全不變。",
+      "evidence": "B42.19 正式服 jar 的 respawnInChunk 在 bytecode offset 94 恰有一次 IsoGridSquare.getZone；offset 99 起檢查 null，107-146 精確比對三種 Zone，149-161 檢查 haveConstruction。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "respawnInChunk",
+        "desc": "(Lzombie/iso/IsoChunk;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/iso/IsoObject",
+        "name": "getContainerCount",
+        "desc": "()I",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/LogFilter.getLootRespawnContainerCount(Lzombie/iso/IsoObject;)I",
+      "rationale": "放寬 Zone gate 後仍必須排除 movedThumpable；helper 對搬動物件回傳 0，對未搬動固定物件呼叫原 getContainerCount。IsoThumpable、IsoDeadBody、IsoCompost 的原版排除同時保留。",
+      "evidence": "B42.19 正式服 jar 的 respawnInChunk 在 bytecode offset 374 恰有一次 IsoObject.getContainerCount；offset 340-364 的三個 instanceof 排除仍在原位，offset 380 後的 getContainerByIndex 與 explored/hasBeenLooted 判斷未修改。"
+    }
+  ],
+  "behaviorNotes": "offset 188 的 SafeHouse.getSafeHouse 呼叫保持原版且每週期動態執行；安全屋解除不立即觸發，須等 chunk 下一個正常 lootRespawnHour marker。週期、seen-hours、MaxItemsForLootRespawn、loot table 與網路同步均未修改。完全無 Zone 時沒有可複製的 hourLastSeen，fallback 使用 0；正式服 SeenHoursPreventLootRespawn=0。",
+  "verification": "build：兩個 redirect 各命中 1；LoadCheck 驗 helper descriptor；CheckClassAdapter 通過；SmokeCheck 以真實 IsoChunk/IsoGridSquare/Zone/IsoObject 驗證 Region 固定容器取得 TownZone fallback、hourLastSeen 保留、movedThumpable 負對照與正常 TownZone identity pass-through，並斷言 patched respawnInChunk 兩個改道各一次、原 getZone/getContainerCount 各為零、SafeHouse.getSafeHouse 仍恰一次。"
+}

@@ -1,0 +1,42 @@
+{
+  "className": "zombie/entity/EntityBucket",
+  "kind": "performance",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "updateMembership",
+        "desc": "(Lzombie/entity/GameEntity;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/entity/util/Array",
+        "name": "add",
+        "desc": "(Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/FastIdentityArrayRemoval.add(Lzombie/entity/util/Array;Ljava/lang/Object;)V",
+      "rationale": "在 bucket 唯一 add mutation point 同步建立 sidecar index；bucket bit、listener callback 與 debug membership 檢查不動。",
+      "evidence": "正式服與本機 projectzomboid.jar SHA-256 同為 901a12e3e2e4f3de841c17d9a30d0e2fe97115d390e8af577fdcdcb98c5d7d76；EntityBucket.class 原版 SHA-256=184aba3fcc6ea658ae6699bf16727669cc0cc81ea8423a8444ef909cc890aee2。private entities 初始化為 new Array<>(false,16)；updateMembership bytecode offset 153 恰有一次 Array.add，前置 bucket bit 確保正常路徑不重複加入。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "updateMembership",
+        "desc": "(Lzombie/entity/GameEntity;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/entity/util/Array",
+        "name": "removeValue",
+        "desc": "(Ljava/lang/Object;Z)Z",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/FastIdentityArrayRemoval.remove(Lzombie/entity/util/Array;Ljava/lang/Object;Z)Z",
+      "rationale": "以同一 sidecar 做 identity swap-remove，避免每個 bucket 在大量 entity unload 中反覆線性掃描；後續 bit clear 與 listener 順序不動。",
+      "evidence": "updateMembership bytecode offset 343 恰有一次 Array.removeValue(entity,true)，offset 346 緊接 POP；containsEntity bucket bit 與 debug contains 負對照仍在原位。"
+    }
+  ],
+  "behaviorNotes": "只改 updateMembership 內 private unordered entities 的 add/remove；ordered listeners Array 的 add/remove 完全未改。helper 的 registry 使用 weak Array key，State 只含 primitive Trove collections；Trove remove auto-compaction 關閉以避免 unload 熱路徑 rehash，State 隨 Array weak lifecycle 回收。",
+  "verification": "PatchConfig aggregate expectedHits=2；SmokeCheck 驗 helper add/remove 各恰一、原呼叫各為零，並驗 helper/State 沒有 IdentityHashMap 或 entity 強參照；行為測試驗 tail swap、first-match collision fallback、不同 Array 不被全域長鎖串行；尺度 benchmark 固定四個 N、3 warmup、7 median，只以正確性守門；CheckClassAdapter、-Xverify:all 與 javap offset 153/343 均通過。"
+}
