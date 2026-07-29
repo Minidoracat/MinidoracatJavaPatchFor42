@@ -4,3 +4,5 @@ dist/
 .omc/
 .omx/
 .claude/
+AGENTS.md
+CLAUDE.md
