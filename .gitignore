@@ -2,3 +2,5 @@ work/
 dist/
 *.class
 .omc/
+.omx/
+.claude/
