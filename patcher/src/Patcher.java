@@ -17,9 +17,9 @@ import java.util.jar.JarFile;
  *
  * 原則：只做「堆疊形狀不變」的 bytecode 手術，原 class 的 StackMapFrames 與
  * max stack/locals 原樣保留（ClassWriter flags=0），把驗證風險壓到最低：
- *   1. redirect —— 把指定呼叫指令改道為 INVOKESTATIC zombie/mdc/LogFilter 同形靜態方法
- *      （receiver 變第一參數；淨堆疊效果與指令長度皆不變）。過濾邏輯在 LogFilter.java
- *      用 javac 對遊戲 jar 正常編譯，不做方法合成。
+ *   1. redirect —— 把指定呼叫指令改道為指定 helper 的同形 INVOKESTATIC 方法
+ *      （receiver 變第一參數；淨堆疊效果與指令長度皆不變）。helper 用 javac
+ *      對遊戲 jar 正常編譯，不做方法合成。
  *   2. constChange —— 替換方法內 LDC/BIPUSH/SIPUSH 數值常數（同長度指令、堆疊不變）。
  *
  * 守門：每個 MethodOps 帶 expectedHits，逐方法核對實際命中數——任何 build 漂移
@@ -29,7 +29,11 @@ import java.util.jar.JarFile;
  */
 public final class Patcher {
 
-    record Site(int opcode, String owner, String name, String desc, String redirectName) {}
+    record Site(int opcode, String owner, String name, String desc, String redirectOwner, String redirectName) {
+        Site(int opcode, String owner, String name, String desc, String redirectName) {
+            this(opcode, owner, name, desc, FILTER_OWNER, redirectName);
+        }
+    }
     record ConstChange(Object from, Object to) {}
 
     /**
@@ -107,7 +111,7 @@ public final class Patcher {
         public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
             for (Site s : ops.redirects) {
                 if (s.opcode() == opcode && s.owner().equals(owner) && s.name().equals(name) && s.desc().equals(desc)) {
-                    super.visitMethodInsn(Opcodes.INVOKESTATIC, FILTER_OWNER, s.redirectName(),
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, s.redirectOwner(), s.redirectName(),
                             redirectDesc(opcode, owner, desc), false);
                     ops.actualHits++;
                     return;
@@ -141,7 +145,7 @@ public final class Patcher {
         }
     }
 
-    /** redirect 目標簽名：receiver（非 static 時）前置，回傳型別沿用原 desc（log 類皆 V）。 */
+    /** redirect 目標簽名：receiver（非 static 時）前置，回傳型別沿用原 desc。 */
     static String redirectDesc(int opcode, String owner, String desc) {
         if (opcode == Opcodes.INVOKESTATIC) {
             return desc;
