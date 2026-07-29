@@ -1,0 +1,42 @@
+{
+  "className": "zombie/entity/EngineEntityManager",
+  "kind": "performance",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "addEntityInternal",
+        "desc": "(Lzombie/entity/GameEntity;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/entity/util/Array",
+        "name": "add",
+        "desc": "(Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/FastIdentityArrayRemoval.add(Lzombie/entity/util/Array;Ljava/lang/Object;)V",
+      "rationale": "在唯一合法 add mutation point 同步建立 sidecar identity-hash index；後續 entitySet、component handler、bucket membership 與 callback 順序完全不變。",
+      "evidence": "正式服與本機 projectzomboid.jar SHA-256 同為 901a12e3e2e4f3de841c17d9a30d0e2fe97115d390e8af577fdcdcb98c5d7d76；EngineEntityManager.class 原版 SHA-256=532ab439f6dacb5d63c91ab9dbe20b2c6127e79bfaeffd49a1a8f40059517e63。addEntityInternal bytecode offset 38 恰有一次 Array.add；private entities 初始化為 new Array<>(false,16)，entitySet 先拒絕重複 entity。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "removeEntityInternal",
+        "desc": "(Lzombie/entity/GameEntity;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/entity/util/Array",
+        "name": "removeValue",
+        "desc": "(Ljava/lang/Object;Z)Z",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/FastIdentityArrayRemoval.remove(Lzombie/entity/util/Array;Ljava/lang/Object;Z)Z",
+      "rationale": "將大量 chunk unload 時每個 entity 對全域 Array 的 identity 線性搜尋改成已驗證 index 的 unordered swap-remove；return 仍由 caller POP，callback 與 flags 順序不動。",
+      "evidence": "removeEntityInternal bytecode offset 29 恰有一次 Array.removeValue(entity,true)，offset 32 緊接 POP；方法先以 entitySet.remove 判斷合法 membership，因此正常路徑的值必須存在。"
+    }
+  ],
+  "behaviorNotes": "只改 private entities 的兩個 mutation point；pendingOperations、entitySet、ImmutableArray、EntityBucketManager、component handler 與 engine callbacks 均未改。helper 對 ordered/equality/null、identity-hash collision 或狀態漂移保留原版 fallback。",
+  "verification": "PatchConfig 兩個 method 各 expectedHits=1；SmokeCheck 驗 helper add/remove 各恰一、原 Array 呼叫各為零且 remove 的 POP 保留；LoadCheck 驗 receiver-first descriptor；FastIdentityArrayRemovalTest 驗等價性、碰撞、漂移與 weak lifecycle；CheckClassAdapter、-Xverify:all 與 javap offset 38/29 均通過。"
+}
