@@ -1,0 +1,59 @@
+{
+  "className": "zombie/network/packets/connection/LoginPacket",
+  "kind": "instrumentation",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/network/ServerWorldDatabase",
+        "name": "setPassword",
+        "desc": "(Ljava/lang/String;Ljava/lang/String;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatLoginMetrics.setPassword(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V",
+      "rationale": "只量測同步 DB delegate 的 nanoTime elapsed；receiver、兩個參數、呼叫順序與 caller 的既有 Exception catch 範圍不變。",
+      "evidence": "正式服與本機 projectzomboid.jar SHA-256 同為 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8；LoginPacket.class SHA-256=4a935cbf9ea462ba1204129e378051214367108a58133199ed5658e21d8c9122，processServer 內恰有一次此呼叫（42.20 重新驗證：build 命中數守門＋SmokeCheck 結構斷言；42.19 的絕對 offset 已因 validator.reset→playerUpdateTimeoutReset、新增 updatePing/AntiCheat.log 而位移，不再記錄）。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/network/ServerWorldDatabase",
+        "name": "updateLastConnectionDate",
+        "desc": "(Ljava/lang/String;Ljava/lang/String;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatLoginMetrics.updateLastConnectionDate(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V",
+      "rationale": "只量測並 delegate exactly once；不新增 checked exception，不改 SQL、transaction、retry、thread、queue 或 cache。",
+      "evidence": "同一正式服 class 的 processServer 內恰有一次此呼叫（42.20 重新驗證：build 命中數守門＋SmokeCheck 結構斷言；42.19 的絕對 offset 已因 validator.reset→playerUpdateTimeoutReset、新增 updatePing/AntiCheat.log 而位移，不再記錄）；ServerWorldDatabase API 未宣告 checked exception。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/network/ServerWorldDatabase",
+        "name": "setUserSteamID",
+        "desc": "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatLoginMetrics.setUserSteamID(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+      "rationale": "保存並原樣回傳 delegate 結果，使 caller 緊接的 POP 與原版 stack effect 不變；不記錄 Steam ID。",
+      "evidence": "同一正式服 class 的 processServer 內恰有一次此呼叫（42.20 重新驗證：build 命中數守門＋SmokeCheck 結構斷言；42.19 的絕對 offset 已因 validator.reset→playerUpdateTimeoutReset、新增 updatePing/AntiCheat.log 而位移，不再記錄），offset 1333 緊接 POP；建置後 SmokeCheck 仍驗證 helper call 後下一條真指令為 POP。"
+    }
+  ],
+  "behaviorNotes": "helper 無 mutable static state；System.nanoTime 只包住 delegate。每個非 fatal outcome 至多嘗試一次既有 DebugType.Multiplayer.println sink，payload 僅為 [MinidoracatJavaPatch][LoginMetrics] op=<固定列舉> elapsedNs=<十進位數字>，不含 username/password/SteamID/IP/token。非致命 sink failure 吞掉；VirtualMachineError、ThreadDeath、LinkageError 不吞。delegate fatal 計算 elapsed 後直接原樣重拋且不碰 sink；logging fatal 優先於既有 nonfatal delegate failure；不 retry、不 addSuppressed。",
+  "verification": "PatchConfig aggregate expectedHits=3；manifest 精確包含一筆 LoginPacket.class 與一筆 MinidoracatLoginMetrics.class，runtime 總數 17。LoadCheck 驗三個 receiver-first descriptor、return type、只有 setPassword 宣告 SQLException 且 helper 無 mutable static field；SmokeCheck 逐 site 驗 helper=1、原 DB call=0、delegate exactly once、safeLog exactly once、Multiplayer sink 與 POP；LoginMetricsBehaviorTest 驗 return/exception identity、suppressed 不變、delegate/sink counts、三種 fatal precedence、regex/cardinality 與 PII 不外洩；CheckClassAdapter 與 -Xverify:all 通過。"
+}

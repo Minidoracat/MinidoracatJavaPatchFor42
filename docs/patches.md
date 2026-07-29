@@ -1,7 +1,7 @@
-# 優化項目與原理詳解（42.19.0）
+# 優化項目與原理詳解（42.20.0）
 
 > 本文檔是給維運者看的完整說明：每一項優化「為什麼做、動了什麼、為什麼安全、怎麼驗證」。
-> bytecode 層的逐項原始證據（javap 反組譯摘錄）在 [specs/](specs/) 十份 JSON。
+> bytecode 層的逐項原始證據（javap 反組譯摘錄）在 [specs/](specs/) JSON。
 
 ## 0. 總機制：為什麼「裝了就生效」
 
@@ -33,7 +33,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
-## 1. 抑噪類（8 項）——為什麼值得做
+## 1. 抑噪類（7 項）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：
 (a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與
@@ -41,36 +41,56 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 | # | 位置 | 攔掉的訊息 | 觸發原因 | 保留了什麼 |
 |---|---|---|---|---|
-| 1 | ActionStateContainer.tryInsertChildState | `Transition's target state "X" not supported by parent` | MOD 動作組合常態觸發，每分鐘數十行（本伺服器實測最大宗） | 該 method 外其他 5 個同型警告；行為本就是 warn 後 return false，判定不變 |
-| 2 | AnimationSet.GetState | `AnimState not found: X` | MOD 動畫集缺 state，引擎本就回傳空 fallback | fallback 行為不變；Load 路徑 log 不動 |
-| 3 | SkinningBoneHierarchy.buildBoneHierarchy | `SkeletonBone not resolved for bone: X` | MOD 模型骨架非標準骨名，開機刷屏 | 骨架建構結果完全不變 |
-| 4 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **僅三個已知名**（MetalBigWireFence／WoodFloorLvl3／Wooden_Windows，完整訊息 equals） | 特定物件載入必刷 | **其他名稱（含 null）照常警告**；resetObjectInfo 清理照跑 |
-| 5 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
-| 6 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
-| 7 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
-| 8 | PacketTypes$PacketType.onServerPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）；反作弊警告 `The packet %s is not valid` 照常輸出** |
+| 1 | AnimationSet.GetState | `AnimState not found: X` | MOD 動畫集缺 state，引擎本就回傳空 fallback | fallback 行為不變；Load 路徑 log 不動 |
+| 2 | SkinningBoneHierarchy.buildBoneHierarchy | `SkeletonBone not resolved for bone: X` | MOD 模型骨架非標準骨名，開機刷屏 | 骨架建構結果完全不變 |
+| 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **僅三個已知名**（MetalBigWireFence／WoodFloorLvl3／Wooden_Windows，完整訊息 equals） | 特定物件載入必刷 | **其他名稱（含 null）照常警告**；resetObjectInfo 清理照跑 |
+| 4 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
+| 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
+| 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
+| 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
+
+> **42.20 變更**：`ActionStateContainer.tryInsertChildState` 的抑噪已移除——TIS 自己把那兩個
+> `DebugType.warn` 降級為 `trace`（全 class warn 8→6、trace 1→3），噪音源由官方修掉。
+> 第 7 項的 consistency log 也從 `PacketTypes$PacketType.onServerPacket` 搬到
+> `INetworkPacket.logInconsistentPacket`（interface default method，訊息文字未變），改道目標隨之搬家；
+> `PlayerHitZombiePacket` 的 override 只多一層前置過濾，最後仍呼叫 super，兩條路徑都涵蓋。
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，
 先 `uninstall.sh` 還原再觀察。每份 spec 的 `verification` 段都寫了正反向驗證法。
 
 ---
 
-## 2. 行為類（2 項）——動了什麼、為什麼是安全的
+## 2. 行為類（1 項）——動了什麼、為什麼是安全的
 
-### 2a. 殭屍超額回收加速（ZombieCountOptimiser.incrementZombie：`10 → 6`）
+### 2a.（42.20 移除，重新分析後決定不恢復）殭屍超額回收加速 `10 → 6`
 
-**原理**：殭屍總數超過沙盒 `zombiesCountBeforeDeletion` 閾值時，伺服器每 frame 對
-每隻「可無感刪除」的殭屍做隨機取樣，中選才進刪除佇列。取樣機率由
-`Rand.AdjustForFramerate(10)` 決定——伺服器端等於 `Next(3)==0`＝每 frame 1/3。
-改成 6 → `Next(2)==0`＝1/2，**超額殭屍回收速度提高 1.5 倍**，緩解 78 張圖大世界的
-實體壓力（正是這台伺服器 OOM 事故的背景負載）。
+TIS 在 42.20 重寫了整個 class。重新分析結論：**這個手術在新模型下已與原始目標脫鉤，不恢復。**
 
-**為什麼安全**：五道既有安全條件一個不動——(1) 總數超過閾值才觸發（閾值是沙盒設定、
-每 frame 重算，降回即停）；(2) **所有玩家視野外**才刪（任何玩家看得到就不刪，不會
-目擊消失）；(3) 無攻擊目標（不中斷戰鬥）；(4) 戶外無屋頂；(5) 非復活玩家屍體。
-為什麼是 6 不是更低：伺服器端換算 `(int)(chance/3)`，5 以下會變成 100% 全刪
-（單 frame 超殺）、2 以下有未定義行為風險——6 是最保守的一階加速。
-同 class `canBeDeletedUnnoticed` 的安全距離常數 10 逐字節驗證未動。
+| 面向 | 42.19 | 42.20 |
+|---|---|---|
+| 進入點 | `startCount()` ＋ 主 loop 逐隻呼叫 `incrementZombie(IsoZombie)` | 併成 `prepareZombiesForDeletion()`，自行迴圈（`MovingObjectUpdateScheduler.startFrame`，仍是每 frame 一次） |
+| 掃描來源 | `IsoWorld cell.getObjectList()`——**全世界已載入殭屍** | 各連線的 `zombiesToSend` |
+| 進入 `zombiesToSend` 的條件 | — | `getOwner() != null && getOwner() != connection` ＋ `connection.RelevantTo(...)`；母集合是 `zombiesReceived`（**client 回報的殭屍**） |
+| 觸發門檻 | 全域殭屍總數 vs `zombiesCountBeforeDeletion` | **per-connection** `zombiesToSend.size()` vs 同一個設定值 |
+| 每 frame 刪除量 | 無上限 | 每連線最多 `size - threshold`（`zombiesCountForDelete--`） |
+| 視野保護 | 遍歷所有玩家 `GameServer.IDToPlayerMap` | 只遍歷 `connection.players[]`（該連線 ≤4 人） |
+| 安全距離 | `(range-2)*10/2` | `(range-2)*10`（**半徑 ×2＝更不容易刪**） |
+
+**為什麼不恢復**：`zombiesToSend` 只收「有主且主人不是本連線」的殭屍，**無主殭屍永遠不進這個列表**，
+因此 42.20 的 culling 完全碰不到它們。而遠離所有玩家、堆在世界各處的無主殭屍正是 78 張圖大世界的
+記憶體壓力來源，也是當初做這個手術的理由。在新模型下把取樣從 1/3 調到 1/2，只會加快刪除
+「有主、在某連線 relevant 區內、但歐氏距離超出保護半徑」的一小撮殭屍——保護半徑還放大了 2 倍、
+又多了 per-connection 額度上限。要處理殭屍堆積得換切入點，不是這個常數。
+
+**常數語意本身沒變**（供將來參考）：`RandInterface.AdjustForFramerate` 伺服器端是
+`(int)(chance * 0.33333334f)`——`10`→`(int)3.333`=3→`Rand.Next(3)==0`＝1/3；`6`→2→1/2；
+`5`→1→`Rand.Next(1)` 恆為 0＝**100% 全刪**。所以 6 仍會是最保守的一階加速，若日後決定恢復。
+
+**附帶風險（原版行為，非我方引入）**：`canBeDeletedUnnoticed` 只檢查該連線的玩家，不檢查其他
+連線的玩家，理論上 B 玩家可能目擊 A 連線判定「無人看見」的殭屍消失。不加速就不會放大它。
+
+> 證據等級：作用域與條件為反編譯語意判讀（`NetworkZombiePacker`、`UdpConnection.RelevantTo`），
+> 常數換算為 `AdjustForFramerate` default method ＋算術驗證。結論是不動 bytecode，故未做 javap 逐指令驗證。
 
 ### 2b. 動物壓力模型三調（IsoAnimal）
 
@@ -83,14 +103,21 @@ clamp）。MP 的結構性問題是「**進水快、出水慢**」：多玩家�
 | 手術 | 值 | 效果 |
 |---|---|---|
 | updateStress 閒置衰減除數 | `5500 → 2750` | 無壓力源時恢復速度 ×2（唯一自然出水管道） |
-| respondToSound 聲音除數 | `20 → 60` | 單次聲音壓力 ÷3（尖峰主因） |
+| respondToSound 聲音壓力係數 | `0.05f → 1/60f` | 單次聲音壓力 ÷3（尖峰主因） |
 | killed 屠宰連鎖上限 | `Rand(10,30) → Rand(10,15)` | 平均 20→12.5，群體受驚語意保留 |
 
 **為什麼安全**：全部是既有常數的幅度調整——無新路徑、無指令增刪；`changeStress`
 的 [0,100] clamp、基因/缺陷放大、逃跑行為（動物照樣被嚇跑）、防虐待機制
-（被攻擊的高壓直寫路徑）全部不動。共享常數已逐一防護：20.0f 的常數池條目被
-誘導/接受度等五個方法共用——手術只改 `respondToSound` 方法內的指令指向新條目，
+（被攻擊的高壓直寫路徑）全部不動。手術只改指定方法內的指令指向新常數池條目，
 其他方法實測原樣。伺服器權威、數值經同步覆蓋 client，**只裝伺服器即全域生效**。
+
+> **42.20 座標變更（重要陷阱）**：TIS 把壓力算式從 `changeStress(sound.radius / 20.0F)`
+> 改寫成 `changeStress(sound.radius * 0.05F)`（數學等價，但常數池條目從除數換成乘數），
+> 同時在 wild 分支新增 `fleeDistance = sound.radius * 3.0F + 20.0F`。
+> 結果是 `respondToSound` 內**仍剛好只有一個 `20.0f`**——舊的 `ConstChange(20.0f, 60.0f)`
+> 會通過逐方法命中數守門（1 == 1），卻把野生動物逃跑距離改成 `radius*3+60`，壓力完全沒調。
+> **命中數守門只數數量、不驗語境**；常數手術每次更新都要用 `javap` 確認前後指令
+> （正確的壓力點在 offset 347 附近：`ldc 0.05f; fmul; invokevirtual changeStress:(F)V`）。
 
 **刻意不做的**（分析過並否決）：PacketsCache 的封包速率常數（正路是 ini 的
 `MaxPacketsPerSecond`）；動物 heldBy 安撫速率（已是主動手段）；culling 的安全距離
@@ -118,13 +145,170 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 
 ---
 
+## 2d. 安全屋 room/building 綁定修復
+
+**症狀**：B42.19 正式服擴充大型 `Map=` 後，玩家申請安全屋時大量出現
+`SafehouseClaimPacket.isConsistent > building not found`。失敗座標的原始 lotheader 仍有合法
+`RoomDef`／`BuildingDef`，但執行期 `IsoGridSquare.getBuilding()` 回傳 null。
+
+**手術**只改 `SafehouseClaimPacket` 兩個呼叫點：
+
+1. `isConsistent` 的 `IsoGridSquare.getBuilding()` 改道 helper。正常有 building 時直接回傳；只有 null
+   才掃描目前 metacell 與相鄰八格的 authoritative `roomList`，依原版 `IsoMetaChunk.getRoomAt`
+   規則（反向順序、user-defined 優先、排除 emptyoutside）找房間，呼叫 `setRoomID` 並重新確認 building。
+   找不到或補回後仍為 null，就回復舊 roomId，讓原版照常拒絕。
+2. `processServer` 的 `SafeHouse.canBeSafehouse` 改道 wrapper，先同樣修復 claim square 與玩家目前
+   square，再呼叫原版方法。既有「已擁有安全屋、存活天數、住宅類型、屋內角色、範圍重疊、戰爭、
+   權限與反作弊」檢查一項都沒有移除。
+
+這個 patch **不直接建立安全屋、不修改 `map_meta.bin`、不接受沒有 RoomDef 的座標**。掃描是 O(n)，
+但只發生在原本會失敗的安全屋 claim，不是 frame 熱路徑。成功修復會記錄：
+`[MinidoracatJavaPatch] repaired safehouse room binding at x,y,z roomId=...`。
+
+舊安全屋資料另由 `scripts/map_meta_safehouses.py` 解析與選擇性合併；工具強制輸出新檔、逐座標指定、
+拒絕 owner／範圍衝突，且讀取與輸出都必須通過 byte-for-byte round-trip 驗證，不會直接覆蓋正式存檔。
+
+---
+
+## 2e. 原生固定容器週期刷新修復
+
+**根因**：B42.19 的 `LootRespawn.respawnInChunk` 先用地面格的 Zone 擋整個 `(x,y)` 垂直欄位；
+只有精確名稱 `TownZone`、`TownZones`、`TrailerPark` 會進入掃描。正式服實測的 Yanghu 醫院只有
+`Region`／`FarmLand`，該地圖 `objects.lua` 也沒有任何上述 Zone，因此原生藥櫃永遠不會進到刷新流程。
+另一類案例雖位於 `TownZone`，但玩家任何建造／搬家具都可能把整個 Zone 的
+`haveConstruction` 永久標為 true；原版沒有對應的解除路徑，之後整區固定容器都被擋住。
+
+**手術**只改 `LootRespawn.respawnInChunk` 兩個呼叫點，週期 marker、loot table 與其他 gate 不動：
+
+1. `IsoGridSquare.getZone()` 改道 `getLootRespawnZone`。原版 Zone 已合格且沒有 construction 時直接回傳，
+   零行為差異；否則先掃同一 chunk 的同一垂直欄位，只有找到「非屍體、非 `IsoThumpable`、非 compost、
+   `movedThumpable=false` 且確有 container」的物件，才回傳只供本次 gate 判斷的合格 Zone。
+   有原 Zone 時會複製 `hourLastSeen`，所以 `SeenHoursPreventLootRespawn` 照常生效。
+2. `IsoObject.getContainerCount()` 改道 `getLootRespawnContainerCount`：搬動過的原生家具回傳 0；
+   玩家製容器原本多為 `IsoThumpable`，仍在原版 `instanceof` gate 被排除。未搬動固定物件原樣回傳
+   真實 container count。
+
+**安全屋語意完整保留**：bytecode 中 `SafeHouse.getSafeHouse(square)` 沒有改道，每個刷新週期都重新查
+目前有效的安全屋。安全屋存在時仍不刷新；解除後不會立刻補貨（避免 claim/unclaim 洗物資），而是在該
+chunk 的**下一個正常 `HoursForLootRespawn` 週期**恢復。`explored`、`hasBeenLooted`、
+`MaxItemsForLootRespawn`、`SeenHoursPreventLootRespawn` 與 `ItemPickerJava.fillContainer` 全部保持原版。
+
+**已知邊界**：若 square 完全沒有 Zone，就沒有可保存的原版 `hourLastSeen`，fallback 使用 0；正式服目前
+`SeenHoursPreventLootRespawn=0`，不影響現行行為。此 patch 修的是週期刷新，不強制未探索容器立刻生成，
+也不重寫既有 `lootRespawnHour`。
+
+---
+
+## 2f. 玩家登入同步 DB 寫入耗時量測（觀測 patch）
+
+**目的**：玩家登入時曾伴隨 `Server is too busy`，但目前證據只能確認主執行緒在登入流程中做同步工作，
+尚不能把尖峰歸因到單一 DB operation。本項先建立可歸因的 server-side timing，不改登入並行度或拒絕策略。
+
+`LoginPacket.processServer` 只有三個呼叫點被改道：
+
+| 原呼叫 | helper op | 原版 bytecode |
+|---|---|---|
+| `ServerWorldDatabase.setPassword(String,String)` | `SET_PASSWORD` | offset 1273，caller 既有 `catch Exception` 保留 |
+| `ServerWorldDatabase.updateLastConnectionDate(String,String)` | `UPDATE_LAST_CONNECTION` | offset 1303 |
+| `ServerWorldDatabase.setUserSteamID(String,String)` | `SET_USER_STEAM_ID` | offset 1330，後續 `POP` 保留 |
+
+helper 對原 receiver method **delegate exactly once**，`System.nanoTime()` 只包住 delegate，成功時輸出：
+
+```text
+[MinidoracatJavaPatch][LoginMetrics] op=<固定列舉> elapsedNs=<十進位數字>
+```
+
+payload 不含 username、password、Steam ID、IP 或 token。只使用既有 `DebugType.Multiplayer.println`
+sink，不新增檔案 writer、thread、flush、cache、queue、retry、SQL 或 transaction。非致命的 log
+格式化／sink failure 不得改變登入結果；`VirtualMachineError`、`ThreadDeath`、`LinkageError` 原樣外拋。
+若 delegate 已拋 fatal，wrapper 只完成 elapsed 計算後直接重拋，不再嘗試 log；若 delegate 是 nonfatal
+而 logging 是 fatal，logging fatal 優先，且不修改任一 exception 的 suppressed list。
+
+這不是「登入優化」本身，而是下一輪 A/B 判斷依據。正式服部署後要把三種 op 的 elapsed 分布與
+`Server is too busy` 時段對齊；證據指出哪一項形成長尾後，才評估 transaction／批次化等行為改動。
+原生 70ms busy 判斷、`LoginQueueEnabled`、`DenyLoginOnOverloadedServer`、auth/protocol 與登入順序均未修改。
+
+---
+
+## 2g. chunk unload entity removal 索引化
+
+**正式服根因證據**：玩家回報卡頓與黑邊的時段，主機仍有約 85% CPU idle、低 I/O、充足可用記憶體，
+也沒有 OOM、`VehicleCollide` 或持續登入尖峰；但伺服器實際 FPS 曾降到約 2–5。五次 matching-JAR
+thread dump 中四次主執行緒都落在：
+
+```text
+Array.removeValue
+  -> EntityBucket.updateMembership
+  -> EngineEntityManager.removeEntityInternal
+  -> IsoChunk.removeFromWorld
+  -> ServerMap$ServerCell.Unload
+  -> ServerMap.postupdate
+```
+
+`EngineEntityManager.entities` 與每個 `EntityBucket.entities` 都是 `new Array<>(false, 16)`。原版
+`removeValue(entity, true)` 每次都從 index 0 線性掃描；大量 chunk 在同一波卸載時，k 個 entity
+反覆掃描逐漸縮小的全域／bucket 陣列，總工作量是 O(k×N)，最壞接近 O(N²)。這也解釋了為何整台
+主機不滿載：PZ 權威 world loop 的單一主執行緒先吃滿一個核心，其餘核心閒置，玩家仍看到 chunk
+供應延遲與黑邊。
+
+**手術範圍只有四個 callsite**：
+
+| class.method | 原呼叫 | 改道 |
+|---|---|---|
+| `EngineEntityManager.addEntityInternal` | `Array.add` ×1 | `FastIdentityArrayRemoval.add` |
+| `EngineEntityManager.removeEntityInternal` | `Array.removeValue` ×1 | `FastIdentityArrayRemoval.remove` |
+| `EntityBucket.updateMembership` | `Array.add` ×1、`removeValue` ×1 | 同上 |
+
+沒有改 `ServerCell.Unload`、chunk 判定、entity callback、bucket bit、listener 順序、登入佇列或 busy
+保護。helper 在 patched add 時同步建立 sidecar：以 `System.identityHashCode(entity)` 映射 index，
+尾端 swap-remove 後只更新搬入元素的 index，因此正常 add/remove 都是常態 O(1)。
+
+**安全與生命週期**：
+
+- registry 是 `WeakHashMap<Array<?>, State>`，且只接受 `ordered=false`；`State` 本身只含
+  `TIntIntHashMap`／`TIntHashSet` 與 primitive counter，不持有 Array 或 entity 強參照。
+- `TIntIntHashMap` 關閉 remove 時的 auto-compaction，避免同一波 unload 反覆配置／rehash；
+  sidecar 會保留該 Array 的峰值容量，直到 weak key 回收。這是以少量可界定記憶體換掉 hot-path GC。
+- identity hash 碰撞或同一 identity 重複時，該 hash 改走原版「由前往後、第一個 identity match」
+  的線性語意；每次 fast remove 前仍用 `items[index] == value` 驗證。
+- 偵測到 size/index 漂移時最多 rebuild 一次；再次不一致就失效 sidecar 並呼叫原版
+  `removeValue`。`ordered=true`、`identity=false`、null 全都直接保留原版路徑。
+- 鎖粒度是每個 Array；全域 weak registry lock 只包短暫查找／登記，不包 O(N) rebuild 或原始 add。
+
+**驗證**：build 會確認四個原呼叫歸零且四個 helper 呼叫各恰一、helper/inner class 不含
+`IdentityHashMap` 或 entity 強參照；另跑 tail-swap 等價性、missing、ordered/equality/null、
+size/same-size/index 漂移、duplicate/hash collision、不同 Array 並行與 deterministic stats。
+尺度 benchmark 固定 N=1024/2048/4096/8192、3 輪 warmup＋7 輪中位數，輸出 add、first remove、
+full remove、ns/entity、倍增比與可用時的 thread allocation；時間只作報告，不設機器相依 pass/fail
+門檻。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
-2. **抑噪生效**：上表 8 種訊息不再出現（開機幾分鐘內原本必有 1/3/5/7）。
+2. **抑噪生效**：上表 7 種訊息不再出現（開機幾分鐘內原本必有 2/4/6）。
 3. **未誤攔**（反向）：debug 模式下 ItemPickInfo 診斷訊息、SpriteConfig 其他名稱警告、
    anticheat `is not valid` 仍會輸出。
-4. **行為觀察**：殭屍統計 `zombiesCulled` 上升速率約 1.5 倍；動物面板（admin cheat）
-   壓力恢復約快一倍、槍聲增量約 1/3。
-5. **PZ 更新後**：`install.sh` 會因同源閘拒裝——重拉 jar → `build.ps1`（命中守門通過
-   即座標仍有效）→ 重新部署。
+4. **行為觀察**：動物面板（admin cheat）壓力恢復約快一倍、槍聲增量約 1/3。
+   （殭屍 `zombiesCulled` 觀察項隨 2a 一併移除。）
+5. **安全屋驗證**：在曾回報失敗的房屋重新申請，應先看到 repair log，隨後由原版規則成功建立；
+   非房屋座標仍必須被 `building not found` 拒絕。
+6. **容器刷新驗證**：在無 TownZone 的自訂地圖與 `haveConstruction=true` 的 vanilla Zone 各選一個
+   已探索、已拿取且少於 `MaxItemsForLootRespawn` 的原生固定容器；等下一個正常週期後應可補貨。
+   同區玩家製箱、搬動家具及有效安全屋內容器不得補貨；解除安全屋後只在再下一個週期恢復。
+7. **登入量測驗證**：controlled Steam login 應出現三個 op 各一行；任何 unknown/duplicate/missing op、
+   非十進位或負的 `elapsedNs`、玩家識別資料外洩都視為失敗。先觀察 log，不以本 patch 宣稱 busy 已修復。
+8. **chunk unload 驗證**：以相近在線人數與移動速度比較 patch 前後 server FPS、黑邊回報與 thread dump；
+   hot stack 不應再長時間停在 `Array.removeValue -> EntityBucket/EngineEntityManager`。若出現
+   `VerifyError`／entity membership 異常，先停服執行 `uninstall.sh` 回退，不以單次低負載時段宣稱根治。
+9. **PZ 更新**（順序不可調換）：
+   1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
+      **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
+      本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。
+   2. 重拉 jar → `build.ps1`。
+   3. **命中數守門通過 ≠ 座標仍有效**——守門只數數量、不驗語境。常數手術必須另外用 `javap`
+      確認該常數的前後指令（見 2b 的 42.20 實例：`respondToSound` 內仍剛好有一個 `20.0f`，
+      舊座標會通過守門卻改到逃跑距離）。redirect 手術則確認 owner／method 未被搬家
+      （見第 1 節 42.20 實例：consistency log 搬到 `INetworkPacket.logInconsistentPacket`）。
+   4. 逐項語境驗證通過後才重新部署，並回到本清單第 1 項重跑開機健檢。

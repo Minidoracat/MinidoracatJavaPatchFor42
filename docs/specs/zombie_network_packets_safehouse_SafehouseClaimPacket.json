@@ -1,0 +1,42 @@
+{
+  "className": "zombie/network/packets/safehouse/SafehouseClaimPacket",
+  "kind": "repair",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "isConsistent",
+        "desc": "(Lzombie/network/IConnection;)Z"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/iso/IsoGridSquare",
+        "name": "getBuilding",
+        "desc": "()Lzombie/iso/areas/IsoBuilding;",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/LogFilter.getBuilding(Lzombie/iso/IsoGridSquare;)Lzombie/iso/areas/IsoBuilding;",
+      "rationale": "只在原版 building-null 拒絕點加入 roomList fallback；正常 building 路徑零額外掃描。helper 只補 roomId，找不到可信 RoomDef 時仍由原版拒絕。",
+      "evidence": "B42.19 jar 的 isConsistent 在 bytecode offset 61 恰有一次 IsoGridSquare.getBuilding，offset 64 立即做 ifnonnull；建置 expectedCount=1。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/iso/areas/SafeHouse",
+        "name": "canBeSafehouse",
+        "desc": "(Lzombie/iso/IsoGridSquare;Lzombie/characters/IsoPlayer;)Ljava/lang/String;",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/LogFilter.canBeSafehouse(Lzombie/iso/IsoGridSquare;Lzombie/characters/IsoPlayer;)Ljava/lang/String;",
+      "rationale": "修復 claim square 與 player current square 後，原封不動呼叫 SafeHouse.canBeSafehouse；避免玩家 square 仍帶 exterior flag 而被誤判不在屋內。",
+      "evidence": "B42.19 jar 的 processServer 在 bytecode offset 11 恰有一次 SafeHouse.canBeSafehouse；後續 reason 判斷、addSafeHouse、SafehouseSync 與 chat sync 均未修改。"
+    }
+  ],
+  "behaviorNotes": "不修改全域 IsoGridSquare.getBuilding 或 IsoMetaGrid.getRoomAt，只影響安全屋 claim。fallback 鏡像 IsoMetaChunk.getRoomAt 的 user-defined 優先與反向順序，掃描中心 metacell 加相鄰八格以涵蓋跨 cell 房屋。",
+  "verification": "build：兩個 redirect 各命中 1；LoadCheck 驗 helper descriptor；CheckClassAdapter 通過；SmokeCheck 斷言 patched class 已無兩個原呼叫且各只改道一次，helper 含 setRoomID 後重新讀 building。部署後以曾失敗房屋驗 repair log，並以室外座標做負對照。"
+}
