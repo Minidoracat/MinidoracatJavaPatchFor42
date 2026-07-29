@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — 在 PZ 伺服器安裝 loose-class patch（與 java/、manifest.txt 同目錄執行）
 # 三道閘（全過才動正式目錄，fail-closed）：
-#   1) payload preflight：manifest 所列每個檔案存在且 SHA256 與建置產物一致（含 LogFilter）
+#   1) payload preflight：manifest 所列每個檔案存在且 SHA256 與建置產物一致（含 runtime helpers）
 #   2) 同源驗證：伺服器 jar 內原版 class SHA256 與 manifest 記錄一致——遊戲更新過即拒裝
 #   3) 衝突檢查：已安裝（有 patch-manifest.txt）或目標路徑有他人 loose 檔即拒裝
 # 生效時機：下次伺服器重啟。升級＝先 uninstall.sh 再 install.sh；移除＝uninstall.sh。
@@ -26,7 +26,7 @@ done < "$MF"
 echo "== 2/3 同源驗證（jar 原版 class hash）=="
 while IFS=$'\t' read -r entry orig_sha _rest; do
     [ -n "$entry" ] || continue
-    [ "$orig_sha" = "-" ] && continue   # LogFilter 等新增檔無 jar 原版
+    [ "$orig_sha" = "-" ] && continue   # runtime helpers 等新增檔無 jar 原版
     if ! unzip -l "$JAR" "$entry" >/dev/null 2>&1; then
         echo "[中止] jar 內不存在 $entry（遊戲版本結構已變）" >&2; exit 1
     fi
@@ -47,15 +47,12 @@ echo "OK  無衝突"
 
 echo "== 安裝 =="
 count=0
-# 相依順序：LogFilter（被改道呼叫的目標）先落地，再放 patched class
-for pass in mdc rest; do
-    while IFS=$'\t' read -r entry _rest; do
+# 相依順序：manifest 中 orig_sha=- 的 runtime helpers 先落地，再放 patched callers。
+for pass in helpers patched; do
+    while IFS=$'\t' read -r entry orig_sha _rest; do
         [ -n "$entry" ] || continue
-        case "$pass:$entry" in
-            mdc:zombie/mdc/*) ;;
-            rest:zombie/mdc/*) continue ;;
-            mdc:*) continue ;;
-        esac
+        [ "$pass" = helpers ] && [ "$orig_sha" != "-" ] && continue
+        [ "$pass" = patched ] && [ "$orig_sha" = "-" ] && continue
         mkdir -p "$SF/java/$(dirname "$entry")"
         cp "$HERE/java/$entry" "$SF/java/$entry"
         chown pzserver:pzserver "$SF/java/$entry" "$SF/java/$(dirname "$entry")" 2>/dev/null || true

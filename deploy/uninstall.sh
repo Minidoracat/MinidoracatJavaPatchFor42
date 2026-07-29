@@ -5,11 +5,15 @@ SF="${PZ_SERVERFILES:-/home/pzserver/serverfiles}"
 MF="$SF/java/patch-manifest.txt"
 [ -f "$MF" ] || { echo "[中止] 找不到 $MF（未安裝？）" >&2; exit 1; }
 
-while IFS=$'\t' read -r entry _; do
-    [ -n "$entry" ] || continue
-    rm -f "$SF/java/$entry"
-    echo "removed $entry"
-done < "$MF"
+for pass in patched helpers; do
+    while IFS=$'\t' read -r entry orig_sha _rest; do
+        [ -n "$entry" ] || continue
+        [ "$pass" = patched ] && [ "$orig_sha" = "-" ] && continue
+        [ "$pass" = helpers ] && [ "$orig_sha" != "-" ] && continue
+        rm -f "$SF/java/$entry"
+        echo "removed $entry"
+    done < "$MF"
+done
 rm -f "$SF/java/zombie/mdc/LogFilter.class"
 rmdir "$SF/java/zombie/mdc" 2>/dev/null || true
 rm -f "$MF"

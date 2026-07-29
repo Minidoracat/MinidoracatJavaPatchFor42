@@ -24,34 +24,65 @@ Remove-Item -Recurse -Force "$R\work\out", "$R\dist\java" -ErrorAction SilentlyC
 New-Item -ItemType Directory -Force "$R\work\out", "$R\dist\java" | Out-Null
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
 
-Write-Host "[1/5] 編譯 patcher..."
+Write-Host "[1/10] 編譯 patcher..."
 javac -encoding UTF-8 -cp $ASM_CP -d "$R\work\out" (Get-ChildItem "$R\patcher\src\*.java").FullName
 Assert-Ok "javac patcher"
 
-Write-Host "[2/5] 編譯 LogFilter（對遊戲 jar）..."
+Write-Host "[2/10] 編譯 runtime helpers（對遊戲 jar）..."
 javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist\java" (Get-ChildItem "$R\patcher\game" -Recurse -Filter *.java).FullName
-Assert-Ok "javac LogFilter"
+Assert-Ok "javac runtime helpers"
 
-Write-Host "[3/5] 執行 bytecode 手術..."
+Write-Host "[3/10] 編譯全部行為測試與 benchmark..."
+javac -encoding UTF-8 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" -d "$R\work\out" `
+    (Get-ChildItem "$R\patcher\tests" -Recurse -Filter *.java).FullName
+Assert-Ok "javac tests"
+
+Write-Host "[4/10] 執行 bytecode 手術..."
 java -cp "$R\work\out;$ASM_CP" Patcher "$R\work\projectzomboid.jar" "$R\dist\java" "$R\dist\manifest.txt"
 Assert-Ok "Patcher"
 
-# LogFilter 入 manifest（origSha=- 表無 jar 原版；install.sh preflight 據此驗 payload 完整性）
-$lfSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\zombie\mdc\LogFilter.class").Hash.ToLower()
-Add-Content -Path "$R\dist\manifest.txt" -Value "zombie/mdc/LogFilter.class`t-`t$lfSha`t0hits" -NoNewline
-Add-Content -Path "$R\dist\manifest.txt" -Value "`n" -NoNewline
+# Runtime helpers 置於 manifest 最前（origSha=- 表無 jar 原版）；部署時先 helper、再 patched caller。
+$helperEntries = @(
+    'zombie/mdc/LogFilter.class',
+    'zombie/network/MinidoracatLoginMetrics.class',
+    'zombie/mdc/FastIdentityArrayRemoval.class',
+    'zombie/mdc/FastIdentityArrayRemoval$State.class'
+)
+$manifestLines = foreach ($entry in $helperEntries) {
+    $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()
+    "$entry`t-`t$helperSha`t0hits"
+}
+$manifestLines += Get-Content "$R\dist\manifest.txt"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText(
+    "$R\dist\manifest.txt",
+    [string]::Join("`n", $manifestLines) + "`n",
+    $utf8NoBom)
+Write-Host "final manifest -> $R\dist\manifest.txt（$($manifestLines.Count) classes）"
 
-Write-Host "[4/6] 連結驗證（-Xverify:all）..."
+Write-Host "[5/10] 連結驗證（-Xverify:all）..."
 java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
 Assert-Ok "LoadCheck"
 
-Write-Host "[5/6] JVMS 資料流驗證（CheckClassAdapter）..."
+Write-Host "[6/10] JVMS 資料流驗證（CheckClassAdapter）..."
 java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
 Assert-Ok "BytecodeVerify"
 
-Write-Host "[6/6] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
+Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
 java -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
 Assert-Ok "SmokeCheck"
+
+Write-Host "[8/10] LoginMetrics 行為與例外 precedence 驗證..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.LoginMetricsBehaviorTest
+Assert-Ok "LoginMetricsBehaviorTest"
+
+Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
+Assert-Ok "FastIdentityArrayRemovalTest"
+
+Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
+Assert-Ok "FastIdentityArrayRemovalBenchmark"
 
 Copy-Item "$R\deploy\install.sh", "$R\deploy\uninstall.sh" "$R\dist\" -Force
 Write-Host "完成：dist\java（loose classes）＋ dist\manifest.txt ＋ install/uninstall.sh"

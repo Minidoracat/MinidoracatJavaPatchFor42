@@ -1,22 +1,39 @@
 package zombie.mdc;
 
+import zombie.characters.IsoPlayer;
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
+import zombie.iso.IsoChunk;
+import zombie.iso.IsoGridSquare;
+import zombie.iso.IsoMetaCell;
+import zombie.iso.IsoMetaGrid;
+import zombie.iso.IsoObject;
+import zombie.iso.IsoWorld;
+import zombie.iso.RoomDef;
+import zombie.iso.areas.IsoBuilding;
+import zombie.iso.areas.SafeHouse;
+import zombie.iso.objects.IsoCompost;
+import zombie.iso.objects.IsoDeadBody;
+import zombie.iso.objects.IsoThumpable;
+import zombie.iso.zones.Zone;
 
 /**
- * 噪音過濾器（隨 patch 以 loose class 出貨；由被改道的呼叫點進入）。
+ * 窄範圍 patch helper（隨 patch 以 loose class 出貨；由被改道的呼叫點進入）。
  * 原則：只攔「已知噪音」，其餘一律轉發原始 log 呼叫——寧漏不誤。
  * 比對策略：能拿到完整字面值的用 equals（零誤攔），動態尾綴的用 startsWith。
  * 樣式出處：docs/specs/*.json（javap 證據）；docs/patches.md 有對照表。
  */
 public final class LogFilter {
 
+    /** 每個 LootRespawn 執行緒各自重用一個只供 gate 判斷的合格 Zone，避免週期掃描時大量配置 UUID。 */
+    private static final ThreadLocal<Zone> LOOT_RESPAWN_ZONE = ThreadLocal.withInitial(
+            () -> new Zone("", "TownZone", 0, 0, 0, 1, 1));
+
     /** warn(String format, Object[]) 呼叫點——比對「格式化前」的完整 format 常數（equals）。 */
     private static final String[] FMT_EXACT = {
-        "%s> Transition's target state \"%s\" not supported by parent: \"%s\"",          // ActionStateContainer
         "AnimState not found: %s",                                                       // AnimationSet
         "SkeletonBone not resolved for bone: %s, defaulting to SkeletonBone.None",       // SkinningBoneHierarchy
-        "The packet %s is not consistent: %s",                                           // PacketTypes$PacketType
+        "The packet %s is not consistent: %s",                                           // INetworkPacket.logInconsistentPacket
     };
 
     /** warn(Object) 呼叫點——訊息已組字串：完整訊息用 equals、動態長串用 startsWith。 */
@@ -77,6 +94,160 @@ public final class LogFilter {
             }
         }
         DebugLog.log(message);
+    }
+
+    /**
+     * B42.19 只讓 TownZone/TownZones/TrailerPark 通過定期刷新，而且任何一次建造都會把整個 Zone
+     * 永久標成 haveConstruction。若同一垂直欄位確有未搬動的原生固定容器，回傳僅供本次 gate
+     * 使用的合格 Zone；原版 safehouse、seen-hours、週期與單容器規則仍在 LootRespawn 內執行。
+     */
+    public static Zone getLootRespawnZone(IsoGridSquare square) {
+        if (square == null) {
+            return null;
+        }
+
+        Zone zone = square.getZone();
+        if (isLootRespawnZone(zone) && !zone.haveConstruction) {
+            return zone;
+        }
+        if (!hasFixedLootContainerInColumn(square)) {
+            return zone;
+        }
+
+        Zone effective = LOOT_RESPAWN_ZONE.get();
+        effective.hourLastSeen = zone == null ? 0 : zone.hourLastSeen;
+        effective.haveConstruction = false;
+        return effective;
+    }
+
+    /** 搬動過的原生家具與玩家製 IsoThumpable 都不可因放寬 Zone gate 而取得定期刷新。 */
+    public static int getLootRespawnContainerCount(IsoObject object) {
+        if (object == null || object instanceof IsoDeadBody || object instanceof IsoThumpable
+                || object instanceof IsoCompost || object.isMovedThumpable()) {
+            return 0;
+        }
+        return object.getContainerCount();
+    }
+
+    private static boolean hasFixedLootContainerInColumn(IsoGridSquare ground) {
+        IsoChunk chunk = ground.getChunk();
+        if (chunk == null) {
+            return false;
+        }
+
+        int localX = Math.floorMod(ground.getX(), 8);
+        int localY = Math.floorMod(ground.getY(), 8);
+        for (int z = chunk.getMinLevel(); z <= chunk.getMaxLevel(); z++) {
+            IsoGridSquare square = chunk.getGridSquare(localX, localY, z);
+            if (square == null) {
+                continue;
+            }
+            for (int i = 0; i < square.getObjects().size(); i++) {
+                if (getLootRespawnContainerCount(square.getObjects().get(i)) > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isLootRespawnZone(Zone zone) {
+        if (zone == null) {
+            return false;
+        }
+        String type = zone.getType();
+        return "TownZone".equals(type) || "TownZones".equals(type) || "TrailerPark".equals(type);
+    }
+
+    /**
+     * B42.19 大型 Map= 組合偶爾遺失 IsoGridSquare -> IsoRoom 綁定；只在安全屋申請路徑
+     * 回查 authoritative roomList，補回 roomId 後仍交由原版 SafeHouse 規則驗證。
+     */
+    public static IsoBuilding getBuilding(IsoGridSquare square) {
+        if (square == null) {
+            return null;
+        }
+        IsoBuilding building = square.getBuilding();
+        if (building != null) {
+            return building;
+        }
+
+        RoomDef room = findRoom(square);
+        if (room == null) {
+            return null;
+        }
+
+        long oldRoomId = square.getRoomID();
+        square.setRoomID(room.getID());
+        building = square.getBuilding();
+        if (building == null) {
+            square.setRoomID(oldRoomId);
+            return null;
+        }
+
+        DebugLog.log(DebugType.Multiplayer, String.format(
+                "[MinidoracatJavaPatch] repaired safehouse room binding at %d,%d,%d roomId=%d",
+                square.getX(), square.getY(), square.getZ(), room.getID()));
+        return building;
+    }
+
+    public static String canBeSafehouse(IsoGridSquare square, IsoPlayer player) {
+        getBuilding(square);
+        if (player != null) {
+            getBuilding(player.getCurrentSquare());
+        }
+        return SafeHouse.canBeSafehouse(square, player);
+    }
+
+    private static RoomDef findRoom(IsoGridSquare square) {
+        IsoMetaGrid grid = IsoWorld.instance.getMetaGrid();
+        IsoMetaCell center = grid.getMetaGridFromTile(square.getX(), square.getY());
+        if (center == null) {
+            return null;
+        }
+
+        RoomDef fallback = findRoom(center, square);
+        if (fallback != null && fallback.userDefined) {
+            return fallback;
+        }
+
+        // ponytail: claim-time O(n) fallback; add an index only if this ever becomes a hot path.
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                RoomDef candidate = findRoom(grid.getCellData(center.getX() + dx, center.getY() + dy), square);
+                if (candidate != null && candidate.userDefined) {
+                    return candidate;
+                }
+                if (fallback == null) {
+                    fallback = candidate;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    /** Mirror IsoMetaChunk.getRoomAt precedence: newest room first, user-defined wins. */
+    private static RoomDef findRoom(IsoMetaCell cell, IsoGridSquare square) {
+        if (cell == null) {
+            return null;
+        }
+        RoomDef fallback = null;
+        for (int i = cell.roomList.size() - 1; i >= 0; i--) {
+            RoomDef room = cell.roomList.get(i);
+            if (room.getBuilding() != null && !room.isEmptyOutside()
+                    && room.isInside(square.getX(), square.getY(), square.getZ())) {
+                if (room.userDefined) {
+                    return room;
+                }
+                if (fallback == null) {
+                    fallback = room;
+                }
+            }
+        }
+        return fallback;
     }
 
     private LogFilter() {}
