@@ -312,13 +312,19 @@ invokestatic zombie/mdc/PopmanBufferGuard.clampAddZombieCount(ILjava/nio/ByteBuf
 istore C
 ```
 
-**v1→v2（2026-07-30 當晚線上否證）**：v1 上限固定 1024/29=35，部署重啟後 13 分鐘內仍有
-2 筆 underflow 且 clamp 觸發 0 次——唯一自洽解釋是**失敗頁面 count ≤ 35 但 buffer limit
-＜ count×29**，即 native 會把 limit 設為實際寫入量，炸點是「count 與實際寫入筆數不符」而非
-容量溢位。v2 改以呼叫當下 `buffer.remaining()/29` 為上限（clear() 後 position=0、
-remaining=limit）：native 有設 limit → 上限＝實際可讀筆數；沒設 → remaining=1024、上限=35
-＝v1 行為，兩種語意都涵蓋。若 v2 部署後例外仍在，代表「每筆固定 29 bytes」假設也錯
-（變長記錄），屆時改逐筆 remaining 檢查（迴圈頭手術，較深）。
+**v1→v2→根因修正（2026-07-30 當晚，codex 對抗審查定案）**：v1 上限固定 1024/29=35，
+部署重啟後 13 分鐘內仍 2 筆 underflow 且 clamp 觸發 0 次——「容量溢位」假說被線上否證。
+v2 改以呼叫當下 `buffer.remaining()/29` 為上限（防禦性保留），但 codex 進一步從
+反編譯源碼證實**主嫌是共享 buffer 的執行緒競爭**：`processPendingSaveCells`／
+`writeCellSnapshot` 在 MapCollisionData 背景執行緒（`MapCollisionData.runInner:469`）
+對**同一個 `this.byteBuffer`** 做 clear＋put 序列，而主執行緒的 `updateMain` 讀同一
+buffer **完全沒有同步**——`saveLock` 保護了 `beginSaveRealZombies` 與
+`processPendingSaveCells` 的寫側，`updateMain` 卻沒拿鎖（vanilla 遺漏）。兩執行緒共享
+同一 Buffer 的 position 指標，並發時 position 亂跳 → 隨機欄位 underflow＋混讀損毀的
+殭屍資料；也解釋例外集中在 chunk 存檔高峰。v2 在競爭下只能讀到瞬間快照，
+**不能根治**（但無害：不比原版差）。根治＝v3 buffer 所有權隔離或補上鎖（見進行中工作；
+lock-wrap 有 native 層死鎖未知數、buffer 拆分需驗證全部使用者執行緒歸屬，
+定案前需 runtime overlap trace）。
 
 **為什麼 clamp 在 `offset += count` 之後**：offset 推進沿用 native 原回報值，分頁推進行為與
 原版逐位元一致——無論 native 是 offset-served 還是 consume-on-read，都不會重讀、推進不足或
