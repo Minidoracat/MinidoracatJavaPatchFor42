@@ -300,15 +300,25 @@ add-zombie 佇列。buffer 是 `allocateDirect(1024)`，每筆 29 bytes（getFlo
 **`PathfindNative.updateMain` 泵送**全部帶掉；native 已把該批標記為已消耗，這批殭屍生成永久遺失
 ——高流量區殭屍密度被慢慢抽乾＋殭屍尋路瞬間定格。
 
-**手術**：新手術型 `count-clamp`（線性插入、無新分支）。鎖定
+**手術（v2）**：新手術型 `count-clamp`（線性插入、無新分支）。鎖定
 `invokestatic n_getAddZombieData → istore C → iload O → iload C → iadd → istore O` 全序
 （slot 一致性逐步核對，任何一步不符即放棄→命中數守門失敗），在 `istore O` **之後**插入：
 
 ```text
 iload C
-invokestatic zombie/mdc/PopmanBufferGuard.clampAddZombieCount(I)I
+aload_0
+getfield byteBuffer
+invokestatic zombie/mdc/PopmanBufferGuard.clampAddZombieCount(ILjava/nio/ByteBuffer;)I
 istore C
 ```
+
+**v1→v2（2026-07-30 當晚線上否證）**：v1 上限固定 1024/29=35，部署重啟後 13 分鐘內仍有
+2 筆 underflow 且 clamp 觸發 0 次——唯一自洽解釋是**失敗頁面 count ≤ 35 但 buffer limit
+＜ count×29**，即 native 會把 limit 設為實際寫入量，炸點是「count 與實際寫入筆數不符」而非
+容量溢位。v2 改以呼叫當下 `buffer.remaining()/29` 為上限（clear() 後 position=0、
+remaining=limit）：native 有設 limit → 上限＝實際可讀筆數；沒設 → remaining=1024、上限=35
+＝v1 行為，兩種語意都涵蓋。若 v2 部署後例外仍在，代表「每筆固定 29 bytes」假設也錯
+（變長記錄），屆時改逐筆 remaining 檢查（迴圈頭手術，較深）。
 
 **為什麼 clamp 在 `offset += count` 之後**：offset 推進沿用 native 原回報值，分頁推進行為與
 原版逐位元一致——無論 native 是 offset-served 還是 consume-on-read，都不會重讀、推進不足或
@@ -351,9 +361,20 @@ getFloat×3/get×1/getInt×4 計出，並與 helper 實際 clamp ceiling 連動�
 | `ServerPlayerDB.process()` | `DB_PROCESS` | **queue drain＋SQL select/insert/update＋commit**,可能含先前 backlog |
 | `this.write(b)`(封包序列化) | `WRITE_PACKET` | SurvivorDesc/物品序列化進封包 |
 
+**一般重連(既有角色,join 大宗)**:`CreatePlayerPacket` 只在新角色/死亡換角時走
+(40 人重啟湧入只記到 3 筆的原因)。一般重連走 `GameServer.receivePlayerConnect`,補兩個量測:
+
+| op 標籤 | 範圍 |
+|---|---|
+| `REJOIN_TOTAL` | 整個 `receivePlayerConnect`(兩個呼叫點:ConnectPacket.parse 一般、ConnectCoopPacket.parse 分屏/coop) |
+| `REJOIN_LOAD_CHARACTER` | 內層 `ServerPlayerDB.serverLoadNetworkCharacter`(SQL SELECT＋玩家全量反序列化,同方法 if/else 兩點) |
+
+`REJOIN_TOTAL − REJOIN_LOAD_CHARACTER` ＝ 其餘處理(全服廣播、ClientServerMap、
+preventIndoorZombies——private static 不可包)。
+
 **量測不到的殘差**:`new IsoPlayer(...)` 建構子無法以 redirect 包
 (INVOKESPECIAL `<init>` 的未初始化物件不可傳入 helper,verifier 禁止)——
-若四項總和遠小於 join 停頓,殘差＝ctor＋spawn 邏輯＋chunk 載入,屆時再做第二輪定位。
+若各項總和遠小於 join 停頓,殘差＝ctor＋spawn 邏輯＋chunk 載入,屆時再做第二輪定位。
 
 **驗證**:build 守門＝命中恰 4;SmokeCheck 結構斷言(四點改道且原呼叫歸零、wrapper 各
 delegate exactly once、單一 sink、無 checked exception、僅用既有 Multiplayer sink);

@@ -2,6 +2,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,14 +56,21 @@ public final class SmokeCheck {
                     checkLootZoneFallback(patched));
 
             Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
-            Method clamp = guard.getMethod("clampAddZombieCount", int.class);
-            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE);
-            failed += check("popman clamp 行為（35 內原值、36+ 夾 35、負值不動）",
-                    (Integer)clamp.invoke(null, 10) == 10
-                    && (Integer)clamp.invoke(null, 35) == 35
-                    && (Integer)clamp.invoke(null, 36) == 35
+            Method clamp = guard.getMethod("clampAddZombieCount", int.class, ByteBuffer.class);
+            ByteBuffer full = ByteBuffer.allocate(1024);
+            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE, full);
+            ByteBuffer shortLimit = ByteBuffer.allocate(1024);
+            shortLimit.limit(58);   // 2 筆整＝58 bytes
+            ByteBuffer partial = ByteBuffer.allocate(1024);
+            partial.limit(57);      // 1 筆整＋28 bytes 殘尾
+            failed += check("popman clamp 行為（容量上限 35、limit-short 依 remaining、負值不動）",
+                    (Integer)clamp.invoke(null, 10, full) == 10
+                    && (Integer)clamp.invoke(null, 35, full) == 35
+                    && (Integer)clamp.invoke(null, 36, full) == 35
                     && clampCeiling == 35
-                    && (Integer)clamp.invoke(null, -3) == -3);
+                    && (Integer)clamp.invoke(null, 20, shortLimit) == 2
+                    && (Integer)clamp.invoke(null, 2, partial) == 1
+                    && (Integer)clamp.invoke(null, -3, full) == -3);
         }
 
         // ---- 2. 結構斷言 ----
@@ -136,10 +144,11 @@ public final class SmokeCheck {
                 popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I");
         boolean clampSeq = false;
         if (nativePage != null) {
-            // w[0..7]＝clamp 全序；w[8..12]＝解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge）——
-            // 鎖住「被 clamp 的變數就是迴圈比較上限」且 loop-index slot 與 count/offset slot 相異，
-            // 避免 TIS 改用另一份拷貝或另一個變數時 clamp 變死碼（codex 對抗審查發現）
-            AbstractInsnNode[] w = new AbstractInsnNode[13];
+            // w[0..9]＝clamp 全序（v2 含 aload_0＋getfield byteBuffer——同時鎖定 clamp 讀的是
+            // <init> 配置的同一個 buffer 欄位）；w[10..14]＝解析迴圈頭（iconst_0; istore i;
+            // iload i; iload C; if_icmpge）——鎖住「被 clamp 的變數就是迴圈比較上限」且
+            // loop-index slot 與 count/offset slot 相異（codex 對抗審查發現）
+            AbstractInsnNode[] w = new AbstractInsnNode[15];
             AbstractInsnNode cursor = nativePage;
             boolean full = true;
             for (int i = 0; i < w.length; i++) {
@@ -154,20 +163,25 @@ public final class SmokeCheck {
                     && w[3].getOpcode() == Opcodes.IADD
                     && w[4] instanceof VarInsnNode s4 && s4.getOpcode() == Opcodes.ISTORE && s4.var == s1.var
                     && w[5] instanceof VarInsnNode s5 && s5.getOpcode() == Opcodes.ILOAD && s5.var == s0.var
-                    && w[6] instanceof MethodInsnNode c6 && c6.getOpcode() == Opcodes.INVOKESTATIC
-                            && c6.owner.equals(popmanGuard)
-                            && c6.name.equals("clampAddZombieCount") && c6.desc.equals("(I)I")
-                    && w[7] instanceof VarInsnNode s7 && s7.getOpcode() == Opcodes.ISTORE && s7.var == s0.var
-                    && w[8].getOpcode() == Opcodes.ICONST_0
-                    && w[9] instanceof VarInsnNode s9 && s9.getOpcode() == Opcodes.ISTORE
-                            && s9.var != s0.var && s9.var != s1.var
-                    && w[10] instanceof VarInsnNode s10 && s10.getOpcode() == Opcodes.ILOAD && s10.var == s9.var
-                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ILOAD && s11.var == s0.var
-                    && w[12] instanceof JumpInsnNode j12 && j12.getOpcode() == Opcodes.IF_ICMPGE;
+                    && w[6] instanceof VarInsnNode a6 && a6.getOpcode() == Opcodes.ALOAD && a6.var == 0
+                    && w[7] instanceof FieldInsnNode f7 && f7.getOpcode() == Opcodes.GETFIELD
+                            && f7.owner.equals(popmanCls) && f7.name.equals("byteBuffer")
+                            && f7.desc.equals("Ljava/nio/ByteBuffer;")
+                    && w[8] instanceof MethodInsnNode c8 && c8.getOpcode() == Opcodes.INVOKESTATIC
+                            && c8.owner.equals(popmanGuard)
+                            && c8.name.equals("clampAddZombieCount") && c8.desc.equals("(ILjava/nio/ByteBuffer;)I")
+                    && w[9] instanceof VarInsnNode s9c && s9c.getOpcode() == Opcodes.ISTORE && s9c.var == s0.var
+                    && w[10].getOpcode() == Opcodes.ICONST_0
+                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ISTORE
+                            && s11.var != s0.var && s11.var != s1.var
+                    && w[12] instanceof VarInsnNode s12 && s12.getOpcode() == Opcodes.ILOAD && s12.var == s11.var
+                    && w[13] instanceof VarInsnNode s13 && s13.getOpcode() == Opcodes.ILOAD && s13.var == s0.var
+                    && w[14] instanceof JumpInsnNode j14 && j14.getOpcode() == Opcodes.IF_ICMPGE;
         }
-        failed += check("popman clamp 插在 offset 推進之後、count slot 即 if_icmpge 迴圈上限", clampSeq);
+        failed += check("popman clamp 插在 offset 推進之後、含 byteBuffer 傳遞、count slot 即迴圈上限", clampSeq);
         failed += check("popman clamp 恰一次、native 分頁呼叫未增減",
-                countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard, "clampAddZombieCount", "(I)I") == 1
+                countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard,
+                        "clampAddZombieCount", "(ILjava/nio/ByteBuffer;)I") == 1
                 && countExactCalls(popman, Opcodes.INVOKESTATIC,
                         popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I") == 1);
 
@@ -351,6 +365,40 @@ public final class SmokeCheck {
                 countFieldReads(jmSafeLog, "zombie/debug/DebugType", "Multiplayer") == 1
                 && countExactCalls(jmSafeLog, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "println", "(Ljava/lang/String;)V") == 1);
+
+        // ---- 一般重連（既有角色）量測：REJOIN_TOTAL 兩個呼叫點＋REJOIN_LOAD_CHARACTER ----
+        String rpcDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V";
+        String loadCharDesc = "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;";
+        String parseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        MethodNode connectParse = method(distJava, "zombie/network/packets/connection/ConnectPacket",
+                "parse", parseDesc);
+        MethodNode connectCoopParse = method(distJava, "zombie/network/packets/connection/ConnectCoopPacket",
+                "parse", parseDesc);
+        failed += check("REJOIN_TOTAL 兩個呼叫點各改道一次且原呼叫歸零",
+                countExactCalls(connectParse, Opcodes.INVOKESTATIC, joinMetrics, "receivePlayerConnect", rpcDesc) == 1
+                && countExactCalls(connectParse, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "receivePlayerConnect", rpcDesc) == 0
+                && countExactCalls(connectCoopParse, Opcodes.INVOKESTATIC, joinMetrics, "receivePlayerConnect", rpcDesc) == 1
+                && countExactCalls(connectCoopParse, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "receivePlayerConnect", rpcDesc) == 0);
+        MethodNode gsReceive = method(distJava, "zombie/network/GameServer", "receivePlayerConnect", rpcDesc);
+        failed += check("REJOIN_LOAD_CHARACTER 兩個 if/else 呼叫點改道且原呼叫歸零",
+                countExactCalls(gsReceive, Opcodes.INVOKESTATIC, joinMetrics, "serverLoadNetworkCharacter",
+                        "(Lzombie/savefile/ServerPlayerDB;ILjava/lang/String;)Lzombie/characters/IsoPlayer;") == 2
+                && countExactCalls(gsReceive, Opcodes.INVOKEVIRTUAL, playerDb,
+                        "serverLoadNetworkCharacter", loadCharDesc) == 0);
+        MethodNode jmRpc = method(distJava, joinMetrics, "receivePlayerConnect", rpcDesc);
+        MethodNode jmLoadChar = method(distJava, joinMetrics, "serverLoadNetworkCharacter",
+                "(Lzombie/savefile/ServerPlayerDB;ILjava/lang/String;)Lzombie/characters/IsoPlayer;");
+        failed += check("重連兩個 wrapper 各 delegate exactly once、單一 sink、無 checked exception",
+                countExactCalls(jmRpc, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "receivePlayerConnect", rpcDesc) == 1
+                && countExactCalls(jmLoadChar, Opcodes.INVOKEVIRTUAL, playerDb,
+                        "serverLoadNetworkCharacter", loadCharDesc) == 1
+                && countExactCalls(jmRpc, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && countExactCalls(jmLoadChar, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && (jmRpc.exceptions == null || jmRpc.exceptions.isEmpty())
+                && (jmLoadChar.exceptions == null || jmLoadChar.exceptions.isEmpty()));
 
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
