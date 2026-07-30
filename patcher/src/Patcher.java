@@ -39,11 +39,18 @@ public final class Patcher {
     /**
      * 分頁筆數 clamp：鎖定「INVOKESTATIC site → istore C → iload O → iload C → iadd → istore O」
      * 全序（C＝筆數 slot、O＝offset slot，slot 一致性逐步核對），在 istore O 之後插入
-     * 「iload C; INVOKESTATIC helper(I)I; istore C」。線性插入、無新分支、堆疊峰值 1、
-     * frames 不需增補；序列任何一步不符即整段放棄（命中數守門會讓建置失敗）。
+     * 「iload C; aload_0; getfield bufferField; INVOKESTATIC helper(I+bufferDesc)I; istore C」。
+     * 線性插入、無新分支、堆疊峰值 2、frames 不需增補；序列任何一步不符即整段放棄
+     * （命中數守門會讓建置失敗）。helper 以呼叫當下 buffer.remaining() 計算上限——
+     * native 有無設 limit 兩種語意都涵蓋（v1 固定容量上限已被線上否證）。
      */
     record CountClamp(String siteOwner, String siteName, String siteDesc,
-                      String helperOwner, String helperName) {}
+                      String bufferField, String bufferFieldDesc,
+                      String helperOwner, String helperName) {
+        String helperDesc() {
+            return "(I" + bufferFieldDesc + ")I";
+        }
+    }
 
     /**
      * 方法頭部 null 守衛：aload &lt;slot&gt;［; invokevirtual owner.name desc］; ifnonnull L; return; L:[F_SAME]。
@@ -160,7 +167,9 @@ public final class Patcher {
                 case 5 -> {
                     if (opcode == Opcodes.ISTORE && var == clampOffsetSlot) {
                         super.visitVarInsn(Opcodes.ILOAD, clampCountSlot);
-                        super.visitMethodInsn(Opcodes.INVOKESTATIC, c.helperOwner(), c.helperName(), "(I)I", false);
+                        super.visitVarInsn(Opcodes.ALOAD, 0);
+                        super.visitFieldInsn(Opcodes.GETFIELD, c.siteOwner(), c.bufferField(), c.bufferFieldDesc());
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, c.helperOwner(), c.helperName(), c.helperDesc(), false);
                         super.visitVarInsn(Opcodes.ISTORE, clampCountSlot);
                         ops.actualHits++;
                     }
