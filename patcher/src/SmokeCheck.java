@@ -300,6 +300,58 @@ public final class SmokeCheck {
                 && countExactCalls(safeLog, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "println", "(Ljava/lang/String;)V") == 1);
 
+        // ---- join 卡頓量測：四個重活逐點改道且原呼叫歸零、wrapper delegate exactly once ----
+        String joinMetrics = "zombie/network/MinidoracatJoinMetrics";
+        String createPacket = "zombie/network/packets/character/CreatePlayerPacket";
+        String luaEvents = "zombie/Lua/LuaEventManager";
+        String playerDb = "zombie/savefile/ServerPlayerDB";
+        String triggerDesc = "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V";
+        String updateCharDesc = "(Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V";
+        String writeDesc = "(Lzombie/core/network/ByteBufferWriter;)V";
+        MethodNode createProcess = method(distJava, createPacket, "processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        failed += check("join 四個重活逐點改道且原呼叫歸零",
+                countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "triggerEvent", triggerDesc) == 1
+                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "serverUpdateNetworkCharacter",
+                        "(Lzombie/savefile/ServerPlayerDB;Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V") == 1
+                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "process",
+                        "(Lzombie/savefile/ServerPlayerDB;)V") == 1
+                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "write",
+                        "(Lzombie/network/packets/character/CreatePlayerPacket;Lzombie/core/network/ByteBufferWriter;)V") == 1
+                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, luaEvents, "triggerEvent", triggerDesc) == 0
+                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, playerDb,
+                        "serverUpdateNetworkCharacter", updateCharDesc) == 0
+                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, playerDb, "process", "()V") == 0
+                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, createPacket, "write", writeDesc) == 0);
+
+        MethodNode jmTrigger = method(distJava, joinMetrics, "triggerEvent", triggerDesc);
+        MethodNode jmUpdate = method(distJava, joinMetrics, "serverUpdateNetworkCharacter",
+                "(Lzombie/savefile/ServerPlayerDB;Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V");
+        MethodNode jmProcess = method(distJava, joinMetrics, "process", "(Lzombie/savefile/ServerPlayerDB;)V");
+        MethodNode jmWrite = method(distJava, joinMetrics, "write",
+                "(Lzombie/network/packets/character/CreatePlayerPacket;Lzombie/core/network/ByteBufferWriter;)V");
+        failed += check("JoinMetrics 四個 wrapper 各 delegate exactly once",
+                countExactCalls(jmTrigger, Opcodes.INVOKESTATIC, luaEvents, "triggerEvent", triggerDesc) == 1
+                && countExactCalls(jmUpdate, Opcodes.INVOKEVIRTUAL, playerDb,
+                        "serverUpdateNetworkCharacter", updateCharDesc) == 1
+                && countExactCalls(jmProcess, Opcodes.INVOKEVIRTUAL, playerDb, "process", "()V") == 1
+                && countExactCalls(jmWrite, Opcodes.INVOKEVIRTUAL, createPacket, "write", writeDesc) == 1);
+        failed += check("JoinMetrics 每個 wrapper 至多一個 metrics sink、無 checked exception",
+                countExactCalls(jmTrigger, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && countExactCalls(jmUpdate, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && countExactCalls(jmProcess, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && countExactCalls(jmWrite, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
+                && (jmTrigger.exceptions == null || jmTrigger.exceptions.isEmpty())
+                && (jmUpdate.exceptions == null || jmUpdate.exceptions.isEmpty())
+                && (jmProcess.exceptions == null || jmProcess.exceptions.isEmpty())
+                && (jmWrite.exceptions == null || jmWrite.exceptions.isEmpty()));
+
+        MethodNode jmSafeLog = method(distJava, joinMetrics, "safeLog", "(Ljava/lang/String;J)V");
+        failed += check("JoinMetrics 只使用既有 Multiplayer log sink",
+                countFieldReads(jmSafeLog, "zombie/debug/DebugType", "Multiplayer") == 1
+                && countExactCalls(jmSafeLog, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
+                        "println", "(Ljava/lang/String;)V") == 1);
+
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
         String addDesc = "(Ljava/lang/Object;)V";

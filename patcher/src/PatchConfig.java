@@ -15,6 +15,7 @@ public final class PatchConfig {
     private static final String DL = "zombie/debug/DebugLog";
     private static final String LOG_STR = "(Ljava/lang/String;)V";
     private static final String LOGIN_METRICS = "zombie/network/MinidoracatLoginMetrics";
+    private static final String JOIN_METRICS = "zombie/network/MinidoracatJoinMetrics";
     private static final String TWO_STR_VOID = "(Ljava/lang/String;Ljava/lang/String;)V";
     private static final String ENTITY_ARRAY = "zombie/entity/util/Array";
     private static final String FAST_ARRAY_REMOVAL = "zombie/mdc/FastIdentityArrayRemoval";
@@ -112,6 +113,28 @@ public final class PatchConfig {
                 LOGIN_METRICS, "setUserSteamID"));
         loginProcess.expectedHits = 3;
         patches.add(login);
+
+        // join 卡頓量測（正式服實測 6–11 秒主迴圈停頓集中在玩家 join/死亡重生換角）：
+        // CreatePlayerPacket.processServer 尾段四個重活各包 timing wrapper，不改呼叫順序、
+        // 參數與例外邊界。IsoPlayer ctor 無法以 redirect 包（INVOKESPECIAL <init> 的
+        // 未初始化物件不可傳遞）——殘差時間＝ctor＋spawn 邏輯，由四項量測反推。
+        Patcher.ClassPatch createPlayer = new Patcher.ClassPatch("zombie/network/packets/character/CreatePlayerPacket");
+        Patcher.MethodOps createProcess = createPlayer.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/Lua/LuaEventManager",
+                "triggerEvent", "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V",
+                JOIN_METRICS, "triggerEvent"));
+        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
+                "serverUpdateNetworkCharacter",
+                "(Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V",
+                JOIN_METRICS, "serverUpdateNetworkCharacter"));
+        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
+                "process", "()V", JOIN_METRICS, "process"));
+        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/packets/character/CreatePlayerPacket",
+                "write", "(Lzombie/core/network/ByteBufferWriter;)V", JOIN_METRICS, "write"));
+        createProcess.expectedHits = 4;
+        patches.add(createPlayer);
 
         // 大量 chunk unload 會逐 entity 從 Engine 全域陣列與各 bucket 做 identity 線性搜尋；
         // 四個精確 add/remove callsite 改道至 primitive sidecar index，生命週期與 callback 順序不動

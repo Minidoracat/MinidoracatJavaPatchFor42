@@ -1,0 +1,74 @@
+{
+  "className": "zombie/network/packets/character/CreatePlayerPacket",
+  "kind": "instrumentation",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/Lua/LuaEventManager",
+        "name": "triggerEvent",
+        "desc": "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.triggerEvent(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V",
+      "rationale": "只量測 OnNewGame Lua event（百餘模組 handler 全跑一遍，join 停頓頭號嫌疑）；static→static，desc 不變，順序與例外邊界不變。",
+      "evidence": "jar SHA-256=e4661ca9…54b8；javap processServer BCI 1075 invokestatic #602，方法內恰一次。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/savefile/ServerPlayerDB",
+        "name": "serverUpdateNetworkCharacter",
+        "desc": "(Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.serverUpdateNetworkCharacter(Lzombie/savefile/ServerPlayerDB;Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V",
+      "rationale": "量測玩家 snapshot 序列化＋enqueue（NetworkCharacterData ctor 內 player.save 到 buffer 後入佇列，非 SQL）；receiver 前置為第一參數，delegate exactly once。",
+      "evidence": "javap processServer BCI 1090 invokevirtual #613，方法內恰一次（注意同名 (ByteBuffer,UdpConnection) 多載在別的方法，desc 全比對不會誤中）。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/savefile/ServerPlayerDB",
+        "name": "process",
+        "desc": "()V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.process(Lzombie/savefile/ServerPlayerDB;)V",
+      "rationale": "量測 queue drain＋SQL select/insert/update＋commit——真正的 DB 工作在這裡，且可能包含先前累積的 backlog。",
+      "evidence": "javap processServer BCI 1096 invokevirtual #617，方法內恰一次。"
+    },
+    {
+      "op": "redirect-call",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/network/packets/character/CreatePlayerPacket",
+        "name": "write",
+        "desc": "(Lzombie/core/network/ByteBufferWriter;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.write(Lzombie/network/packets/character/CreatePlayerPacket;Lzombie/core/network/ByteBufferWriter;)V",
+      "rationale": "量測玩家序列化（SurvivorDesc/WornItems/HumanVisual save）。",
+      "evidence": "javap processServer BCI 1116 invokevirtual #634（同 class write），方法內恰一次。IsoPlayer ctor（BCI 958 invokespecial <init>）無法以 redirect 包——未初始化物件不可傳遞；殘差時間＝ctor＋spawn 邏輯，由四項量測反推。正式服 6–11 秒 join 停頓實例：2026-07-30 17:20:33–39（Player-C replacing dead player）。"
+    }
+  ]
+}
