@@ -11,6 +11,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -30,6 +31,7 @@ public final class SmokeCheck {
         Path distJava = Path.of(args[0]);
         Path jar = Path.of(args[1]);
         int failed = 0;
+        int clampCeiling = 0;
 
         // ---- 1. 行為 smoke ----
         try (URLClassLoader patched = new URLClassLoader(
@@ -51,6 +53,16 @@ public final class SmokeCheck {
                     invokeLootContainerCount(patched, true) == 0);
             failed += check("非 TownZone 固定容器 fallback 與搬動負對照",
                     checkLootZoneFallback(patched));
+
+            Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
+            Method clamp = guard.getMethod("clampAddZombieCount", int.class);
+            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE);
+            failed += check("popman clamp 行為（35 內原值、36+ 夾 35、負值不動）",
+                    (Integer)clamp.invoke(null, 10) == 10
+                    && (Integer)clamp.invoke(null, 35) == 35
+                    && (Integer)clamp.invoke(null, 36) == 35
+                    && clampCeiling == 35
+                    && (Integer)clamp.invoke(null, -3) == -3);
         }
 
         // ---- 2. 結構斷言 ----
@@ -112,6 +124,81 @@ public final class SmokeCheck {
         failed += check("容器 filter 同時檢查 moved flag 並保留原 count",
                 countCalls(containerFilter, "zombie/iso/IsoObject", "isMovedThumpable") == 1
                 && countCalls(containerFilter, "zombie/iso/IsoObject", "getContainerCount") == 1);
+
+        // ---- popman clamp：鎖定「native 分頁 → offset 推進（原值）→ clamp 迴圈上限」全序 ----
+        // 命中數守門只保證插入發生一次；這裡連 slot 一致性一起鎖：clamp 必須在 istore O 之後、
+        // 且 iload/istore 的是同一個 count slot——插錯位置（例如 clamp 跑到 offset += count 之前，
+        // 會改變分頁消耗語意）或鎖錯變數都在此擋下。
+        String popmanCls = "zombie/popman/ZombiePopulationManager";
+        String popmanGuard = "zombie/mdc/PopmanBufferGuard";
+        MethodNode popman = method(distJava, popmanCls, "updateMain", "()V");
+        MethodInsnNode nativePage = findExactCall(popman, Opcodes.INVOKESTATIC,
+                popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I");
+        boolean clampSeq = false;
+        if (nativePage != null) {
+            // w[0..7]＝clamp 全序；w[8..12]＝解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge）——
+            // 鎖住「被 clamp 的變數就是迴圈比較上限」且 loop-index slot 與 count/offset slot 相異，
+            // 避免 TIS 改用另一份拷貝或另一個變數時 clamp 變死碼（codex 對抗審查發現）
+            AbstractInsnNode[] w = new AbstractInsnNode[13];
+            AbstractInsnNode cursor = nativePage;
+            boolean full = true;
+            for (int i = 0; i < w.length; i++) {
+                cursor = nextReal(cursor);
+                if (cursor == null) { full = false; break; }
+                w[i] = cursor;
+            }
+            clampSeq = full
+                    && w[0] instanceof VarInsnNode s0 && s0.getOpcode() == Opcodes.ISTORE
+                    && w[1] instanceof VarInsnNode s1 && s1.getOpcode() == Opcodes.ILOAD && s1.var != s0.var
+                    && w[2] instanceof VarInsnNode s2 && s2.getOpcode() == Opcodes.ILOAD && s2.var == s0.var
+                    && w[3].getOpcode() == Opcodes.IADD
+                    && w[4] instanceof VarInsnNode s4 && s4.getOpcode() == Opcodes.ISTORE && s4.var == s1.var
+                    && w[5] instanceof VarInsnNode s5 && s5.getOpcode() == Opcodes.ILOAD && s5.var == s0.var
+                    && w[6] instanceof MethodInsnNode c6 && c6.getOpcode() == Opcodes.INVOKESTATIC
+                            && c6.owner.equals(popmanGuard)
+                            && c6.name.equals("clampAddZombieCount") && c6.desc.equals("(I)I")
+                    && w[7] instanceof VarInsnNode s7 && s7.getOpcode() == Opcodes.ISTORE && s7.var == s0.var
+                    && w[8].getOpcode() == Opcodes.ICONST_0
+                    && w[9] instanceof VarInsnNode s9 && s9.getOpcode() == Opcodes.ISTORE
+                            && s9.var != s0.var && s9.var != s1.var
+                    && w[10] instanceof VarInsnNode s10 && s10.getOpcode() == Opcodes.ILOAD && s10.var == s9.var
+                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ILOAD && s11.var == s0.var
+                    && w[12] instanceof JumpInsnNode j12 && j12.getOpcode() == Opcodes.IF_ICMPGE;
+        }
+        failed += check("popman clamp 插在 offset 推進之後、count slot 即 if_icmpge 迴圈上限", clampSeq);
+        failed += check("popman clamp 恰一次、native 分頁呼叫未增減",
+                countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard, "clampAddZombieCount", "(I)I") == 1
+                && countExactCalls(popman, Opcodes.INVOKESTATIC,
+                        popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I") == 1);
+
+        // MAX_RECORDS＝1024/29 的兩個上游前提做成可執行守門（codex 對抗審查發現）：
+        // capacity 取自 <init> 的 allocateDirect 實參、每筆 bytes 由 updateMain 的 buffer 讀取組成計出，
+        // 再與 helper 實際 clamp ceiling 連動——PZ 只改 buffer 大小或 record 欄位時建置失敗而非默默錯上限
+        MethodNode popmanInit = method(distJava, popmanCls, "<init>", "()V");
+        int popmanCapacity = -1;
+        int popmanAllocCount = 0;
+        for (AbstractInsnNode in : popmanInit.instructions) {
+            if (in instanceof MethodInsnNode alloc && alloc.getOpcode() == Opcodes.INVOKESTATIC
+                    && alloc.owner.equals("java/nio/ByteBuffer") && alloc.name.equals("allocateDirect")) {
+                popmanAllocCount++;
+                AbstractInsnNode prev = prevReal(alloc);
+                AbstractInsnNode next = nextReal(alloc);
+                if (prev instanceof IntInsnNode cap && cap.getOpcode() == Opcodes.SIPUSH
+                        && next instanceof FieldInsnNode pf && pf.getOpcode() == Opcodes.PUTFIELD
+                        && pf.owner.equals(popmanCls) && pf.name.equals("byteBuffer")) {
+                    popmanCapacity = cap.operand;
+                }
+            }
+        }
+        int floatReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getFloat", "()F");
+        int byteReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "get", "()B");
+        int intReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getInt", "()I");
+        int recordBytes = floatReads * 4 + byteReads + intReads * 4;
+        failed += check("popman buffer 容量與每筆組成未漂移（allocateDirect(1024)、3F+1B+4I）",
+                popmanAllocCount == 1 && popmanCapacity == 1024
+                && floatReads == 3 && byteReads == 1 && intReads == 4);
+        failed += check("helper clamp ceiling ＝ 容量/每筆 bytes（上限與前提連動）",
+                recordBytes > 0 && clampCeiling == popmanCapacity / recordBytes);
 
         // ---- 常數手術的語境鎖（回歸測試：命中數守門只數數量，擋不住改到同方法的另一條算式）----
         // 42.20 實例：壓力算式從 changeStress(radius / 20.0F) 改寫成 changeStress(radius * 0.05F)，
@@ -513,6 +600,15 @@ public final class SmokeCheck {
         for (AbstractInsnNode next = instruction.getNext(); next != null; next = next.getNext()) {
             if (next.getOpcode() >= 0) {
                 return next;
+            }
+        }
+        return null;
+    }
+
+    static AbstractInsnNode prevReal(AbstractInsnNode instruction) {
+        for (AbstractInsnNode prev = instruction.getPrevious(); prev != null; prev = prev.getPrevious()) {
+            if (prev.getOpcode() >= 0) {
+                return prev;
             }
         }
         return null;

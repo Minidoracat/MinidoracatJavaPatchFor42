@@ -37,6 +37,15 @@ public final class Patcher {
     record ConstChange(Object from, Object to) {}
 
     /**
+     * 分頁筆數 clamp：鎖定「INVOKESTATIC site → istore C → iload O → iload C → iadd → istore O」
+     * 全序（C＝筆數 slot、O＝offset slot，slot 一致性逐步核對），在 istore O 之後插入
+     * 「iload C; INVOKESTATIC helper(I)I; istore C」。線性插入、無新分支、堆疊峰值 1、
+     * frames 不需增補；序列任何一步不符即整段放棄（命中數守門會讓建置失敗）。
+     */
+    record CountClamp(String siteOwner, String siteName, String siteDesc,
+                      String helperOwner, String helperName) {}
+
+    /**
      * 方法頭部 null 守衛：aload &lt;slot&gt;［; invokevirtual owner.name desc］; ifnonnull L; return; L:[F_SAME]。
      * 插在原第一條指令前（含 super 呼叫之前）；堆疊峰值 1、locals 不變、原 frames 照舊——
      * 新 branch target 只需補一個 F_SAME（與初始 frame 等價，後續壓縮 frame 的 delta 鏈不受影響）。
@@ -48,6 +57,7 @@ public final class Patcher {
         final List<Site> redirects = new ArrayList<>();
         final List<ConstChange> consts = new ArrayList<>();
         HeadGuard headGuard = null;
+        CountClamp countClamp = null;
         int expectedHits = 0;
         int actualHits = 0;
         MethodOps(String name, String desc) { this.name = name; this.desc = desc; }
@@ -86,6 +96,10 @@ public final class Patcher {
 
     static final class MethodSurgeon extends MethodVisitor {
         final MethodOps ops;
+        /** CountClamp 狀態機：0=待命 1=看到 site 呼叫 2=istore C 3=iload O 4=iload C 5=iadd。 */
+        int clampState = 0;
+        int clampCountSlot = -1;
+        int clampOffsetSlot = -1;
         MethodSurgeon(MethodVisitor mv, MethodOps ops) {
             super(Opcodes.ASM9, mv);
             this.ops = ops;
@@ -111,6 +125,7 @@ public final class Patcher {
         public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
             for (Site s : ops.redirects) {
                 if (s.opcode() == opcode && s.owner().equals(owner) && s.name().equals(name) && s.desc().equals(desc)) {
+                    clampState = 0;
                     super.visitMethodInsn(Opcodes.INVOKESTATIC, s.redirectOwner(), s.redirectName(),
                             redirectDesc(opcode, owner, desc), false);
                     ops.actualHits++;
@@ -118,9 +133,106 @@ public final class Patcher {
                 }
             }
             super.visitMethodInsn(opcode, owner, name, desc, itf);
+            CountClamp c = ops.countClamp;
+            clampState = c != null && opcode == Opcodes.INVOKESTATIC && c.siteOwner().equals(owner)
+                    && c.siteName().equals(name) && c.siteDesc().equals(desc) ? 1 : 0;
+        }
+
+        @Override
+        public void visitVarInsn(int opcode, int var) {
+            super.visitVarInsn(opcode, var);
+            CountClamp c = ops.countClamp;
+            if (c == null) {
+                return;
+            }
+            switch (clampState) {
+                case 1 -> {
+                    if (opcode == Opcodes.ISTORE) { clampCountSlot = var; clampState = 2; } else { clampState = 0; }
+                }
+                case 2 -> {
+                    if (opcode == Opcodes.ILOAD && var != clampCountSlot) {
+                        clampOffsetSlot = var; clampState = 3;
+                    } else { clampState = 0; }
+                }
+                case 3 -> {
+                    clampState = opcode == Opcodes.ILOAD && var == clampCountSlot ? 4 : 0;
+                }
+                case 5 -> {
+                    if (opcode == Opcodes.ISTORE && var == clampOffsetSlot) {
+                        super.visitVarInsn(Opcodes.ILOAD, clampCountSlot);
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, c.helperOwner(), c.helperName(), "(I)I", false);
+                        super.visitVarInsn(Opcodes.ISTORE, clampCountSlot);
+                        ops.actualHits++;
+                    }
+                    clampState = 0;
+                }
+                default -> clampState = 0;
+            }
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            super.visitInsn(opcode);
+            clampState = clampState == 4 && opcode == Opcodes.IADD ? 5 : 0;
+        }
+
+        @Override
+        public void visitJumpInsn(int opcode, org.objectweb.asm.Label label) {
+            super.visitJumpInsn(opcode, label);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+            super.visitFieldInsn(opcode, owner, name, desc);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitTypeInsn(int opcode, String type) {
+            super.visitTypeInsn(opcode, type);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitIincInsn(int varIndex, int increment) {
+            super.visitIincInsn(varIndex, increment);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitInvokeDynamicInsn(String name, String desc, org.objectweb.asm.Handle handle, Object... args) {
+            super.visitInvokeDynamicInsn(name, desc, handle, args);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitTableSwitchInsn(int min, int max, org.objectweb.asm.Label dflt, org.objectweb.asm.Label... labels) {
+            super.visitTableSwitchInsn(min, max, dflt, labels);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitLookupSwitchInsn(org.objectweb.asm.Label dflt, int[] keys, org.objectweb.asm.Label[] labels) {
+            super.visitLookupSwitchInsn(dflt, keys, labels);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitMultiANewArrayInsn(String descriptor, int numDimensions) {
+            super.visitMultiANewArrayInsn(descriptor, numDimensions);
+            clampState = 0;
+        }
+
+        @Override
+        public void visitFrame(int type, int numLocal, Object[] local, int numStack, Object[] stack) {
+            super.visitFrame(type, numLocal, local, numStack, stack);
+            // StackMapFrame＝控制流合流點；pattern 跨越合流點即語意不明，放棄（codex 對抗審查發現）
+            clampState = 0;
         }
         @Override
         public void visitLdcInsn(Object value) {
+            clampState = 0;
             for (ConstChange c : ops.consts) {
                 if (c.from().equals(value)) {
                     super.visitLdcInsn(c.to());
@@ -132,6 +244,7 @@ public final class Patcher {
         }
         @Override
         public void visitIntInsn(int opcode, int operand) {
+            clampState = 0;
             if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) {
                 for (ConstChange c : ops.consts) {
                     if (c.from() instanceof Integer i && i == operand && c.to() instanceof Integer t) {
