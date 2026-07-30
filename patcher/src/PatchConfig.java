@@ -254,5 +254,31 @@ public final class PatchConfig {
         return patches;
     }
 
+    /**
+     * Client 端 patch 集合（與 server 部署完全隔離：獨立 build-client.ps1 → dist-client\，
+     * 不進 server manifest）。42.20 invisible-entities 調查（「影子/名牌在、3D 模型不見」）
+     * 因果鏈第一環：TextureIDAssetManager.waitFileTask 的 50MB 全域 DirectBuffer 硬門檻——
+     * 超標時 2–4 條檔案載入執行緒無限 sleep（零 log、無 timeout），貼圖與 mesh 共用管線
+     * 全面停擺，此時所有新進視野/剛被 Reset 的實體因全有全無 bake 閘門整隻不畫。
+     * javap 證據：waitFileTask()V ＝ invokestatic DirectBufferAllocator.getBytesAllocated()J
+     * → ldc2_w 52428800L → lcmp/ifle → sleep(20) 迴圈（方法內兩者各恰一處）。
+     */
+    public static List<Patcher.ClassPatch> client() {
+        List<Patcher.ClassPatch> patches = new ArrayList<>();
+
+        // 兩刀都在 waitFileTask 方法範圍內：redirect＝passthrough 觀測（水位/hwm/stall 計數，
+        // 節流 log 到 console.txt）；constChange＝門檻 50MB→256MB（native pixel-buffer 水位，
+        // 非 VRAM 非 heap，任何能跑 B42 的機器都零負擔）。
+        Patcher.ClassPatch tex = new Patcher.ClassPatch("zombie/core/textures/TextureIDAssetManager");
+        Patcher.MethodOps wait = tex.method("waitFileTask", "()V");
+        wait.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/core/utils/DirectBufferAllocator",
+                "getBytesAllocated", "()J", "zombie/mdc/TexturePipelineGuard", "bytesAllocatedObserved"));
+        wait.consts.add(new Patcher.ConstChange(52428800L, 268435456L));
+        wait.expectedHits = 2;
+        patches.add(tex);
+
+        return patches;
+    }
+
     private PatchConfig() {}
 }

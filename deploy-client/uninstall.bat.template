@@ -1,0 +1,56 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+set "SHA_TIAM=__TIAM_SHA__"
+set "SHA_GUARD=__GUARD_SHA__"
+set "FAILED=0"
+
+if not exist "ProjectZomboid64.exe" (
+  echo [ERROR] Please run this from the Project Zomboid game folder.
+  goto :fail
+)
+
+call :removeone "zombie\core\textures\TextureIDAssetManager.class" "%SHA_TIAM%"
+call :removeone "zombie\mdc\TexturePipelineGuard.class" "%SHA_GUARD%"
+rd "zombie\core\textures" 2>nul
+rd "zombie\core" 2>nul
+rd "zombie\mdc" 2>nul
+rd "zombie" 2>nul
+
+if not "%FAILED%"=="0" (
+  echo [WARN] Some files were NOT removed - see messages above.
+  goto :fail
+)
+echo [OK] Patch removed.
+pause
+exit /b 0
+
+:removeone
+if not exist "%~1" (
+  echo [SKIP] %~1 not present.
+  exit /b 0
+)
+call :hash "%~1"
+if /i not "%HASH%"=="%~2" (
+  echo [WARN] %~1 does not match this patch version - NOT deleted.
+  set "FAILED=1"
+  exit /b 0
+)
+del /q "%~1"
+if exist "%~1" (
+  echo [WARN] Could not delete %~1
+  set "FAILED=1"
+) else (
+  echo [OK] Removed %~1
+)
+exit /b 0
+
+:hash
+set "HASH="
+for /f "delims=" %%H in ('certutil -hashfile "%~1" SHA256 ^| find /v ":"') do set "HASH=%%H"
+set "HASH=%HASH: =%"
+exit /b 0
+
+:fail
+pause
+exit /b 1

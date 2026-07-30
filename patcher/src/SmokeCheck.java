@@ -31,6 +31,15 @@ public final class SmokeCheck {
     public static void main(String[] args) throws Exception {
         Path distJava = Path.of(args[0]);
         Path jar = Path.of(args[1]);
+
+        if (args.length > 2 && args[2].equals("client")) {
+            if (clientChecks(distJava, jar) > 0) {
+                System.exit(1);
+            }
+            System.out.println("client 守衛語意驗證全數通過");
+            return;
+        }
+
         int failed = 0;
         int clampCeiling = 0;
 
@@ -499,6 +508,70 @@ public final class SmokeCheck {
         System.out.println("守衛語意驗證全數通過");
     }
 
+    /**
+     * Client patch（TextureIDAssetManager.waitFileTask 門檻＋觀測改道）驗證：
+     * vanilla 前提守門（jar 內恰一個 getBytesAllocated＋恰一個 52428800L，PZ 改寫此方法
+     * 時建置失敗而非默默錯位）、patched 全序鎖、helper 常數與 bytecode 常數連動、
+     * 以及 helper passthrough 對真實 DirectBufferAllocator 水位的行為 smoke。
+     */
+    static int clientChecks(Path distJava, Path jar) throws Exception {
+        int failed = 0;
+        String texCls = "zombie/core/textures/TextureIDAssetManager";
+        String guardCls = "zombie/mdc/TexturePipelineGuard";
+        String dba = "zombie/core/utils/DirectBufferAllocator";
+
+        MethodNode vanillaWait = methodFromJar(jar, texCls, "waitFileTask", "()V");
+        failed += check("vanilla 前提：waitFileTask 恰一個 getBytesAllocated 與 52428800L",
+                countExactCalls(vanillaWait, Opcodes.INVOKESTATIC, dba, "getBytesAllocated", "()J") == 1
+                && countLongConst(vanillaWait, 52428800L) == 1
+                && countLongConst(vanillaWait, 268435456L) == 0);
+
+        MethodNode wait = method(distJava, texCls, "waitFileTask", "()V");
+        failed += check("觀測改道恰一次且原 getBytesAllocated 歸零",
+                countExactCalls(wait, Opcodes.INVOKESTATIC, guardCls, "bytesAllocatedObserved", "()J") == 1
+                && countExactCalls(wait, Opcodes.INVOKESTATIC, dba, "getBytesAllocated", "()J") == 0);
+        failed += check("門檻常數已改 256MB 且 50MB 歸零",
+                countLongConst(wait, 268435456L) == 1 && countLongConst(wait, 52428800L) == 0);
+
+        AbstractInsnNode[] w = firstReal(wait, 4);
+        boolean seq = w[0] instanceof MethodInsnNode m0 && m0.getOpcode() == Opcodes.INVOKESTATIC
+                && m0.owner.equals(guardCls) && m0.name.equals("bytesAllocatedObserved") && m0.desc.equals("()J")
+                && w[1] instanceof LdcInsnNode l1 && l1.cst instanceof Long lv && lv == 268435456L
+                && w[2] != null && w[2].getOpcode() == Opcodes.LCMP
+                && w[3] != null && w[3].getOpcode() == Opcodes.IFLE;
+        failed += check("waitFileTask 全序鎖（observed→256MB→lcmp→ifle）", seq);
+        failed += check("sleep(20) 迴圈保留",
+                countExactCalls(wait, Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V") == 1
+                && countLongConst(wait, 20L) == 1);
+        failed += check("InterruptedException handler 區間保留（vanilla 與 patched 各恰一個）",
+                vanillaWait.tryCatchBlocks != null && vanillaWait.tryCatchBlocks.size() == 1
+                && "java/lang/InterruptedException".equals(vanillaWait.tryCatchBlocks.get(0).type)
+                && wait.tryCatchBlocks != null && wait.tryCatchBlocks.size() == 1
+                && "java/lang/InterruptedException".equals(wait.tryCatchBlocks.get(0).type));
+
+        try (URLClassLoader patched = new URLClassLoader(
+                new URL[]{ distJava.toUri().toURL(), jar.toUri().toURL() },
+                ClassLoader.getPlatformClassLoader())) {
+            Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", true, patched);
+            failed += check("helper 門檻常數與 bytecode 常數連動（50MB/256MB）",
+                    guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) == 52428800L
+                    && guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) == 268435456L);
+
+            Class<?> alloc = Class.forName("zombie.core.utils.DirectBufferAllocator", true, patched);
+            Method observed = guard.getMethod("bytesAllocatedObserved");
+            Method direct = alloc.getMethod("getBytesAllocated");
+            long before = (Long)observed.invoke(null);
+            Object wrapped = alloc.getMethod("allocate", int.class).invoke(null, 1024 * 1024);
+            long during = (Long)observed.invoke(null);
+            long directDuring = (Long)direct.invoke(null);
+            wrapped.getClass().getMethod("dispose").invoke(wrapped);
+            long after = (Long)observed.invoke(null);
+            failed += check("helper passthrough 與真實水位一致（allocate 1MB → dispose 歸零）",
+                    before == 0L && during == directDuring && during >= 1024 * 1024 && after == 0L);
+        }
+        return failed;
+    }
+
     /** 回傳 true=拋了 NPE、false=正常返回；其他例外直接失敗拋出。 */
     static boolean invokeProcess(ClassLoader cl, String cls, boolean withArg) throws Exception {
         Class<?> c = Class.forName(cls, true, cl);
@@ -607,6 +680,28 @@ public final class SmokeCheck {
         ClassNode cn = new ClassNode();
         new ClassReader(Files.readAllBytes(distJava.resolve(cls + ".class"))).accept(cn, 0);
         return cn;
+    }
+
+    /** 讀 jar 內 vanilla class 的方法（前提守門用——與 patched 版分開比對）。 */
+    static MethodNode methodFromJar(Path jar, String cls, String name, String desc) throws Exception {
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            byte[] bytes = jf.getInputStream(jf.getEntry(cls + ".class")).readAllBytes();
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, 0);
+            return cn.methods.stream()
+                    .filter(m -> m.name.equals(name) && m.desc.equals(desc)).findFirst().orElseThrow();
+        }
+    }
+
+    /** 統計方法內 ldc2_w 的指定 long 常數出現次數。 */
+    static int countLongConst(MethodNode m, long value) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Long l && l == value) {
+                count++;
+            }
+        }
+        return count;
     }
 
     static boolean containsUtf8(Path distJava, String cls, String value) throws Exception {
