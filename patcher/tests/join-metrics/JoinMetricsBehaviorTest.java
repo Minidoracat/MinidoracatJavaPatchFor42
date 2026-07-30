@@ -28,7 +28,8 @@ public final class JoinMetricsBehaviorTest {
 
     private static final Pattern METRIC = Pattern.compile(
             "^\\[MinidoracatJavaPatch\\]\\[JoinMetrics\\] "
-                    + "op=(TRIGGER_ON_NEW_GAME|DB_UPDATE_CHARACTER|DB_PROCESS|WRITE_PACKET) elapsedNs=([0-9]+)$");
+                    + "op=(TRIGGER_ON_NEW_GAME|DB_UPDATE_CHARACTER|DB_PROCESS|WRITE_PACKET"
+                    + "|REJOIN_TOTAL|REJOIN_LOAD_CHARACTER) elapsedNs=([0-9]+)$");
 
     private static int probeEventCounter;
 
@@ -80,6 +81,14 @@ public final class JoinMetricsBehaviorTest {
         observed = capture(() -> MinidoracatJoinMetrics.process(null));
         require(observed instanceof NullPointerException, "process(null) NPE");
         requireMetric(probe, "DB_PROCESS");
+
+        // REJOIN_LOAD_CHARACTER：null receiver 在派發點即拋，不觸發 ServerPlayerDB <clinit>。
+        // REJOIN_TOTAL 的 delegate 是 GameServer static（INVOKESTATIC 必觸發 GameServer <clinit>，
+        // 裸 JVM 無法安全初始化）——delegate 行為由 SmokeCheck 結構斷言補位。
+        probe.reset(null);
+        observed = capture(() -> MinidoracatJoinMetrics.serverLoadNetworkCharacter(null, 0, "probe"));
+        require(observed instanceof NullPointerException, "serverLoadNetworkCharacter(null) NPE");
+        requireMetric(probe, "REJOIN_LOAD_CHARACTER");
     }
 
     private static void nonfatalIdentityAndSinkNonfatal(ProbeLogStream probe) {

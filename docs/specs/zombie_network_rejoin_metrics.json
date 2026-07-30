@@ -1,0 +1,33 @@
+{
+  "classNames": [
+    "zombie/network/packets/connection/ConnectPacket",
+    "zombie/network/packets/connection/ConnectCoopPacket",
+    "zombie/network/GameServer"
+  ],
+  "kind": "instrumentation",
+  "note": "一般重連（既有角色）量測。CreatePlayerPacket 只蓋新角色/死亡換角（40 人重啟湧入僅 3 筆的原因）；一般重連走 GameServer.receivePlayerConnect。",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": { "owner": "zombie/network/packets/connection/ConnectPacket", "name": "parse", "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V" },
+      "site": { "opcode": "INVOKESTATIC", "owner": "zombie/network/GameServer", "name": "receivePlayerConnect", "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V", "expectedCount": 1 },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.receivePlayerConnect（op=REJOIN_TOTAL）",
+      "evidence": "javap ConnectPacket.parse BCI 8 invokestatic #71，方法內恰一次。jar SHA e4661ca9…54b8。"
+    },
+    {
+      "op": "redirect-call",
+      "method": { "owner": "zombie/network/packets/connection/ConnectCoopPacket", "name": "parse", "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V" },
+      "site": { "opcode": "INVOKESTATIC", "owner": "zombie/network/GameServer", "name": "receivePlayerConnect", "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V", "expectedCount": 1 },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.receivePlayerConnect（op=REJOIN_TOTAL）",
+      "evidence": "javap ConnectCoopPacket.parse BCI 797 invokestatic #266，方法內恰一次。"
+    },
+    {
+      "op": "redirect-call",
+      "method": { "owner": "zombie/network/GameServer", "name": "receivePlayerConnect", "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V" },
+      "site": { "opcode": "INVOKEVIRTUAL", "owner": "zombie/savefile/ServerPlayerDB", "name": "serverLoadNetworkCharacter", "desc": "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;", "expectedCount": 2 },
+      "redirect": "zombie/network/MinidoracatJoinMetrics.serverLoadNetworkCharacter（op=REJOIN_LOAD_CHARACTER，回傳 IsoPlayer passthrough）",
+      "rationale": "SQL SELECT＋玩家全量反序列化＝重連最重的可包段；同方法 steam/非 steam if/else 各一點，同 wrapper。REJOIN_TOTAL − REJOIN_LOAD_CHARACTER ＝ 廣播/ClientServerMap/preventIndoorZombies（private static 不可包）。",
+      "evidence": "javap GameServer.receivePlayerConnect BCI 120 與 138 invokevirtual #3658，方法內恰兩次；PlayerInventoryPacket 的第三個呼叫點不在此方法、不受影響。"
+    }
+  ]
+}

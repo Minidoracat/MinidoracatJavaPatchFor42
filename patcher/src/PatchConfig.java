@@ -136,6 +136,34 @@ public final class PatchConfig {
         createProcess.expectedHits = 4;
         patches.add(createPlayer);
 
+        // 一般重連（既有角色，join 大宗）走 GameServer.receivePlayerConnect，CreatePlayerPacket
+        // 只蓋新角色/死亡換角。REJOIN_TOTAL 包整個 receivePlayerConnect（兩個呼叫點：一般＋coop），
+        // REJOIN_LOAD_CHARACTER 包內層 SQL SELECT＋玩家全量反序列化（同方法兩個 if/else 呼叫點）。
+        String rpcDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V";
+        Patcher.ClassPatch connect = new Patcher.ClassPatch("zombie/network/packets/connection/ConnectPacket");
+        Patcher.MethodOps connectParse = connect.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        connectParse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                "receivePlayerConnect", rpcDesc, JOIN_METRICS, "receivePlayerConnect"));
+        connectParse.expectedHits = 1;
+        patches.add(connect);
+
+        Patcher.ClassPatch connectCoop = new Patcher.ClassPatch("zombie/network/packets/connection/ConnectCoopPacket");
+        Patcher.MethodOps connectCoopParse = connectCoop.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        connectCoopParse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                "receivePlayerConnect", rpcDesc, JOIN_METRICS, "receivePlayerConnect"));
+        connectCoopParse.expectedHits = 1;
+        patches.add(connectCoop);
+
+        Patcher.ClassPatch gameServer = new Patcher.ClassPatch("zombie/network/GameServer");
+        Patcher.MethodOps rpc = gameServer.method("receivePlayerConnect", rpcDesc);
+        rpc.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
+                "serverLoadNetworkCharacter", "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;",
+                JOIN_METRICS, "serverLoadNetworkCharacter"));
+        rpc.expectedHits = 2;
+        patches.add(gameServer);
+
         // 大量 chunk unload 會逐 entity 從 Engine 全域陣列與各 bucket 做 identity 線性搜尋；
         // 四個精確 add/remove callsite 改道至 primitive sidecar index，生命週期與 callback 順序不動
         Patcher.ClassPatch entityManager = new Patcher.ClassPatch("zombie/entity/EngineEntityManager");
@@ -188,14 +216,16 @@ public final class PatchConfig {
         a3.expectedHits = 1;
         patches.add(animal);
 
-        // native n_getAddZombieData 回報筆數可超過 1024-byte byteBuffer 容量（29 bytes/筆，>35 即
-        // BufferUnderflowException——整個 tick 的 popman 解析＋PathfindNative 泵送被外層 catch 跳過，
-        // 該批殭屍生成永久遺失；正式服 2026-07-30 單日 77 筆）。只 clamp 解析迴圈上限；
+        // native n_getAddZombieData 回報的分頁筆數與 buffer 實際可讀量不符即 BufferUnderflowException
+        // ——整個 tick 的 popman 解析＋PathfindNative 泵送被外層 catch 跳過（正式服 2026-07-30 單日
+        // 77 筆）。v1 固定 35 上限已被線上否證（count≤35 仍炸＝native 會設 limit）；v2 以呼叫當下
+        // buffer.remaining()/29 為上限，native 有無設 limit 都涵蓋。只 clamp 解析迴圈上限；
         // offset += count 沿用 native 原回報值，分頁推進與消耗語意跟原版完全一致。
         Patcher.ClassPatch popman = new Patcher.ClassPatch("zombie/popman/ZombiePopulationManager");
         Patcher.MethodOps popmanUpdate = popman.method("updateMain", "()V");
         popmanUpdate.countClamp = new Patcher.CountClamp("zombie/popman/ZombiePopulationManager",
                 "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I",
+                "byteBuffer", "Ljava/nio/ByteBuffer;",
                 "zombie/mdc/PopmanBufferGuard", "clampAddZombieCount");
         popmanUpdate.expectedHits = 1;
         patches.add(popman);
