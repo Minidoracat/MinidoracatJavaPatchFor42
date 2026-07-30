@@ -1,0 +1,25 @@
+{
+  "className": "zombie/popman/ZombiePopulationManager",
+  "kind": "defensive-clamp",
+  "patches": [
+    {
+      "op": "count-clamp",
+      "method": {
+        "name": "updateMain",
+        "desc": "()V"
+      },
+      "site": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/popman/ZombiePopulationManager",
+        "name": "n_getAddZombieData",
+        "desc": "(ILjava/nio/ByteBuffer;)I",
+        "expectedCount": 1
+      },
+      "insertAfter": "istore(offset) of `offset += count`（全序鎖：invokestatic site → istore C → iload O → iload C → iadd → istore O，slot 一致性逐步核對；任何一步不符、或遇 StackMapFrame 控制流合流點，即放棄且命中數守門失敗）",
+      "inserted": "iload C; INVOKESTATIC zombie/mdc/PopmanBufferGuard.clampAddZombieCount(I)I; istore C",
+      "rationale": "native 回報的分頁筆數可超過 byteBuffer 容量（allocateDirect(1024)，每筆 29 bytes＝getFloat×3＋get×1＋getInt×4，>35 筆即 BufferUnderflowException）；例外把整個 tick 的 popman 解析、updateLoadedAreas、MapCollisionData.notifyThread、playerSpawns.update 以及同一 try 區塊的 PathfindNative.updateMain 全部帶掉。clamp 放在 offset += count 之後：只約束解析迴圈上限，分頁推進沿用 native 原回報值——offset-served 或 consume-on-read 任一語意下都不會重讀、推進不足或死迴圈。非 lossless：超額殘尾（count−35 筆）在兩種語意下都會被跳過，遺失範圍與原版 underflow 相同、不新增遺失，效果是把「整個 tick 陪葬」縮小為「只丟殘尾」；native 端如何處置殘尾無法由 Java 端單獨證明。線性插入、無新分支、插入點堆疊為空、峰值 1（實測原版與 patched 均 stack=9, locals=21、StackMapTable 17 entries 未變）；frames 不需增補。",
+      "verification": "SmokeCheck：行為 smoke（35 內原值、36+ 夾 35、負值不動）；結構全序鎖 w[0..12] 延伸至解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge），要求 count slot 即迴圈比較上限、loop-index slot 與 count/offset slot 相異；MAX_RECORDS 前提守門——capacity 取自 <init> 的 allocateDirect 實參（恰 1 處、SIPUSH 1024、putfield byteBuffer）、每筆 bytes 由 updateMain 的 buffer 讀取組成計出（getFloat×3/get×1/getInt×4），並與 helper 實際 clamp ceiling（clamp(Integer.MAX_VALUE)）連動。手術狀態機在 visitFrame/visitJump/visitField/visitType/visitIinc/visitLdc/visitIntInsn/invokedynamic/switch/multianewarray 任何非 pattern 指令一律重置（codex gpt-5.6-sol 對抗審查定案）。",
+      "evidence": "正式服與本機 projectzomboid.jar SHA-256 同為 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8；ZombiePopulationManager.class SHA-256=126fbf46d4b0ee77c6b85a4781e270fa71bcb35d405596bd130f1c276302e8dc。javap：<init> 的 sipush 1024 → allocateDirect（buffer 容量，全 class 唯一）；updateMain offset 69 invokestatic n_getAddZombieData（全 class 唯一）、72 istore 7（count）、74/76/78/79 iload 6/iload 7/iadd/istore 6（offset += count）、81 iconst_0 為原插入點後首指令、86 iload 7 為迴圈比較。每筆 29 bytes 由 updateMain 的讀取序列驗證（getFloat×3＋get×1＋getInt×4，方法內恰為 3/1/4 次）。正式服 2026-07-30 全日 11 個 log set 共 77 筆 `IngameState.UpdateStuff> Exception thrown`＝BufferUnderflowException at ZombiePopulationManager.updateMain（:611 getFloat 與 :614 getInt 兩種越界點，符合 count 超額後在頁尾任意欄位讀爆），與玩家「殭屍/實體消失」回報時段吻合（01:04:47 例外落在 client 端 229 筆 stale zombie 清除視窗內）。"
+    }
+  ]
+}

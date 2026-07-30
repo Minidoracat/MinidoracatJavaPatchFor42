@@ -284,6 +284,57 @@ full remove、ns/entity、倍增比與可用時的 thread allocation；時間只
 
 ---
 
+## 2h. popman add-zombie 分頁 clamp（防禦性修復）
+
+**正式服根因證據**：2026-07-30 全日 11 個 log set 共 77 筆
+`IngameState.UpdateStuff> Exception thrown`＝`java.nio.BufferUnderflowException` at
+`ZombiePopulationManager.updateMain`（`:611` getFloat 與 `:614` getInt 兩種越界點）。下午高峰
+（12:12–18:11）6 小時內 34 筆；01:04:47 的例外正落在玩家 client 端 229 筆
+`removing stale zombie 5000` 清除視窗內，與「殭屍/實體消失」回報時段吻合。
+
+**機制**：`updateMain` 以 `n_getAddZombieData(offset, byteBuffer)` 分頁讀取 native 的
+add-zombie 佇列。buffer 是 `allocateDirect(1024)`，每筆 29 bytes（getFloat×3＋get×1＋getInt×4），
+最多容納 35 筆；native 回報的 count 偶爾超額，Java 端照數讀取即在頁尾任意欄位 underflow。
+例外一路拋出 `IngameState.UpdateStuff` 的共用 try 區塊，把該 tick 的 popman 剩餘解析、
+`updateLoadedAreas`、`MapCollisionData.notifyThread`、`playerSpawns.update` 與
+**`PathfindNative.updateMain` 泵送**全部帶掉；native 已把該批標記為已消耗，這批殭屍生成永久遺失
+——高流量區殭屍密度被慢慢抽乾＋殭屍尋路瞬間定格。
+
+**手術**：新手術型 `count-clamp`（線性插入、無新分支）。鎖定
+`invokestatic n_getAddZombieData → istore C → iload O → iload C → iadd → istore O` 全序
+（slot 一致性逐步核對，任何一步不符即放棄→命中數守門失敗），在 `istore O` **之後**插入：
+
+```text
+iload C
+invokestatic zombie/mdc/PopmanBufferGuard.clampAddZombieCount(I)I
+istore C
+```
+
+**為什麼 clamp 在 `offset += count` 之後**：offset 推進沿用 native 原回報值，分頁推進行為與
+原版逐位元一致——無論 native 是 offset-served 還是 consume-on-read，都不會重讀、推進不足或
+死迴圈。**此 patch 不是 lossless**：超額殘尾（count−35 筆）在兩種語意下都會被跳過，遺失範圍
+與原版 underflow 時相同——效果是把「整個 tick 陪葬」縮小為「只丟殘尾」，不新增遺失；
+native 端如何處置殘尾（重發或已消耗）無法由 Java 端單獨證明。若改成在 offset 推進**之前**
+clamp，consume-on-read 語意下 `while (offset < total)` 可能永不收斂（主執行緒死迴圈）——
+這是不可接受的風險，故不採。
+
+**helper**：`zombie/mdc/PopmanBufferGuard.clampAddZombieCount(int)`——`count <= 35` 原值返回；
+超額時累計 dropped 筆數並經 `DebugType.Multiplayer.println` 記
+`[MinidoracatJavaPatch][PopmanBufferGuard]`（log sink 失敗不外拋，不影響解析）。單執行緒
+（server 主迴圈）呼叫，無同步。插入點堆疊為空、峰值 1，遠低於原方法既有 max_stack，
+frames 不需增補（`ClassWriter(0)` 原樣保留）。
+
+**驗證**：build 守門＝命中恰 1；SmokeCheck 行為 smoke（35 內原值、36+ 夾 35、負值不動）＋
+結構全序鎖（clamp 必須在 `istore O` 之後、count slot 即 `if_icmpge` 迴圈比較上限、
+loop-index slot 與 count/offset 相異、native 分頁呼叫未增減）＋ **MAX_RECORDS 前提守門**
+（capacity 取自 `<init>` 的 `allocateDirect` 實參、每筆 bytes 由 updateMain 的
+getFloat×3/get×1/getInt×4 計出，並與 helper 實際 clamp ceiling 連動——PZ 只改 buffer 大小
+或 record 欄位時建置失敗而非默默錯上限）。手術狀態機遇 StackMapFrame（控制流合流點）即放棄。
+部署後觀測：`UpdateStuff> Exception thrown`＋`BufferUnderflowException` 應歸零；
+若 `[PopmanBufferGuard]` clamp log 出現＝native 超額頁實際發生率的直接量測。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。

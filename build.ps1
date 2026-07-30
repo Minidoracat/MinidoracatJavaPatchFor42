@@ -46,7 +46,8 @@ $helperEntries = @(
     'zombie/mdc/LogFilter.class',
     'zombie/network/MinidoracatLoginMetrics.class',
     'zombie/mdc/FastIdentityArrayRemoval.class',
-    'zombie/mdc/FastIdentityArrayRemoval$State.class'
+    'zombie/mdc/FastIdentityArrayRemoval$State.class',
+    'zombie/mdc/PopmanBufferGuard.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()

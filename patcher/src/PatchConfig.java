@@ -165,6 +165,18 @@ public final class PatchConfig {
         a3.expectedHits = 1;
         patches.add(animal);
 
+        // native n_getAddZombieData 回報筆數可超過 1024-byte byteBuffer 容量（29 bytes/筆，>35 即
+        // BufferUnderflowException——整個 tick 的 popman 解析＋PathfindNative 泵送被外層 catch 跳過，
+        // 該批殭屍生成永久遺失；正式服 2026-07-30 單日 77 筆）。只 clamp 解析迴圈上限；
+        // offset += count 沿用 native 原回報值，分頁推進與消耗語意跟原版完全一致。
+        Patcher.ClassPatch popman = new Patcher.ClassPatch("zombie/popman/ZombiePopulationManager");
+        Patcher.MethodOps popmanUpdate = popman.method("updateMain", "()V");
+        popmanUpdate.countClamp = new Patcher.CountClamp("zombie/popman/ZombiePopulationManager",
+                "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I",
+                "zombie/mdc/PopmanBufferGuard", "clampAddZombieCount");
+        popmanUpdate.expectedHits = 1;
+        patches.add(popman);
+
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
 
         // hit 封包 stale/type-confused reference：getZombie()=tryCastTo 可回 null，原版 9 個 setter 無檢查；
