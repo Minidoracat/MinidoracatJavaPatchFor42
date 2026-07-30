@@ -41,6 +41,13 @@ public final class LogFilter {
         "Invalid SpriteConfig object! scripted object = MetalBigWireFence",              // SpriteConfig（選擇性）
         "Invalid SpriteConfig object! scripted object = WoodFloorLvl3",
         "Invalid SpriteConfig object! scripted object = Wooden_Windows",
+        // 42.20 新增噪音（2026-07-30 正式服實測 5.5h：510/266/246/69/64/28 筆，全為原版物件必刷）
+        "Invalid SpriteConfig object! scripted object = DoubleWireGate",
+        "Invalid SpriteConfig object! scripted object = BrickWallLvl2",
+        "Invalid SpriteConfig object! scripted object = MetalSmallWireFence",
+        "Invalid SpriteConfig object! scripted object = BrickWindowFrameLvl2",
+        "Invalid SpriteConfig object! scripted object = Piano",
+        "Invalid SpriteConfig object! scripted object = WoodenWallLvl3",
     };
     private static final String[] OBJ_PREFIX = {
         "No packet handler for type:",                                                   // PacketsCache <init>
