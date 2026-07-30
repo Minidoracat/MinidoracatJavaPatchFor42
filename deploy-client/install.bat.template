@@ -1,0 +1,62 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+set "EXPECTED_JAR=__JAR_SHA__"
+set "SHA_TIAM=__TIAM_SHA__"
+set "SHA_GUARD=__GUARD_SHA__"
+
+if not exist "ProjectZomboid64.exe" (
+  echo [ERROR] Please extract this zip into the Project Zomboid game folder first.
+  goto :fail
+)
+if not exist "patch-files\zombie\core\textures\TextureIDAssetManager.class" (
+  echo [ERROR] patch-files folder is missing. Re-extract the whole zip here.
+  goto :fail
+)
+
+echo Checking game version...
+call :hash "projectzomboid.jar"
+if /i "%HASH%"=="%EXPECTED_JAR%" goto :versionok
+echo [ERROR] Game version mismatch - this patch is for build 42.20.0 only.
+echo    expected %EXPECTED_JAR%
+echo    actual   %HASH%
+goto :fail
+:versionok
+
+if not exist "zombie\core\textures\TextureIDAssetManager.class" goto :noconflict
+call :hash "zombie\core\textures\TextureIDAssetManager.class"
+if /i "%HASH%"=="%SHA_TIAM%" goto :noconflict
+echo [ERROR] A different loose patch already exists at zombie\core\textures\ - remove it first.
+goto :fail
+:noconflict
+
+echo Installing...
+xcopy /y /e /i /q "patch-files\zombie" "zombie" >nul
+if errorlevel 1 (
+  echo [ERROR] Copy failed.
+  goto :fail
+)
+
+call :hash "zombie\core\textures\TextureIDAssetManager.class"
+if /i not "%HASH%"=="%SHA_TIAM%" goto :verifyfail
+call :hash "zombie\mdc\TexturePipelineGuard.class"
+if /i not "%HASH%"=="%SHA_GUARD%" goto :verifyfail
+
+echo [OK] Patch installed and verified. Start the game normally.
+echo      To confirm in-game: search "TexPipelineGuard" in %%UserProfile%%\Zomboid\console.txt
+pause
+exit /b 0
+
+:verifyfail
+echo [ERROR] Post-install verification failed - run uninstall.bat and try again.
+goto :fail
+
+:hash
+set "HASH="
+for /f "delims=" %%H in ('certutil -hashfile "%~1" SHA256 ^| find /v ":"') do set "HASH=%%H"
+set "HASH=%HASH: =%"
+exit /b 0
+
+:fail
+pause
+exit /b 1

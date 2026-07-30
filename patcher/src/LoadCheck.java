@@ -19,6 +19,28 @@ public final class LoadCheck {
                 Class.forName(cls, false, cl);
                 System.out.println("load OK  " + cls);
             }
+
+            if (args.length == 4 && args[3].equals("client")) {
+                // client 模式：只驗 client helper 簽名（server helpers 不在 dist-client）
+                Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", false, cl);
+                var observed = guard.getDeclaredMethod("bytesAllocatedObserved");
+                int guardModifiers = java.lang.reflect.Modifier.PUBLIC
+                        | java.lang.reflect.Modifier.STATIC;
+                if (observed.getReturnType() != long.class
+                        || (observed.getModifiers() & guardModifiers) != guardModifiers
+                        || observed.getExceptionTypes().length != 0) {
+                    throw new NoSuchMethodException("TexturePipelineGuard.bytesAllocatedObserved signature");
+                }
+                // 門檻常數與 PatchConfig.client() 的手術值連動（clinit 僅設 long，無遊戲副作用）
+                if (guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) != 52428800L
+                        || guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) != 268435456L) {
+                    throw new IllegalStateException("TexturePipelineGuard 門檻常數與手術值不一致");
+                }
+                System.out.println("client helper OK bytesAllocatedObserved 簽名與門檻常數一致");
+                System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
+                return;
+            }
+
             Class<?> lf = Class.forName("zombie.mdc.LogFilter", false, cl);
             // 跨類連結斷言：redirect helper 必須以「與 PatchConfig 改道簽名一致」的形式存在
             // （Class.forName 不會解析 INVOKESTATIC 的符號參照；缺了只會在執行期 NoSuchMethodError）
