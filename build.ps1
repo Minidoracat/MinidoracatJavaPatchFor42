@@ -47,7 +47,8 @@ $helperEntries = @(
     'zombie/network/MinidoracatLoginMetrics.class',
     'zombie/mdc/FastIdentityArrayRemoval.class',
     'zombie/mdc/FastIdentityArrayRemoval$State.class',
-    'zombie/mdc/PopmanBufferGuard.class'
+    'zombie/mdc/PopmanBufferGuard.class',
+    'zombie/network/MinidoracatJoinMetrics.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()
@@ -73,9 +74,11 @@ Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
 java -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
 Assert-Ok "SmokeCheck"
 
-Write-Host "[8/10] LoginMetrics 行為與例外 precedence 驗證..."
+Write-Host "[8/10] LoginMetrics／JoinMetrics 行為與例外 precedence 驗證..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.LoginMetricsBehaviorTest
 Assert-Ok "LoginMetricsBehaviorTest"
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.JoinMetricsBehaviorTest
+Assert-Ok "JoinMetricsBehaviorTest"
 
 Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
