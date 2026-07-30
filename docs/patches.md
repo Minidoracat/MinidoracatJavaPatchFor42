@@ -407,6 +407,62 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 
 ---
 
+## 2j. Client 端貼圖管線門檻修復＋觀測（實體隱形，第一個 client patch）
+
+**症狀與根因**:B42 MP 已知未修 bug——受害 client 看到隊友/殭屍/車輛「只剩影子和名牌、
+3D 模型不見」,>20 人在線觸發、relog 暫癒、log 全程無錯誤。四路反編譯 trace＋對抗評審
+定案的因果鏈第一環:`TextureIDAssetManager.waitFileTask` 以 50MB 的全域 DirectBuffer
+水位當硬門檻(`while (getBytesAllocated() > 52428800L) sleep(20)`),超標時 2–4 條檔案
+載入執行緒無限 sleep(零 log、無 timeout);貼圖與 mesh 共用 FileSystemImpl 載入池,
+管線停滯期間所有新進視野/剛被 Reset 的實體因全有全無 bake 閘門
+(`ModelInstanceTextureCreator.render` 任一貼圖未 ready 整隻不烘)完全隱形,而影子
+(FBORenderShadows blob 貼花)與名牌(UI batch)走獨立管線照畫。詳見
+`docs/specs/zombie_core_textures_TextureIDAssetManager.json`。
+
+**手術**(`PatchConfig.client()`,expectedHits=2,兩刀都在 waitFileTask 方法內):
+1. redirect——`DirectBufferAllocator.getBytesAllocated()J` 改道
+   `zombie/mdc/TexturePipelineGuard.bytesAllocatedObserved()J`(同形 ()J,回傳值
+   原樣 passthrough、真實取值例外照原版傳播;觀測部分 try/catch 全吞、fatal 三件套
+   VirtualMachineError/ThreadDeath/LinkageError 照拋,絕不改變載入行為)。
+2. constChange——門檻 `52428800L`(50MB)→`268435456L`(256MB)。**門檻語意(codex
+   對抗審查實驗修正)**:這是「已解碼未上傳」pixel buffer 的水位,但 WrappedBuffer 走
+   LWJGL native malloc,**不受 -XX:MaxDirectMemorySize 約束**(codex 以
+   `-Xmx64m -XX:MaxDirectMemorySize=16m` 實測仍配得 321MB),且門檻是配置前檢查、
+   多 worker 可同時通過,256MB 不是硬上限——它把「vanilla 會 throttle 的時刻」換成
+   「繼續吃 native RAM」。256MB 是針對本次受害 client(高 RAM 機器)的實驗值,
+   低 RAM(≤8GB)機器不建議使用;部署後需以 process RSS 與 hwm log 實測回饋再定案。
+
+**觀測輸出**(決策在 synchronized 內、`DebugLog.log` 一律在鎖外送出——避免慢速 log
+串行化 2–4 條載入執行緒;非 fatal 觀測例外全吞,fatal 三件套照拋):`active` 宣告
+(log 成功才設旗標,boot 極早期 DebugLog 未就緒時自動重試——此行是安裝驗證契約)、
+`hwmBytes` 高水位每跨 8MB 台階一行、水位高於原版 50MB 門檻時每 5 秒至多一行
+`bytes/hwm/aboveVanillaMs/vanillaStallSamples/patchedStallSamples`。
+**語意精確版**:vanillaStallSamples＝would-enter-wait 取樣數(原版在該取樣點會
+進入至少一次 20ms 等待),單獨不證明持續饑餓;連續 stall 行＋`aboveVanillaMs`
+(本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝256MB
+仍不夠,需再調。
+
+**與 server 部署完全隔離**:獨立 `build-client.ps1` → `work\out-client`＋`dist-client\`
+(不進 server manifest;server build 十步全綠回歸驗證過)。安裝機制:client
+`ProjectZomboid64.json` classpath 為 `[".", "projectzomboid.jar"]`,遊戲目錄優先於
+jar,loose class 直接 shadow。**玩家安裝走 fail-closed `install.bat`**(建置時注入
+SHA:先驗 jar SHA-256=42.20.0、再驗目標位置無其他 loose patch 衝突,通過才從
+`patch-files\` 複製並回驗兩檔 SHA);移除走 `uninstall.bat`(逐檔比對 SHA 確認
+ownership 才刪,非本 patch 版本一律不動並以非零 exit 報警;Steam 驗證檔案完整性
+**不會**移除非 depot 的 loose file,不可當移除手段)。僅供受影響玩家個人測試,
+不得散布;遊戲版本更新後 install.bat 會自動拒裝,既裝者須先 uninstall。
+
+**驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
+waitFileTask 恰一個 getBytesAllocated＋恰一個 52428800L,PZ 改寫時建置失敗)、
+全序鎖(observed→256MB→lcmp→ifle)、sleep(20) 迴圈保留、helper 門檻常數與 bytecode
+常數連動、真實 allocate/dispose passthrough smoke;LoadCheck client 模式(-Xverify:all
+＋簽名/常數連動);BytecodeVerify;TexturePipelineGuardBehaviorTest(真實
+DirectBufferAllocator 跨兩門檻:1MB/65MB/321MB 的計數分類與 dispose 歸零)。
+部署後觀測:console.txt 搜 `TexPipelineGuard`,`active` 行＝生效;隱形復發時
+對照 `vanillaStallSamples` 與 relog 時點即可對帳因果鏈。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。

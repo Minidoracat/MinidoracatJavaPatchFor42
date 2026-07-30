@@ -287,15 +287,15 @@ public final class Patcher {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 3) {
-            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest 輸出路徑>");
+        if (args.length != 3 && !(args.length == 4 && args[3].equals("client"))) {
+            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest 輸出路徑> [client]");
             System.exit(2);
         }
         Path jarPath = Path.of(args[0]);
         Path outDir = Path.of(args[1]);
         Path manifestPath = Path.of(args[2]);
 
-        List<ClassPatch> patches = PatchConfig.all();
+        List<ClassPatch> patches = args.length == 4 ? PatchConfig.client() : PatchConfig.all();
         List<String> manifest = new ArrayList<>();
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
 

@@ -1,5 +1,6 @@
 work/
 dist/
+dist-client/
 *.class
 .omc/
 .omx/
