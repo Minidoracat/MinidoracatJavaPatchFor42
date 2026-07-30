@@ -335,6 +335,38 @@ getFloat×3/get×1/getInt×4 計出，並與 helper 實際 clamp ceiling 連動�
 
 ---
 
+## 2i. join 卡頓量測（觀測 patch）
+
+**動機**:正式服主迴圈實測 6–11 秒停頓集中在玩家 join／死亡重生換角(例:17:20:33–17:20:39
+的 6.6s 正值 Soup「replacing dead player」),但無法從 log 分辨時間花在哪一段。
+現有 LoginMetrics 只蓋 login 期的三個 DB 寫入,不含 join spawn 段。
+
+**手術**:與 LoginMetrics 同型的 redirect-call timing wrapper——
+`CreatePlayerPacket.processServer` 尾段四個重活各包一層,不改呼叫順序、參數與例外邊界:
+
+| 原呼叫 | op 標籤 | 實際工作(依 42.20 反編譯核實) |
+|---|---|---|
+| `LuaEventManager.triggerEvent("OnNewGame",…)` | `TRIGGER_ON_NEW_GAME` | 百餘模組的 OnNewGame handler 全跑一遍,頭號嫌疑 |
+| `ServerPlayerDB.serverUpdateNetworkCharacter` | `DB_UPDATE_CHARACTER` | 玩家 snapshot 序列化＋enqueue(`player.save` 到 buffer,**非 SQL**) |
+| `ServerPlayerDB.process()` | `DB_PROCESS` | **queue drain＋SQL select/insert/update＋commit**,可能含先前 backlog |
+| `this.write(b)`(封包序列化) | `WRITE_PACKET` | SurvivorDesc/物品序列化進封包 |
+
+**量測不到的殘差**:`new IsoPlayer(...)` 建構子無法以 redirect 包
+(INVOKESPECIAL `<init>` 的未初始化物件不可傳入 helper,verifier 禁止)——
+若四項總和遠小於 join 停頓,殘差＝ctor＋spawn 邏輯＋chunk 載入,屆時再做第二輪定位。
+
+**驗證**:build 守門＝命中恰 4;SmokeCheck 結構斷言(四點改道且原呼叫歸零、wrapper 各
+delegate exactly once、單一 sink、無 checked exception、僅用既有 Multiplayer sink);
+JoinMetricsBehaviorTest 行為測試——以可 override write() 的 FakePacket 全象限覆蓋
+(delegate 成功/receiver 與 argument identity/nonfatal sentinel identity/三種
+delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
+其餘 wrapper 以 null-receiver NPE 驗證;triggerEvent 每測試點用唯一事件名
+(LuaEventManager 對未知事件先註冊再拋 NPE,同名第二次會成功)。
+部署後觀測:join 時四行 `[MinidoracatJavaPatch][JoinMetrics] op=… elapsedNs=…`,
+對照停頓長度即可歸因。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
