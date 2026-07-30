@@ -56,24 +56,29 @@ public final class SmokeCheck {
                     checkLootZoneFallback(patched));
 
             Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
-            Method clamp = guard.getMethod("clampAddZombieCount", int.class, ByteBuffer.class);
-            ByteBuffer full = ByteBuffer.allocate(1024);
-            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE, full);
-            ByteBuffer shortLimit = ByteBuffer.allocate(1024);
-            shortLimit.limit(58);   // 2 筆整＝58 bytes
-            ByteBuffer partial = ByteBuffer.allocate(1024);
-            partial.limit(57);      // 1 筆整＋28 bytes 殘尾
-            ByteBuffer advanced = ByteBuffer.allocate(1024);
-            advanced.position(29);  // remaining=995→34 筆；誤改成 limit()/29 會得 35（codex 語境鎖）
-            failed += check("popman clamp 行為（容量上限 35、limit-short/position 依 remaining、負值不動）",
-                    (Integer)clamp.invoke(null, 10, full) == 10
-                    && (Integer)clamp.invoke(null, 35, full) == 35
-                    && (Integer)clamp.invoke(null, 36, full) == 35
+            Method clamp = guard.getMethod("clampAddZombieCount", int.class);
+            Method swapBuffer = guard.getMethod("updateMainBuffer", ByteBuffer.class);
+            ByteBuffer priv = (ByteBuffer)swapBuffer.invoke(null, (ByteBuffer)null);
+            ByteBuffer privAgain = (ByteBuffer)swapBuffer.invoke(null, ByteBuffer.allocate(1));
+            failed += check("popman v3 專用 buffer（同一實例、direct、容量 1024、無視傳入值）",
+                    priv != null && priv == privAgain && priv.isDirect() && priv.capacity() == 1024);
+            priv.clear();
+            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE);
+            boolean fullOk = (Integer)clamp.invoke(null, 10) == 10
+                    && (Integer)clamp.invoke(null, 35) == 35
+                    && (Integer)clamp.invoke(null, 36) == 35
                     && clampCeiling == 35
-                    && (Integer)clamp.invoke(null, 20, shortLimit) == 2
-                    && (Integer)clamp.invoke(null, 2, partial) == 1
-                    && (Integer)clamp.invoke(null, 35, advanced) == 34
-                    && (Integer)clamp.invoke(null, -3, full) == -3);
+                    && (Integer)clamp.invoke(null, -3) == -3;
+            priv.limit(58);          // 2 筆整＝58 bytes
+            boolean shortOk = (Integer)clamp.invoke(null, 20) == 2;
+            priv.limit(57);          // 1 筆整＋28 bytes 殘尾
+            boolean partialOk = (Integer)clamp.invoke(null, 2) == 1;
+            priv.clear();
+            priv.position(29);       // remaining=995→34 筆；誤改成 limit()/29 會得 35（codex 語境鎖）
+            boolean advancedOk = (Integer)clamp.invoke(null, 35) == 34;
+            priv.clear();
+            failed += check("popman clamp 行為（容量上限 35、limit-short/position 依 remaining、負值不動）",
+                    fullOk && shortOk && partialOk && advancedOk);
         }
 
         // ---- 2. 結構斷言 ----
@@ -147,11 +152,10 @@ public final class SmokeCheck {
                 popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I");
         boolean clampSeq = false;
         if (nativePage != null) {
-            // w[0..9]＝clamp 全序（v2 含 aload_0＋getfield byteBuffer——同時鎖定 clamp 讀的是
-            // <init> 配置的同一個 buffer 欄位）；w[10..14]＝解析迴圈頭（iconst_0; istore i;
-            // iload i; iload C; if_icmpge）——鎖住「被 clamp 的變數就是迴圈比較上限」且
-            // loop-index slot 與 count/offset slot 相異（codex 對抗審查發現）
-            AbstractInsnNode[] w = new AbstractInsnNode[15];
+            // w[0..7]＝clamp 全序（v3 回 (I)I——上限計算移入 helper 的專用 buffer）；
+            // w[8..12]＝解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge）——
+            // 鎖住「被 clamp 的變數就是迴圈比較上限」且 loop-index slot 與 count/offset slot 相異
+            AbstractInsnNode[] w = new AbstractInsnNode[13];
             AbstractInsnNode cursor = nativePage;
             boolean full = true;
             for (int i = 0; i < w.length; i++) {
@@ -166,27 +170,44 @@ public final class SmokeCheck {
                     && w[3].getOpcode() == Opcodes.IADD
                     && w[4] instanceof VarInsnNode s4 && s4.getOpcode() == Opcodes.ISTORE && s4.var == s1.var
                     && w[5] instanceof VarInsnNode s5 && s5.getOpcode() == Opcodes.ILOAD && s5.var == s0.var
-                    && w[6] instanceof VarInsnNode a6 && a6.getOpcode() == Opcodes.ALOAD && a6.var == 0
-                    && w[7] instanceof FieldInsnNode f7 && f7.getOpcode() == Opcodes.GETFIELD
-                            && f7.owner.equals(popmanCls) && f7.name.equals("byteBuffer")
-                            && f7.desc.equals("Ljava/nio/ByteBuffer;")
-                    && w[8] instanceof MethodInsnNode c8 && c8.getOpcode() == Opcodes.INVOKESTATIC
-                            && c8.owner.equals(popmanGuard)
-                            && c8.name.equals("clampAddZombieCount") && c8.desc.equals("(ILjava/nio/ByteBuffer;)I")
-                    && w[9] instanceof VarInsnNode s9c && s9c.getOpcode() == Opcodes.ISTORE && s9c.var == s0.var
-                    && w[10].getOpcode() == Opcodes.ICONST_0
-                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ISTORE
-                            && s11.var != s0.var && s11.var != s1.var
-                    && w[12] instanceof VarInsnNode s12 && s12.getOpcode() == Opcodes.ILOAD && s12.var == s11.var
-                    && w[13] instanceof VarInsnNode s13 && s13.getOpcode() == Opcodes.ILOAD && s13.var == s0.var
-                    && w[14] instanceof JumpInsnNode j14 && j14.getOpcode() == Opcodes.IF_ICMPGE;
+                    && w[6] instanceof MethodInsnNode c6 && c6.getOpcode() == Opcodes.INVOKESTATIC
+                            && c6.owner.equals(popmanGuard)
+                            && c6.name.equals("clampAddZombieCount") && c6.desc.equals("(I)I")
+                    && w[7] instanceof VarInsnNode s7 && s7.getOpcode() == Opcodes.ISTORE && s7.var == s0.var
+                    && w[8].getOpcode() == Opcodes.ICONST_0
+                    && w[9] instanceof VarInsnNode s9 && s9.getOpcode() == Opcodes.ISTORE
+                            && s9.var != s0.var && s9.var != s1.var
+                    && w[10] instanceof VarInsnNode s10 && s10.getOpcode() == Opcodes.ILOAD && s10.var == s9.var
+                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ILOAD && s11.var == s0.var
+                    && w[12] instanceof JumpInsnNode j12 && j12.getOpcode() == Opcodes.IF_ICMPGE;
         }
-        failed += check("popman clamp 插在 offset 推進之後、含 byteBuffer 傳遞、count slot 即迴圈上限", clampSeq);
+        failed += check("popman clamp 插在 offset 推進之後、count slot 即 if_icmpge 迴圈上限", clampSeq);
         failed += check("popman clamp 恰一次、native 分頁呼叫未增減",
                 countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard,
-                        "clampAddZombieCount", "(ILjava/nio/ByteBuffer;)I") == 1
+                        "clampAddZombieCount", "(I)I") == 1
                 && countExactCalls(popman, Opcodes.INVOKESTATIC,
                         popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I") == 1);
+
+        // ---- v3 buffer 隔離：updateMain 內每個 getfield byteBuffer 必須緊接 swap，10/10 無漏 ----
+        int popmanGetfields = 0;
+        int popmanSwapped = 0;
+        for (AbstractInsnNode in : popman.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
+                    && fi.owner.equals(popmanCls) && fi.name.equals("byteBuffer")
+                    && fi.desc.equals("Ljava/nio/ByteBuffer;")) {
+                popmanGetfields++;
+                AbstractInsnNode next = nextReal(in);
+                if (next instanceof MethodInsnNode sw && sw.getOpcode() == Opcodes.INVOKESTATIC
+                        && sw.owner.equals(popmanGuard) && sw.name.equals("updateMainBuffer")
+                        && sw.desc.equals("(Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;")) {
+                    popmanSwapped++;
+                }
+            }
+        }
+        failed += check("popman v3 隔離：updateMain 10 處 getfield byteBuffer 全部緊接 swap、無多餘 swap",
+                popmanGetfields == 10 && popmanSwapped == 10
+                && countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard, "updateMainBuffer",
+                        "(Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;") == 10);
 
         // MAX_RECORDS＝1024/29 的兩個上游前提做成可執行守門（codex 對抗審查發現）：
         // capacity 取自 <init> 的 allocateDirect 實參、每筆 bytes 由 updateMain 的 buffer 讀取組成計出，

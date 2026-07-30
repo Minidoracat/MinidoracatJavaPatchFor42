@@ -216,18 +216,21 @@ public final class PatchConfig {
         a3.expectedHits = 1;
         patches.add(animal);
 
-        // native n_getAddZombieData 回報的分頁筆數與 buffer 實際可讀量不符即 BufferUnderflowException
-        // ——整個 tick 的 popman 解析＋PathfindNative 泵送被外層 catch 跳過（正式服 2026-07-30 單日
-        // 77 筆）。v1 固定 35 上限已被線上否證（count≤35 仍炸＝native 會設 limit）；v2 以呼叫當下
-        // buffer.remaining()/29 為上限，native 有無設 limit 都涵蓋。只 clamp 解析迴圈上限；
-        // offset += count 沿用 native 原回報值，分頁推進與消耗語意跟原版完全一致。
+        // 根因（codex 對抗審查＋v2 clamp 線上 overlap 證據 pageCount=35>readable=28、1024−814=210
+        // =10×21 恰為寫側 10 筆）：this.byteBuffer 由 MCD 背景執行緒寫側（saveLock 互斥）與主執行緒
+        // updateMain 讀側共用，讀側無鎖（vanilla 遺漏）→ position 併發亂跳 → 隨機欄位 underflow
+        // ＋混讀損毀。v3 root fix：updateMain 內全部 10 處 getfield byteBuffer 之後同形換成
+        // PopmanBufferGuard.UPDATE_MAIN_BUFFER 專用 buffer（讀寫隔離、零鎖）；count-clamp 降為
+        // 保險絲（隔離後不應觸發，觸發即記 log）。寫側 beginSaveRealZombies/writeCellSnapshot 不動。
         Patcher.ClassPatch popman = new Patcher.ClassPatch("zombie/popman/ZombiePopulationManager");
         Patcher.MethodOps popmanUpdate = popman.method("updateMain", "()V");
         popmanUpdate.countClamp = new Patcher.CountClamp("zombie/popman/ZombiePopulationManager",
                 "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I",
-                "byteBuffer", "Ljava/nio/ByteBuffer;",
                 "zombie/mdc/PopmanBufferGuard", "clampAddZombieCount");
-        popmanUpdate.expectedHits = 1;
+        popmanUpdate.fieldGetSwap = new Patcher.FieldGetSwap("zombie/popman/ZombiePopulationManager",
+                "byteBuffer", "Ljava/nio/ByteBuffer;",
+                "zombie/mdc/PopmanBufferGuard", "updateMainBuffer");
+        popmanUpdate.expectedHits = 11;   // clamp ×1 ＋ getfield swap ×10（clear、native 參數、8 讀取）
         patches.add(popman);
 
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----

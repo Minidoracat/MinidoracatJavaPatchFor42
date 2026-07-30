@@ -284,7 +284,7 @@ full remove、ns/entity、倍增比與可用時的 thread allocation；時間只
 
 ---
 
-## 2h. popman add-zombie 分頁 clamp（防禦性修復）
+## 2h. popman 共享 buffer 執行緒競爭修復（v3 buffer 隔離）
 
 **正式服根因證據**：2026-07-30 全日 11 個 log set 共 77 筆
 `IngameState.UpdateStuff> Exception thrown`＝`java.nio.BufferUnderflowException` at
@@ -292,25 +292,34 @@ full remove、ns/entity、倍增比與可用時的 thread allocation；時間只
 （12:12–18:11）6 小時內 34 筆；01:04:47 的例外正落在玩家 client 端 229 筆
 `removing stale zombie 5000` 清除視窗內，與「殭屍/實體消失」回報時段吻合。
 
-**機制**：`updateMain` 以 `n_getAddZombieData(offset, byteBuffer)` 分頁讀取 native 的
-add-zombie 佇列。buffer 是 `allocateDirect(1024)`，每筆 29 bytes（getFloat×3＋get×1＋getInt×4），
-最多容納 35 筆；native 回報的 count 偶爾超額，Java 端照數讀取即在頁尾任意欄位 underflow。
-例外一路拋出 `IngameState.UpdateStuff` 的共用 try 區塊，把該 tick 的 popman 剩餘解析、
+**機制（定案根因＝執行緒競爭）**：`updateMain`（主執行緒）以
+`n_getAddZombieData(offset, byteBuffer)` 分頁讀取 native 的 add-zombie 佇列，buffer 是
+`allocateDirect(1024)`、每筆 29 bytes（getFloat×3＋get×1＋getInt×4）。**同一個
+`this.byteBuffer` 也是存檔寫側的工作區**：`writeCellSnapshot`（MCD 背景執行緒，每筆
+21 bytes）與 `beginSaveRealZombies`（主執行緒）——寫側之間有 `saveLock` 互斥，
+**讀側 `updateMain` 卻沒拿鎖（vanilla 遺漏）**。MCD 寫側與主執行緒讀側併發時，共享的
+Buffer position 被兩邊同時推進：輕則讀取越界（隨機欄位 `BufferUnderflowException`），
+重則**無聲混讀**寫側的 21-byte 記錄當成 29-byte 生成資料（殭屍資料損毀）。例外一路拋出
+`IngameState.UpdateStuff` 的共用 try 區塊，把該 tick 的 popman 剩餘解析、
 `updateLoadedAreas`、`MapCollisionData.notifyThread`、`playerSpawns.update` 與
-**`PathfindNative.updateMain` 泵送**全部帶掉；native 已把該批標記為已消耗，這批殭屍生成永久遺失
-——高流量區殭屍密度被慢慢抽乾＋殭屍尋路瞬間定格。
+**`PathfindNative.updateMain` 泵送**全部帶掉——高流量區殭屍密度被抽乾＋殭屍尋路瞬間定格；
+例外集中在 chunk 存檔高峰（寫側活躍時段）也由此解釋。
 
-**手術（v2）**：新手術型 `count-clamp`（線性插入、無新分支）。鎖定
-`invokestatic n_getAddZombieData → istore C → iload O → iload C → iadd → istore O` 全序
-（slot 一致性逐步核對，任何一步不符即放棄→命中數守門失敗），在 `istore O` **之後**插入：
+**手術（v3，root fix）**：兩個手術型組合，全部線性插入、無新分支：
 
-```text
-iload C
-aload_0
-getfield byteBuffer
-invokestatic zombie/mdc/PopmanBufferGuard.clampAddZombieCount(ILjava/nio/ByteBuffer;)I
-istore C
-```
+1. **field-get-swap（buffer 隔離，根治）**：updateMain 內全部 **10 處**
+   `getfield byteBuffer`（clear ×1、native 寫入參數 ×1、欄位讀取 ×8）之後插入
+   `invokestatic PopmanBufferGuard.updateMainBuffer(ByteBuffer)ByteBuffer`——吃掉共享
+   buffer、回傳主執行緒專用的 `UPDATE_MAIN_BUFFER`（allocateDirect(1024) 鏡射 vanilla）。
+   讀側與 MCD 寫側徹底隔離，零鎖零死鎖。堆疊 1→1。前提已驗證：native 只有
+   `n_getAddZombieData`/`n_saveRealZombies` 收 ByteBuffer 且皆逐呼叫傳參
+   （`n_init` 無 buffer 註冊＝無快取位址假設）；寫側 `beginSaveRealZombies`（主執行緒）
+   ／`writeCellSnapshot`（MCD 執行緒）維持 vanilla 的 this.byteBuffer＋saveLock 紀律不動。
+2. **count-clamp（保險絲）**：鎖定
+   `invokestatic n_getAddZombieData → istore C → iload O → iload C → iadd → istore O` 全序
+   （slot 逐步核對，任何一步不符即放棄→守門失敗），在 `istore O` 之後插入
+   `iload C; invokestatic clampAddZombieCount(I)I; istore C`——helper 以專用 buffer 的
+   `remaining()/29` 為上限。隔離後不應觸發；一旦觸發即記 log＝仍有未知失配的警報器。
 
 **v1→v2→根因修正（2026-07-30 當晚，codex 對抗審查定案）**：v1 上限固定 1024/29=35，
 部署重啟後 13 分鐘內仍 2 筆 underflow 且 clamp 觸發 0 次——「容量溢位」假說被線上否證。
@@ -322,25 +331,29 @@ buffer **完全沒有同步**——`saveLock` 保護了 `beginSaveRealZombies` �
 `processPendingSaveCells` 的寫側，`updateMain` 卻沒拿鎖（vanilla 遺漏）。兩執行緒共享
 同一 Buffer 的 position 指標，並發時 position 亂跳 → 隨機欄位 underflow＋混讀損毀的
 殭屍資料；也解釋例外集中在 chunk 存檔高峰。v2 在競爭下只能讀到瞬間快照，
-**不能根治**（但無害：不比原版差）。根治＝v3 buffer 所有權隔離或補上鎖（見進行中工作；
-lock-wrap 有 native 層死鎖未知數、buffer 拆分需驗證全部使用者執行緒歸屬，
-定案前需 runtime overlap trace）。
+**不能根治**（但無害）。**runtime overlap trace 已於 2026-07-31 00:17 由 v2 clamp 取得**：
+`pageCount=35 > readable=28 (remainingBytes=814)`——1024−814=210=**10×21 bytes 恰為寫側
+10 筆記錄**，位元組級證實取樣瞬間 MCD 寫側正在同一 buffer 寫入。據此定案 v3 buffer 隔離
+（見上方手術），棄用 lock-wrap（native 層死鎖未知數）。
 
 **為什麼 clamp 在 `offset += count` 之後**：offset 推進沿用 native 原回報值，分頁推進行為與
 原版逐位元一致——無論 native 是 offset-served 還是 consume-on-read，都不會重讀、推進不足或
-死迴圈。**此 patch 不是 lossless**：超額殘尾（count−35 筆）在兩種語意下都會被跳過，遺失範圍
-與原版 underflow 時相同——效果是把「整個 tick 陪葬」縮小為「只丟殘尾」，不新增遺失；
-native 端如何處置殘尾（重發或已消耗）無法由 Java 端單獨證明。若改成在 offset 推進**之前**
-clamp，consume-on-read 語意下 `while (offset < total)` 可能永不收斂（主執行緒死迴圈）——
-這是不可接受的風險，故不採。
+死迴圈。若改成在 offset 推進**之前** clamp，consume-on-read 語意下 `while (offset < total)`
+可能永不收斂（主執行緒死迴圈）——不可接受，故不採。損失語意：**隔離後的正常路徑 lossless**
+（native 回報數不會超過專用 buffer 可讀量，clamp 不觸發）；只有保險絲真的觸發時（＝仍有
+未知失配的異常狀況）才會丟棄超額殘尾，遺失範圍與原版 underflow 相同、不新增遺失。
 
-**helper**：`zombie/mdc/PopmanBufferGuard.clampAddZombieCount(int)`——`count <= 35` 原值返回；
-超額時累計 dropped 筆數並經 `DebugType.Multiplayer.println` 記
-`[MinidoracatJavaPatch][PopmanBufferGuard]`（log sink 失敗不外拋，不影響解析）。單執行緒
-（server 主迴圈）呼叫，無同步。插入點堆疊為空、峰值 1，遠低於原方法既有 max_stack，
-frames 不需增補（`ClassWriter(0)` 原樣保留）。
+**helper**：`zombie/mdc/PopmanBufferGuard`——`UPDATE_MAIN_BUFFER`（allocateDirect(1024)
+專用 buffer，僅主執行緒觸碰）＋`updateMainBuffer(ByteBuffer)`（swap 目標，無視傳入值回傳
+專用 buffer）＋`clampAddZombieCount(int)`（`count <= remaining/29` 原值返回；超額時累計
+dropped 筆數並經 `DebugType.Multiplayer.println` 記 `[MinidoracatJavaPatch][PopmanBufferGuard]`，
+log sink 失敗不外拋）。插入點堆疊安全（swap 1→1、clamp 峰值 1），frames 不需增補
+（`ClassWriter(0)` 原樣保留）。
 
-**驗證**：build 守門＝命中恰 1；SmokeCheck 行為 smoke（35 內原值、36+ 夾 35、負值不動）＋
+**驗證**：build 守門＝命中恰 **11**（field-get-swap ×10＋count-clamp ×1）；SmokeCheck
+專用 buffer 斷言（同一實例、direct、容量 1024、無視傳入值）＋ **10/10 swap 相鄰性**
+（updateMain 每個 `getfield byteBuffer` 必須緊接 swap、無多餘 swap）＋
+行為 smoke（35 內原值、36+ 夾 35、limit-short/position 依 remaining、負值不動）＋
 結構全序鎖（clamp 必須在 `istore O` 之後、count slot 即 `if_icmpge` 迴圈比較上限、
 loop-index slot 與 count/offset 相異、native 分頁呼叫未增減）＋ **MAX_RECORDS 前提守門**
 （capacity 取自 `<init>` 的 `allocateDirect` 實參、每筆 bytes 由 updateMain 的

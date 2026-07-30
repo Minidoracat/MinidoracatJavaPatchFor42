@@ -39,16 +39,22 @@ public final class Patcher {
     /**
      * 分頁筆數 clamp：鎖定「INVOKESTATIC site → istore C → iload O → iload C → iadd → istore O」
      * 全序（C＝筆數 slot、O＝offset slot，slot 一致性逐步核對），在 istore O 之後插入
-     * 「iload C; aload_0; getfield bufferField; INVOKESTATIC helper(I+bufferDesc)I; istore C」。
-     * 線性插入、無新分支、堆疊峰值 2、frames 不需增補；序列任何一步不符即整段放棄
-     * （命中數守門會讓建置失敗）。helper 以呼叫當下 buffer.remaining() 計算上限——
-     * native 有無設 limit 兩種語意都涵蓋（v1 固定容量上限已被線上否證）。
+     * 「iload C; INVOKESTATIC helper(I)I; istore C」。線性插入、無新分支、堆疊峰值 1、
+     * frames 不需增補；序列任何一步不符即整段放棄（命中數守門會讓建置失敗）。
+     * helper 內部以 v3 專用 buffer 的 remaining() 計算上限（保險絲，隔離後不應觸發）。
      */
     record CountClamp(String siteOwner, String siteName, String siteDesc,
-                      String bufferField, String bufferFieldDesc,
-                      String helperOwner, String helperName) {
+                      String helperOwner, String helperName) {}
+
+    /**
+     * getfield 同形替換（v3 buffer 隔離）：在每個 GETFIELD owner.name:desc 之後插入
+     * 「INVOKESTATIC helper(desc)desc」——吃掉共享欄位值、回傳替身。堆疊 1→1、線性、
+     * 無新分支；只作用於所屬 MethodOps 的方法，命中數計入該方法守門。
+     */
+    record FieldGetSwap(String owner, String name, String desc,
+                        String helperOwner, String helperName) {
         String helperDesc() {
-            return "(I" + bufferFieldDesc + ")I";
+            return "(" + desc + ")" + desc;
         }
     }
 
@@ -65,6 +71,7 @@ public final class Patcher {
         final List<ConstChange> consts = new ArrayList<>();
         HeadGuard headGuard = null;
         CountClamp countClamp = null;
+        FieldGetSwap fieldGetSwap = null;
         int expectedHits = 0;
         int actualHits = 0;
         MethodOps(String name, String desc) { this.name = name; this.desc = desc; }
@@ -167,9 +174,7 @@ public final class Patcher {
                 case 5 -> {
                     if (opcode == Opcodes.ISTORE && var == clampOffsetSlot) {
                         super.visitVarInsn(Opcodes.ILOAD, clampCountSlot);
-                        super.visitVarInsn(Opcodes.ALOAD, 0);
-                        super.visitFieldInsn(Opcodes.GETFIELD, c.siteOwner(), c.bufferField(), c.bufferFieldDesc());
-                        super.visitMethodInsn(Opcodes.INVOKESTATIC, c.helperOwner(), c.helperName(), c.helperDesc(), false);
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, c.helperOwner(), c.helperName(), "(I)I", false);
                         super.visitVarInsn(Opcodes.ISTORE, clampCountSlot);
                         ops.actualHits++;
                     }
@@ -194,6 +199,12 @@ public final class Patcher {
         @Override
         public void visitFieldInsn(int opcode, String owner, String name, String desc) {
             super.visitFieldInsn(opcode, owner, name, desc);
+            FieldGetSwap sw = ops.fieldGetSwap;
+            if (sw != null && opcode == Opcodes.GETFIELD
+                    && sw.owner().equals(owner) && sw.name().equals(name) && sw.desc().equals(desc)) {
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, sw.helperOwner(), sw.helperName(), sw.helperDesc(), false);
+                ops.actualHits++;
+            }
             clampState = 0;
         }
 
