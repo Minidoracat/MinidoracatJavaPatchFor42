@@ -63,13 +63,16 @@ public final class SmokeCheck {
             shortLimit.limit(58);   // 2 筆整＝58 bytes
             ByteBuffer partial = ByteBuffer.allocate(1024);
             partial.limit(57);      // 1 筆整＋28 bytes 殘尾
-            failed += check("popman clamp 行為（容量上限 35、limit-short 依 remaining、負值不動）",
+            ByteBuffer advanced = ByteBuffer.allocate(1024);
+            advanced.position(29);  // remaining=995→34 筆；誤改成 limit()/29 會得 35（codex 語境鎖）
+            failed += check("popman clamp 行為（容量上限 35、limit-short/position 依 remaining、負值不動）",
                     (Integer)clamp.invoke(null, 10, full) == 10
                     && (Integer)clamp.invoke(null, 35, full) == 35
                     && (Integer)clamp.invoke(null, 36, full) == 35
                     && clampCeiling == 35
                     && (Integer)clamp.invoke(null, 20, shortLimit) == 2
                     && (Integer)clamp.invoke(null, 2, partial) == 1
+                    && (Integer)clamp.invoke(null, 35, advanced) == 34
                     && (Integer)clamp.invoke(null, -3, full) == -3);
         }
 
@@ -399,6 +402,32 @@ public final class SmokeCheck {
                 && countExactCalls(jmLoadChar, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
                 && (jmRpc.exceptions == null || jmRpc.exceptions.isEmpty())
                 && (jmLoadChar.exceptions == null || jmLoadChar.exceptions.isEmpty()));
+
+        // 回傳契約結構鎖（codex 對抗審查發現）：delegate 結果必須 astore→尾端 aload 同 slot→areturn，
+        // 且全方法恰一個 areturn——wrapper 誤改成永遠回傳 null（全部重連被 kick）時建置失敗
+        MethodInsnNode loadCharDelegate = findExactCall(jmLoadChar, Opcodes.INVOKEVIRTUAL, playerDb,
+                "serverLoadNetworkCharacter", loadCharDesc);
+        boolean returnContract = false;
+        if (loadCharDelegate != null) {
+            AbstractInsnNode afterDelegate = nextReal(loadCharDelegate);
+            AbstractInsnNode lastReal = null;
+            int areturns = 0;
+            for (AbstractInsnNode in : jmLoadChar.instructions) {
+                if (in.getOpcode() >= 0) {
+                    lastReal = in;
+                }
+                if (in.getOpcode() == Opcodes.ARETURN) {
+                    areturns++;
+                }
+            }
+            returnContract = afterDelegate instanceof VarInsnNode st && st.getOpcode() == Opcodes.ASTORE
+                    && areturns == 1
+                    && lastReal != null && lastReal.getOpcode() == Opcodes.ARETURN
+                    && prevReal(lastReal) instanceof VarInsnNode ld && ld.getOpcode() == Opcodes.ALOAD
+                    && ld.var == st.var;
+        }
+        failed += check("REJOIN_LOAD_CHARACTER 回傳 identity 結構鎖（astore→aload 同 slot→唯一 areturn）",
+                returnContract);
 
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
