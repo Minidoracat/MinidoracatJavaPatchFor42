@@ -5,25 +5,29 @@ set "SHA_TIAM=__TIAM_SHA__"
 set "SHA_GUARD=__GUARD_SHA__"
 set "FAILED=0"
 
+rem 全檔線性 goto 流程、零括號區塊：路徑含 ( ) 時 cmd 的括號區塊會誤解析（實測）
+
 rem --- locate game folder: same-dir, PZ_GAMEDIR override, then Steam registry + library list ---
 set "GAMEDIR="
 if exist "%SRC%ProjectZomboid64.exe" set "GAMEDIR=%SRC%"
-if not defined GAMEDIR if defined PZ_GAMEDIR if exist "%PZ_GAMEDIR%\ProjectZomboid64.exe" set "GAMEDIR=%PZ_GAMEDIR%"
-if not defined GAMEDIR (
-  echo Locating Project Zomboid via Steam...
-  for /f "delims=" %%G in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath; if($s){ $roots=@($s); $v=Join-Path $s 'steamapps/libraryfolders.vdf'; if(Test-Path $v){ $m=(Select-String -Path $v -Pattern '\x22path\x22\s+\x22([^\x22]+)\x22' -AllMatches).Matches; foreach($x in $m){ $roots+=$x.Groups[1].Value.Replace('\\','\') } }; foreach($r in $roots){ $g=Join-Path $r 'steamapps/common/ProjectZomboid'; if(Test-Path (Join-Path $g 'ProjectZomboid64.exe')){ (Get-Item $g).FullName; break } } }"') do set "GAMEDIR=%%G"
-)
-if not defined GAMEDIR (
-  echo [ERROR] Could not find the Project Zomboid game folder automatically.
-  echo         Put this uninstall.bat into the game folder and run it again.
-  goto :fail
-)
+if defined GAMEDIR goto :located
+if not defined PZ_GAMEDIR goto :steamlookup
+if exist "%PZ_GAMEDIR%\ProjectZomboid64.exe" set "GAMEDIR=%PZ_GAMEDIR%"
+if defined GAMEDIR goto :located
+:steamlookup
+echo Locating Project Zomboid via Steam...
+for /f "delims=" %%G in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath; if($s){ $roots=@($s); $v=Join-Path $s 'steamapps/libraryfolders.vdf'; if(Test-Path $v){ $m=(Select-String -Path $v -Pattern '\x22path\x22\s+\x22([^\x22]+)\x22' -AllMatches).Matches; foreach($x in $m){ $roots+=$x.Groups[1].Value.Replace('\\','\') } }; foreach($r in $roots){ $g=Join-Path $r 'steamapps/common/ProjectZomboid'; if(Test-Path (Join-Path $g 'ProjectZomboid64.exe')){ (Get-Item $g).FullName; break } } }"') do set "GAMEDIR=%%G"
+if defined GAMEDIR goto :located
+echo [ERROR] Could not find the Project Zomboid game folder automatically.
+echo         Put this uninstall.bat into the game folder and run it again.
+goto :fail
+:located
 if not "%GAMEDIR:~-1%"=="\" set "GAMEDIR=%GAMEDIR%\"
-if not exist "%GAMEDIR%ProjectZomboid64.exe" (
-  echo [ERROR] %GAMEDIR% does not look like the game folder.
-  goto :fail
-)
-echo Game folder: %GAMEDIR%
+if exist "%GAMEDIR%ProjectZomboid64.exe" goto :gamedirok
+echo [ERROR] "%GAMEDIR%" does not look like the game folder.
+goto :fail
+:gamedirok
+echo Game folder: "%GAMEDIR%"
 
 call :removeone "%GAMEDIR%zombie\core\textures\TextureIDAssetManager.class" "%SHA_TIAM%"
 call :removeone "%GAMEDIR%zombie\mdc\TexturePipelineGuard.class" "%SHA_GUARD%"
@@ -32,32 +36,32 @@ rd "%GAMEDIR%zombie\core" 2>nul
 rd "%GAMEDIR%zombie\mdc" 2>nul
 rd "%GAMEDIR%zombie" 2>nul
 
-if not "%FAILED%"=="0" (
-  echo [WARN] Some files were NOT removed - see messages above.
-  goto :fail
-)
+if "%FAILED%"=="0" goto :allok
+echo [WARN] Some files were NOT removed - see messages above.
+goto :fail
+:allok
 echo [OK] Patch removed.
 pause
 exit /b 0
 
 :removeone
-if not exist "%~1" (
-  echo [SKIP] %~1 not present.
-  exit /b 0
-)
+if exist "%~1" goto :ro_present
+echo [SKIP] "%~1" not present.
+exit /b 0
+:ro_present
 call :hash "%~1"
-if /i not "%HASH%"=="%~2" (
-  echo [WARN] %~1 does not match this patch version - NOT deleted.
-  set "FAILED=1"
-  exit /b 0
-)
+if /i "%HASH%"=="%~2" goto :ro_delete
+echo [WARN] "%~1" does not match this patch version - NOT deleted.
+set "FAILED=1"
+exit /b 0
+:ro_delete
 del /q "%~1"
-if exist "%~1" (
-  echo [WARN] Could not delete %~1
-  set "FAILED=1"
-) else (
-  echo [OK] Removed %~1
-)
+if exist "%~1" goto :ro_delfail
+echo [OK] Removed "%~1"
+exit /b 0
+:ro_delfail
+echo [WARN] Could not delete "%~1"
+set "FAILED=1"
 exit /b 0
 
 :hash

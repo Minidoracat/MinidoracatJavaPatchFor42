@@ -84,6 +84,8 @@ foreach ($bat in @('install', 'uninstall')) {
         -replace '__TIAM_SHA__', $tiamSha `
         -replace '__GUARD_SHA__', $guardSha
     if ($body -match '__[A-Z_]+__') { throw "$bat.bat 模板還有未注入的 placeholder" }
+    # CRLF 強制：LF-only 批次檔在 cmd 會出現幽靈解析錯誤（「這個時候不應有…」，實測）
+    $body = $body -replace "`r?`n", "`r`n"
     # ASCII 無 BOM：cmd 對 BOM 開頭的 @echo off 會直接報錯
     [System.IO.File]::WriteAllText("$pkg\$bat.bat", $body, [System.Text.Encoding]::ASCII)
 }
