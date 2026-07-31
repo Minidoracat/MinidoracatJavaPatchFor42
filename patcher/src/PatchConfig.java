@@ -266,14 +266,17 @@ public final class PatchConfig {
     public static List<Patcher.ClassPatch> client() {
         List<Patcher.ClassPatch> patches = new ArrayList<>();
 
-        // 兩刀都在 waitFileTask 方法範圍內：redirect＝passthrough 觀測（水位/hwm/stall 計數，
-        // 節流 log 到 console.txt）；constChange＝門檻 50MB→256MB（native pixel-buffer 水位，
-        // 非 VRAM 非 heap，任何能跑 B42 的機器都零負擔）。
+        // 兩刀都在 waitFileTask 方法範圍內：redirect＝passthrough 觀測（水位/hwm/floor/stall，
+        // 節流 log 到 console.txt）；constChange＝門檻 50MB→1GB（v1.1）。實測（Tester-A 兩場 log）
+        // 證明水位地板因 ImageData 解碼例外洩漏單調上升，v1 的 256MB 天花板 ~35 分鐘被追上
+        // →天花板只買時間，1GB 依實測斜率約 2–2.5 小時被追上（≈v1 跑道 ×4，無時間保證）；
+        // 根治＝ImageData dispose 修補（另行實作）。
+        // 高 RAM 受害 client 實驗值，≤8GB RAM 機器不適用。
         Patcher.ClassPatch tex = new Patcher.ClassPatch("zombie/core/textures/TextureIDAssetManager");
         Patcher.MethodOps wait = tex.method("waitFileTask", "()V");
         wait.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/core/utils/DirectBufferAllocator",
                 "getBytesAllocated", "()J", "zombie/mdc/TexturePipelineGuard", "bytesAllocatedObserved"));
-        wait.consts.add(new Patcher.ConstChange(52428800L, 268435456L));
+        wait.consts.add(new Patcher.ConstChange(52428800L, 1073741824L));
         wait.expectedHits = 2;
         patches.add(tex);
 
