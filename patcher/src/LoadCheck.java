@@ -33,7 +33,7 @@ public final class LoadCheck {
                 }
                 // 門檻常數與 PatchConfig.client() 的手術值連動（clinit 僅設 long，無遊戲副作用）
                 if (guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) != 52428800L
-                        || guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) != 268435456L) {
+                        || guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) != 1073741824L) {
                     throw new IllegalStateException("TexturePipelineGuard 門檻常數與手術值不一致");
                 }
                 System.out.println("client helper OK bytesAllocatedObserved 簽名與門檻常數一致");
