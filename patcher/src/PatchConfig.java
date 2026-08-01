@@ -233,6 +233,32 @@ public final class PatchConfig {
         popmanUpdate.expectedHits = 11;   // clamp ×1 ＋ getfield swap ×10（clear、native 參數、8 讀取）
         patches.add(popman);
 
+        // ---- 效能第一波（2026-08-02，66 份低谷 thread dump 聚合定案，Claude/codex 雙審一致）----
+
+        // 殭屍載具視線 broad-phase 預篩：isVehicleBetween 對整個 cell 每台載具做完整 OBB 相交
+        // （每台 2 次矩陣求逆＋6 次向量池借還，dump 佔比 ~23% 最大宗）。改道唯一的
+        // getIntersectPoint 呼叫點到保守包圍球預篩——球外幾何上不可能相交直接回 null
+        // （呼叫端只判非 null，零語意差），球內或異常原樣委派。per-vehicle 動態半徑
+        // （extents/COM L1 上界＋膨脹，零 false-negative），不動 CombatManager 等其他呼叫者。
+        Patcher.ClassPatch zombieVeh = new Patcher.ClassPatch("zombie/characters/IsoZombie");
+        Patcher.MethodOps zvb = zombieVeh.method("isVehicleBetween", "(FFF)Z");
+        zvb.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                "getIntersectPoint", "(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;",
+                "zombie/mdc/VehicleIntersectPrefilter", "getIntersectPoint"));
+        zvb.expectedHits = 1;
+        patches.add(zombieVeh);
+
+        // VehicleManager.connected 512→256：serverUpdate 每 tick 無條件掃 512 slot × 全部載具
+        // （dump 5/5 停在該迴圈回跳邊 line 127），但 RakNet connectionArray 只有 256、
+        // connection ID 一律 getByte()&255 解碼、UdpConnection.setIndex 全 jar 零呼叫者——
+        // index 恆 <256，上半 512 slot 純空轉。<init> 的 sipush 512 改 256 直接砍半。
+        // BaseVehicle.connectionState[512] 不動（同 index 界限，多餘槽位無害）。
+        Patcher.ClassPatch vehMgr = new Patcher.ClassPatch("zombie/vehicles/VehicleManager");
+        Patcher.MethodOps vehMgrInit = vehMgr.method("<init>", "()V");
+        vehMgrInit.consts.add(new Patcher.ConstChange(512, 256));
+        vehMgrInit.expectedHits = 1;
+        patches.add(vehMgr);
+
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
 
         // hit 封包 stale/type-confused reference：getZombie()=tryCastTo 可回 null，原版 9 個 setter 無檢查；
