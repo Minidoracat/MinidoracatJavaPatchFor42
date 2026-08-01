@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 /**
@@ -63,6 +64,19 @@ public final class SmokeCheck {
                     invokeLootContainerCount(patched, true) == 0);
             failed += check("非 TownZone 固定容器 fallback 與搬動負對照",
                     checkLootZoneFallback(patched));
+
+            // 載具預篩幾何純函數（點到線段平方距離；零 false-negative 的數學基礎）
+            Class<?> prefilter = Class.forName("zombie.mdc.VehicleIntersectPrefilter", true, patched);
+            Method distSq = prefilter.getMethod("distSqPointSegment",
+                    float.class, float.class, float.class, float.class, float.class,
+                    float.class, float.class, float.class, float.class);
+            float onSeg = (Float)distSq.invoke(null, 5f,0f,0f, 0f,0f,0f, 10f,0f,0f);
+            float perp = (Float)distSq.invoke(null, 5f,3f,0f, 0f,0f,0f, 10f,0f,0f);
+            float beyond = (Float)distSq.invoke(null, 14f,0f,0f, 0f,0f,0f, 10f,0f,0f);
+            float degen = (Float)distSq.invoke(null, 3f,4f,0f, 7f,7f,7f, 7f,7f,7f);
+            failed += check("預篩幾何：線段上=0、垂距=9、端點外=16、退化線段=點距",
+                    onSeg == 0f && perp == 9f && beyond == 16f
+                    && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
 
             Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
             Method clamp = guard.getMethod("clampAddZombieCount", int.class);
@@ -501,6 +515,54 @@ public final class SmokeCheck {
                 stateFieldsArePrimitiveOnly(stateNode)
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/util/Array")
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/GameEntity"));
+
+        // ---- 效能第一波（載具預篩＋VehicleManager 512→256）----
+        String prefilterCls = "zombie/mdc/VehicleIntersectPrefilter";
+        String intersectDesc = "(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;";
+        MethodNode zvb = method(distJava, "zombie/characters/IsoZombie", "isVehicleBetween", "(FFF)Z");
+        failed += check("載具預篩改道恰一次且原呼叫歸零",
+                countExactCalls(zvb, Opcodes.INVOKESTATIC, prefilterCls, "getIntersectPoint",
+                        "(Lzombie/vehicles/BaseVehicle;" + intersectDesc.substring(1)) == 1
+                && countExactCalls(zvb, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                        "getIntersectPoint", intersectDesc) == 0);
+        ClassNode prefilterNode = classNode(distJava, prefilterCls);
+        failed += check("預篩 helper static 欄位僅 primitive（無快取、無強參照）",
+                prefilterNode.fields.stream().allMatch(
+                        f -> f.desc.length() == 1 && "ZBCSIJFD".contains(f.desc)));
+
+        // VehicleManager <init>：sipush 512→256，語境鎖＝256 後緊接 anewarray UdpConnection；
+        // 負對照＝bipush 27 與 100L/1000L 節流常數原樣（守門盲點教訓：數量對不代表改對地方）
+        MethodNode vmInit = method(distJava, "zombie/vehicles/VehicleManager", "<init>", "()V");
+        int sipush256Ctx = 0, sipush512 = 0, bipush27 = 0;
+        boolean throttle100 = false, throttle1000 = false;
+        for (AbstractInsnNode in : vmInit.instructions) {
+            if (in instanceof IntInsnNode ii && ii.getOpcode() == Opcodes.SIPUSH) {
+                if (ii.operand == 512) {
+                    sipush512++;
+                } else if (ii.operand == 256) {
+                    AbstractInsnNode next = nextReal(ii);
+                    if (next instanceof TypeInsnNode t && t.getOpcode() == Opcodes.ANEWARRAY
+                            && t.desc.equals("zombie/core/raknet/UdpConnection")) {
+                        sipush256Ctx++;
+                    }
+                }
+            }
+            if (in instanceof IntInsnNode ii && ii.getOpcode() == Opcodes.BIPUSH && ii.operand == 27) {
+                bipush27++;
+            }
+            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Long l) {
+                if (l == 100L) {
+                    throttle100 = true;
+                }
+                if (l == 1000L) {
+                    throttle1000 = true;
+                }
+            }
+        }
+        failed += check("VehicleManager connected 陣列 256（語境鎖 anewarray UdpConnection）",
+                sipush256Ctx == 1 && sipush512 == 0);
+        failed += check("VehicleManager 節流常數未誤中（bipush 27、100L、1000L 原樣）",
+                bipush27 == 1 && throttle100 && throttle1000);
 
         if (failed > 0) {
             System.exit(1);

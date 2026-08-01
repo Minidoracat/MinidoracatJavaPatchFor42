@@ -48,7 +48,8 @@ $helperEntries = @(
     'zombie/mdc/FastIdentityArrayRemoval.class',
     'zombie/mdc/FastIdentityArrayRemoval$State.class',
     'zombie/mdc/PopmanBufferGuard.class',
-    'zombie/network/MinidoracatJoinMetrics.class'
+    'zombie/network/MinidoracatJoinMetrics.class',
+    'zombie/mdc/VehicleIntersectPrefilter.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()
@@ -61,6 +62,19 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [string]::Join("`n", $manifestLines) + "`n",
     $utf8NoBom)
 Write-Host "final manifest -> $R\dist\manifest.txt（$($manifestLines.Count) classes）"
+
+# manifest 完整性守門：dist\java 的每個 .class 都必須在 manifest 內（漏登記＝install.sh
+# 不會複製、上線 NoClassDefFoundError——$helperEntries 是手寫清單，此檢查堵住人為遺漏）
+$distClasses = Get-ChildItem "$R\dist\java" -Recurse -Filter *.class |
+    ForEach-Object { $_.FullName.Substring("$R\dist\java\".Length).Replace('\', '/') }
+$manifestEntries = $manifestLines | ForEach-Object { ($_ -split "`t")[0] }
+$unlisted = $distClasses | Where-Object { $manifestEntries -notcontains $_ }
+$missing = $manifestEntries | Where-Object { $distClasses -notcontains $_ }
+if ($unlisted -or $missing) {
+    if ($unlisted) { Write-Host "[中止] dist\java 有 class 未登記於 manifest（helperEntries 漏加？）：$($unlisted -join ', ')" }
+    if ($missing) { Write-Host "[中止] manifest 登記的 class 不存在於 dist\java：$($missing -join ', ')" }
+    throw "manifest 完整性守門失敗"
+}
 
 Write-Host "[5/10] 連結驗證（-Xverify:all）..."
 java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"

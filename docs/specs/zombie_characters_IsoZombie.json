@@ -1,0 +1,23 @@
+{
+  "className": "zombie/characters/IsoZombie",
+  "kind": "performance",
+  "buildBaseline": "42.20.0 / jar SHA-256 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": { "name": "isVehicleBetween", "desc": "(FFF)Z" },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/vehicles/BaseVehicle",
+        "name": "getIntersectPoint",
+        "desc": "(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/VehicleIntersectPrefilter.getIntersectPoint(Lzombie/vehicles/BaseVehicle;Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;",
+      "rationale": "66 份 FPS 低谷 thread dump 中載具幾何主題佔 ~23%（最大宗）。isVehicleBetween 遍歷整個已載入 cell 的 IsoCell.vehicles Set（無距離預篩），對每台載具做完整 OBB 相交——未命中路徑每台 2 次 Transform.inverse() 矩陣求逆＋約 6 次 ThreadLocal 向量池借還。呼叫端（spottedNew，殭屍發現目標的 carObstacleMod 修飾）只判回傳值非 null。helper 先做「線段到載具保守包圍球」平方距離預篩：球外＝幾何上不可能相交＝直接回 null（語意嚴格等價），球內或任何異常＝原樣委派原版。半徑 per-vehicle 動態計算（extents/2+|COM| 的 L1 上界 ≥ L2 半對角，必然偏大＝零 false-negative）＋1.0F 膨脹吸收 getX/getY 與 jniTransform 物理原點的次格差、下限 6.0F 覆蓋原版最長載具（半對角 ~3.7）；超長 MOD 載具自動放大，不賭固定 margin（codex 對抗審查定案：拒絕固定車長、拒絕端點距離、拒絕不含旋轉的緊 AABB）。雙方一致否決第二階段 TTL 結果快取（失效鍵須含車輛旋轉/翻覆/拖曳/jniTransform/mod reload，且 result 是池化可變 Vector3f 不可持有）。只 patch 本方法內唯一呼叫點，CombatManager 與 BaseVehicle.processRangeHit 等其他呼叫者不受影響。helper 帶 rejected/delegated/anomalies 計數，每 2^24 次呼叫經既有 Multiplayer sink 印一行——部署後驗證 reject 率是 codex 設下的人數上限放寬前提之一。",
+      "evidence": "42.20 javap：isVehicleBetween(FFF)Z 內 offset 99 恰一處 invokevirtual #2778 BaseVehicle.getIntersectPoint:(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;。方法頭：offset 3/8/13 allocVector3f ×3，offset 18-27 IsoWorld.instance.currentCell.getVehicles().iterator()——全載具迭代無預篩。dump 佐證：16 份樣本停在 isVehicleBetween(IsoZombie.java:2321 原始行)，getIntersectPoint/getLocalPos/releaseVector3f 鏈合計 ~29 份 frame 命中。"
+    }
+  ],
+  "behaviorNotes": "呼叫鏈（反編譯語意）：spottedNew（殭屍 spot 判定）在計算 carObstacleMod 時呼叫 isVehicleBetween(target)；追擊中殭屍（bonusSpotTime>0）每 tick 一次，玩家 LOS 掃描路徑亦會觸發。回傳值僅用於「有無載具遮擋」布林判定（遮擋時 spot 機率乘 0/0.5）。預篩的行為等價論證：包圍球是 OBB 的嚴格外接（L1 ≥ L2 ≥ 實際半對角），球外載具的 OBB 不可能與視線段相交，原版此時也會回 null——僅省去昂貴的精確計算。script==null 時原版 getIntersectPoint 會 NPE；helper 此時走委派路徑，NPE 行為與原版一致（fail-open 不吞語意）。",
+  "verification": "部署後：(1) console 出現 [MinidoracatJavaPatch][VehiclePrefilter] 統計行，rejected/(rejected+delegated) 應 >0.9（reject 率低於此值代表預篩無效益，考慮回退）；(2) fps-dip-sampler 新 dump 中 BaseVehicle.getIntersectPoint/getLocalPos/releaseVector3f 主題佔比應從 ~23% 顯著塌陷；(3) 反向確認：殭屍隔車不應看見玩家（近距離載具遮擋行為不變）；(4) anomalies 計數持續增長代表 script null 或幾何異常頻繁，需調查。回退：uninstall.sh。"
+}
