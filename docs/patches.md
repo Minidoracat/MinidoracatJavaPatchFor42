@@ -515,6 +515,31 @@ index≥256 反例，立即 uninstall 並推翻界限分析。
 `install.sh` 不會複製、上線即 `NoClassDefFoundError`（SmokeCheck 的 URLClassLoader 吃整個
 dist/java 所以測不到）。已補雙向守門：dist/java 與 manifest 不一致＝建置中止。
 
+## 2l. 假死修復：removeGlassAttachments 無限迴圈保險絲
+
+**事故**：2026-08-02 17:48 全服假死（幀計數凍結 f:15924、所有玩家靜止、重登卡驗證、
+graceful stop 無效、pkill -9 恢復）。兩份間隔 4 秒的 thread dump 主執行緒皆 RUNNABLE
+於同一迴圈的不同指令（活迴圈非死鎖），呼叫鏈：
+
+```text
+SmashWindowPacket.processServer（一位玩家砸窗）
+→ IsoWindow.smashWindow → IsoGridSquare.removeGlassAttachments
+→ 無限迴圈（PropertyContainer.get / stream anyMatch 之間狂轉）
+```
+
+**根因**：原版迴圈命中「玻璃附掛物／窗牆電燈開關」時 `RemoveTileObject(o)` 後**無條件
+`n--`**，假設移除必使清單縮短；42.20 的 RemoveTileObject 走 `safelyRemoveTileObjectFromSquare`
+安全路徑，特定物件狀態下移除不生效 → 同 index 重撞同物件 → 永迴圈。一個砸窗封包鎖死整個
+server tick。100 條執行緒堆疊**零我方 patch 類**——純原版 42.20 bug（建議回報 TIS）。
+
+**手術**：`smashWindow(ZZ)V` 內唯一的 `removeGlassAttachments` 呼叫點（javap offset 221，
+全 jar 唯一呼叫者）改道 `GlassAttachmentGuard`：逐語意重刻原迴圈，唯一差別＝**清單真的
+縮短了才回退 index**；未縮短（原版死鎖分支）跳過該物件＋log
+`[MinidoracatJavaPatch][GlassGuard] stuck glass attachment skipped at x,y,z sprite=…`。
+正常砸窗逐語意等價（清除、警報順序全不動）；病態案例從全服假死降級為一個物件未清除
+＋一行定位 log——**下次觸發直接知道問題物件在哪**。helper 無狀態零欄位，全 public API。
+TIS 官方修復後 uninstall 即回歸原版。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
