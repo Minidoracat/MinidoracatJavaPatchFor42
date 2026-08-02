@@ -259,6 +259,20 @@ public final class PatchConfig {
         vehMgrInit.expectedHits = 1;
         patches.add(vehMgr);
 
+        // ---- 假死修復（2026-08-02 事故：SmashWindowPacket → removeGlassAttachments 無限迴圈）----
+
+        // 原版迴圈假設 RemoveTileObject 必使清單縮短而無條件 n--；42.20 safelyRemove 路徑
+        // 特定物件移除不生效 → 同 index 重撞同物件 → 主執行緒死鎖全服假死（兩份 thread dump
+        // ＋pkill -9 恢復實證）。改道唯一呼叫點到 GlassAttachmentGuard：逐語意重刻，
+        // 「清單真的縮短」才回退 index，否則跳過＋log 座標與 sprite 名（定位問題物件）。
+        Patcher.ClassPatch window = new Patcher.ClassPatch("zombie/iso/objects/IsoWindow");
+        Patcher.MethodOps smash = window.method("smashWindow", "(ZZ)V");
+        smash.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoGridSquare",
+                "removeGlassAttachments", "(Lzombie/iso/objects/IsoWindow;)V",
+                "zombie/mdc/GlassAttachmentGuard", "removeGlassAttachments"));
+        smash.expectedHits = 1;
+        patches.add(window);
+
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
 
         // hit 封包 stale/type-confused reference：getZombie()=tryCastTo 可回 null，原版 9 個 setter 無檢查；

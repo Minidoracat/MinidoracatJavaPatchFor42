@@ -564,6 +564,19 @@ public final class SmokeCheck {
         failed += check("VehicleManager 節流常數未誤中（bipush 27、100L、1000L 原樣）",
                 bipush27 == 1 && throttle100 && throttle1000);
 
+        // ---- 假死修復（removeGlassAttachments 無限迴圈保險絲）----
+        String glassGuard = "zombie/mdc/GlassAttachmentGuard";
+        MethodNode smashW = method(distJava, "zombie/iso/objects/IsoWindow", "smashWindow", "(ZZ)V");
+        failed += check("玻璃附掛清除改道恰一次且原呼叫歸零",
+                countExactCalls(smashW, Opcodes.INVOKESTATIC, glassGuard, "removeGlassAttachments",
+                        "(Lzombie/iso/IsoGridSquare;Lzombie/iso/objects/IsoWindow;)V") == 1
+                && countExactCalls(smashW, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoGridSquare",
+                        "removeGlassAttachments", "(Lzombie/iso/objects/IsoWindow;)V") == 0);
+        ClassNode glassNode = classNode(distJava, glassGuard);
+        failed += check("GlassGuard 無狀態（零欄位）且含定位 log 前綴",
+                glassNode.fields.isEmpty()
+                && containsUtf8(distJava, glassGuard, "[MinidoracatJavaPatch][GlassGuard]"));
+
         if (failed > 0) {
             System.exit(1);
         }
