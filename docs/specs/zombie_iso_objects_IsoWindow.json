@@ -1,0 +1,23 @@
+{
+  "className": "zombie/iso/objects/IsoWindow",
+  "kind": "crash-fix",
+  "buildBaseline": "42.20.0 / jar SHA-256 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": { "name": "smashWindow", "desc": "(ZZ)V" },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/iso/IsoGridSquare",
+        "name": "removeGlassAttachments",
+        "desc": "(Lzombie/iso/objects/IsoWindow;)V",
+        "expectedCount": 1
+      },
+      "redirect": "zombie/mdc/GlassAttachmentGuard.removeGlassAttachments(Lzombie/iso/IsoGridSquare;Lzombie/iso/objects/IsoWindow;)V",
+      "rationale": "2026-08-02 17:48 全服假死事故根因。IsoGridSquare.removeGlassAttachments 的迴圈在命中『玻璃附掛物（ATTACHED_TO_GLASS）或窗牆上的電燈開關』時 RemoveTileObject(o) 後無條件 n--，隱含假設『移除必使 objects 清單縮短』。42.20 的 RemoveTileObject 預設走 IsoObjectUtils.safelyRemoveTileObjectFromSquare 安全移除路徑，特定物件狀態下移除不生效（清單長度不變）→ 迴圈以同一 index 重撞同一物件 → RemoveTileObject 再度無效 → n-- → 主執行緒無限迴圈。單一玩家的 SmashWindowPacket 即鎖死整個 server tick：登入、存檔、所有玩家全部凍結，graceful stop 收不進去，唯 pkill -9。helper 逐語意重刻迴圈（同判定式、同 RemoveTileObject 呼叫），唯一差別＝移除後驗證 objects.size() 確實縮短才回退 index；未縮短（原版死鎖分支）則跳過該物件並經既有 Multiplayer sink 記錄座標與 sprite 名——正常路徑語意等價，病態路徑從全服假死降級為單一物件未清除＋一行定位 log（下次觸發即知道問題物件是誰、在哪）。removeGlassAttachments 全 jar 唯一呼叫者即此 callsite，改道不波及他處；原方法本體保留未動（他日 TIS 修復後 uninstall 即回歸）。",
+      "evidence": "42.20 javap：smashWindow(ZZ)V 內 offset 221 恰一處 invokevirtual #452 IsoGridSquare.removeGlassAttachments:(Lzombie/iso/objects/IsoWindow;)V；全 class grep 恰 1 次。事故現場：兩份間隔 4 秒的 thread dump（2026-08-02 17:50，保存於 log/console 輪替檔）main 執行緒皆 RUNNABLE 於同一迴圈不同指令（dump1 停在 Spliterator.getExactSizeIfKnown、dump2 停在 PropertyContainer.get:183），呼叫鏈 SmashWindowPacket.processServer:76 → smashWindow:373→:360 → removeGlassAttachments:8343 stream anyMatch；幀計數凍結於 f:15924、玩家重連請求堆積、JVM 無 deadlock 報告（純活迴圈）；100 條執行緒堆疊零我方 patch 類。反編譯佐證：IsoGridSquare.java:8218-8230 for 迴圈 + :8226-8227 RemoveTileObject 後無條件 n--；RemoveTileObject:6090-6097 委派 safelyRemoveTileObjectFromSquare。"
+    }
+  ],
+  "behaviorNotes": "helper 使用之 API 全為 public：IsoGridSquare.getObjects()/RemoveTileObject(IsoObject)/getX/getY/getZ、IsoWindow.getNorth()、IsoObject.getSprite()/getProperties()/getFacing()、IsoSprite.getName()、IsoPropertyType（zombie.core.properties）。判定式與原版逐條對應：sprite 非 null、ATTACHED_TO_GLASS、IS_MOVE_ABLE+(IS_HIGH|MOVE_TYPE=WallObject)+facing 在窗側、IsoLightSwitch instanceof。無狀態（零欄位），無快取。與 hit/Zombie、hit/Fall 頭部守衛同屬防假死/防崩潰家族。",
+  "verification": "部署後：(1) 開機健檢無 VerifyError/NoSuchMethodError；(2) 玩家正常砸窗：窗碎、玻璃附掛物照常清除、警報照響（handleAlarm 順序未動）；(3) 若 console 出現 [MinidoracatJavaPatch][GlassGuard] stuck glass attachment skipped at x,y,z sprite=…＝原版會死鎖的案例被保險絲接住——記下座標回報並檢查該物件；(4) 假死不再由砸窗觸發（f: 幀計數持續前進）。負對照：SmokeCheck 斷言改道恰一次、原呼叫歸零、helper 零欄位＋log 前綴存在。回退：uninstall.sh（TIS 官方修復後建議回歸原版）。"
+}
