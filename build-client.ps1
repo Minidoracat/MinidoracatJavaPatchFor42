@@ -129,4 +129,12 @@ Copy-Item "$R\deploy-client\README-INSTALL.txt" $pkg -Force
 $zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-42.20.0-$PATCH_VERSION.zip"
 Get-ChildItem "$R\dist-client\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
+
+# 發布到 output\（gitignore）：zip＋未壓縮目錄一站式，舊版自動清掉避免混發
+$out = "$R\output"
+New-Item -ItemType Directory -Force $out | Out-Null
+Get-ChildItem "$out\MinidoracatClientPatch-*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Copy-Item $zip $out
+Copy-Item -Recurse $pkg "$out\MinidoracatClientPatch-TexPipeline-42.20.0-$PATCH_VERSION"
 Write-Host "完成：$zip"
+Write-Host "output -> $out（zip＋未壓縮目錄）"
