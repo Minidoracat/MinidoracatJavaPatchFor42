@@ -2,6 +2,8 @@
 # 與 server build（build.ps1）完全隔離：獨立 work\out-client 與 dist-client\，不進 server manifest。
 # client 與 server 的 projectzomboid.jar SHA-256 相同（e4661ca9…54b8），共用 work\projectzomboid.jar。
 $ErrorActionPreference = 'Stop'
+# patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB
+$PATCH_VERSION = 'v1.2'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $R = $PSScriptRoot
 
@@ -91,7 +93,7 @@ foreach ($bat in @('install', 'uninstall')) {
 }
 # 檔名一律 ASCII：Compress-Archive 對非 ASCII 檔名會寫出 OEM 亂碼 entry（實測）
 Copy-Item "$R\deploy-client\README-INSTALL.txt" $pkg -Force
-$zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-42.20.0.zip"
-Remove-Item $zip -ErrorAction SilentlyContinue
+$zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-42.20.0-$PATCH_VERSION.zip"
+Get-ChildItem "$R\dist-client\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
 Write-Host "完成：$zip"
