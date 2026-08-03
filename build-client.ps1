@@ -2,8 +2,8 @@
 # 與 server build（build.ps1）完全隔離：獨立 work\out-client 與 dist-client\，不進 server manifest。
 # client 與 server 的 projectzomboid.jar SHA-256 相同（e4661ca9…54b8），共用 work\projectzomboid.jar。
 $ErrorActionPreference = 'Stop'
-# patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB
-$PATCH_VERSION = 'v1.2'
+# patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波
+$PATCH_VERSION = 'v2.0'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $R = $PSScriptRoot
 
@@ -43,7 +43,10 @@ java -cp "$R\work\out-client;$ASM_CP" Patcher "$R\work\projectzomboid.jar" "$R\d
 Assert-Ok "Patcher client"
 
 # helper 條目前置（origSha=- 表無 jar 原版）；部署順序＝先 helper、再 patched caller
-$helperEntries = @('zombie/mdc/TexturePipelineGuard.class')
+$helperEntries = @(
+    'zombie/mdc/TexturePipelineGuard.class',
+    'zombie/core/textures/MinidoracatTextureLeakGuard.class'
+)
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\$entry").Hash.ToLower()
     "$entry`t-`t$helperSha`t0hits"
@@ -69,6 +72,8 @@ java -cp "$R\work\out-client;$ASM_CP" SmokeCheck "$R\dist-client\java" "$R\work\
 Assert-Ok "SmokeCheck client"
 java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.mdc.TexturePipelineGuardBehaviorTest
 Assert-Ok "TexturePipelineGuardBehaviorTest"
+java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest
+Assert-Ok "MinidoracatTextureLeakGuardBehaviorTest"
 
 Write-Host "[8/8] 打包玩家安裝 zip（SHA 閘門注入 install/uninstall.bat）..."
 $pkg = "$R\dist-client\pkg"
@@ -77,14 +82,42 @@ New-Item -ItemType Directory -Force "$pkg\patch-files" | Out-Null
 # payload 放 patch-files\ 暫存區：install.bat 先驗 jar SHA／衝突，通過才複製到遊戲目錄並回驗
 Copy-Item -Recurse "$R\dist-client\java\zombie" "$pkg\patch-files\zombie"
 
-$jarSha   = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower()
-$tiamSha  = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\zombie\core\textures\TextureIDAssetManager.class").Hash.ToLower()
-$guardSha = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\zombie\mdc\TexturePipelineGuard.class").Hash.ToLower()
+$jarSha = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower()
+# payload 逐檔生成 install 的衝突/回驗段與 uninstall 的 removeone 段（線性 goto、唯一標籤）
+$payload = Get-ChildItem "$R\dist-client\java" -Recurse -Filter *.class | ForEach-Object {
+    [pscustomobject]@{
+        Rel = $_.FullName.Substring("$R\dist-client\java\".Length)
+        Sha = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+    }
+}
+$conflictChecks = ''; $verifyChecks = ''; $removeCalls = ''; $srcChecks = ''; $rollbackDeletes = ''; $ci = 0
+foreach ($f in $payload) {
+    $ci++
+    $srcChecks += "call :hash `"%SRC%patch-files\$($f.Rel)`"`n" +
+        "if /i `"%HASH%`"==`"$($f.Sha)`" goto :src$ci`n" +
+        "echo [ERROR] patch-files\$($f.Rel) is corrupted or incomplete. Re-extract the whole zip.`n" +
+        "goto :fail`n" +
+        ":src$ci`n"
+    $conflictChecks += "if not exist `"%GAMEDIR%$($f.Rel)`" goto :conf$ci`n" +
+        "call :hash `"%GAMEDIR%$($f.Rel)`"`n" +
+        "if /i `"%HASH%`"==`"$($f.Sha)`" goto :conf$ci`n" +
+        "echo [ERROR] A different loose patch already exists at $($f.Rel) - remove it first.`n" +
+        "goto :fail`n" +
+        ":conf$ci`n"
+    $verifyChecks += "call :hash `"%GAMEDIR%$($f.Rel)`"`n" +
+        "if /i not `"%HASH%`"==`"$($f.Sha)`" goto :verifyfail`n"
+    $removeCalls += "call :removeone `"%GAMEDIR%$($f.Rel)`" `"$($f.Sha)`"`n"
+    $rollbackDeletes += "del /q `"%GAMEDIR%$($f.Rel)`" 2>nul`n"
+}
+Write-Host "install/uninstall 閘門涵蓋 $($payload.Count) 個 payload 檔"
 foreach ($bat in @('install', 'uninstall')) {
     $body = (Get-Content -Raw "$R\deploy-client\$bat.bat.template") `
         -replace '__JAR_SHA__', $jarSha `
-        -replace '__TIAM_SHA__', $tiamSha `
-        -replace '__GUARD_SHA__', $guardSha
+        -replace '__SRC_CHECKS__', $srcChecks.TrimEnd("`n") `
+        -replace '__CONFLICT_CHECKS__', $conflictChecks.TrimEnd("`n") `
+        -replace '__VERIFY_CHECKS__', $verifyChecks.TrimEnd("`n") `
+        -replace '__ROLLBACK_DELETES__', $rollbackDeletes.TrimEnd("`n") `
+        -replace '__REMOVE_CALLS__', $removeCalls.TrimEnd("`n")
     if ($body -match '__[A-Z_]+__') { throw "$bat.bat 模板還有未注入的 placeholder" }
     # CRLF 強制：LF-only 批次檔在 cmd 會出現幽靈解析錯誤（「這個時候不應有…」，實測）
     $body = $body -replace "`r?`n", "`r`n"

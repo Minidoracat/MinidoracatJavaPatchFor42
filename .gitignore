@@ -7,3 +7,5 @@ dist-client/
 .claude/
 AGENTS.md
 CLAUDE.md
+
+temp/
