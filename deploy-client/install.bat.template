@@ -2,8 +2,6 @@
 setlocal EnableExtensions
 set "SRC=%~dp0"
 set "EXPECTED_JAR=__JAR_SHA__"
-set "SHA_TIAM=__TIAM_SHA__"
-set "SHA_GUARD=__GUARD_SHA__"
 
 rem 全檔線性 goto 流程、零括號區塊：路徑含 ( ) 時 cmd 的括號區塊會誤解析（實測）
 
@@ -11,6 +9,9 @@ if exist "%SRC%patch-files\zombie\core\textures\TextureIDAssetManager.class" got
 echo [ERROR] patch-files folder is missing. Re-extract the whole zip first.
 goto :fail
 :havepayload
+
+rem 來源完整性預檢：zip 損壞/解壓不完整在碰遊戲目錄之前就擋下（逐檔生成於建置時）
+__SRC_CHECKS__
 
 rem --- locate game folder: same-dir, PZ_GAMEDIR override, then Steam registry + library list ---
 set "GAMEDIR="
@@ -44,21 +45,15 @@ echo    actual   %HASH%
 goto :fail
 :versionok
 
-if not exist "%GAMEDIR%zombie\core\textures\TextureIDAssetManager.class" goto :noconflict
-call :hash "%GAMEDIR%zombie\core\textures\TextureIDAssetManager.class"
-if /i "%HASH%"=="%SHA_TIAM%" goto :noconflict
-echo [ERROR] A different loose patch already exists at zombie\core\textures\ - remove it first.
-goto :fail
-:noconflict
+rem 衝突閘：逐 payload 檔生成於建置時（存在且指紋不同=其他 patch 佔用，拒裝）
+__CONFLICT_CHECKS__
 
 echo Installing...
 xcopy /y /e /i /q "%SRC%patch-files\zombie" "%GAMEDIR%zombie" >nul
 if errorlevel 1 goto :copyfail
 
-call :hash "%GAMEDIR%zombie\core\textures\TextureIDAssetManager.class"
-if /i not "%HASH%"=="%SHA_TIAM%" goto :verifyfail
-call :hash "%GAMEDIR%zombie\mdc\TexturePipelineGuard.class"
-if /i not "%HASH%"=="%SHA_GUARD%" goto :verifyfail
+rem 複製後回驗：逐 payload 檔生成於建置時
+__VERIFY_CHECKS__
 
 echo [OK] Patch installed and verified. Start the game normally.
 echo      To confirm in-game: search "TexPipelineGuard" in %%UserProfile%%\Zomboid\console.txt
@@ -70,7 +65,14 @@ echo [ERROR] Copy failed.
 goto :fail
 
 :verifyfail
-echo [ERROR] Post-install verification failed - run uninstall.bat and try again.
+echo [ERROR] Post-install verification failed - rolling back this install...
+rem 回滾：衝突閘已保證安裝前目標位置為空或與本 payload 完全相同,直接刪除本次寫入即還原
+__ROLLBACK_DELETES__
+rd "%GAMEDIR%zombie\core\textures" 2>nul
+rd "%GAMEDIR%zombie\core" 2>nul
+rd "%GAMEDIR%zombie\mdc" 2>nul
+rd "%GAMEDIR%zombie" 2>nul
+echo [ERROR] Rolled back. Re-extract the zip and try again.
 goto :fail
 
 :hash

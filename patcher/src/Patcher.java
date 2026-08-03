@@ -65,11 +65,20 @@ public final class Patcher {
      */
     record HeadGuard(int varSlot, String callOwner, String callName, String callDesc) {}
 
+    /**
+     * 方法頭線性呼叫（v2.0 起，貼圖洩漏根治用）：visitCode 後插
+     * `aload_0; invokestatic helperOwner.helperName helperDesc`（desc 收 receiver 型別、回 void）。
+     * 純線性、無分支、無新 branch target——frames 完全不需增補；堆疊峰值 1，
+     * visitMaxs 以 max(原值,1) 保底。helper 對遊戲 jar 正常編譯，內部自帶冪等與例外紀律。
+     */
+    record HeadCall(String helperOwner, String helperName, String helperDesc) {}
+
     static final class MethodOps {
         final String name, desc;
         final List<Site> redirects = new ArrayList<>();
         final List<ConstChange> consts = new ArrayList<>();
         HeadGuard headGuard = null;
+        HeadCall headCall = null;
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
         int expectedHits = 0;
@@ -134,6 +143,20 @@ public final class Patcher {
                 super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
                 ops.actualHits++;
             }
+            HeadCall hc = ops.headCall;
+            if (hc != null) {
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, hc.helperOwner(), hc.helperName(),
+                        hc.helperDesc(), false);
+                ops.actualHits++;
+            }
+        }
+
+        @Override
+        public void visitMaxs(int maxStack, int maxLocals) {
+            // 頭部插入的堆疊峰值為 1；原方法 maxStack 幾乎必 ≥1，取 max 保底
+            super.visitMaxs(ops.headCall != null || ops.headGuard != null
+                    ? Math.max(maxStack, 1) : maxStack, maxLocals);
         }
         @Override
         public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {

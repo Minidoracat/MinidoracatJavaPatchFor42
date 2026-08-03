@@ -1,8 +1,6 @@
 @echo off
 setlocal EnableExtensions
 set "SRC=%~dp0"
-set "SHA_TIAM=__TIAM_SHA__"
-set "SHA_GUARD=__GUARD_SHA__"
 set "FAILED=0"
 
 rem 全檔線性 goto 流程、零括號區塊：路徑含 ( ) 時 cmd 的括號區塊會誤解析（實測）
@@ -29,8 +27,8 @@ goto :fail
 :gamedirok
 echo Game folder: "%GAMEDIR%"
 
-call :removeone "%GAMEDIR%zombie\core\textures\TextureIDAssetManager.class" "%SHA_TIAM%"
-call :removeone "%GAMEDIR%zombie\mdc\TexturePipelineGuard.class" "%SHA_GUARD%"
+rem 逐 payload 檔生成於建置時（指紋不符=非本 patch 版本,不刪並報警）
+__REMOVE_CALLS__
 rd "%GAMEDIR%zombie\core\textures" 2>nul
 rd "%GAMEDIR%zombie\core" 2>nul
 rd "%GAMEDIR%zombie\mdc" 2>nul

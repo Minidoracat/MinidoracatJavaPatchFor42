@@ -37,6 +37,23 @@ public final class LoadCheck {
                     throw new IllegalStateException("TexturePipelineGuard 門檻常數與手術值不一致");
                 }
                 System.out.println("client helper OK bytesAllocatedObserved 簽名與門檻常數一致");
+
+                // v2.0 洩漏根治 helper：改道/head-call 簽名逐一比對（缺了只會在執行期 NoSuchMethodError）
+                Class<?> leak = Class.forName("zombie.core.textures.MinidoracatTextureLeakGuard", false, cl);
+                Class<?> imgData = Class.forName("zombie.core.textures.ImageData", false, cl);
+                Class<?> texId = Class.forName("zombie.core.textures.TextureID", false, cl);
+                int psf = java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC;
+                for (var sig : new Object[][]{
+                        { "disposeFrames", new Class<?>[]{ imgData }, void.class },
+                        { "ensureData", new Class<?>[]{ imgData }, void.class },
+                        { "onFreeMemory", new Class<?>[]{ texId }, void.class },
+                        { "createSteamAvatarFixed", new Class<?>[]{ long.class }, imgData } }) {
+                    var m = leak.getDeclaredMethod((String)sig[0], (Class<?>[])sig[1]);
+                    if (m.getReturnType() != sig[2] || (m.getModifiers() & psf) != psf) {
+                        throw new NoSuchMethodException("MinidoracatTextureLeakGuard." + sig[0] + " signature");
+                    }
+                }
+                System.out.println("leak guard OK 四個手術簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }
