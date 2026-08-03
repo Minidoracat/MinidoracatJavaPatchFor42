@@ -620,6 +620,112 @@ removeAll 四情境、補償迭代重入的訪問序列黃金比對）＋10 個�
 歸零、S3 負對照 `size×2/get×1` 原樣、S4 負對照 `ProcessStaticUpdaters` 零改道、S5 六個
 contains 後綴必為 IFNE/IFEQ、全 jar hierarchy walk 斷言 IsoObject 全後代零 equals/hashCode 覆寫）。
 
+## 2n. 受精蛋世界清除豁免（IsoGridSquare.load）
+
+**立案**：正式服 `WorldItemRemovalList`（247 項）含 `Base.Egg`。查證後確認清除判定
+**無法區分受精蛋**，而現行參數讓地上的受精蛋 100% 在孵化前被刪除。
+
+**根因鏈**（三段都有 javap／原始碼佐證）：
+
+1. 判定只吃字串。`IsoGridSquare.load` offset 423-426 取 `worldItem.getItem().getFullType()`，
+   之後全部比對都走 `SandboxOptions.worldItemRemovalListContains`＝`worldItemRemovalSet.contains(type)`
+   （SandboxOptions.java:1305-1313），純 exact match，**看不到任何 per-instance 狀態**。
+2. 受精是實例欄位不是型別。`Food.java:126-131` 的 `fertilized` / `fertilizedTime` /
+   `timeToHatch` / `animalHatch` 全是實例欄位；受精蛋與一般蛋同為 `Base.Egg`——
+   `ChickenDefinitions.lua:152` 的原版註解就寫明「can be fertilized or not, depend if a
+   rooster mated with the chicken or not」。
+3. 時間差 52 倍。
+
+| 參數 | 值 |
+|---|---|
+| `HoursForWorldItemRemoval` | 24 遊戲小時 |
+| 母雞 `timeToHatch`（ChickenDefinitions.lua:153） | 21×24 = 504 小時 |
+| `AnimalEggHatch = 5` → `Food.setTimeToHatch` 乘數 | ×2.5 |
+| 實際孵化需時 | **1260 小時（52.5 天）** |
+
+`Food.checkEggHatch` 的 `else` 分支（hutch==null 且不在容器時 `baby.addToWorld()`）是原版
+明確支援的「地上孵化」路徑，被清單設定切斷。
+
+**手術**：改道 `load(ByteBuffer,int,boolean)` 內**唯一**的
+`IsoWorldInventoryObject.isIgnoreRemoveSandbox()Z`（全 class 恰一處，位於
+`aload → ifne → getstatic GameTime.instance` 的清除判定鏈上）到 `FertilizedEggGuard`。
+INVOKEVIRTUAL→INVOKESTATIC 同形替換，堆疊 1→1、指令長度不變、frames 不動。
+
+**為什麼選這個 callsite**（四路審查獨立驗證，替代方案全部不可行）：
+
+| 替代方案 | 為什麼不行 |
+|---|---|
+| `getFullType()`（offset 426） | 回傳值同時餵給 `ScriptManager.FindItem`＋`getObsolete` 判定、`type.split("_")` 前綴分支與四個 list 比對。改它等於**偽造 item type**，blast radius 大好幾倍 |
+| `worldItemRemovalListContains`（4 處） | receiver 是 `SandboxOptions`、參數是 String，**拿不到 `worldItem`**；且要同時處理黑白名單四個分支才不破壞對稱 |
+| `getWorldAgeHours()`（offset 600） | receiver 是 `GameTime`，**拿不到 `worldItem`** |
+| head-guard 插入 | `load` 是巨型方法，依手術鐵則需 `EXPAND_FRAMES`＋補 `F_SAME`，本專案明訂保留給防崩潰守衛 |
+
+offset 589 的 `aload 13` 是整條清除鏈上**唯一一個 `worldItem` 在堆疊上、且位於黑白名單分支
+之後**的位置。且 `isIgnoreRemoveSandbox` 的語意本來就是「豁免 sandbox 清除」，擴充它是語意
+延伸而非行為改寫。代價是：任何有界化邏輯**只能寫在 helper 裡**，因為沒有第二個 callsite
+可以表達「延長期限」而非「永不清除」。
+
+**效能**：四個 `listContains` 都在 589 之前且以 `&&` 短路，所以 helper **只在該 item 已命中
+清除清單時才被呼叫**，不是每個 world item 都跑；而同路徑對每個 world item 本來就會跑
+`type.split("_")`（regex＋陣列配置）＋`ScriptManager.FindItem(type)`，成本高出 helper 數量級。
+
+**豁免範圍刻意收斂**：`fertilized` 且 `animalHatch` 非空（與 `checkEggHatch` 的孵化 gate 用
+同一個 `StringUtils.isNullOrEmpty`）——孵不出來的「受精」蛋不佔額度。容器／背包／雞舍
+(`IsoHutch`)／動物拖車內的蛋本來就不是 `IsoWorldInventoryObject`，不經此路徑。火雞蛋是
+`Base.TurkeyEgg`、不在清除清單內，本節只影響 `Base.Egg`。
+
+### 2n-1. 為什麼一定要有孵化視窗天花板（初版被審查推翻的論證）
+
+初版寫「冷卻／烹煮／冷凍會由原版把 `fertilized` 設回 false，所以豁免自動失效、不會永久堆積」。
+**這個論證對地上物品是錯的**——三條路徑全部被容器閘擋住：
+
+| 宣稱的失效路徑 | 實際 gate | 地上物可達？ |
+|---|---|---|
+| 烹煮 `heat>1.6`（Food:384） | 整段包在 `if (outermostContainer != null)`（Food:377）內 | **否** |
+| 冷凍（Food:840） | 需 `isInFreezer(outermostContainer) && isPowered()` | **否** |
+| 冷卻 `heat<0.5`（Food:634） | `temp = outermostContainer == null ? 1.0F : ...`，地上 temp 恆為 1.0，heat 被兩側 clamp 收斂到剛好 1.0 | **否**（只有「剛從冷凍庫拿出來就丟地上」的邊角會觸發） |
+
+根因是 `IsoWorldInventoryObject` 建構子對 item 做 `setContainer(null)`，而
+`InventoryItem.getOutermostContainer()` 對 null／`type=="floor"` 的 container 一律回 null
+⇒ **地上物品的 `outermostContainer` 恆為 null**。補刀：`isRotten()` 對 fertilized 恆回 false，
+腐敗也清不掉。
+
+唯一真實的出口是孵化，而 `fertilizedTime` **只在該 chunk 載入期間推進**
+（`processWorldItems` 由 `addToWorld` 填、`removeFromWorld` 清）——所以**少載入的 chunk 上，
+受精蛋既不孵化也不再被清除，就是永久豁免**。
+
+因此有界性不能靠推論原版行為，改由 helper 自己保證：
+
+```java
+// 豁免視窗＝dropTime + HATCH_WINDOW_MULTIPLIER(4.0) × timeToHatch（世界小時）
+// dropTime==-1（無法定界）或 timeToHatch<=0 一律不豁免，交還原版清除
+```
+
+取 4 倍是因為 `fertilizedTime` 只在載入時推進、世界時鐘遠快於它——常載入的基地 chunk 綽綽有餘，
+永不載入的 chunk 則保證被回收。母雞 1260h ⇒ 視窗 5040 世界小時（210 遊戲日）。
+這也是本 patch 唯一的可調旋鈕（`LoadCheck` 斷言它必須是有限正數，`SmokeCheck` 與它連動）。
+
+**已知取捨：累積的成本在主執行緒，不在存檔。** 被留下的每顆蛋都成為 `processWorldItems` 的
+常駐 updater，而 `IsoCell.addToProcessItems` 是 `ArrayList.contains` 線性掃描——2m 的
+`CellListMembership` sidecar **沒有覆蓋** `processItems`/`processWorldItems` 這兩張清單。
+天花板把它變成有界，但仍需按下方第 10 項的門檻盯著。
+
+**已知取捨：client 不改。** `IsoGridSquare.load` 的清除區塊沒有 `GameClient.client` 守衛，
+而 client 在 MP 也存本地 chunk 快取、`SandboxOptions` 由 server 同步——所以可能出現
+「伺服器留著蛋、玩家端本地載入時把它從 square 刪掉」的視覺 desync（小雞看似憑空出現）。
+無資料遺失，**但驗證時不能只靠遊戲畫面目視**，見下方第 10 項。
+
+**驗證**（SmokeCheck 13 條＋LoadCheck 簽名/常數守門）：vanilla 前提守門（`isIgnoreRemoveSandbox`
+恰一＋4×`listContains`＋1×`getWorldAgeHours`，TIS 改寫 `load` 時建置失敗而非默默錯位）、
+改道恰一＋原呼叫歸零、清除鏈其餘判定未被動（負對照）、**位置全序鎖**
+（`aload → guard → ifne → getstatic GameTime.instance`）、**分支方向鎖**（guard 回 true 的
+去處必須等於清除鏈尾端「未過期＝保留」的去處——若 TIS 把語意反轉成「要清除」，指令形狀與
+命中數完全不變，只有這條擋得住）、**匯流鎖**（四個 `listContains` 分支中判定為命中清單的三條
+必須全部落到 guard，3/3）、helper 先取 vanilla 值恰一次、static 欄位僅 primitive＋log 前綴，
+加五組行為 smoke（委派 vanilla／判定六種輸入／孵化視窗四象限／端到端＋log 分支確實執行／
+**全程零 anomalies**——沒有最後這條，期望 `false` 的斷言在「helper 全程吞例外」時也會綠燈）。
+逐項 javap 證據見 `docs/specs/zombie_iso_IsoGridSquare.json`。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -645,7 +751,28 @@ contains 後綴必為 IFNE/IFEQ、全 jar hierarchy walk 斷言 IsoObject 全後
    新 dump 中載具主題（getIntersectPoint/getLocalPos/releaseVector3f/serverUpdate）佔比應從
    ~29% 顯著塌陷——這是第二波（P2/P3/P5）的立案量測；(e) `anomalies` 持續增長＝script null
    或幾何異常頻繁，需調查。
-10. **PZ 更新**（順序不可調換）：
+10. **受精蛋豁免驗證**（觀察端一律以**伺服器**為準，見 2n 的 client desync 取捨）：
+   (a) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`——此路徑跑在
+   `ServerChunkLoader` 執行緒上，出現即立刻 uninstall。
+   (b) 正對照：地上放一顆**一般** `Base.Egg`，過 24 遊戲小時並讓該 chunk 卸載後重回，應消失
+   （證明清單仍生效、豁免沒有誤放行）。
+   (c) 豁免對照：地上放一顆**公雞受精過**的蛋，同樣時間後應仍在。**判定依據是伺服器端證據**
+   （`[EggGuard]` log 行、或重新登入/切換區域強制 client 重抓 chunk 後再看），
+   **不要只靠遊戲畫面目視**——client 本地 chunk 快取會造成偽陰性。
+   (d) `[MinidoracatJavaPatch][EggGuard] fertilized egg kept at x,y,z …` 每 32 次豁免印一行，
+   含座標、物種與 `progress=fertilizedTime/timeToHatch`。
+   **注意 `keptLoads` 是「豁免決策次數」不是蛋的顆數**——同一顆蛋每次 chunk 載回來都再計一次，
+   所以它同時被「蛋變多」與「chunk 反覆載入」推高（codex 審查發現）。要數實際顆數請用
+   log 行裡的**座標去重**。**硬性門檻**：去重後的座標數 > 200、或 fps-dip dump 出現
+   `IsoCell.addToProcessItems`／`ArrayList.indexOf` ⇒ 檢討並考慮 `uninstall.sh` 回退
+   （回退後那些蛋在下一次 chunk 載入即被清掉，累積自動歸零）。
+   `expiredLoads` 持續成長是正常的（天花板在回收孵不出來的蛋）。
+   (e) `anomaly n=… <例外類別>: <訊息>` 出現＝`getItem`/`Food` 存取或 log 路徑異常，需調查
+   （實務上應恆為 0）。
+   (f) 地上孵化解封的二階效應：全 jar 沒有全域動物上限（只有 per-hutch 的
+   `IsoHutch.getMaxAnimals()`），24 小時清除原本是自由放養繁殖的煞車之一。觀察線上
+   `IsoAnimal` 數量的週趨勢，異常增長時考慮調低 `HATCH_WINDOW_MULTIPLIER` 或回退。
+11. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
       本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。

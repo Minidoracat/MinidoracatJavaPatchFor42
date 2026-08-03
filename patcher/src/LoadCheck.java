@@ -123,6 +123,35 @@ public final class LoadCheck {
                 throw new NoSuchMethodException("FastIdentityArrayRemoval.remove signature/modifiers");
             }
             System.out.println("entity helper OK add/remove 精確簽名與 public static 契約一致");
+
+            // 受精蛋豁免：改道簽名（receiver 前置）、判定與視窗 helper、觀測 getter 逐一比對——
+            // 缺了只會在執行期 NoSuchMethodError，而該路徑是 chunk 載入（ServerChunkLoader 執行緒）
+            Class<?> worldItem = Class.forName("zombie.iso.objects.IsoWorldInventoryObject", false, cl);
+            Class<?> inventoryItem = Class.forName("zombie.inventory.InventoryItem", false, cl);
+            Class<?> food = Class.forName("zombie.inventory.types.Food", false, cl);
+            Class<?> eggGuard = Class.forName("zombie.mdc.FertilizedEggGuard", false, cl);
+            int publicStatic = java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC;
+            for (var sig : new Object[][]{
+                    { "isIgnoreRemoveSandbox", new Class<?>[]{ worldItem }, boolean.class },
+                    { "isHatchableEgg", new Class<?>[]{ inventoryItem }, boolean.class },
+                    { "withinHatchWindow", new Class<?>[]{ worldItem, food }, boolean.class },
+                    { "keptLoadsObserved", new Class<?>[]{}, long.class },
+                    { "expiredLoadsObserved", new Class<?>[]{}, long.class },
+                    { "anomaliesObserved", new Class<?>[]{}, long.class } }) {
+                var m = eggGuard.getDeclaredMethod((String)sig[0], (Class<?>[])sig[1]);
+                if (m.getReturnType() != sig[2]
+                        || (m.getModifiers() & publicStatic) != publicStatic
+                        || m.getExceptionTypes().length != 0) {
+                    throw new NoSuchMethodException("FertilizedEggGuard." + sig[0] + " signature");
+                }
+            }
+            // 豁免天花板是唯一的可調旋鈕，且是「不永久堆積」的唯一保證——必須為有限正數
+            double hatchWindow = eggGuard.getDeclaredField("HATCH_WINDOW_MULTIPLIER").getDouble(null);
+            if (!(hatchWindow > 0.0) || !Double.isFinite(hatchWindow)) {
+                throw new IllegalStateException("FertilizedEggGuard.HATCH_WINDOW_MULTIPLIER 必須是有限正數："
+                        + hatchWindow);
+            }
+            System.out.println("egg guard OK 改道/判定/視窗簽名與天花板常數一致（" + hatchWindow + "×）");
         }
         System.out.println("全部 " + Files.readAllLines(manifest).size() + " 個 class 連結驗證通過");
     }
