@@ -316,7 +316,7 @@ public final class PatchConfig {
         Patcher.MethodOps wait = tex.method("waitFileTask", "()V");
         wait.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/core/utils/DirectBufferAllocator",
                 "getBytesAllocated", "()J", "zombie/mdc/TexturePipelineGuard", "bytesAllocatedObserved"));
-        wait.consts.add(new Patcher.ConstChange(52428800L, 1073741824L));
+        wait.consts.add(new Patcher.ConstChange(52428800L, 4294967296L));
         wait.expectedHits = 2;
         patches.add(tex);
 

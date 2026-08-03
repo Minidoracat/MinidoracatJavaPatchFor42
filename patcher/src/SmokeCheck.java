@@ -599,22 +599,22 @@ public final class SmokeCheck {
         failed += check("vanilla 前提：waitFileTask 恰一個 getBytesAllocated 與 52428800L",
                 countExactCalls(vanillaWait, Opcodes.INVOKESTATIC, dba, "getBytesAllocated", "()J") == 1
                 && countLongConst(vanillaWait, 52428800L) == 1
-                && countLongConst(vanillaWait, 1073741824L) == 0);
+                && countLongConst(vanillaWait, 4294967296L) == 0);
 
         MethodNode wait = method(distJava, texCls, "waitFileTask", "()V");
         failed += check("觀測改道恰一次且原 getBytesAllocated 歸零",
                 countExactCalls(wait, Opcodes.INVOKESTATIC, guardCls, "bytesAllocatedObserved", "()J") == 1
                 && countExactCalls(wait, Opcodes.INVOKESTATIC, dba, "getBytesAllocated", "()J") == 0);
-        failed += check("門檻常數已改 1GB 且 50MB 歸零",
-                countLongConst(wait, 1073741824L) == 1 && countLongConst(wait, 52428800L) == 0);
+        failed += check("門檻常數已改 4GB 且 50MB 歸零",
+                countLongConst(wait, 4294967296L) == 1 && countLongConst(wait, 52428800L) == 0);
 
         AbstractInsnNode[] w = firstReal(wait, 4);
         boolean seq = w[0] instanceof MethodInsnNode m0 && m0.getOpcode() == Opcodes.INVOKESTATIC
                 && m0.owner.equals(guardCls) && m0.name.equals("bytesAllocatedObserved") && m0.desc.equals("()J")
-                && w[1] instanceof LdcInsnNode l1 && l1.cst instanceof Long lv && lv == 1073741824L
+                && w[1] instanceof LdcInsnNode l1 && l1.cst instanceof Long lv && lv == 4294967296L
                 && w[2] != null && w[2].getOpcode() == Opcodes.LCMP
                 && w[3] != null && w[3].getOpcode() == Opcodes.IFLE;
-        failed += check("waitFileTask 全序鎖（observed→1GB→lcmp→ifle）", seq);
+        failed += check("waitFileTask 全序鎖（observed→4GB→lcmp→ifle）", seq);
         failed += check("sleep(20) 迴圈保留",
                 countExactCalls(wait, Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V") == 1
                 && countLongConst(wait, 20L) == 1);
@@ -628,9 +628,9 @@ public final class SmokeCheck {
                 new URL[]{ distJava.toUri().toURL(), jar.toUri().toURL() },
                 ClassLoader.getPlatformClassLoader())) {
             Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", true, patched);
-            failed += check("helper 門檻常數與 bytecode 常數連動（50MB/1GB）",
+            failed += check("helper 門檻常數與 bytecode 常數連動（50MB/4GB）",
                     guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) == 52428800L
-                    && guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) == 1073741824L);
+                    && guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) == 4294967296L);
 
             Class<?> alloc = Class.forName("zombie.core.utils.DirectBufferAllocator", true, patched);
             Method observed = guard.getMethod("bytesAllocatedObserved");

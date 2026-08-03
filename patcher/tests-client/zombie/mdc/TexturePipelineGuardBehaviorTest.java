@@ -10,8 +10,8 @@ import zombie.core.utils.WrappedBuffer;
  * TexturePipelineGuard 行為驗證（裸 JVM）。
  * 第一段用真實 DirectBufferAllocator 配置驗 passthrough 恆等與 50MB 門檻跨越
  * （1MB＋64MB，成本低）；第二段以反射直呼 observe(long) 合成水位值＋操縱時間欄位，
- * 覆蓋 1GB 門檻分類、floor 窗最低值、periodic 重置與行優先序（stall＞hwm＞periodic）
- * ——不需 1GB 真實 native 配置（codex 差量審查要求）。
+ * 覆蓋 4GB 門檻分類、floor 窗最低值、periodic 重置與行優先序（stall＞hwm＞periodic）
+ * ——不需大額真實 native 配置（codex 差量審查要求）。
  * observe() 內的 DebugLog 呼叫在裸 JVM 失敗時由 helper 外層吞掉，不影響本測試。
  */
 public final class TexturePipelineGuardBehaviorTest {
@@ -80,8 +80,8 @@ public final class TexturePipelineGuardBehaviorTest {
                 && !line.contains("periodic")
                 && readLong("floorWindowBytes") == 60L * MB);
 
-        obs(1200L * MB);
-        failed += check("合成越過 1GB：vanilla 與 patched 計數都遞增",
+        obs(5L * 1024L * MB);
+        failed += check("合成越過 4GB：vanilla 與 patched 計數都遞增",
                 readLong("vanillaStallSamples") == 3L
                 && readLong("patchedStallSamples") == 1L);
 

@@ -13,8 +13,8 @@ import zombie.debug.DebugLog;
  * v1.1 實測依據（Tester-A 兩場 log）：水位「地板」單調上升永不下降（棘輪洩漏——ImageData
  * 解碼例外路徑無 dispose），~35 分鐘從 50MB 爬到 273MB 釘死在 v1 的 256MB 天花板→
  * 全部載入執行緒永久睡→隱形回歸。**天花板只買時間，任何上限終被地板追上**；
- * v1.1 把天花板加到 1GB——依 Tester-A 實測斜率約 2–2.5 小時被追上（跑道≈v1 的 4 倍，
- * 無時間保證；且門檻為配置前檢查、多 worker 可同時通過，1GB 非硬上限，低 RAM 機器
+ * v1.2 天花板 4GB——Tester-A 實測「開往路易斯」的內容洪峰讓地板數分鐘暴增 550MB＋、1GB 被單趟吃掉：洩漏與「看過的新內容量」成正比而非時間，
+ * 4GB 亦僅是更寬的跑道（無時間保證；門檻為配置前檢查、非硬上限），低 RAM 機器
  * 仍有 native OOM 風險），並加掛「地板」觀測量測洩漏速率，
  * root fix（ImageData dispose 修補）另行實作。洩漏是 process 級 static，relog
  * 清不掉（只有完全重開遊戲歸零）——玩家端指引以此為準。
@@ -23,12 +23,12 @@ import zombie.debug.DebugLog;
  *   1. redirect —— getBytesAllocated() 改道到 {@link #bytesAllocatedObserved()}：回傳值
  *      原樣 passthrough（真實取值的例外照原版傳播）。非 fatal 的觀測例外一律吞掉、
  *      不改變載入行為；fatal（VirtualMachineError/ThreadDeath/LinkageError）照拋。
- *   2. constChange —— 門檻 52428800L（50MB）→ 1073741824L（1GB）。
+ *   2. constChange —— 門檻 52428800L（50MB）→ 4294967296L（4GB）。
  *
  * 門檻語意（codex 對抗審查修正）：這是「已解碼未上傳」pixel buffer 的水位，但
  * WrappedBuffer 走 LWJGL native malloc，**不受 -XX:MaxDirectMemorySize 約束**，
- * 門檻也是配置前檢查（多 worker 可同時通過），因此 1GB 不是硬上限——低 RAM
- * 機器請勿使用本 patch（建議 16GB+），部署後以 process RSS 與 hwm/floor log
+ * 門檻也是配置前檢查（多 worker 可同時通過），因此天花板不是硬上限——低 RAM
+ * 機器請勿使用本 patch（建議 32GB+），部署後以 process RSS 與 hwm/floor log
  * 實測回饋。
  *
  * 觀測輸出（決策在鎖內、log 一律在鎖外，避免慢速 log 串行化載入執行緒）：
@@ -44,7 +44,7 @@ public final class TexturePipelineGuard {
     /** 原版 waitFileTask 門檻（觀測分類用；SmokeCheck 與 jar 內 ldc2_w 前提對帳）。 */
     public static final long VANILLA_LIMIT_BYTES = 52428800L;
     /** constChange 後的實際門檻（SmokeCheck 與 patched class 的 ldc2_w 連動對帳）。 */
-    public static final long PATCHED_LIMIT_BYTES = 1073741824L;
+    public static final long PATCHED_LIMIT_BYTES = 4294967296L;
 
     private static final long LOG_INTERVAL_NS = 5_000_000_000L;
     private static final long PERIODIC_INTERVAL_NS = 60_000_000_000L;
