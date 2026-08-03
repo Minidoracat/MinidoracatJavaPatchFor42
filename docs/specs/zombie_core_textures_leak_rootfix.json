@@ -1,0 +1,26 @@
+{
+  "className": "zombie/core/textures/{ImageData,TextureID}",
+  "kind": "client-leak-root-fix-wave1",
+  "deployTarget": "client-only（dist-client\\ v2.0；與 v1.2 門檻/觀測 patch 同包）",
+  "patches": [
+    {
+      "op": "head-call ×3（ImageData）",
+      "method": {
+        "name": "dispose()V / getData()Lzombie/core/textures/MipMapLevel; / getMipMapCount()I"
+      },
+      "inserted": "各方法頭插 `aload_0; invokestatic zombie/core/textures/MinidoracatTextureLeakGuard.{disposeFrames|ensureData|ensureData}(Lzombie/core/textures/ImageData;)V`（新手術型 head-call：純線性、無分支、無新 branch target，visitMaxs 取 max(原值,1)）。expectedHits 各 1。",
+      "rationale": "四路 retention trace＋對抗評審定罪：1096MB 洩漏地板主犯 1（40-60%）＝dispose() 只釋放 data＋mipMaps、完全不碰 frames——APNG 每幀全尺寸 buffer 永久滯留（零例外零 log、對 mod 集合確定性＝110MB 雙機基線）；主犯 2（20-35%）＝getData() 對 data==null 一律配置固定 67108864 不看實際尺寸，且 mip-flag APNG 因 getMipMapCount()==0→getMipMapData(-1)→mipMaps[-2] AIOOBE 跳過 generateHwId 尾端 dispose，單發漏 64MB＋mip 鏈＋全幀（=+64/+99MB 大跳）。disposeFrames：迭代 frames 逐幀 isDisposed 冪等閘後 dispose（WrappedBuffer 雙重 dispose 拋 ISE＝落地鐵則）再 clear；frames 讀取者全 codebase 僅 AnimatedTextureID.setImageData（dispose 前執行、轉移後 frame.data=null）與 ImageData(ImageDataFrame) ctor。ensureData：data==null 且尺寸為正時以 getWidthHW×getHeightHW×4 配置（64MB 分支成死碼），APNG 主層以第一幀 duplicate() 填充（原版上傳全零＝隱形→修後顯示第一幀）；壞檔退回原版；lazy-init 競態與原版同形不加劇。呼叫者普查：getMipMapCount 僅 ImageData.initMipMaps 與 TextureID.generateHwId 兩內部呼叫者（即修復路徑；codex 審查校正）；getData 讀取全以 w*h*4 為界。",
+      "evidence": "javap（真 jar）：dispose()V 只有 data＋mipMaps 迴圈（getfield frames 零次）；getData() ldc_w 67108864 恰一；getMipMapCount() 首三真指令 aload_0/getfield data/ifnonnull（null→iconst_0 ireturn）。欄位：ImageData.data public、frames 為 package-private final ArrayList（helper 必須同套件）、widthHw/heightHw private（經 public getter）。MipMapLevel(int,int) 配置 w*h*4。"
+    },
+    {
+      "op": "head-call ×1 + redirect ×1（TextureID）",
+      "method": {
+        "name": "freeMemory()V / createSteamAvatar(J)Lzombie/core/textures/TextureID;"
+      },
+      "inserted": "S6：freeMemory() 頭插 head-call onFreeMemory(Lzombie/core/textures/TextureID;)V——原版只 `data=null` 斷引用不 dispose（假釋放 footgun；唯一直接呼叫鏈為 setData(null) 分支、而 setData(null) 呼叫者為零（codex 審查校正措辭），防禦性堵口，經 getImageData() 立即冪等 dispose）。S4：createSteamAvatar 內 INVOKESTATIC ImageData.createSteamAvatar(J) redirect 至 createSteamAvatarFixed（全 codebase 唯一呼叫點）——逐語意重實作（allocate 65536→SteamFriends.CreateSteamAvatar→position/flip→new ImageData 完全同序），僅失敗（avatarWidth<=0）與例外路徑補 disposeQuiet（原版直接 return null 漏 65536B 且 UI 重試即重漏）。expectedHits 各 1。",
+      "rationale": "S4 為 minor（<1-2%）但零風險；SteamFriends.CreateSteamAvatar 為同步複製語意，例外時釋放後照原版傳播。S6 觸發面近零，最壞情境（未來出現與上傳併發的呼叫者）＝上傳讀 disposed buffer 拋 ISE 被 render queue 捕捉落 log，有界不 crash。",
+      "evidence": "javap：freeMemory()V＝aload_0/aconst_null/putfield data 三真指令；createSteamAvatar bytecode 逐指令對照（ldc 65536→allocate→CreateSteamAvatar→ifgt→aconst_null/areturn 失敗分支無 dispose）。"
+    }
+  ],
+  "verification": "SmokeCheck client：vanilla 前提守門（dispose 觸碰 frames 0 次＝TIS 未自行修復即建置失敗、getData 67108864 恰一、freeMemory 純斷引用零 dispose、avatar 原呼叫恰一）；head-call 全序鎖 ×4（首兩真指令 aload_0→invokestatic helper 且全方法恰一次）；redirect 恰一且原呼叫歸零；patched dispose 的 MipMapLevel.dispose 呼叫數與 vanilla 相等（head-call 未破壞原體）。LoadCheck client：helper 四簽名 public static 逐一比對。行為測試（同套件直接存取 frames、真實 DirectBufferAllocator）：主層＋幀配置對帳、dispose 後歸零（原版恆漏幀）、dispose 冪等、getData 實際尺寸（非 64MB）、getMipMapCount 回真值、第一幀內容填充、壞檔 fallback、全釋放歸零。install/uninstall.bat 改 payload 逐檔生成閘門（5 檔），fake-gamedir 手動 roundtrip（未進 build gate）：安裝回驗、竄改拒刪 exit 1、乾淨移除、來源損壞預檢、verifyfail 回滾。server build（30 classes）零回歸。預期：入服基線 110MB→<15MB、路易斯 +550MB→趨近 0、8hr 1096MB→<100MB。"
+}

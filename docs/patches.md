@@ -503,7 +503,7 @@ dispose,單發漏 64MB+mip 鏈+全幀(=+64/+99MB 大跳);從犯=cancel 丟棄(5-
 純斷引用、avatar 呼叫恰一)+head-call 全序鎖+redirect 歸零+MipMapLevel.dispose
 呼叫數不變;行為測試(同套件直接存取 frames):幀對帳歸零、dispose 冪等、實際尺寸
 配置、第一幀內容填充、壞檔 fallback,全部對真實 DirectBufferAllocator;
-install/uninstall.bat 改為 payload 逐檔生成閘門(5 檔),roundtrip 六情境通過。
+install/uninstall.bat 改為 payload 逐檔生成閘門(5 檔:來源預檢/衝突/回驗/回滾/ownership 移除),fake-gamedir 手動 roundtrip 通過(未進 build gate)。
 **預期**:入服基線 110MB→<15MB、路易斯 +550MB→趨近 0、8hr 1096MB→<100MB,
 地板穩定低於原版 50MB 閘門=隱形窒息路徑關閉(4GB 門檻降為第二道保險)。
 殘餘風險(文件化):未稽核的大量寫入路徑最壞=BufferOverflowException 有界落 log;
