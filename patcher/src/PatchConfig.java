@@ -336,6 +336,27 @@ public final class PatchConfig {
         hf.expectedHits = 1;
         patches.add(hitF);
 
+        // ---- 受精蛋清除豁免（2026-08-04，四路獨立審查定案）----
+
+        // 世界物品清除只比對 getFullType()（worldItemRemovalListContains＝Set.contains 精確比對），
+        // 而「受精」是 Food 的 per-instance 欄位——受精蛋與一般蛋同為 Base.Egg，清單無法區分。
+        // 正式服 HoursForWorldItemRemoval=24 vs 母雞 timeToHatch 504×2.5（AnimalEggHatch=5）=1260
+        // 遊戲小時，地上受精蛋必定在孵化前被清掉，等於封死 Food.checkEggHatch 的地上孵化分支。
+        // 改道 load 內唯一的 isIgnoreRemoveSandbox（javap：全 class 恰一處，位於 ifne→
+        // GameTime.getWorldAgeHours 的清除判定鏈；且四個 listContains 都在此點之前並以 && 短路，
+        // 故 helper 只在該 item 已命中清除清單時才被呼叫）——helper 先取 vanilla 值原樣放行，
+        // 僅在 false 時追加「fertilized 且 animalHatch 非空且在孵化視窗內」豁免。
+        // 視窗（dropTime + HATCH_WINDOW_MULTIPLIER × timeToHatch）是「不永久堆積」的唯一保證：
+        // 審查證實原版三條去受精路徑（烹煮/冷凍/冷卻）對地上物品全部不可達
+        // （getOutermostContainer() 對 floor container 恆回 null），詳見 helper javadoc 與 2n。
+        Patcher.ClassPatch gridSquare = new Patcher.ClassPatch("zombie/iso/IsoGridSquare");
+        Patcher.MethodOps squareLoad = gridSquare.method("load", "(Ljava/nio/ByteBuffer;IZ)V");
+        squareLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/objects/IsoWorldInventoryObject", "isIgnoreRemoveSandbox", "()Z",
+                "zombie/mdc/FertilizedEggGuard", "isIgnoreRemoveSandbox"));
+        squareLoad.expectedHits = 1;
+        patches.add(gridSquare);
+
         return patches;
     }
 
