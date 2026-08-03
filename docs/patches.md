@@ -424,17 +424,17 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
    `zombie/mdc/TexturePipelineGuard.bytesAllocatedObserved()J`(同形 ()J,回傳值
    原樣 passthrough、真實取值例外照原版傳播;觀測部分 try/catch 全吞、fatal 三件套
    VirtualMachineError/ThreadDeath/LinkageError 照拋,絕不改變載入行為)。
-2. constChange——門檻 `52428800L`(50MB)→v1 `268435456L`(256MB)→**v1.1
-   `1073741824L`(1GB)**。**門檻語意(codex 對抗審查實驗修正)**:這是「已解碼未上傳」
+2. constChange——門檻 `52428800L`(50MB)→v1 `268435456L`(256MB)→v1.1 `1073741824L`(1GB)→**v1.2 `4294967296L`(4GB)**。**門檻語意(codex 對抗審查實驗修正)**:這是「已解碼未上傳」
    pixel buffer 的水位,但 WrappedBuffer 走 LWJGL native malloc,**不受
    -XX:MaxDirectMemorySize 約束**,且門檻是配置前檢查、多 worker 可同時通過——
    天花板不是硬上限。**v1.1 實測依據(blue 兩場 log,2026-07-31)**:水位「地板」
    因棘輪洩漏單調上升永不下降(50→125→154→263→273MB 釘死),~35 分鐘追上 v1 的
    256MB 天花板→全部載入執行緒永久睡(~194 樣本/s)→隱形回歸。code 級洩漏點=
    ImageData 解碼例外路徑無 dispose(ctor 分支+APNG 迴圈中斷洩 compositeBuffer+
-   getData() 64MB 懶配置)。**天花板只買時間,任何上限終被地板追上**;1GB 依實測斜率
-   約 2–2.5 小時被追上(≈v1 跑道 ×4,無時間保證;1GB 亦非硬上限,可被多 worker 超額),
-   根治=ImageData dispose 修補(規劃中)。洩漏為 process 級 static,relog 清不掉
+   getData() 64MB 懶配置)。**天花板只買時間,任何上限終被地板追上**;**v1.2 實測依據(blue console(12),2026-08-02)**:開往路易斯的內容洪峰讓地板數分鐘
+   暴增 550MB＋、單趟吃掉整個 1GB 天花板(floor 終值 1096MB>1024MB=管線永久死亡,
+   只剩輪胎與影子)——**洩漏/常駐量與「看過的新內容量」成正比,非時間**;4GB 亦僅是
+   更寬跑道(非硬上限、無時間保證),根治=ImageData dispose 修補(規劃中)。洩漏為 process 級 static,relog 清不掉
    (解釋社群 relog 時靈時不靈),完全重開遊戲才歸零——玩家指引以此為準。
    低 RAM(≤8GB)機器不適用本 patch。
 
@@ -447,7 +447,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 水位=洩漏地板——**floorBytes 單調上升=洩漏進行中的直接證據,斜率=洩漏速率**。
 **語意精確版**:vanillaStallSamples＝would-enter-wait 取樣數(原版在該取樣點會
 進入至少一次 20ms 等待),單獨不證明持續饑餓;連續 stall 行＋`aboveVanillaMs`
-(本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝1GB
+(本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
 **與 server 部署完全隔離**:獨立 `build-client.ps1` → `work\out-client`＋`dist-client\`
@@ -462,7 +462,7 @@ ownership 才刪,非本 patch 版本一律不動並以非零 exit 報警;Steam �
 
 **驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
 waitFileTask 恰一個 getBytesAllocated＋恰一個 52428800L,PZ 改寫時建置失敗)、
-全序鎖(observed→1GB→lcmp→ifle)、sleep(20) 迴圈保留、helper 門檻常數與 bytecode
+全序鎖(observed→4GB→lcmp→ifle)、sleep(20) 迴圈保留、helper 門檻常數與 bytecode
 常數連動、真實 allocate/dispose passthrough smoke;LoadCheck client 模式(-Xverify:all
 ＋簽名/常數連動);BytecodeVerify;TexturePipelineGuardBehaviorTest(真實
 DirectBufferAllocator 真實配置驗 passthrough/50MB 跨越/dispose 歸零,1GB 門檻與
