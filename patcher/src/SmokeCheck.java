@@ -1,5 +1,15 @@
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.ByteBuffer;
@@ -77,6 +87,8 @@ public final class SmokeCheck {
             failed += check("預篩幾何：線段上=0、垂距=9、端點外=16、退化線段=點距",
                     onSeg == 0f && perp == 9f && beyond == 16f
                     && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
+
+            failed += checkCellListMembership(patched);
 
             Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
             Method clamp = guard.getMethod("clampAddZombieCount", int.class);
@@ -577,6 +589,95 @@ public final class SmokeCheck {
                 glassNode.fields.isEmpty()
                 && containsUtf8(distJava, glassGuard, "[MinidoracatJavaPatch][GlassGuard]"));
 
+        // ---- P5 CellListMembership（15 呼叫點；docs/p5-chunk-unload-design-v2.md §4）----
+        String clmCls = "zombie/mdc/CellListMembership";
+        String alCls = "java/util/ArrayList";
+        String objZ = "(Ljava/lang/Object;)Z";
+        String clmObjZ = "(Ljava/util/ArrayList;Ljava/lang/Object;)Z";
+
+        MethodNode p5Process = method(distJava, "zombie/iso/IsoCell", "ProcessIsoObject", "()V");
+        failed += check("P5 ProcessIsoObject：removeAll/clear 改道恰一、原呼叫歸零、size×2/get×1 原樣(S3)",
+                countExactCalls(p5Process, Opcodes.INVOKESTATIC, clmCls, "removeAll",
+                        "(Ljava/util/ArrayList;Ljava/util/Collection;)Z") == 1
+                && countExactCalls(p5Process, Opcodes.INVOKESTATIC, clmCls, "clear",
+                        "(Ljava/util/ArrayList;)V") == 1
+                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "removeAll",
+                        "(Ljava/util/Collection;)Z") == 0
+                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "clear", "()V") == 0
+                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "size", "()I") == 2
+                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "get",
+                        "(I)Ljava/lang/Object;") == 1);
+
+        MethodNode p5Add = method(distJava, "zombie/iso/IsoCell", "addToProcessIsoObject",
+                "(Lzombie/iso/IsoObject;)V");
+        MethodNode p5AddRemove = method(distJava, "zombie/iso/IsoCell", "addToProcessIsoObjectRemove",
+                "(Lzombie/iso/IsoObject;)V");
+        MethodNode p5Static = method(distJava, "zombie/iso/IsoCell", "addToStaticUpdaterObjectList",
+                "(Lzombie/iso/IsoObject;)V");
+        failed += check("P5 addToProcessIsoObject：remove/contains/add 各恰一且原呼叫歸零",
+                countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
+                && countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 1
+                && countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
+                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0
+                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
+                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
+        failed += check("P5 addToProcessIsoObjectRemove：contains×2＋add×1 且原呼叫歸零",
+                countExactCalls(p5AddRemove, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 2
+                && countExactCalls(p5AddRemove, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
+                && countExactCalls(p5AddRemove, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
+                && countExactCalls(p5AddRemove, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
+        failed += check("P5 addToStaticUpdaterObjectList：contains＋add 各恰一且原呼叫歸零",
+                countExactCalls(p5Static, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 1
+                && countExactCalls(p5Static, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
+                && countExactCalls(p5Static, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
+                && countExactCalls(p5Static, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
+
+        MethodNode p5ObjRemove = method(distJava, "zombie/iso/IsoObject", "removeFromWorld", "()V");
+        failed += check("P5 IsoObject.removeFromWorld：S.remove 改道恰一且原呼叫歸零",
+                countExactCalls(p5ObjRemove, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
+                && countExactCalls(p5ObjRemove, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0);
+
+        MethodNode p5Reanimate = method(distJava, "zombie/iso/objects/IsoDeadBody", "setReanimateTime", "(F)V");
+        failed += check("P5 IsoDeadBody.setReanimateTime：contains×2＋add＋remove 且原呼叫歸零",
+                countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 2
+                && countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
+                && countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
+                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
+                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0
+                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0);
+
+        // S4 負對照：ProcessStaticUpdaters（javap 定案的誤報站點）不得有任何改道
+        MethodNode p5StaticUpd = method(distJava, "zombie/iso/IsoCell", "ProcessStaticUpdaters", "()V");
+        int clmInStaticUpd = 0;
+        for (AbstractInsnNode in : p5StaticUpd.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(clmCls)) {
+                clmInStaticUpd++;
+            }
+        }
+        failed += check("P5 S4 負對照：ProcessStaticUpdaters 零改道（原誤報站點）", clmInStaticUpd == 0);
+
+        // S5：六個 contains 改道點的下一條真指令必為 IFNE/IFEQ（分支消費者後綴鎖）
+        int containsBranchOk = 0, containsTotal = 0;
+        for (MethodNode mn : new MethodNode[]{p5Add, p5AddRemove, p5Static, p5Reanimate}) {
+            for (AbstractInsnNode in : mn.instructions) {
+                if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
+                        && mi.owner.equals(clmCls) && mi.name.equals("contains")) {
+                    containsTotal++;
+                    AbstractInsnNode next = nextReal(in);
+                    if (next != null && (next.getOpcode() == Opcodes.IFNE
+                            || next.getOpcode() == Opcodes.IFEQ)) {
+                        containsBranchOk++;
+                    }
+                }
+            }
+        }
+        failed += check("P5 S5：六個 contains 改道點後綴皆為 IFNE/IFEQ（" + containsBranchOk + "/6）",
+                containsTotal == 6 && containsBranchOk == 6);
+
+        failed += check("P5 helper 含觀測 log 前綴",
+                containsUtf8(distJava, clmCls, "[MinidoracatJavaPatch][CellList]"));
+        failed += checkIdentityDomain(jar);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -644,7 +745,82 @@ public final class SmokeCheck {
             failed += check("helper passthrough 與真實水位一致（allocate 1MB → dispose 歸零）",
                     before == 0L && during == directDuring && during >= 1024 * 1024 && after == 0L);
         }
+
+        // ---- v2.0 貼圖洩漏根治：vanilla 前提守門＋head-call 全序＋avatar redirect ----
+        String leakGuard = "zombie/core/textures/MinidoracatTextureLeakGuard";
+        String imgCls = "zombie/core/textures/ImageData";
+        String tidCls = "zombie/core/textures/TextureID";
+        String imgHelperDesc = "(Lzombie/core/textures/ImageData;)V";
+        String avatarDesc = "(J)Lzombie/core/textures/ImageData;";
+
+        MethodNode vDispose = methodFromJar(jar, imgCls, "dispose", "()V");
+        MethodNode vGetData = methodFromJar(jar, imgCls, "getData", "()Lzombie/core/textures/MipMapLevel;");
+        MethodNode vFree = methodFromJar(jar, tidCls, "freeMemory", "()V");
+        MethodNode vAvatar = methodFromJar(jar, tidCls, "createSteamAvatar",
+                "(J)Lzombie/core/textures/TextureID;");
+        failed += check("vanilla 前提：dispose 未觸碰 frames（TIS 未自行修復）",
+                countFieldTouches(vDispose, imgCls, "frames") == 0);
+        failed += check("vanilla 前提：getData 含固定 64MB 配置、freeMemory 僅斷引用、avatar 呼叫恰一",
+                countIntConst(vGetData, 67108864) == 1
+                && countFieldTouches(vFree, tidCls, "data") == 1
+                && countExactCalls(vFree, Opcodes.INVOKEVIRTUAL,
+                        "zombie/core/textures/ImageData", "dispose", "()V") == 0
+                && countExactCalls(vAvatar, Opcodes.INVOKESTATIC, imgCls,
+                        "createSteamAvatar", avatarDesc) == 1);
+
+        MethodNode pDispose = method(distJava, imgCls, "dispose", "()V");
+        MethodNode pGetData = method(distJava, imgCls, "getData", "()Lzombie/core/textures/MipMapLevel;");
+        MethodNode pMipCount = method(distJava, imgCls, "getMipMapCount", "()I");
+        MethodNode pFree = method(distJava, tidCls, "freeMemory", "()V");
+        MethodNode pAvatar = method(distJava, tidCls, "createSteamAvatar",
+                "(J)Lzombie/core/textures/TextureID;");
+        failed += check("dispose/getData/getMipMapCount/freeMemory 四個 head-call 全序（aload_0→helper 恰一次）",
+                headCallOk(pDispose, leakGuard, "disposeFrames", imgHelperDesc)
+                && headCallOk(pGetData, leakGuard, "ensureData", imgHelperDesc)
+                && headCallOk(pMipCount, leakGuard, "ensureData", imgHelperDesc)
+                && headCallOk(pFree, leakGuard, "onFreeMemory", "(Lzombie/core/textures/TextureID;)V"));
+        failed += check("avatar redirect 恰一次且原呼叫歸零",
+                countExactCalls(pAvatar, Opcodes.INVOKESTATIC, leakGuard,
+                        "createSteamAvatarFixed", avatarDesc) == 1
+                && countExactCalls(pAvatar, Opcodes.INVOKESTATIC, imgCls,
+                        "createSteamAvatar", avatarDesc) == 0);
+        failed += check("dispose 原體保留（MipMapLevel.dispose 呼叫數未變＝head-call 未破壞原邏輯）",
+                countExactCalls(pDispose, Opcodes.INVOKEVIRTUAL,
+                        "zombie/core/textures/MipMapLevel", "dispose", "()V")
+                == countExactCalls(vDispose, Opcodes.INVOKEVIRTUAL,
+                        "zombie/core/textures/MipMapLevel", "dispose", "()V"));
         return failed;
+    }
+
+    /** head-call 全序鎖：方法首兩條真指令＝aload_0；invokestatic helper，且該 helper 呼叫全方法恰一次。 */
+    static boolean headCallOk(MethodNode m, String owner, String name, String desc) {
+        AbstractInsnNode[] h = firstReal(m, 2);
+        return h[0] instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0
+                && h[1] instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
+                && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)
+                && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == 1;
+    }
+
+    /** 統計方法內對指定欄位的任何存取（GETFIELD/PUTFIELD/GETSTATIC/PUTSTATIC）。 */
+    static int countFieldTouches(MethodNode m, String owner, String name) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.owner.equals(owner) && fi.name.equals(name)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 統計方法內 LDC 的指定 int 常數出現次數。 */
+    static int countIntConst(MethodNode m, int value) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Integer i && i == value) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /** 回傳 true=拋了 NPE、false=正常返回；其他例外直接失敗拋出。 */
@@ -739,6 +915,207 @@ public final class SmokeCheck {
         squareClass.getField("zone").set(square, town);
         boolean vanillaPassThrough = effectiveZone.invoke(null, square) == town;
         return fallbackOk && movedBlocked && vanillaPassThrough;
+    }
+
+    /** P5 CellListMembership 行為測試：differential／重複元素／ghost 自癒／kill／降級／removeAll／重入黃金比對。 */
+    static int checkCellListMembership(ClassLoader patched) throws Exception {
+        int failed = 0;
+        Class<?> clm = Class.forName("zombie.mdc.CellListMembership", true, patched);
+        Method inject = clm.getDeclaredMethod("testInject", ArrayList.class, ArrayList.class, ArrayList.class);
+        Method reset = clm.getDeclaredMethod("testReset");
+        Method killedQ = clm.getDeclaredMethod("testKilled");
+        inject.setAccessible(true);
+        reset.setAccessible(true);
+        killedQ.setAccessible(true);
+        Field mask = clm.getDeclaredField("auditMask");
+        mask.setAccessible(true);
+        Method mContains = clm.getMethod("contains", ArrayList.class, Object.class);
+        Method mAdd = clm.getMethod("add", ArrayList.class, Object.class);
+        Method mRemove = clm.getMethod("remove", ArrayList.class, Object.class);
+        Method mRemoveAll = clm.getMethod("removeAll", ArrayList.class, Collection.class);
+
+        // 1) differential：400 個決定性偽隨機 op（含重複與 null）與 vanilla 全等
+        reset.invoke(null);
+        ArrayList<Object> p = new ArrayList<>(), r = new ArrayList<>(), s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        ArrayList<Object> ref = new ArrayList<>();
+        Object oa = new Object(), ob = new Object(), oc = new Object();
+        Object[] pool = {oa, ob, oc, null, oa, ob};
+        boolean diffOk = true;
+        long seed = 20260803L;
+        for (int i = 0; i < 400; i++) {
+            seed = seed * 6364136223846793005L + 1442695040888963407L;
+            Object o = pool[(int) ((seed >>> 16) % pool.length)];
+            switch ((int) ((seed >>> 33) % 3)) {
+                case 0 -> diffOk &= ((Boolean) mAdd.invoke(null, p, o)) == ref.add(o);
+                case 1 -> diffOk &= ((Boolean) mRemove.invoke(null, p, o)) == ref.remove(o);
+                default -> diffOk &= ((Boolean) mContains.invoke(null, p, o)) == ref.contains(o);
+            }
+        }
+        failed += check("CellList differential：400 op（重複/null）回傳與內容順序全等 vanilla",
+                diffOk && p.equals(ref));
+
+        // 2) 重複元素感知：[x,x] 移除一份後 membership 必須保留
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        Object x = new Object();
+        mAdd.invoke(null, p, x);
+        mAdd.invoke(null, p, x);
+        mRemove.invoke(null, p, x);
+        boolean dupKeep = (Boolean) mContains.invoke(null, p, x);
+        mRemove.invoke(null, p, x);
+        boolean dupGone = !((Boolean) mContains.invoke(null, p, x)) && p.isEmpty();
+        failed += check("CellList 重複元素：移除一份仍在、移除兩份才除名", dupKeep && dupGone);
+
+        // 3) 等大小換血 ghost：audit 全開時 contains 與 remove-miss 都必須自癒
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        Object y = new Object(), z = new Object();
+        mAdd.invoke(null, p, y);
+        p.set(0, z);                       // 旁路等大小換血：y→z
+        mask.setInt(null, 0);              // 每 op 抽驗
+        boolean ghostContains = (Boolean) mContains.invoke(null, p, z);   // 假陰性→audit→rebuild→true
+        p.set(0, y);                       // 再換回：set 此刻認 z 不認 y
+        boolean ghostRemove = (Boolean) mRemove.invoke(null, p, y);       // fast-miss audit→修復→真移除
+        failed += check("CellList 等大小換血：contains 假陰性與 remove-miss ghost 皆被 audit 自癒",
+                ghostContains && ghostRemove && p.isEmpty() && !((Boolean) killedQ.invoke(null)));
+
+        // 4) size 漂移自癒不計 kill（GO-WITH-FIXES：良性旁路只 rebuild）
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        for (int i = 0; i < 20; i++) {
+            p.add(new Object());                                   // 旁路 append（size 漂移）
+            if (!((Boolean) mContains.invoke(null, p, p.get(p.size() - 1)))) {
+                failed += check("CellList size 漂移 rebuild 後應答正確", false);
+                break;
+            }
+        }
+        failed += check("CellList 20 次 size 漂移 rebuild 全部自癒且未 kill",
+                !((Boolean) killedQ.invoke(null)));
+
+        // 5) audit divergence 達 8 → 永久 kill → 直通 vanilla
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        mask.setInt(null, 0);
+        Object probe = new Object();
+        // 每輪：helper add（set 記錄）→ 旁路換血同格（size 不變、set 與 list 分歧）→ audit 必偵測。
+        // 不可只換血一次：首次 audit 會 rebuild 使兩者一致，之後不再分歧（測試自身的教訓）。
+        for (int i = 0; i < 12 && !((Boolean) killedQ.invoke(null)); i++) {
+            mAdd.invoke(null, p, probe);
+            p.set(p.size() - 1, new Object());
+            mContains.invoke(null, p, probe);
+        }
+        boolean nowKilled = (Boolean) killedQ.invoke(null);
+        ArrayList<Object> after = new ArrayList<>();
+        mAdd.invoke(null, after, probe);   // killed 後任何清單都直通 vanilla
+        failed += check("CellList audit divergence 達門檻後永久 kill 且直通 vanilla",
+                nowKilled && after.size() == 1 && after.get(0) == probe);
+
+        // 6) generation 降級：未知清單一律 vanilla 行為
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        ArrayList<Object> unknown = new ArrayList<>();
+        boolean downgrade = !((Boolean) mContains.invoke(null, unknown, oa))
+                && (Boolean) mAdd.invoke(null, unknown, oa)
+                && unknown.size() == 1;
+        failed += check("CellList 未知清單（舊 cell/降級路徑）純 vanilla 直通", downgrade);
+
+        // 7) removeAll：重複、R⊄P、空 R、subclass gate 全對照 vanilla
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        for (Object o : new Object[]{oa, ob, oa, oc}) {
+            mAdd.invoke(null, p, o);
+        }
+        r.add(oa);
+        r.add(new Object());               // R⊄P
+        ArrayList<Object> refP = new ArrayList<>(java.util.List.of(oa, ob, oa, oc));
+        ArrayList<Object> refR = new ArrayList<>(r);
+        boolean raRet = (Boolean) mRemoveAll.invoke(null, p, r);
+        boolean raRef = refP.removeAll(refR);
+        boolean removeAllOk = raRet == raRef && p.equals(refP);
+        boolean raEmpty = !((Boolean) mRemoveAll.invoke(null, p, new ArrayList<>() {
+        }));                                // 匿名子類 → gate → 原生（空集合回 false）
+        failed += check("CellList removeAll：重複全清、R⊄P、保序、回傳值與 subclass gate 全等 vanilla",
+                removeAllOk && raEmpty);
+
+        // 8) B10 黃金比對：補償迭代（n--/size--）中重入 remove，訪問序列與 vanilla 全等
+        reset.invoke(null);
+        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
+        inject.invoke(null, p, r, s);
+        Object[] objs = new Object[6];
+        ArrayList<Object> refS = new ArrayList<>();
+        for (int i = 0; i < objs.length; i++) {
+            objs[i] = new Object();
+            mAdd.invoke(null, s, objs[i]);
+            refS.add(objs[i]);
+        }
+        Set<Object> doomed = new HashSet<>(java.util.List.of(objs[1], objs[3]));
+        ArrayList<Object> visitPatched = new ArrayList<>(), visitRef = new ArrayList<>();
+        for (int n = 0; n < s.size(); n++) {
+            Object o = s.get(n);
+            visitPatched.add(o);
+            if (doomed.contains(o)) {
+                mRemove.invoke(null, s, o);
+                n--;
+            }
+        }
+        for (int n = 0; n < refS.size(); n++) {
+            Object o = refS.get(n);
+            visitRef.add(o);
+            if (doomed.contains(o)) {
+                refS.remove(o);
+                n--;
+            }
+        }
+        failed += check("CellList 補償迭代重入 remove：訪問序列與最終清單全等 vanilla",
+                visitPatched.equals(visitRef) && s.equals(refS));
+
+        reset.invoke(null);
+        return failed;
+    }
+
+    /** P5 identity domain：全 jar hierarchy walk，IsoObject 全後代不得覆寫 equals/hashCode。 */
+    static int checkIdentityDomain(Path jar) throws Exception {
+        Map<String, String> superOf = new HashMap<>();
+        Set<String> overrides = new HashSet<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e).readAllBytes())
+                        .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                superOf.put(cn.name, cn.superName);
+                for (MethodNode m : cn.methods) {
+                    if ((m.name.equals("equals") && m.desc.equals("(Ljava/lang/Object;)Z"))
+                            || (m.name.equals("hashCode") && m.desc.equals("()I"))) {
+                        overrides.add(cn.name);
+                        break;
+                    }
+                }
+            }
+        }
+        int bad = 0;
+        for (String cls : superOf.keySet()) {
+            String cur = cls;
+            while (cur != null && !cur.equals("zombie/iso/IsoObject")) {
+                cur = superOf.get(cur);
+            }
+            if (cur != null && overrides.contains(cls)) {
+                System.out.println("  !! equals/hashCode 覆寫: " + cls);
+                bad++;
+            }
+        }
+        return check("P5 identity domain：IsoObject 全後代零 equals/hashCode 覆寫（全 jar walk）", bad == 0);
     }
 
     static int check(String what, boolean ok) {

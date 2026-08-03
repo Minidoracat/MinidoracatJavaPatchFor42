@@ -259,6 +259,51 @@ public final class PatchConfig {
         vehMgrInit.expectedHits = 1;
         patches.add(vehMgr);
 
+        // ---- 效能第二波 P5（2026-08-03 解封：低谷頻率回升 >5/日、chunk 卸載重回榜首）----
+        // IsoCell 三清單的 identity membership sidecar（docs/p5-chunk-unload-design-v2.md，
+        // 雙審定稿＋GO-WITH-FIXES 三修正）：miss O(P)/O(S) → O(1)，removeAll O(P×R) → O(P+R)，
+        // 清單保序權威不動、hit 保留 vanilla、generation bundle 生命週期、audit+kill 保險絲。
+        // 15 呼叫點全部 INVOKEVIRTUAL java/util/ArrayList（javap 定案，非 12——原稿漏數雙 contains）。
+        String clm = "zombie/mdc/CellListMembership";
+        String arrayList = "java/util/ArrayList";
+        String objBool = "(Ljava/lang/Object;)Z";
+
+        Patcher.ClassPatch isoCell = new Patcher.ClassPatch("zombie/iso/IsoCell");
+        Patcher.MethodOps cellProcess = isoCell.method("ProcessIsoObject", "()V");
+        cellProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "removeAll",
+                "(Ljava/util/Collection;)Z", clm, "removeAll"));
+        cellProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "clear",
+                "()V", clm, "clear"));
+        cellProcess.expectedHits = 2;
+        Patcher.MethodOps cellAdd = isoCell.method("addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V");
+        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
+        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
+        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
+        cellAdd.expectedHits = 3;
+        Patcher.MethodOps cellAddRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
+        cellAddRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
+        cellAddRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
+        cellAddRemove.expectedHits = 3;   // contains ×2（P 與 R 各一）＋ add ×1
+        Patcher.MethodOps cellStatic = isoCell.method("addToStaticUpdaterObjectList", "(Lzombie/iso/IsoObject;)V");
+        cellStatic.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
+        cellStatic.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
+        cellStatic.expectedHits = 2;
+        patches.add(isoCell);
+
+        Patcher.ClassPatch isoObjWorld = new Patcher.ClassPatch("zombie/iso/IsoObject");
+        Patcher.MethodOps objRemoveWorld = isoObjWorld.method("removeFromWorld", "()V");
+        objRemoveWorld.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
+        objRemoveWorld.expectedHits = 1;   // staticUpdaterObjectList.remove(this) 的 O(S) miss 全掃
+        patches.add(isoObjWorld);
+
+        Patcher.ClassPatch deadBody = new Patcher.ClassPatch("zombie/iso/objects/IsoDeadBody");
+        Patcher.MethodOps reanimate = deadBody.method("setReanimateTime", "(F)V");
+        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
+        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
+        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
+        reanimate.expectedHits = 4;   // contains ×2（兩分支 guard）＋ add ＋ remove——經 getter 的旁路變異者，必須鏡射
+        patches.add(deadBody);
+
         // ---- 假死修復（2026-08-02 事故：SmashWindowPacket → removeGlassAttachments 無限迴圈）----
 
         // 原版迴圈假設 RemoveTileObject 必使清單縮短而無條件 n--；42.20 safelyRemove 路徑
@@ -319,6 +364,45 @@ public final class PatchConfig {
         wait.consts.add(new Patcher.ConstChange(52428800L, 4294967296L));
         wait.expectedHits = 2;
         patches.add(tex);
+
+        // ---- v2.0 貼圖洩漏根治第一波（四路 retention trace＋對抗評審定罪；docs/patches.md 2j）----
+        // 主犯 1（40-60%）：ImageData.dispose() 只釋放 data＋mipMaps、完全不碰 frames——
+        // APNG 動畫貼圖每幀全尺寸 buffer 永久滯留（零例外零 log、對 mod 集合確定性=110MB 雙機基線）。
+        // 主犯 2（20-35%）：getData() 對 data==null 一律配置固定 67108864（64MB）不看實際尺寸；
+        // mip-flag APNG 因 getMipMapCount()==0 → getMipMapData(-1) AIOOBE 跳過上傳尾端 dispose，
+        // 單發漏 64MB＋mip 鏈＋全幀（=+64/+99MB 大跳）。helper 位於 zombie.core.textures
+        // （frames 為 package-private），所有 dispose 過 isDisposed 冪等閘。
+        String leakGuard = "zombie/core/textures/MinidoracatTextureLeakGuard";
+        Patcher.ClassPatch imgData = new Patcher.ClassPatch("zombie/core/textures/ImageData");
+        Patcher.MethodOps disposeM = imgData.method("dispose", "()V");
+        disposeM.headCall = new Patcher.HeadCall(leakGuard, "disposeFrames",
+                "(Lzombie/core/textures/ImageData;)V");
+        disposeM.expectedHits = 1;
+        Patcher.MethodOps getDataM = imgData.method("getData", "()Lzombie/core/textures/MipMapLevel;");
+        getDataM.headCall = new Patcher.HeadCall(leakGuard, "ensureData",
+                "(Lzombie/core/textures/ImageData;)V");
+        getDataM.expectedHits = 1;
+        Patcher.MethodOps mipCountM = imgData.method("getMipMapCount", "()I");
+        mipCountM.headCall = new Patcher.HeadCall(leakGuard, "ensureData",
+                "(Lzombie/core/textures/ImageData;)V");
+        mipCountM.expectedHits = 1;
+        patches.add(imgData);
+
+        // S6 防禦性堵口：freeMemory 原版只斷引用不 dispose（42.20 零呼叫者，footgun 封口）。
+        // S4：createSteamAvatar 失敗路徑漏 65536 bytes——redirect 唯一呼叫點到逐語意重實作
+        // （成功/例外路徑逐一等價，僅失敗路徑補 dispose）。
+        Patcher.ClassPatch texId = new Patcher.ClassPatch("zombie/core/textures/TextureID");
+        Patcher.MethodOps freeM = texId.method("freeMemory", "()V");
+        freeM.headCall = new Patcher.HeadCall(leakGuard, "onFreeMemory",
+                "(Lzombie/core/textures/TextureID;)V");
+        freeM.expectedHits = 1;
+        Patcher.MethodOps avatarM = texId.method("createSteamAvatar",
+                "(J)Lzombie/core/textures/TextureID;");
+        avatarM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/core/textures/ImageData",
+                "createSteamAvatar", "(J)Lzombie/core/textures/ImageData;",
+                leakGuard, "createSteamAvatarFixed"));
+        avatarM.expectedHits = 1;
+        patches.add(texId);
 
         return patches;
     }

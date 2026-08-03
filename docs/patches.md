@@ -470,6 +470,46 @@ floor/periodic/優先序狀態機以反射 observe() 合成值驗證——不需
 部署後觀測:console.txt 搜 `TexPipelineGuard`,`active` 行＝生效;隱形復發時
 對照 `vanillaStallSamples` 與 relog 時點即可對帳因果鏈。
 
+### 2j-v2.0 洩漏根治第一波（S1/S2/S4/S6）
+
+**定罪**(四路 retention trace＋對抗評審,全數源碼核實):1096MB 洩漏地板＝
+主犯 1(40-60%)**ImageData.dispose() 漏 frames**——APNG 動畫貼圖每幀全尺寸
+buffer,dispose 只釋放 data＋mipMaps,零例外零 log 確定性洩漏=110MB 雙機基線主體;
+主犯 2(20-35%)**getData() 固定 67108864(64MB)fallback**(不看實際尺寸)＋
+mip-flag APNG 因 getMipMapCount()==0→getMipMapData(-1) AIOOBE 跳過上傳尾端
+dispose,單發漏 64MB+mip 鏈+全幀(=+64/+99MB 大跳);從犯=cancel 丟棄(5-15%,
+掛證據門檻待遙測)＋setImageData 覆寫釘死(3-10%,第二波)。**「上傳後不釋放」
+主路徑假說不成立**——generateHwId 尾端有 dispose,地板全來自旁路。
+
+**手術**(新手術型 head-call:visitCode 後插 `aload_0; invokestatic helper` 純線性
+無分支,visitMaxs 取 max(原值,1);helper `zombie.core.textures.MinidoracatTextureLeakGuard`
+必須同套件——frames 為 package-private):
+- **S1** dispose() head-call `disposeFrames`——迭代 frames 逐幀 dispose(isDisposed
+  冪等閘;WrappedBuffer 雙重 dispose 拋 ISE)後 clear。安全論證:frames 讀取者全
+  codebase 僅 AnimatedTextureID.setImageData(dispose 前執行且轉移後 frame.data=null)
+  與 ImageData(ImageDataFrame) ctor。
+- **S2** getData()/getMipMapCount() head-call `ensureData`——data==null 時以
+  getWidthHW×getHeightHW×4 實際尺寸配置(64MB 分支成死碼),APNG 以第一幀內容填充
+  (原版上傳全零=隱形,修後顯示第一幀=紅利);getMipMapCount 回真值→AIOOBE 家族
+  歸位走完正常 dispose。壞檔(尺寸非正)不介入退回原版。呼叫者普查:getMipMapCount
+  僅 2 內部呼叫者(即修復路徑);getData 讀取全以 w*h*4 為界。
+- **S4** TextureID.createSteamAvatar 內 redirect `createSteamAvatarFixed`(唯一
+  呼叫點)——逐語意重實作,失敗/例外路徑補 dispose(原版漏 65536B 且 UI 重試重漏)。
+- **S6** TextureID.freeMemory() head-call `onFreeMemory`——原版只斷引用不 dispose
+  (假釋放 footgun;42.20 零呼叫者,防禦性堵口)。
+
+**驗證**:命中守門 7(head-call×4+redirect×1+v1.2 兩刀);SmokeCheck vanilla 前提
+守門(dispose 零觸碰 frames=TIS 未自行修復、getData 恰一個 64MB 常數、freeMemory
+純斷引用、avatar 呼叫恰一)+head-call 全序鎖+redirect 歸零+MipMapLevel.dispose
+呼叫數不變;行為測試(同套件直接存取 frames):幀對帳歸零、dispose 冪等、實際尺寸
+配置、第一幀內容填充、壞檔 fallback,全部對真實 DirectBufferAllocator;
+install/uninstall.bat 改為 payload 逐檔生成閘門(5 檔),roundtrip 六情境通過。
+**預期**:入服基線 110MB→<15MB、路易斯 +550MB→趨近 0、8hr 1096MB→<100MB,
+地板穩定低於原版 50MB 閘門=隱形窒息路徑關閉(4GB 門檻降為第二道保險)。
+殘餘風險(文件化):未稽核的大量寫入路徑最壞=BufferOverflowException 有界落 log;
+createSteamAvatarFixed 裸 JVM 不可測(結構鎖+人工 QA);ensureData 的 lazy-init
+競態與原版同形不加劇。
+
 ---
 
 ## 2k. 效能第一波：載具視線預篩＋VehicleManager 512→256
@@ -539,6 +579,46 @@ server tick。100 條執行緒堆疊**零我方 patch 類**——純原版 42.20
 正常砸窗逐語意等價（清除、警報順序全不動）；病態案例從全服假死降級為一個物件未清除
 ＋一行定位 log——**下次觸發直接知道問題物件在哪**。helper 無狀態零欄位，全 public API。
 TIS 官方修復後 uninstall 即回歸原版。
+
+## 2m. 效能第二波 P5：IsoCell 三清單 identity membership sidecar
+
+**立案**：第一波後低谷頻率一度塌陷至 1–2 次/日，但 2026-08-03 晚間人數衝上 80（新高）後
+單晚觸發 6 次、FPS 探至 6.1，且 chunk 卸載主題重回榜首（新 dump 3/13＝23%，累計
+post-第一波 6/22≈27%）——達到封存時寫死的解封條件（主題 ≥30% 或頻率 >5 次/日）。
+
+**根因**：`IsoCell` 三個排程清單都是 `ArrayList`，熱路徑全是 O(N) 線性掃描且幾乎全 miss：
+
+| 路徑 | vanilla | 改後 |
+|---|---|---|
+| `addToProcessIsoObjectRemove`（每個卸載物件） | `P.contains` O(P) ＋ `R.contains` O(R) | O(1)＋O(1) |
+| `IsoObject.removeFromWorld` 的 `S.remove` | miss 全掃 O(S) | miss O(1)；hit 保留 vanilla |
+| `addToProcessIsoObject`（載入側） | `R.remove` O(R)＋`P.contains` O(P) | O(1)＋O(1) |
+| `ProcessIsoObject` 每 tick `removeAll` | O(P×R)；R=0 仍 O(P) | O(P+R)；R=0 為 O(1) |
+
+**手術**：15 個 `INVOKEVIRTUAL java/util/ArrayList` 呼叫點（javap 定案——原稿誤記 12，漏數
+`addToProcessIsoObjectRemove` 與 `setReanimateTime` 各自的雙 contains）改道
+`CellListMembership` 的六個 helper，跨三個 class：`IsoCell`(10)、`IsoObject`(1)、
+`IsoDeadBody`(4，經 getter 的旁路變異者，不鏡射必失同步）。
+
+**關鍵設計決策**（v1→v2 重寫，Claude 6 項 important ＋ codex REDESIGN 五雷）：
+
+- **不變量是 identity 集合而非 size 對等** —— 清單可含重複元素；`remove` 成功後以
+  `list.contains` 複核才除名（codex 雷 1：否則 `[x,x]` 移一份就永久 false-negative，
+  且 size 對帳永遠抓不到）。
+- **generation bundle 取代 weak registry** —— codex 指出 `State.set→IsoObject.table`（Lua table）
+  可反向釘住弱鍵使其永不釋放；改以 `IsoCell` identity 錨定，換代整組替換，零 GC 猜測。
+- **removeAll 嚴格 gate＋尾端逐刪** —— 非 `ArrayList.class`／null 一律原生（NPE 與 subclass
+  的 `c.contains` 副作用 parity 交給原生）；R 用固定大小索引快照（非 iterator，不引入 vanilla
+  沒有的 CME 面）；尾端 `remove(i)` 每次 `modCount++` 精確還原 JDK `batchRemove` 語意
+  （`subList.clear()` 只加一次，不等價）；例外則毒化 `expectedSize` 後重拋，不半提交。
+- **kill 門檻只算 audit divergence** —— size 對帳 rebuild 只觀測不計（GO-WITH-FIXES：
+  重度 MOD 環境的 Lua 良性旁路會自癒，不該累積成永久停用）。門檻 8 次，terminal。
+
+**驗證**（18 個斷言）：8 個行為 differential（400 op 隨機序列含重複與 null、重複元素感知、
+等大小換血 ghost 自癒、20 次 size 漂移不 kill、divergence 達門檻永久 kill、未知清單降級、
+removeAll 四情境、補償迭代重入的訪問序列黃金比對）＋10 個結構斷言（六方法改道計數與原呼叫
+歸零、S3 負對照 `size×2/get×1` 原樣、S4 負對照 `ProcessStaticUpdaters` 零改道、S5 六個
+contains 後綴必為 IFNE/IFEQ、全 jar hierarchy walk 斷言 IsoObject 全後代零 equals/hashCode 覆寫）。
 
 ## 3. 部署後驗證清單
 

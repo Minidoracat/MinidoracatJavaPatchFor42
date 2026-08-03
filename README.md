@@ -9,7 +9,7 @@ PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路
 bytecode 做「堆疊形狀不變」的呼叫改道／方法內常數替換，另有兩個窄範圍 null 頭部守衛，
 StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac 對遊戲 jar 編譯，隨 patch 出貨。
 
-## 內容（22 個 patched class、30 個 runtime class、33 處手術、51 個命中點）
+## 內容（25 個 patched class、36 個 runtime class、46 處手術、66 個命中點）
 
 - **抑噪 6 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／ItemPickInfo／
   PacketsCache／INetworkPacket.logInconsistentPacket，外加 NetworkZombieManager——只攔已知噪音樣式，
