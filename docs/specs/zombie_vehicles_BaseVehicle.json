@@ -1,0 +1,18 @@
+{
+  "className": "zombie/vehicles/BaseVehicle",
+  "kind": "performance",
+  "buildBaseline": "42.20.0 / jar SHA-256 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8",
+  "designDoc": "docs/wave3-design-v1.md（W3-4）",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": { "name": "update", "desc": "()V" },
+      "site": { "opcode": "INVOKEVIRTUAL", "owner": "zombie/vehicles/BaseVehicle", "name": "couldSeeIntersectedSquare", "desc": "(I)Z", "expectedCount": 1 },
+      "redirect": "zombie/mdc/VehicleCouldSeeGate.couldSeeIntersectedSquare(Lzombie/vehicles/BaseVehicle;I)Z",
+      "rationale": "每車每 tick 對 AABB 10-18 格做 getGridSquare＋isCouldSee＋相交掃描，結果唯一去處 setTargetAlpha 在 server 是 vanilla 自己 if(!GameServer.server) 擋掉的 no-op、getTargetAlpha 恆回 1.0F、targetAlpha[] 全 jar 僅四個守衛讀點（審查逐項證偽）——server 上 100% 死工。server→回 true 等價短路（不解參考 vehicle）；非 server→public API 逐指令複刻 private 原版（部署面不可達）。",
+      "evidence": "javap update()V offset 2374-2398：numPlayers/current ifnull/invokevirtual #3306 couldSeeIntersectedSquare/ifne/setTargetAlpha(I,0.0F)（語境鎖完整，line 3828）。全類另一 callsite 在 render(FFFLzombie/core/textures/ColorInfo;ZZLzombie/core/opengl/Shader;)V offset 116——method-scope 鎖定不觸碰。SmokeCheck：render() 負對照＋setTargetAlpha 頭部 server guard 指紋（getstatic server→ifeq→return）＋getTargetAlpha server→fconst_1 指紋——no-op 論證的建置期鏈結，42.21 改守衛即建置失敗。"
+    }
+  ],
+  "behaviorNotes": "true/false 在 server 端行為等價（雙路徑皆歸於被守衛的 setTargetAlpha；後續 players[i] 在 dedicated server 恆 null）。無封包、無權威狀態。",
+  "verification": "console 出現 [MinidoracatJavaPatch][VehicleCouldSee] serverSkipped=… replicated=0；dump 中 couldSeeIntersectedSquare/getGridSquare 主題幀應消失。"
+}

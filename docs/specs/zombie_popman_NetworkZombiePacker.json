@@ -1,0 +1,18 @@
+{
+  "className": "zombie/popman/NetworkZombiePacker",
+  "kind": "performance",
+  "buildBaseline": "42.20.0 / jar SHA-256 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8",
+  "designDoc": "docs/wave3-design-v1.md（W3-1，v2 定稿）",
+  "patches": [
+    {
+      "op": "redirect-call",
+      "method": { "name": "updateAuth", "desc": "()V" },
+      "site": { "opcode": "INVOKEVIRTUAL", "owner": "zombie/popman/NetworkZombieManager", "name": "updateAuth", "desc": "(Lzombie/characters/IsoZombie;)V", "expectedCount": 1 },
+      "redirect": "zombie/mdc/ZombieAuthThrottle.updateAuth(Lzombie/popman/NetworkZombieManager;Lzombie/characters/IsoZombie;)V",
+      "rationale": "lastChangeOwner 只在實際換手時寫入→owner 穩定殭屍每 tick 全額重選舉（O(C×P) 距離掃描，Z≈2500、C≈80 時每 tick ~20 萬次）。helper 以內部 pass 計數器錯峰（每隻已擁有殭屍每 3 pass 選舉一次；PERIOD 取質數免疫長 pass 步進 2 的殘差鎖死。wall-clock 版遭三稜鏡一致否決、單欄位 tick 版再被 code review MAJOR-1 打回，定稿為雙欄位：呼叫間隔 ≥50ms＝新 pass＋距上次推進 ≥250ms 快 tick 保底）。owner==null／isDead／SwitchZombiesOwnershipEachUpdate=true 即刻放行；delegate 在 try 外零 double-call。",
+      "evidence": "javap updateAuth()V offset 29-33：invokestatic getInstance → aload_3 → invokevirtual #347 NetworkZombieManager.updateAuth（全方法唯一，line 175=dump 幀）。SmokeCheck：改道×1＋原呼叫歸零＋NetworkZombieManager（抑噪 patch 對象）內零 throttle 改道＋jar 端 clearTargetAuth 備援呼叫存在性。"
+    }
+  ],
+  "behaviorNotes": "錯峰上界 4 pass（400ms/tick 最壞 1.6s）< vanilla 換手後 2000ms 冷卻包絡；ZombieList 廣播節奏 3800-5000ms。下游疊加契約：未來 ping 加權 owner 選舉須以節流後頻率（~400ms/隻）為基準重新論證。",
+  "verification": "console 出現 [MinidoracatJavaPatch][AuthThrottle] delegated=… skipped=… anomalies=…；skip 比預期 ~75%；缺行=未生效立即單刀回退；dump 中 updateAuth/getOwnerPlayer ECS 鏈主題應下降。"
+}

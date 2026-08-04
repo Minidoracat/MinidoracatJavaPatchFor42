@@ -92,6 +92,71 @@ public final class SmokeCheck {
             failed += checkCellListMembership(patched);
             failed += checkFertilizedEggGuard(patched);
 
+            // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
+            // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
+            Class<?> throttle = Class.forName("zombie.mdc.ZombieAuthThrottle", true, patched);
+            Method due = throttle.getDeclaredMethod("dueThisTick", long.class, short.class);
+            due.setAccessible(true);
+            boolean staggerOk = true;
+            for (short id : new short[]{Short.MIN_VALUE, (short) -1, (short) 0, (short) 1, (short) 7, Short.MAX_VALUE}) {
+                for (long base = 0; base < 8 && staggerOk; base++) {
+                    int hits = 0;
+                    for (long t = base; t < base + 3; t++) {
+                        if ((Boolean) due.invoke(null, t, id)) {
+                            hits++;
+                        }
+                    }
+                    staggerOk = hits == 1;
+                }
+            }
+            failed += check("W3-1 stagger：任意 onlineId（含負）任意連續 3 tick 恰命中 1 次", staggerOk);
+            Method observe = throttle.getDeclaredMethod("observe", long.class);
+            observe.setAccessible(true);
+            long ob0 = (Long) observe.invoke(null, 1_000_000L);
+            long ob1 = (Long) observe.invoke(null, 1_000_010L);
+            long ob2 = (Long) observe.invoke(null, 1_000_060L);
+            failed += check("W3-1 pass 邊界偵測：<50ms 不推進、>=50ms 推進一格",
+                    ob1 == ob0 && ob2 == ob0 + 1);
+            // code review MAJOR-1 釘子：100ms 長 pass（呼叫間隔 10ms）只推進進場那一格
+            long b0 = (Long) observe.invoke(null, 2_000_000L);
+            for (long t = 2_000_010L; t <= 2_000_100L; t += 10L) {
+                observe.invoke(null, t);
+            }
+            failed += check("W3-1 長 pass 內不重複推進（防步進共振餓死）",
+                    (Long) observe.invoke(null, 2_000_100L) == b0);
+            // 快 tick 保底：呼叫間隔 30ms（<50 永不觸發 pass 邊界）時，250ms fallback 仍推進
+            long c0 = (Long) observe.invoke(null, 3_000_000L);
+            long cEnd = c0;
+            for (long t = 3_000_030L; t <= 3_000_300L; t += 30L) {
+                cEnd = (Long) observe.invoke(null, t);
+            }
+            failed += check("W3-1 快 tick 保底：30ms 間隔跨 300ms 恰推進一次", cEnd == c0 + 1);
+
+            // W3-3 threshold 純函式：下限 12、動態跟隨 spottingDist、MAX_VALUE 在 float domain 安全
+            Class<?> spotPre = Class.forName("zombie.characters.animals.behavior.AnimalSpottedPrefilter", true, patched);
+            Method th = spotPre.getDeclaredMethod("thresholdOf", int.class);
+            th.setAccessible(true);
+            boolean thOk = (Float) th.invoke(null, 10) == 12.0F
+                    && (Float) th.invoke(null, 50) == 52.0F
+                    && (Float) th.invoke(null, 0) == 12.0F
+                    && (Float) th.invoke(null, Integer.MAX_VALUE) > 2.0e9F;
+            failed += check("W3-3 threshold：下限 12、跟隨 spottingDist、MAX_VALUE 安全", thOk);
+
+            // W3-4 server 短路：null vehicle 亦回 true（證明 server 路徑零解參考）
+            Class<?> gameServer = Class.forName("zombie.network.GameServer", true, patched);
+            Field srvField = gameServer.getField("server");
+            boolean prevSrv = srvField.getBoolean(null);
+            srvField.setBoolean(null, true);
+            try {
+                Class<?> gate = Class.forName("zombie.mdc.VehicleCouldSeeGate", true, patched);
+                Class<?> baseVehCls = Class.forName("zombie.vehicles.BaseVehicle", false, patched);
+                Method gm = gate.getMethod("couldSeeIntersectedSquare", baseVehCls, int.class);
+                failed += check("W3-4 server 短路：null vehicle 亦回 true（零解參考）",
+                        (Boolean) gm.invoke(null, null, 0));
+            } finally {
+                srvField.setBoolean(null, prevSrv);
+            }
+
             Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
             Method clamp = guard.getMethod("clampAddZombieCount", int.class);
             Method swapBuffer = guard.getMethod("updateMainBuffer", ByteBuffer.class);
@@ -780,6 +845,62 @@ public final class SmokeCheck {
 
         failed += checkIdentityDomain(jar);
 
+        // ---- W3 效能第三波結構斷言 ----
+        String nzmCls = "zombie/popman/NetworkZombieManager";
+        String throttleCls = "zombie/mdc/ZombieAuthThrottle";
+        MethodNode pkAuth = method(distJava, "zombie/popman/NetworkZombiePacker", "updateAuth", "()V");
+        failed += check("W3-1 packer.updateAuth：改道 x1、原呼叫歸零",
+                countExactCalls(pkAuth, Opcodes.INVOKESTATIC, throttleCls, "updateAuth",
+                        "(L" + nzmCls + ";Lzombie/characters/IsoZombie;)V") == 1
+                && countExactCalls(pkAuth, Opcodes.INVOKEVIRTUAL, nzmCls, "updateAuth",
+                        "(Lzombie/characters/IsoZombie;)V") == 0);
+        // NetworkZombieManager 本就因第一波抑噪 patch 在修補輸出——負對照改為斷言其內部
+        // （含 updateAuth 本體與 clearTargetAuth 斷線清理路徑）零 throttle 改道
+        ClassNode nzmNode = classNode(distJava, nzmCls);
+        boolean nzmClean = nzmNode.methods.stream().allMatch(m ->
+                countExactCalls(m, Opcodes.INVOKESTATIC, throttleCls, "updateAuth",
+                        "(L" + nzmCls + ";Lzombie/characters/IsoZombie;)V") == 0);
+        failed += check("W3-1 負對照：NetworkZombieManager（抑噪 patch 對象）內零 throttle 改道", nzmClean);
+        MethodNode ctAuth = methodFromJar(jar, nzmCls, "clearTargetAuth",
+                "(Lzombie/network/IConnection;Lzombie/characters/IsoPlayer;)V");
+        failed += check("W3-1 前提：clearTargetAuth 確有自身 updateAuth(IsoZombie) 備援呼叫（vanilla 斷線清理）",
+                countExactCalls(ctAuth, Opcodes.INVOKEVIRTUAL, nzmCls, "updateAuth",
+                        "(Lzombie/characters/IsoZombie;)V") >= 1);
+
+        String behavCls = "zombie/characters/animals/behavior/BaseAnimalBehavior";
+        String spotDesc = "(Lzombie/iso/IsoMovingObject;ZF)V";
+        String spotPreCls = "zombie/characters/animals/behavior/AnimalSpottedPrefilter";
+        String spotPreDesc = "(L" + behavCls + ";Lzombie/iso/IsoMovingObject;ZF)V";
+        MethodNode uLos = method(distJava, "zombie/characters/animals/IsoAnimal", "updateLOS", "()V");
+        failed += check("W3-3 updateLOS：改道 x2（殭屍＋玩家分支）、原呼叫歸零",
+                countExactCalls(uLos, Opcodes.INVOKESTATIC, spotPreCls, "spotted", spotPreDesc) == 2
+                && countExactCalls(uLos, Opcodes.INVOKEVIRTUAL, behavCls, "spotted", spotDesc) == 0);
+        MethodNode fwd = method(distJava, "zombie/characters/animals/IsoAnimal", "spotted", spotDesc);
+        failed += check("W3-3 負對照：IsoAnimal.spotted 轉發方法保持 vanilla（TestAnimalSpotPlayer 路徑）",
+                countExactCalls(fwd, Opcodes.INVOKEVIRTUAL, behavCls, "spotted", spotDesc) == 1
+                && countExactCalls(fwd, Opcodes.INVOKESTATIC, spotPreCls, "spotted", spotPreDesc) == 0);
+        MethodNode vSpotted = methodFromJar(jar, behavCls, "spotted", spotDesc);
+        failed += check("W3-3 前綴指紋：無條件前綴（spottedChr＋lastAlerted x2＋GameTime x2）與重放版同構",
+                checkSpottedPrefix(vSpotted));
+        failed += check("W3-3 常數包絡：spotted() float 常數集與 42.20 快照一致（漂移即重新分析）",
+                checkSpottedConstEnvelope(vSpotted));
+        failed += checkAnimalBehaviorDomain(jar);
+
+        String vehCls = "zombie/vehicles/BaseVehicle";
+        MethodNode vUpd = method(distJava, vehCls, "update", "()V");
+        failed += check("W3-4 update：改道 x1、原呼叫歸零",
+                countExactCalls(vUpd, Opcodes.INVOKESTATIC, "zombie/mdc/VehicleCouldSeeGate",
+                        "couldSeeIntersectedSquare", "(L" + vehCls + ";I)Z") == 1
+                && countExactCalls(vUpd, Opcodes.INVOKEVIRTUAL, vehCls, "couldSeeIntersectedSquare", "(I)Z") == 0);
+        MethodNode vRender = method(distJava, vehCls, "render",
+                "(FFFLzombie/core/textures/ColorInfo;ZZLzombie/core/opengl/Shader;)V");
+        failed += check("W3-4 負對照：render() 的同名 callsite 保持 vanilla",
+                countExactCalls(vRender, Opcodes.INVOKEVIRTUAL, vehCls, "couldSeeIntersectedSquare", "(I)Z") == 1);
+        failed += check("W3-4 no-op 鏈結：setTargetAlpha 頭部 server guard 指紋",
+                checkServerGuardHead(methodFromJar(jar, "zombie/iso/IsoObject", "setTargetAlpha", "(IF)V")));
+        failed += check("W3-4 no-op 鏈結：getTargetAlpha server→1.0F 指紋",
+                checkGetTargetAlphaGuard(methodFromJar(jar, "zombie/iso/IsoObject", "getTargetAlpha", "(I)F")));
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -1334,6 +1455,135 @@ public final class SmokeCheck {
             }
         }
         return check("P5 identity domain：IsoObject 全後代零 equals/hashCode 覆寫（全 jar walk）", bad == 0);
+    }
+
+    /**
+     * W3-3 前綴指紋（code review MINOR-2 強化版）：GameClient.client 檢查之前，
+     * putfield 序列（owner 限定）必須恰為 IsoAnimal.spottedChr → BaseAnimalBehavior.lastAlerted ×2、
+     * invoke 僅 GameTime.getInstance/getMultiplier、分支恰為 IFLE→IFGE（守衛方向）
+     * ——與 AnimalSpottedPrefilter 的重放版逐句同構。42.21 改前綴（含欄位搬家/守衛翻轉）即建置失敗。
+     */
+    static boolean checkSpottedPrefix(MethodNode m) {
+        java.util.List<String> putfields = new ArrayList<>();
+        java.util.List<String> invokes = new ArrayList<>();
+        java.util.List<Integer> jumps = new ArrayList<>();
+        for (AbstractInsnNode in = m.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (in.getOpcode() == Opcodes.GETSTATIC) {
+                FieldInsnNode fi = (FieldInsnNode) in;
+                if (fi.owner.equals("zombie/network/GameClient") && fi.name.equals("client")) {
+                    return putfields.equals(java.util.List.of(
+                                    "zombie/characters/animals/IsoAnimal.spottedChr",
+                                    "zombie/characters/animals/behavior/BaseAnimalBehavior.lastAlerted",
+                                    "zombie/characters/animals/behavior/BaseAnimalBehavior.lastAlerted"))
+                            && invokes.equals(java.util.List.of("getInstance", "getMultiplier"))
+                            && jumps.equals(java.util.List.of(Opcodes.IFLE, Opcodes.IFGE));
+                }
+            } else if (in.getOpcode() == Opcodes.PUTFIELD) {
+                FieldInsnNode fi = (FieldInsnNode) in;
+                putfields.add(fi.owner + "." + fi.name);
+            } else if (in instanceof MethodInsnNode mi) {
+                invokes.add(mi.name);
+            } else if (in instanceof JumpInsnNode) {
+                jumps.add(in.getOpcode());
+            }
+        }
+        return false;       // 找不到 GameClient.client 檢查＝前綴結構已變
+    }
+
+    /**
+     * W3-3 常數包絡快照（code review MINOR-1 強化版）：spotted() 內全部 LDC float
+     * 依指令順序的有序清單凍結於 42.20——「值在既有集合內互換」（如門檻 10→14）也會被抓。
+     */
+    static boolean checkSpottedConstEnvelope(MethodNode m) {
+        java.util.List<Float> found = new ArrayList<>();
+        for (AbstractInsnNode in = m.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Float f) {
+                found.add(f);
+            }
+        }
+        // 42.20 快照：51 個 LDC float 依指令順序（ASM 全量收集，含負值/科學記號/重複）
+        java.util.List<Float> expected = java.util.List.of(
+                10.0f, 5.0E-4f, 6.0E-4f, 100.0f, 100.0f, 100.0f, 100.0f, 100.0f, 1000.0f, 80.0f,
+                30.0f, 3.0f, 8000.0f, 800.0f, 500000.0f, 0.5f, 0.3f, 0.25f, 0.25f, -0.4f,
+                16.0f, -0.2f, 3.0f, -0.0f, 1.5f, 0.2f, 1.5f, 0.4f, 3.0f, 0.6f,
+                11.0f, 0.8f, 24.0f, 44.0f, 3.0f, 3.0f, 3.0f, 3.0f, 3.0f, 3.0f,
+                3.0f, 3.0f, 3.0f, 3.0f, 10.0f, 5.0E-5f, 9.0E-5f, 14.0f, 100.0f, 100.0f, 6.0f);
+        if (!found.equals(expected)) {
+            System.out.println("  !! spotted() float 常數序列漂移: " + found);
+            return false;
+        }
+        return true;
+    }
+
+    /** W3-4 指紋：setTargetAlpha 頭三條真實指令＝getstatic GameServer.server → ifeq → return。 */
+    static boolean checkServerGuardHead(MethodNode m) {
+        int[] want = { Opcodes.GETSTATIC, Opcodes.IFEQ, Opcodes.RETURN };
+        return matchHead(m, want);
+    }
+
+    /** W3-4 指紋：getTargetAlpha 頭四條＝getstatic server → ifeq → fconst_1 → freturn。 */
+    static boolean checkGetTargetAlphaGuard(MethodNode m) {
+        int[] want = { Opcodes.GETSTATIC, Opcodes.IFEQ, Opcodes.FCONST_1, Opcodes.FRETURN };
+        return matchHead(m, want);
+    }
+
+    private static boolean matchHead(MethodNode m, int[] want) {
+        int i = 0;
+        for (AbstractInsnNode in = m.instructions.getFirst(); in != null && i < want.length; in = in.getNext()) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            if (in.getOpcode() != want[i]) {
+                return false;
+            }
+            if (i == 0) {
+                FieldInsnNode fi = (FieldInsnNode) in;
+                if (!fi.owner.equals("zombie/network/GameServer") || !fi.name.equals("server")) {
+                    return false;
+                }
+            }
+            i++;
+        }
+        return i == want.length;
+    }
+
+    /** W3-3 去虛擬化前提：BaseAnimalBehavior 全後代（全 jar walk）零 spotted 覆寫——改道後 static dispatch 等價。 */
+    static int checkAnimalBehaviorDomain(Path jar) throws Exception {
+        String base = "zombie/characters/animals/behavior/BaseAnimalBehavior";
+        Map<String, String> superOf = new HashMap<>();
+        Set<String> overrides = new HashSet<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e).readAllBytes())
+                        .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                superOf.put(cn.name, cn.superName);
+                for (MethodNode m : cn.methods) {
+                    if (m.name.equals("spotted") && m.desc.equals("(Lzombie/iso/IsoMovingObject;ZF)V")
+                            && !cn.name.equals(base)) {
+                        overrides.add(cn.name);
+                        break;
+                    }
+                }
+            }
+        }
+        int bad = 0;
+        for (String cls : superOf.keySet()) {
+            String cur = cls;
+            while (cur != null && !cur.equals(base)) {
+                cur = superOf.get(cur);
+            }
+            if (cur != null && overrides.contains(cls)) {
+                System.out.println("  !! spotted 覆寫: " + cls);
+                bad++;
+            }
+        }
+        return check("W3-3 behavior domain：BaseAnimalBehavior 全後代零 spotted 覆寫（全 jar walk）", bad == 0);
     }
 
     static int check(String what, boolean ok) {
