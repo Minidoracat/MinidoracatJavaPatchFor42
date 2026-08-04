@@ -54,7 +54,10 @@ $helperEntries = @(
     'zombie/mdc/CellListMembership.class',
     'zombie/mdc/CellListMembership$State.class',
     'zombie/mdc/CellListMembership$Gen.class',
-    'zombie/mdc/FertilizedEggGuard.class'
+    'zombie/mdc/FertilizedEggGuard.class',
+    'zombie/mdc/ZombieAuthThrottle.class',
+    'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
+    'zombie/mdc/VehicleCouldSeeGate.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()

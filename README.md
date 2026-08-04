@@ -9,7 +9,7 @@ PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路
 bytecode 做「堆疊形狀不變」的呼叫改道／方法內常數替換，另有兩個窄範圍 null 頭部守衛，
 StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac 對遊戲 jar 編譯，隨 patch 出貨。
 
-## 內容（26 個 patched class、38 個 runtime class、47 處手術、67 個命中點）
+## 內容（28 個 patched class、43 個 runtime class、50 處手術、71 個命中點）
 
 - **抑噪 6 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／ItemPickInfo／
   PacketsCache／INetworkPacket.logInconsistentPacket，外加 NetworkZombieManager——只攔已知噪音樣式，
@@ -32,6 +32,16 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   的 per-instance 欄位，與一般蛋同為 `Base.Egg`），而 24 遊戲小時的清除門檻遠短於 1260 小時的
   孵化時間——改道 `IsoGridSquare.load` 內唯一的 `isIgnoreRemoveSandbox`，只在 vanilla 判定為
   不豁免時追加「可孵化且在孵化視窗內」的豁免；視窗天花板保證不會無界累積。
+
+- **效能第三波 W3 三刀**（docs/wave3-design-v1.md v2；三稜鏡對抗審查＋獨立 code review 雙關）：
+  (1) 殭屍 ownership 重選舉錯峰——`NetworkZombiePacker.updateAuth` 改道 tick 計數器節流，
+  owner 穩定殭屍由每 tick 全額 O(連線×玩家) 掃描降為每 3 pass 一次，isDead／孤兒／
+  SwitchZombiesOwnershipEachUpdate 即刻放行；(2) 動物 spotted 距離預過濾——`IsoAnimal.updateLOS`
+  兩處改道，遠距（>max(12, spottingDist+2)）呼叫逐句重放無條件前綴後跳過，全 jar walk 斷言
+  behavior 子類零覆寫＋前綴指紋＋51 值有序常數包絡鎖 42.21 漂移；(3) 車輛 couldSee server
+  死工消除——`BaseVehicle.update` 內掃描結果唯一去處是 server 端 vanilla no-op，直接短路，
+  render() 負對照＋targetAlpha guard 指紋雙鎖。另 W3-2（ECS memo）經 microbenchmark 實測
+  為淨劣化而撤刀，記錄於設計文件。
 
 > 上表僅列到本節；2j~2n 的完整敘述見 docs/patches.md。
 

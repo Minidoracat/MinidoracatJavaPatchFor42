@@ -214,6 +214,20 @@ public final class PatchConfig {
         Patcher.MethodOps a3 = animal.method("killed", "(Lzombie/characters/IsoPlayer;)V");
         a3.consts.add(new Patcher.ConstChange(30.0f, 15.0f));
         a3.expectedHits = 1;
+        // W3-3（2026-08-05 效能第三波，三稜鏡對抗審查定稿）：updateLOS 對同層所有移動物件
+        // （殭屍數千）無水平距離過濾直接呼叫 behavior.spotted()——spotted() 全部持久效果的
+        // 距離門檻 ≤ spottingDist(≈10)，遠距呼叫在 vanilla 中除「spottedChr=null＋lastAlerted
+        // 衰減」無條件前綴外零效果（審查逐行證偽；接受共享 RNG 流分歧，MP 無決定性依賴）。
+        // 兩處呼叫點（殭屍分支＋玩家分支）改道距離預過濾 helper（前綴逐句重放＋每呼叫 live 讀
+        // spottingDist）。IsoAnimal.spotted 轉發方法內的第三處**不動**——外部另有
+        // IsoPlayer.TestAnimalSpotPlayer 以 bForced=false＋Manhattan 距離經其進入（流量可忽略）。
+        // 去虛擬化前提由 SmokeCheck 全 jar walk 把關：BaseAnimalBehavior 後代零 spotted 覆寫。
+        Patcher.MethodOps a4 = animal.method("updateLOS", "()V");
+        a4.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/behavior/BaseAnimalBehavior", "spotted",
+                "(Lzombie/iso/IsoMovingObject;ZF)V",
+                "zombie/characters/animals/behavior/AnimalSpottedPrefilter", "spotted"));
+        a4.expectedHits = 2;
         patches.add(animal);
 
         // 根因（codex 對抗審查＋v2 clamp 線上 overlap 證據 pageCount=35>readable=28、1024−814=210
@@ -356,6 +370,48 @@ public final class PatchConfig {
                 "zombie/mdc/FertilizedEggGuard", "isIgnoreRemoveSandbox"));
         squareLoad.expectedHits = 1;
         patches.add(gridSquare);
+
+        // ---- 效能第三波 W3（2026-08-05，三線並行分析＋三稜鏡對抗審查定稿；
+        //      docs/wave3-design-v1.md，W3-3 見上方 IsoAnimal 條目）----
+
+        // W3-1 殭屍 ownership 重選舉錯峰節流：lastChangeOwner 只在實際換手時寫入，
+        // owner 穩定的殭屍每 tick 都全額重選舉（O(連線×玩家) 距離掃描，Z≈2500、C≈80
+        // 時每 tick ~20 萬次）。改道 packer 迴圈內唯一的 manager.updateAuth 呼叫點到
+        // tick 計數器錯峰 helper（每隻已擁有殭屍每 3 個 pass 選舉一次——PERIOD 取質數
+        // 免疫長 pass 步進 2 的殘差鎖死；wall-clock 版因與退化 tick 週期共振遭三稜鏡
+        // 一致否決，單欄位 tick 版再被 code review MAJOR-1 打回）。owner==null／isDead／
+        // SwitchZombiesOwnershipEachUpdate=true 一律即刻放行；NetworkZombieManager.
+        // clearTargetAuth 內另一 callsite 不動（斷線清理不節流）。
+        // 下游疊加契約：未來若做 ping 加權 owner 選舉（改 manager.updateAuth 內部），
+        // 須以節流後頻率（~400ms/隻）為基準頻率重新論證。
+        Patcher.ClassPatch packer = new Patcher.ClassPatch("zombie/popman/NetworkZombiePacker");
+        Patcher.MethodOps packerAuth = packer.method("updateAuth", "()V");
+        packerAuth.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/popman/NetworkZombieManager", "updateAuth",
+                "(Lzombie/characters/IsoZombie;)V",
+                "zombie/mdc/ZombieAuthThrottle", "updateAuth"));
+        packerAuth.expectedHits = 1;
+        patches.add(packer);
+
+        // W3-2（ECS getECSClass ClassValue memo）已撤刀：microbenchmark 實測 vanilla
+        // 0.93ns/call vs memo 1.19ns/call——深度 1 元件（常態）的 superclass walk 是
+        // 1 次 getSuperclass intrinsic＋2 次參考比較，比 ClassValue fast path 更便宜，
+        // memo 為淨劣化。三稜鏡面板 GO×3 但估算（0.5-2% 收益）被量測推翻；教訓：
+        // 「零風險」不等於「有收益」，收益宣稱低於實作複雜度的刀必須先量測。
+
+        // W3-4 車輛 couldSee 掃描的 server 死工消除：update() 每車每 tick 對 AABB 10–18 格
+        // 做 getGridSquare＋isCouldSee＋相交掃描，結果唯一去處 setTargetAlpha 在 server 端
+        // 是 vanilla 自己 if(!GameServer.server) 擋掉的 no-op、getTargetAlpha 恆回 1.0F
+        // （targetAlpha[] 全 jar 僅四個守衛讀點，審查逐項證偽）。server 直接回 true 等價
+        // 短路；非 server 走 public API 逐指令複刻 fallback（部署面不可達）。
+        // render()V 內同名 callsite 不得觸碰——method-scope 鎖定＋SmokeCheck 負對照。
+        Patcher.ClassPatch baseVeh = new Patcher.ClassPatch("zombie/vehicles/BaseVehicle");
+        Patcher.MethodOps vehUpdate = baseVeh.method("update", "()V");
+        vehUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/vehicles/BaseVehicle", "couldSeeIntersectedSquare", "(I)Z",
+                "zombie/mdc/VehicleCouldSeeGate", "couldSeeIntersectedSquare"));
+        vehUpdate.expectedHits = 1;
+        patches.add(baseVeh);
 
         return patches;
     }
