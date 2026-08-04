@@ -43,6 +43,10 @@ while IFS=$'\t' read -r entry _rest; do
     [ -n "$entry" ] || continue
     [ -e "$SF/java/$entry" ] && { echo "[中止] $SF/java/$entry 已存在（非本 patch 產物）——請先人工處理" >&2; exit 1; }
 done < "$MF"
+# 第三方 loose class 巡檢（僅警告不中止）：SmokeCheck 的全 jar walk 斷言（identity／
+# behavior 子類）只涵蓋建置基準 jar，現場若另有他人 loose class 可旁路這些前提。
+foreign=$(find "$SF/java" -name '*.class' 2>/dev/null | sed "s|^$SF/java/||" | grep -vxF -f <(cut -f1 "$MF") || true)
+[ -n "$foreign" ] && echo "[警告] 偵測到非本 patch 的 loose class（jar walk 前提可能被旁路）：" && echo "$foreign" | sed 's/^/    /'
 echo "OK  無衝突"
 
 echo "== 安裝 =="
