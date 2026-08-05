@@ -6,6 +6,39 @@
 > 現況：**23 個 patched class、34 個 runtime class、34 處手術、44 個命中點**（42.20.2）。
 > 42.20.2 里程碑：官方收編 P5／popman 隔離／512→256 三組（見第四節），我方對應退役。
 
+## 全 Patch 清單（42.20.2 現役）
+
+| 類別 | Patch 項目 | 對象 class | 命中 | Runtime helper | 一句話 |
+|---|---|---|---|---|---|
+| 效能 | W1-1 車輛視線預篩 | `IsoZombie` | 1 | VehicleIntersectPrefilter | 殭屍→車輛 OBB 相交前先做包圍球預篩，99.87% 拒絕 |
+| 效能 | entity removal 索引化 | `EngineEntityManager`＋`EntityBucket` | 2+2 | FastIdentityArrayRemoval(+$State) | 批次卸載的 identity 線性搜尋 O(N)→O(1) |
+| 效能 | W3-1 殭屍 ownership 錯峰 | `NetworkZombiePacker` | 1 | ZombieAuthThrottle | owner 穩定殭屍每 3 pass 才重選舉（原每 tick 全額 O(C×P)） |
+| 效能 | W3-3 動物 spotted 距離預篩 | `IsoAnimal`（updateLOS） | 2 | AnimalSpottedPrefilter | 遠距（>max(12,視距+2)）呼叫重放前綴後跳過，攔截率 99.94% |
+| 效能 | W3-4 車輛 couldSee 死工消除 | `BaseVehicle`（update） | 1 | VehicleCouldSeeGate | server 端結果進 vanilla no-op，直接短路 |
+| 行為 | 動物壓力三調 | `IsoAnimal`（3 常數） | 3 | — | 閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半 |
+| 修復 | 玻璃假死保險絲 | `IsoWindow` | 1 | GlassAttachmentGuard | removeGlassAttachments 無限迴圈改跳過＋定位 log |
+| 修復 | 受精蛋清除豁免 | `IsoGridSquare` | 1 | FertilizedEggGuard | 孵化視窗內的受精蛋不被世界清理刪除 |
+| 修復 | 容器刷新修復 | `LootRespawn` | 2 | （LogFilter 兼任） | 自訂地圖無 TownZone 的原生固定容器恢復刷新 |
+| 防崩潰 | null 頭部守衛 ×2 | `hit/Zombie`＋`hit/Fall` | 1+1 | — | 損壞封包 NPE 崩潰的 guard-before-super |
+| 抑噪 | 已知噪音樣式過濾 ×7 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager` | 1+1+1+9+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出 |
+| 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
+| 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
+
+合計：23 個 patched class、44 個命中點、11 個 runtime helper（34 classes）。
+另有 **client 端獨立包**（貼圖管線門檻＋洩漏根治，發佈於 `output\`，玩家自選安裝，不在 server manifest）。
+
+### 退役／停用／否決（歷史記錄，詳見第四節）
+
+| 項目 | 結局 |
+|---|---|
+| P5 IsoCell sidecar（15 站） | 42.20.2 官方收編 |
+| popman buffer 隔離 v3（11 站） | 42.20.2 官方收編 |
+| VehicleManager 512→256 | 42.20.2 官方收編 |
+| W3-2 ECS memo | microbenchmark 實測淨劣化，撤刀 |
+| 安全屋 room/building 修復 | 停用（觸發條件已移除，座標保留可隨時恢復） |
+| ActionStateContainer 抑噪 | 42.20 官方降級 warn→trace，退役 |
+| ZombieCountOptimiser 回收加速 | 42.20 官方重寫壓力模型，定案不恢復 |
+
 ## 核心哲學
 
 三波效能 patch 共用同一句話：**找出「算了也白算」的工作，證明它白算，然後不算。**
