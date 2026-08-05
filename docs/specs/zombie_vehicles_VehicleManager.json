@@ -5,13 +5,24 @@
   "patches": [
     {
       "op": "const-change",
-      "method": { "name": "<init>", "desc": "()V" },
-      "constChange": { "from": 512, "to": 256 },
-      "site": { "opcode": "SIPUSH", "expectedCount": 1 },
+      "method": {
+        "name": "<init>",
+        "desc": "()V"
+      },
+      "constChange": {
+        "from": 512,
+        "to": 256
+      },
+      "site": {
+        "opcode": "SIPUSH",
+        "expectedCount": 1
+      },
       "rationale": "serverUpdate 每 server tick（每 frame 2 次呼叫：GameServer.main 與 IsoWorld.updateInternal）無條件掃描 connected[] 全部 512 slot × 全部已載入載具做旗標傳播，與實際人數無關；實際發送另有 100ms 節流，~83% 的呼叫純空轉（300 台載具時每秒約 9M 次無效迭代）。而 RakNet 層 connection index 的上界是 256：UdpEngine.connectionArray = new UdpConnection[256]，所有 connection ID 一律 buf.getByte()&255 解碼（值域 0..255），addConnection(id) 直接把該 id 存入 UdpConnection.index，且 setIndex 在全 jar（含遊戲外掛依賴）零呼叫者——index 恆 <256，connected[] 上半 256 slot 從未被寫入、純空轉。<init> 的 sipush 512 改 256 使 connected.length 減半，掃描成本精確砍半。BaseVehicle.connectionState[512] 刻意不動：同受 index<256 界限，多餘槽位僅浪費少量記憶體、無正確性影響，且改它需動另一個 class 增加刀口。不縮到 100/101：連線數上限不代表 RakNet ID 密集分佈於低段（codex 對抗審查定案）。此候選由 codex 提出、取代原 P4 反射門控方案（後者需 setAccessible private 欄位＋每次重解 instance，工程面與失效模式都更差）。",
       "evidence": "42.20 javap：<init> offset 67 恰一處 sipush 512，緊接 anewarray zombie/core/raknet/UdpConnection（語境鎖）；同方法另有 bipush 27、ldc2_w 100L（updateRate）、ldc2_w 1000L（updatePassengers）——SmokeCheck 負對照鎖定不誤中。dump 佐證：5/5 份 serverUpdate 樣本停在 VehicleManager.java:127（原始行號），LineNumberTable 對映 offset 175 = goto 124 —— 即 512×V 旗標迴圈的回跳邊，非 sendVehicles（行 132+/offset 194+，0 份命中）。index<256 證據：UdpEngine.java connectionArray[256]、getByte()&255 解碼（多處）、addConnection→new UdpConnection(this,guid,id)→this.index=id；setIndex 呼叫者全 snapshot 掃描僅 jackson/commons 無關同名方法。"
     }
   ],
   "behaviorNotes": "connected[] 的三個存取點全在 VehicleManager 內：serverUpdate 迴圈讀/清（i < connected.length，自動適應新長度）、connectionAdded 寫入 connected[connection.getIndex()]（index<256 已證，256 長度下界內）、斷線清理 connected[i]=null。旗標傳播語意不變——上半 slot 本來就永遠是 null，走 else 分支對 connectionState[i] 做的 |= 累積會被發送端 shouldSend 的 flags&=1 遮罩丟棄（codex 逐位元分析），砍掉的是純無效工作。",
-  "verification": "部署後：(1) 開機健檢無 ArrayIndexOutOfBoundsException（若出現且 stack 含 VehicleManager.connectionAdded＝index≥256 的反例，立即 uninstall 並回報——這將推翻 getByte()&255 的界限分析）；(2) 載具同步行為不變：玩家上下車、駕駛、乘客視角正常；(3) fps-dip-sampler 新 dump 中 VehicleManager.serverUpdate 佔比應從 ~6-8% 下降；(4) 100ms 節流發送不受影響（sendVehicles 自行重取載具集合）。回退：uninstall.sh。"
+  "verification": "部署後：(1) 開機健檢無 ArrayIndexOutOfBoundsException（若出現且 stack 含 VehicleManager.connectionAdded＝index≥256 的反例，立即 uninstall 並回報——這將推翻 getByte()&255 的界限分析）；(2) 載具同步行為不變：玩家上下車、駕駛、乘客視角正常；(3) fps-dip-sampler 新 dump 中 VehicleManager.serverUpdate 佔比應從 ~6-8% 下降；(4) 100ms 節流發送不受影響（sendVehicles 自行重取載具集合）。回退：uninstall.sh。",
+  "status": "retired-42.20.2",
+  "retirementNote": "42.20.2 官方收編：connected[512] 與 BaseVehicle.connectionState[512] 刪除，改 per-connection UdpConnection.vehicleStates HashMap，sipush 512 座標消失，退役。"
 }

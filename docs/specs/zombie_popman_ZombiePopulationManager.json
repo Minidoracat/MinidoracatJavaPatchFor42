@@ -22,5 +22,7 @@
       "verification": "SmokeCheck：行為 smoke（35 內原值、36+ 夾 35、負值不動）；結構全序鎖 w[0..12] 延伸至解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge），要求 count slot 即迴圈比較上限、loop-index slot 與 count/offset slot 相異；MAX_RECORDS 前提守門——capacity 取自 <init> 的 allocateDirect 實參（恰 1 處、SIPUSH 1024、putfield byteBuffer）、每筆 bytes 由 updateMain 的 buffer 讀取組成計出（getFloat×3/get×1/getInt×4），並與 helper 實際 clamp ceiling（clamp(Integer.MAX_VALUE)）連動。手術狀態機在 visitFrame/visitJump/visitField/visitType/visitIinc/visitLdc/visitIntInsn/invokedynamic/switch/multianewarray 任何非 pattern 指令一律重置（codex gpt-5.6-sol 對抗審查定案）。",
       "evidence": "正式服與本機 projectzomboid.jar SHA-256 同為 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8；ZombiePopulationManager.class SHA-256=126fbf46d4b0ee77c6b85a4781e270fa71bcb35d405596bd130f1c276302e8dc。javap：<init> 的 sipush 1024 → allocateDirect（buffer 容量，全 class 唯一）；updateMain offset 69 invokestatic n_getAddZombieData（全 class 唯一）、72 istore 7（count）、74/76/78/79 iload 6/iload 7/iadd/istore 6（offset += count）、81 iconst_0 為原插入點後首指令、86 iload 7 為迴圈比較。每筆 29 bytes 由 updateMain 的讀取序列驗證（getFloat×3＋get×1＋getInt×4，方法內恰為 3/1/4 次）。正式服 2026-07-30 全日 11 個 log set 共 77 筆 `IngameState.UpdateStuff> Exception thrown`＝BufferUnderflowException at ZombiePopulationManager.updateMain（:611 getFloat 與 :614 getInt 兩種越界點，符合 count 超額後在頁尾任意欄位讀爆），與玩家「殭屍/實體消失」回報時段吻合（01:04:47 例外落在 client 端 229 筆 stale zombie 清除視窗內）。"
     }
-  ]
+  ],
+  "status": "retired-42.20.2",
+  "retirementNote": "42.20.2 官方收編：官方新增 readByteBuffer 專用讀 buffer，updateMain 讀寫隔離與我方 v3 指令級同構，fieldGetSwap 與 count-clamp 一併退役。"
 }
