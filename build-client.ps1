@@ -1,9 +1,12 @@
 # build-client.ps1 — 建置 PZ client loose-class patch（invisible-entities 觀測＋門檻修復）
 # 與 server build（build.ps1）完全隔離：獨立 work\out-client 與 dist-client\，不進 server manifest。
-# client 與 server 的 projectzomboid.jar SHA-256 相同（e4661ca9…54b8），共用 work\projectzomboid.jar。
+# client 與 server 的 projectzomboid.jar 逐版 class 內容相同，共用 work\projectzomboid.jar
+#（42.20.2 起兩側整檔 SHA 可能因重新打包而異，install 閘以 build 當下的 work jar SHA 注入）。
 $ErrorActionPreference = 'Stop'
 # patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波
 $PATCH_VERSION = 'v2.0'
+# 支援的遊戲版本（出包檔名與 install.bat 訊息；整 jar SHA 閘由 work jar 自動注入）
+$GAME_VERSION = '42.20.2'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $R = $PSScriptRoot
 
@@ -113,6 +116,7 @@ Write-Host "install/uninstall 閘門涵蓋 $($payload.Count) 個 payload 檔"
 foreach ($bat in @('install', 'uninstall')) {
     $body = (Get-Content -Raw "$R\deploy-client\$bat.bat.template") `
         -replace '__JAR_SHA__', $jarSha `
+        -replace '__GAME_VERSION__', $GAME_VERSION `
         -replace '__SRC_CHECKS__', $srcChecks.TrimEnd("`n") `
         -replace '__CONFLICT_CHECKS__', $conflictChecks.TrimEnd("`n") `
         -replace '__VERIFY_CHECKS__', $verifyChecks.TrimEnd("`n") `
@@ -126,7 +130,7 @@ foreach ($bat in @('install', 'uninstall')) {
 }
 # 檔名一律 ASCII：Compress-Archive 對非 ASCII 檔名會寫出 OEM 亂碼 entry（實測）
 Copy-Item "$R\deploy-client\README-INSTALL.txt" $pkg -Force
-$zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-42.20.0-$PATCH_VERSION.zip"
+$zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION.zip"
 Get-ChildItem "$R\dist-client\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
 
@@ -135,6 +139,6 @@ $out = "$R\output"
 New-Item -ItemType Directory -Force $out | Out-Null
 Get-ChildItem "$out\MinidoracatClientPatch-*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 Copy-Item $zip $out
-Copy-Item -Recurse $pkg "$out\MinidoracatClientPatch-TexPipeline-42.20.0-$PATCH_VERSION"
+Copy-Item -Recurse $pkg "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION"
 Write-Host "完成：$zip"
 Write-Host "output -> $out（zip＋未壓縮目錄）"
