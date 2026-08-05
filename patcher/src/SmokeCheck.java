@@ -53,7 +53,6 @@ public final class SmokeCheck {
         }
 
         int failed = 0;
-        int clampCeiling = 0;
 
         // ---- 1. 行為 smoke ----
         try (URLClassLoader patched = new URLClassLoader(
@@ -89,7 +88,6 @@ public final class SmokeCheck {
                     onSeg == 0f && perp == 9f && beyond == 16f
                     && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
 
-            failed += checkCellListMembership(patched);
             failed += checkFertilizedEggGuard(patched);
 
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
@@ -157,30 +155,6 @@ public final class SmokeCheck {
                 srvField.setBoolean(null, prevSrv);
             }
 
-            Class<?> guard = Class.forName("zombie.mdc.PopmanBufferGuard", true, patched);
-            Method clamp = guard.getMethod("clampAddZombieCount", int.class);
-            Method swapBuffer = guard.getMethod("updateMainBuffer", ByteBuffer.class);
-            ByteBuffer priv = (ByteBuffer)swapBuffer.invoke(null, (ByteBuffer)null);
-            ByteBuffer privAgain = (ByteBuffer)swapBuffer.invoke(null, ByteBuffer.allocate(1));
-            failed += check("popman v3 專用 buffer（同一實例、direct、容量 1024、無視傳入值）",
-                    priv != null && priv == privAgain && priv.isDirect() && priv.capacity() == 1024);
-            priv.clear();
-            clampCeiling = (Integer)clamp.invoke(null, Integer.MAX_VALUE);
-            boolean fullOk = (Integer)clamp.invoke(null, 10) == 10
-                    && (Integer)clamp.invoke(null, 35) == 35
-                    && (Integer)clamp.invoke(null, 36) == 35
-                    && clampCeiling == 35
-                    && (Integer)clamp.invoke(null, -3) == -3;
-            priv.limit(58);          // 2 筆整＝58 bytes
-            boolean shortOk = (Integer)clamp.invoke(null, 20) == 2;
-            priv.limit(57);          // 1 筆整＋28 bytes 殘尾
-            boolean partialOk = (Integer)clamp.invoke(null, 2) == 1;
-            priv.clear();
-            priv.position(29);       // remaining=995→34 筆；誤改成 limit()/29 會得 35（codex 語境鎖）
-            boolean advancedOk = (Integer)clamp.invoke(null, 35) == 34;
-            priv.clear();
-            failed += check("popman clamp 行為（容量上限 35、limit-short/position 依 remaining、負值不動）",
-                    fullOk && shortOk && partialOk && advancedOk);
         }
 
         // ---- 2. 結構斷言 ----
@@ -243,102 +217,7 @@ public final class SmokeCheck {
                 countCalls(containerFilter, "zombie/iso/IsoObject", "isMovedThumpable") == 1
                 && countCalls(containerFilter, "zombie/iso/IsoObject", "getContainerCount") == 1);
 
-        // ---- popman clamp：鎖定「native 分頁 → offset 推進（原值）→ clamp 迴圈上限」全序 ----
-        // 命中數守門只保證插入發生一次；這裡連 slot 一致性一起鎖：clamp 必須在 istore O 之後、
-        // 且 iload/istore 的是同一個 count slot——插錯位置（例如 clamp 跑到 offset += count 之前，
-        // 會改變分頁消耗語意）或鎖錯變數都在此擋下。
-        String popmanCls = "zombie/popman/ZombiePopulationManager";
-        String popmanGuard = "zombie/mdc/PopmanBufferGuard";
-        MethodNode popman = method(distJava, popmanCls, "updateMain", "()V");
-        MethodInsnNode nativePage = findExactCall(popman, Opcodes.INVOKESTATIC,
-                popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I");
-        boolean clampSeq = false;
-        if (nativePage != null) {
-            // w[0..7]＝clamp 全序（v3 回 (I)I——上限計算移入 helper 的專用 buffer）；
-            // w[8..12]＝解析迴圈頭（iconst_0; istore i; iload i; iload C; if_icmpge）——
-            // 鎖住「被 clamp 的變數就是迴圈比較上限」且 loop-index slot 與 count/offset slot 相異
-            AbstractInsnNode[] w = new AbstractInsnNode[13];
-            AbstractInsnNode cursor = nativePage;
-            boolean full = true;
-            for (int i = 0; i < w.length; i++) {
-                cursor = nextReal(cursor);
-                if (cursor == null) { full = false; break; }
-                w[i] = cursor;
-            }
-            clampSeq = full
-                    && w[0] instanceof VarInsnNode s0 && s0.getOpcode() == Opcodes.ISTORE
-                    && w[1] instanceof VarInsnNode s1 && s1.getOpcode() == Opcodes.ILOAD && s1.var != s0.var
-                    && w[2] instanceof VarInsnNode s2 && s2.getOpcode() == Opcodes.ILOAD && s2.var == s0.var
-                    && w[3].getOpcode() == Opcodes.IADD
-                    && w[4] instanceof VarInsnNode s4 && s4.getOpcode() == Opcodes.ISTORE && s4.var == s1.var
-                    && w[5] instanceof VarInsnNode s5 && s5.getOpcode() == Opcodes.ILOAD && s5.var == s0.var
-                    && w[6] instanceof MethodInsnNode c6 && c6.getOpcode() == Opcodes.INVOKESTATIC
-                            && c6.owner.equals(popmanGuard)
-                            && c6.name.equals("clampAddZombieCount") && c6.desc.equals("(I)I")
-                    && w[7] instanceof VarInsnNode s7 && s7.getOpcode() == Opcodes.ISTORE && s7.var == s0.var
-                    && w[8].getOpcode() == Opcodes.ICONST_0
-                    && w[9] instanceof VarInsnNode s9 && s9.getOpcode() == Opcodes.ISTORE
-                            && s9.var != s0.var && s9.var != s1.var
-                    && w[10] instanceof VarInsnNode s10 && s10.getOpcode() == Opcodes.ILOAD && s10.var == s9.var
-                    && w[11] instanceof VarInsnNode s11 && s11.getOpcode() == Opcodes.ILOAD && s11.var == s0.var
-                    && w[12] instanceof JumpInsnNode j12 && j12.getOpcode() == Opcodes.IF_ICMPGE;
-        }
-        failed += check("popman clamp 插在 offset 推進之後、count slot 即 if_icmpge 迴圈上限", clampSeq);
-        failed += check("popman clamp 恰一次、native 分頁呼叫未增減",
-                countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard,
-                        "clampAddZombieCount", "(I)I") == 1
-                && countExactCalls(popman, Opcodes.INVOKESTATIC,
-                        popmanCls, "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I") == 1);
-
-        // ---- v3 buffer 隔離：updateMain 內每個 getfield byteBuffer 必須緊接 swap，10/10 無漏 ----
-        int popmanGetfields = 0;
-        int popmanSwapped = 0;
-        for (AbstractInsnNode in : popman.instructions) {
-            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
-                    && fi.owner.equals(popmanCls) && fi.name.equals("byteBuffer")
-                    && fi.desc.equals("Ljava/nio/ByteBuffer;")) {
-                popmanGetfields++;
-                AbstractInsnNode next = nextReal(in);
-                if (next instanceof MethodInsnNode sw && sw.getOpcode() == Opcodes.INVOKESTATIC
-                        && sw.owner.equals(popmanGuard) && sw.name.equals("updateMainBuffer")
-                        && sw.desc.equals("(Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;")) {
-                    popmanSwapped++;
-                }
-            }
-        }
-        failed += check("popman v3 隔離：updateMain 10 處 getfield byteBuffer 全部緊接 swap、無多餘 swap",
-                popmanGetfields == 10 && popmanSwapped == 10
-                && countExactCalls(popman, Opcodes.INVOKESTATIC, popmanGuard, "updateMainBuffer",
-                        "(Ljava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;") == 10);
-
-        // MAX_RECORDS＝1024/29 的兩個上游前提做成可執行守門（codex 對抗審查發現）：
-        // capacity 取自 <init> 的 allocateDirect 實參、每筆 bytes 由 updateMain 的 buffer 讀取組成計出，
-        // 再與 helper 實際 clamp ceiling 連動——PZ 只改 buffer 大小或 record 欄位時建置失敗而非默默錯上限
-        MethodNode popmanInit = method(distJava, popmanCls, "<init>", "()V");
-        int popmanCapacity = -1;
-        int popmanAllocCount = 0;
-        for (AbstractInsnNode in : popmanInit.instructions) {
-            if (in instanceof MethodInsnNode alloc && alloc.getOpcode() == Opcodes.INVOKESTATIC
-                    && alloc.owner.equals("java/nio/ByteBuffer") && alloc.name.equals("allocateDirect")) {
-                popmanAllocCount++;
-                AbstractInsnNode prev = prevReal(alloc);
-                AbstractInsnNode next = nextReal(alloc);
-                if (prev instanceof IntInsnNode cap && cap.getOpcode() == Opcodes.SIPUSH
-                        && next instanceof FieldInsnNode pf && pf.getOpcode() == Opcodes.PUTFIELD
-                        && pf.owner.equals(popmanCls) && pf.name.equals("byteBuffer")) {
-                    popmanCapacity = cap.operand;
-                }
-            }
-        }
-        int floatReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getFloat", "()F");
-        int byteReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "get", "()B");
-        int intReads = countExactCalls(popman, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getInt", "()I");
-        int recordBytes = floatReads * 4 + byteReads + intReads * 4;
-        failed += check("popman buffer 容量與每筆組成未漂移（allocateDirect(1024)、3F+1B+4I）",
-                popmanAllocCount == 1 && popmanCapacity == 1024
-                && floatReads == 3 && byteReads == 1 && intReads == 4);
-        failed += check("helper clamp ceiling ＝ 容量/每筆 bytes（上限與前提連動）",
-                recordBytes > 0 && clampCeiling == popmanCapacity / recordBytes);
+        // 42.20.2 官方收編：popman buffer 隔離與 clamp 斷言隨 patch 退役（readByteBuffer 官方隔離）。
 
         // ---- 常數手術的語境鎖（回歸測試：命中數守門只數數量，擋不住改到同方法的另一條算式）----
         // 42.20 實例：壓力算式從 changeStress(radius / 20.0F) 改寫成 changeStress(radius * 0.05F)，
@@ -595,7 +474,7 @@ public final class SmokeCheck {
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/util/Array")
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/GameEntity"));
 
-        // ---- 效能第一波（載具預篩＋VehicleManager 512→256）----
+        // ---- 效能第一波（載具預篩；VehicleManager 512→256 已於 42.20.2 退役）----
         String prefilterCls = "zombie/mdc/VehicleIntersectPrefilter";
         String intersectDesc = "(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;";
         MethodNode zvb = method(distJava, "zombie/characters/IsoZombie", "isVehicleBetween", "(FFF)Z");
@@ -609,39 +488,7 @@ public final class SmokeCheck {
                 prefilterNode.fields.stream().allMatch(
                         f -> f.desc.length() == 1 && "ZBCSIJFD".contains(f.desc)));
 
-        // VehicleManager <init>：sipush 512→256，語境鎖＝256 後緊接 anewarray UdpConnection；
-        // 負對照＝bipush 27 與 100L/1000L 節流常數原樣（守門盲點教訓：數量對不代表改對地方）
-        MethodNode vmInit = method(distJava, "zombie/vehicles/VehicleManager", "<init>", "()V");
-        int sipush256Ctx = 0, sipush512 = 0, bipush27 = 0;
-        boolean throttle100 = false, throttle1000 = false;
-        for (AbstractInsnNode in : vmInit.instructions) {
-            if (in instanceof IntInsnNode ii && ii.getOpcode() == Opcodes.SIPUSH) {
-                if (ii.operand == 512) {
-                    sipush512++;
-                } else if (ii.operand == 256) {
-                    AbstractInsnNode next = nextReal(ii);
-                    if (next instanceof TypeInsnNode t && t.getOpcode() == Opcodes.ANEWARRAY
-                            && t.desc.equals("zombie/core/raknet/UdpConnection")) {
-                        sipush256Ctx++;
-                    }
-                }
-            }
-            if (in instanceof IntInsnNode ii && ii.getOpcode() == Opcodes.BIPUSH && ii.operand == 27) {
-                bipush27++;
-            }
-            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Long l) {
-                if (l == 100L) {
-                    throttle100 = true;
-                }
-                if (l == 1000L) {
-                    throttle1000 = true;
-                }
-            }
-        }
-        failed += check("VehicleManager connected 陣列 256（語境鎖 anewarray UdpConnection）",
-                sipush256Ctx == 1 && sipush512 == 0);
-        failed += check("VehicleManager 節流常數未誤中（bipush 27、100L、1000L 原樣）",
-                bipush27 == 1 && throttle100 && throttle1000);
+        // 42.20.2 官方收編：connected[512] 已刪除改 per-connection HashMap，512→256 斷言退役。
 
         // ---- 假死修復（removeGlassAttachments 無限迴圈保險絲）----
         String glassGuard = "zombie/mdc/GlassAttachmentGuard";
@@ -656,93 +503,8 @@ public final class SmokeCheck {
                 glassNode.fields.isEmpty()
                 && containsUtf8(distJava, glassGuard, "[MinidoracatJavaPatch][GlassGuard]"));
 
-        // ---- P5 CellListMembership（15 呼叫點；docs/p5-chunk-unload-design-v2.md §4）----
-        String clmCls = "zombie/mdc/CellListMembership";
-        String alCls = "java/util/ArrayList";
-        String objZ = "(Ljava/lang/Object;)Z";
-        String clmObjZ = "(Ljava/util/ArrayList;Ljava/lang/Object;)Z";
+        // 42.20.2 官方收編：P5 全家族 15 站結構斷言隨 patch 退役（官方伴生 Set 原生 O(1)）。
 
-        MethodNode p5Process = method(distJava, "zombie/iso/IsoCell", "ProcessIsoObject", "()V");
-        failed += check("P5 ProcessIsoObject：removeAll/clear 改道恰一、原呼叫歸零、size×2/get×1 原樣(S3)",
-                countExactCalls(p5Process, Opcodes.INVOKESTATIC, clmCls, "removeAll",
-                        "(Ljava/util/ArrayList;Ljava/util/Collection;)Z") == 1
-                && countExactCalls(p5Process, Opcodes.INVOKESTATIC, clmCls, "clear",
-                        "(Ljava/util/ArrayList;)V") == 1
-                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "removeAll",
-                        "(Ljava/util/Collection;)Z") == 0
-                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "clear", "()V") == 0
-                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "size", "()I") == 2
-                && countExactCalls(p5Process, Opcodes.INVOKEVIRTUAL, alCls, "get",
-                        "(I)Ljava/lang/Object;") == 1);
-
-        MethodNode p5Add = method(distJava, "zombie/iso/IsoCell", "addToProcessIsoObject",
-                "(Lzombie/iso/IsoObject;)V");
-        MethodNode p5AddRemove = method(distJava, "zombie/iso/IsoCell", "addToProcessIsoObjectRemove",
-                "(Lzombie/iso/IsoObject;)V");
-        MethodNode p5Static = method(distJava, "zombie/iso/IsoCell", "addToStaticUpdaterObjectList",
-                "(Lzombie/iso/IsoObject;)V");
-        failed += check("P5 addToProcessIsoObject：remove/contains/add 各恰一且原呼叫歸零",
-                countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
-                && countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 1
-                && countExactCalls(p5Add, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
-                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0
-                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
-                && countExactCalls(p5Add, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
-        failed += check("P5 addToProcessIsoObjectRemove：contains×2＋add×1 且原呼叫歸零",
-                countExactCalls(p5AddRemove, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 2
-                && countExactCalls(p5AddRemove, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
-                && countExactCalls(p5AddRemove, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
-                && countExactCalls(p5AddRemove, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
-        failed += check("P5 addToStaticUpdaterObjectList：contains＋add 各恰一且原呼叫歸零",
-                countExactCalls(p5Static, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 1
-                && countExactCalls(p5Static, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
-                && countExactCalls(p5Static, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
-                && countExactCalls(p5Static, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0);
-
-        MethodNode p5ObjRemove = method(distJava, "zombie/iso/IsoObject", "removeFromWorld", "()V");
-        failed += check("P5 IsoObject.removeFromWorld：S.remove 改道恰一且原呼叫歸零",
-                countExactCalls(p5ObjRemove, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
-                && countExactCalls(p5ObjRemove, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0);
-
-        MethodNode p5Reanimate = method(distJava, "zombie/iso/objects/IsoDeadBody", "setReanimateTime", "(F)V");
-        failed += check("P5 IsoDeadBody.setReanimateTime：contains×2＋add＋remove 且原呼叫歸零",
-                countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "contains", clmObjZ) == 2
-                && countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "add", clmObjZ) == 1
-                && countExactCalls(p5Reanimate, Opcodes.INVOKESTATIC, clmCls, "remove", clmObjZ) == 1
-                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "contains", objZ) == 0
-                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "add", objZ) == 0
-                && countExactCalls(p5Reanimate, Opcodes.INVOKEVIRTUAL, alCls, "remove", objZ) == 0);
-
-        // S4 負對照：ProcessStaticUpdaters（javap 定案的誤報站點）不得有任何改道
-        MethodNode p5StaticUpd = method(distJava, "zombie/iso/IsoCell", "ProcessStaticUpdaters", "()V");
-        int clmInStaticUpd = 0;
-        for (AbstractInsnNode in : p5StaticUpd.instructions) {
-            if (in instanceof MethodInsnNode mi && mi.owner.equals(clmCls)) {
-                clmInStaticUpd++;
-            }
-        }
-        failed += check("P5 S4 負對照：ProcessStaticUpdaters 零改道（原誤報站點）", clmInStaticUpd == 0);
-
-        // S5：六個 contains 改道點的下一條真指令必為 IFNE/IFEQ（分支消費者後綴鎖）
-        int containsBranchOk = 0, containsTotal = 0;
-        for (MethodNode mn : new MethodNode[]{p5Add, p5AddRemove, p5Static, p5Reanimate}) {
-            for (AbstractInsnNode in : mn.instructions) {
-                if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
-                        && mi.owner.equals(clmCls) && mi.name.equals("contains")) {
-                    containsTotal++;
-                    AbstractInsnNode next = nextReal(in);
-                    if (next != null && (next.getOpcode() == Opcodes.IFNE
-                            || next.getOpcode() == Opcodes.IFEQ)) {
-                        containsBranchOk++;
-                    }
-                }
-            }
-        }
-        failed += check("P5 S5：六個 contains 改道點後綴皆為 IFNE/IFEQ（" + containsBranchOk + "/6）",
-                containsTotal == 6 && containsBranchOk == 6);
-
-        failed += check("P5 helper 含觀測 log 前綴",
-                containsUtf8(distJava, clmCls, "[MinidoracatJavaPatch][CellList]"));
 
         // ---- 受精蛋清除豁免（2026-08-04）----
         // 命中數守門只保證改道發生一次，擋不住「改到別的呼叫點」——這裡把位置鎖進清除判定鏈：
@@ -843,7 +605,6 @@ public final class SmokeCheck {
                 && eggNode.fields.stream().allMatch(f -> f.desc.length() == 1 && "ZBCSIJFD".contains(f.desc))
                 && containsUtf8(distJava, eggGuardCls, "[MinidoracatJavaPatch][EggGuard]"));
 
-        failed += checkIdentityDomain(jar);
 
         // ---- W3 效能第三波結構斷言 ----
         String nzmCls = "zombie/popman/NetworkZombieManager";
@@ -1140,170 +901,6 @@ public final class SmokeCheck {
         return fallbackOk && movedBlocked && vanillaPassThrough;
     }
 
-    /** P5 CellListMembership 行為測試：differential／重複元素／ghost 自癒／kill／降級／removeAll／重入黃金比對。 */
-    static int checkCellListMembership(ClassLoader patched) throws Exception {
-        int failed = 0;
-        Class<?> clm = Class.forName("zombie.mdc.CellListMembership", true, patched);
-        Method inject = clm.getDeclaredMethod("testInject", ArrayList.class, ArrayList.class, ArrayList.class);
-        Method reset = clm.getDeclaredMethod("testReset");
-        Method killedQ = clm.getDeclaredMethod("testKilled");
-        inject.setAccessible(true);
-        reset.setAccessible(true);
-        killedQ.setAccessible(true);
-        Field mask = clm.getDeclaredField("auditMask");
-        mask.setAccessible(true);
-        Method mContains = clm.getMethod("contains", ArrayList.class, Object.class);
-        Method mAdd = clm.getMethod("add", ArrayList.class, Object.class);
-        Method mRemove = clm.getMethod("remove", ArrayList.class, Object.class);
-        Method mRemoveAll = clm.getMethod("removeAll", ArrayList.class, Collection.class);
-
-        // 1) differential：400 個決定性偽隨機 op（含重複與 null）與 vanilla 全等
-        reset.invoke(null);
-        ArrayList<Object> p = new ArrayList<>(), r = new ArrayList<>(), s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        ArrayList<Object> ref = new ArrayList<>();
-        Object oa = new Object(), ob = new Object(), oc = new Object();
-        Object[] pool = {oa, ob, oc, null, oa, ob};
-        boolean diffOk = true;
-        long seed = 20260803L;
-        for (int i = 0; i < 400; i++) {
-            seed = seed * 6364136223846793005L + 1442695040888963407L;
-            Object o = pool[(int) ((seed >>> 16) % pool.length)];
-            switch ((int) ((seed >>> 33) % 3)) {
-                case 0 -> diffOk &= ((Boolean) mAdd.invoke(null, p, o)) == ref.add(o);
-                case 1 -> diffOk &= ((Boolean) mRemove.invoke(null, p, o)) == ref.remove(o);
-                default -> diffOk &= ((Boolean) mContains.invoke(null, p, o)) == ref.contains(o);
-            }
-        }
-        failed += check("CellList differential：400 op（重複/null）回傳與內容順序全等 vanilla",
-                diffOk && p.equals(ref));
-
-        // 2) 重複元素感知：[x,x] 移除一份後 membership 必須保留
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        Object x = new Object();
-        mAdd.invoke(null, p, x);
-        mAdd.invoke(null, p, x);
-        mRemove.invoke(null, p, x);
-        boolean dupKeep = (Boolean) mContains.invoke(null, p, x);
-        mRemove.invoke(null, p, x);
-        boolean dupGone = !((Boolean) mContains.invoke(null, p, x)) && p.isEmpty();
-        failed += check("CellList 重複元素：移除一份仍在、移除兩份才除名", dupKeep && dupGone);
-
-        // 3) 等大小換血 ghost：audit 全開時 contains 與 remove-miss 都必須自癒
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        Object y = new Object(), z = new Object();
-        mAdd.invoke(null, p, y);
-        p.set(0, z);                       // 旁路等大小換血：y→z
-        mask.setInt(null, 0);              // 每 op 抽驗
-        boolean ghostContains = (Boolean) mContains.invoke(null, p, z);   // 假陰性→audit→rebuild→true
-        p.set(0, y);                       // 再換回：set 此刻認 z 不認 y
-        boolean ghostRemove = (Boolean) mRemove.invoke(null, p, y);       // fast-miss audit→修復→真移除
-        failed += check("CellList 等大小換血：contains 假陰性與 remove-miss ghost 皆被 audit 自癒",
-                ghostContains && ghostRemove && p.isEmpty() && !((Boolean) killedQ.invoke(null)));
-
-        // 4) size 漂移自癒不計 kill（GO-WITH-FIXES：良性旁路只 rebuild）
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        for (int i = 0; i < 20; i++) {
-            p.add(new Object());                                   // 旁路 append（size 漂移）
-            if (!((Boolean) mContains.invoke(null, p, p.get(p.size() - 1)))) {
-                failed += check("CellList size 漂移 rebuild 後應答正確", false);
-                break;
-            }
-        }
-        failed += check("CellList 20 次 size 漂移 rebuild 全部自癒且未 kill",
-                !((Boolean) killedQ.invoke(null)));
-
-        // 5) audit divergence 達 8 → 永久 kill → 直通 vanilla
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        mask.setInt(null, 0);
-        Object probe = new Object();
-        // 每輪：helper add（set 記錄）→ 旁路換血同格（size 不變、set 與 list 分歧）→ audit 必偵測。
-        // 不可只換血一次：首次 audit 會 rebuild 使兩者一致，之後不再分歧（測試自身的教訓）。
-        for (int i = 0; i < 12 && !((Boolean) killedQ.invoke(null)); i++) {
-            mAdd.invoke(null, p, probe);
-            p.set(p.size() - 1, new Object());
-            mContains.invoke(null, p, probe);
-        }
-        boolean nowKilled = (Boolean) killedQ.invoke(null);
-        ArrayList<Object> after = new ArrayList<>();
-        mAdd.invoke(null, after, probe);   // killed 後任何清單都直通 vanilla
-        failed += check("CellList audit divergence 達門檻後永久 kill 且直通 vanilla",
-                nowKilled && after.size() == 1 && after.get(0) == probe);
-
-        // 6) generation 降級：未知清單一律 vanilla 行為
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        ArrayList<Object> unknown = new ArrayList<>();
-        boolean downgrade = !((Boolean) mContains.invoke(null, unknown, oa))
-                && (Boolean) mAdd.invoke(null, unknown, oa)
-                && unknown.size() == 1;
-        failed += check("CellList 未知清單（舊 cell/降級路徑）純 vanilla 直通", downgrade);
-
-        // 7) removeAll：重複、R⊄P、空 R、subclass gate 全對照 vanilla
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        for (Object o : new Object[]{oa, ob, oa, oc}) {
-            mAdd.invoke(null, p, o);
-        }
-        r.add(oa);
-        r.add(new Object());               // R⊄P
-        ArrayList<Object> refP = new ArrayList<>(java.util.List.of(oa, ob, oa, oc));
-        ArrayList<Object> refR = new ArrayList<>(r);
-        boolean raRet = (Boolean) mRemoveAll.invoke(null, p, r);
-        boolean raRef = refP.removeAll(refR);
-        boolean removeAllOk = raRet == raRef && p.equals(refP);
-        boolean raEmpty = !((Boolean) mRemoveAll.invoke(null, p, new ArrayList<>() {
-        }));                                // 匿名子類 → gate → 原生（空集合回 false）
-        failed += check("CellList removeAll：重複全清、R⊄P、保序、回傳值與 subclass gate 全等 vanilla",
-                removeAllOk && raEmpty);
-
-        // 8) B10 黃金比對：補償迭代（n--/size--）中重入 remove，訪問序列與 vanilla 全等
-        reset.invoke(null);
-        p = new ArrayList<>(); r = new ArrayList<>(); s = new ArrayList<>();
-        inject.invoke(null, p, r, s);
-        Object[] objs = new Object[6];
-        ArrayList<Object> refS = new ArrayList<>();
-        for (int i = 0; i < objs.length; i++) {
-            objs[i] = new Object();
-            mAdd.invoke(null, s, objs[i]);
-            refS.add(objs[i]);
-        }
-        Set<Object> doomed = new HashSet<>(java.util.List.of(objs[1], objs[3]));
-        ArrayList<Object> visitPatched = new ArrayList<>(), visitRef = new ArrayList<>();
-        for (int n = 0; n < s.size(); n++) {
-            Object o = s.get(n);
-            visitPatched.add(o);
-            if (doomed.contains(o)) {
-                mRemove.invoke(null, s, o);
-                n--;
-            }
-        }
-        for (int n = 0; n < refS.size(); n++) {
-            Object o = refS.get(n);
-            visitRef.add(o);
-            if (doomed.contains(o)) {
-                refS.remove(o);
-                n--;
-            }
-        }
-        failed += check("CellList 補償迭代重入 remove：訪問序列與最終清單全等 vanilla",
-                visitPatched.equals(visitRef) && s.equals(refS));
-
-        reset.invoke(null);
-        return failed;
-    }
-
-    /** P5 identity domain：全 jar hierarchy walk，IsoObject 全後代不得覆寫 equals/hashCode。 */
     /**
      * 受精蛋豁免的行為驗證：委派 vanilla 值、判定四象限、以及整條改道路徑端到端。
      * Food 的建構子會解析 texture 路徑（需要遊戲檔案系統，headless 必 NPE），
@@ -1420,42 +1017,6 @@ public final class SmokeCheck {
         return unsafe.getClass().getMethod("allocateInstance", Class.class).invoke(unsafe, type);
     }
 
-    static int checkIdentityDomain(Path jar) throws Exception {
-        Map<String, String> superOf = new HashMap<>();
-        Set<String> overrides = new HashSet<>();
-        try (ZipFile zf = new ZipFile(jar.toFile())) {
-            Enumeration<? extends ZipEntry> en = zf.entries();
-            while (en.hasMoreElements()) {
-                ZipEntry e = en.nextElement();
-                if (!e.getName().endsWith(".class")) {
-                    continue;
-                }
-                ClassNode cn = new ClassNode();
-                new ClassReader(zf.getInputStream(e).readAllBytes())
-                        .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-                superOf.put(cn.name, cn.superName);
-                for (MethodNode m : cn.methods) {
-                    if ((m.name.equals("equals") && m.desc.equals("(Ljava/lang/Object;)Z"))
-                            || (m.name.equals("hashCode") && m.desc.equals("()I"))) {
-                        overrides.add(cn.name);
-                        break;
-                    }
-                }
-            }
-        }
-        int bad = 0;
-        for (String cls : superOf.keySet()) {
-            String cur = cls;
-            while (cur != null && !cur.equals("zombie/iso/IsoObject")) {
-                cur = superOf.get(cur);
-            }
-            if (cur != null && overrides.contains(cls)) {
-                System.out.println("  !! equals/hashCode 覆寫: " + cls);
-                bad++;
-            }
-        }
-        return check("P5 identity domain：IsoObject 全後代零 equals/hashCode 覆寫（全 jar walk）", bad == 0);
-    }
 
     /**
      * W3-3 前綴指紋（code review MINOR-2 強化版）：GameClient.client 檢查之前，

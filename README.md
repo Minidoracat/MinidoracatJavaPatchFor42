@@ -9,7 +9,11 @@ PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路
 bytecode 做「堆疊形狀不變」的呼叫改道／方法內常數替換，另有兩個窄範圍 null 頭部守衛，
 StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac 對遊戲 jar 編譯，隨 patch 出貨。
 
-## 內容（28 個 patched class、43 個 runtime class、50 處手術、71 個命中點）
+## 內容（23 個 patched class、34 個 runtime class、34 處手術、44 個命中點）
+
+> **42.20.2 里程碑**：官方在此版收編了我方三組 patch——P5 IsoCell sidecar（官方伴生 Set）、
+> popman buffer 隔離（官方 readByteBuffer）、VehicleManager 512→256（官方改 per-connection
+> HashMap）。三組已光榮退役，詳見 docs/optimization-summary.md 第四節。
 
 - **抑噪 6 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／ItemPickInfo／
   PacketsCache／INetworkPacket.logInconsistentPacket，外加 NetworkZombieManager——只攔已知噪音樣式，
@@ -27,6 +31,7 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 - **chunk unload entity removal 1 項**：只改道 `EngineEntityManager` 與 `EntityBucket` 的四個
   unordered identity add/remove callsite，以 weak-key＋primitive sidecar index 把批次卸載的重複
   O(N) 搜尋改成常態 O(1)；碰撞、外部 mutation、ordered/equality/null 路徑都保留原版 fallback。
+  （42.20.2 覆核：`EngineEntityManager`/`EntityBucket` 位元組未變，patch 續用。）
 
 - **受精蛋清除豁免 1 項**：`WorldItemRemovalList` 只比對 item type，無法區分受精蛋（受精是 `Food`
   的 per-instance 欄位，與一般蛋同為 `Base.Egg`），而 24 遊戲小時的清除門檻遠短於 1260 小時的

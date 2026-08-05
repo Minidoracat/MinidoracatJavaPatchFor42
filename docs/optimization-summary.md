@@ -3,7 +3,8 @@
 > 最後更新：2026-08-05（W3 上線後）。本文是**面向營運的總覽**——每項只講三件事：
 > 浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
 > [patches.md](patches.md)，各波設計定稿見 `docs/*-design-*.md` 與 [specs/](specs/)。
-> 現況：**28 個 patched class、43 個 runtime class、50 處手術、71 個命中點**（42.20）。
+> 現況：**23 個 patched class、34 個 runtime class、34 處手術、44 個命中點**（42.20.2）。
+> 42.20.2 里程碑：官方收編 P5／popman 隔離／512→256 三組（見第四節），我方對應退役。
 
 ## 核心哲學
 
@@ -33,14 +34,14 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **實測**：**拒絕率 99.87%**（rejected 8.9 億 vs delegated 128 萬），車輛碰撞主題從後續
   dump **完全消失**；低谷頻率 12+/日 → 1-2/日（與 W1-2 合併效果）。
 
-### W1-2 `VehicleManager` 連線槽 512→256
+### W1-2 `VehicleManager` 連線槽 512→256——**42.20.2 官方收編退役**（官方刪除雙 512 陣列改 per-connection HashMap，比砍半更徹底）
 
 - **浪費**：serverUpdate 每 tick 無條件掃 512 個連線槽 × 全部車輛，但 RakNet 連線陣列
   只有 256、connection ID 解碼恆 <256——上半 512 槽純空轉。
 - **修法**：建構子常數 512→256，掃描直接砍半。
 - **實測**：該迴圈行號從 dump 消失（原 5/5 命中）。
 
-### P5 IsoCell 三清單 identity sidecar（2026-08-03）
+### P5 IsoCell 三清單 identity sidecar（2026-08-03）——**42.20.2 官方收編退役**（官方原生伴生 Set＋isEmpty 快速路徑，15 站全數 O(1)；changelog 的「chunk unloading 效能修復」即此）
 
 - **浪費**：chunk 卸載時每個物件要對「處理清單 P」「待移除清單 R」做線性 contains
   掃描——**P 實測 1.0～1.5 萬個元素**，幾乎全 miss 全掃；每 tick 的 removeAll 是
@@ -84,7 +85,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **附註**：同波的 W3-2（ECS 查找快取）被 microbenchmark 實測否決（vanilla 0.93 vs
   memo 1.19 ns/call，淨劣化）而撤刀——審查證明「無風險」，只有量測證明「有收益」。
 
-### 基礎-1 popman 共享 buffer 執行緒競爭修復（v3 隔離）
+### 基礎-1 popman 共享 buffer 執行緒競爭修復（v3 隔離）——**42.20.2 官方收編退役**（官方 readByteBuffer 專用讀 buffer，與 v3 指令級同構）
 
 - **問題**：`ZombiePopulationManager.byteBuffer` 由背景寫側與主執行緒讀側共用、讀側
   無鎖（vanilla 遺漏）→ position 併發亂跳 → BufferUnderflow ＋隨機欄位混讀——
@@ -130,6 +131,9 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | ZombieCountOptimiser 回收加速 | 重新分析已完成、定案不恢復：42.20 的 culling 只掃 per-connection 的有主殭屍，碰不到無主殭屍（記憶體壓力主源），加速取樣與原始目標脫鉤（patches.md 2a） |
 | SafehouseClaimPacket 修復 | 觸發條件（自訂地圖）已從正式服移除，無症狀不介入驗證路徑 |
 | W3-2 ECS memo | microbenchmark 實測淨劣化，撤刀 |
+| P5 IsoCell sidecar（15 站） | **42.20.2 官方收編**：官方伴生 Set 原生 O(1)＋isEmpty 快速路徑，優於我方 O(P+R)；IsoDeadBody 旁路變異亦被官方 root fix |
+| popman buffer 隔離 v3（11 站） | **42.20.2 官方收編**：官方 readByteBuffer 讀寫隔離與 v3 完全同構，clamp 保險絲失去防護對象 |
+| VehicleManager 512→256 | **42.20.2 官方收編**：connected[512]/connectionState[512] 雙陣列整個刪除，改 per-connection vehicleStates HashMap |
 
 ## 五、配套 config 調整（非 patch，但屬同一條優化線）
 
@@ -147,7 +151,8 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 8/2（W1 上線） | 車輛主題歸零、觸發 1-2/日 |
 | 8/3 尖峰（80 人，P5 前基線） | 21:00-23:05 連續 FPS 2-6、觸發 9 次頂格、卸載主題 27% |
 | 8/4 尖峰（P5 生效） | 低谷 4-6、觸發 3 次、卸載主題 0、22:00 後 41 分鐘安靜 |
-| 8/5（W3 上線） | 三刀計數器全綠；**尖峰驗收待今晚四晚對照** |
+| 8/5（W3 上線） | 三刀計數器全綠：動物攔截 99.94%（4h45m 攔 37.6 億次）、車輛 8500 萬次短路、ownership 節流生效 |
+| 8/6（42.20.2） | 官方收編 P5／popman／512→256 三組（changelog 明寫修復 high-pop server 的 chunk unloading lag——與我方 8/3 診斷同源）；全 patch 覆核後 23 class 續用，34 classes 重新部署 |
 
 誠實邊界：主迴圈是單執行緒，Amdahl 定律決定了沒有銀彈——每一波都是「低谷變淺、
 變稀」而非平均 FPS 飆升；80+ 人的瀰漫負載（LOS thread 飽和、join chunk 同步、

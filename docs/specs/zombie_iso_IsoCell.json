@@ -2,50 +2,100 @@
   "className": "zombie/iso/IsoCell",
   "kind": "performance",
   "buildBaseline": "42.20.0 / jar SHA-256 e4661ca9cb168abc995d3cf59994fa17f66ba8a4e2c2899cbfa48f7eacea54b8",
-  "companionClasses": ["zombie/iso/IsoObject", "zombie/iso/objects/IsoDeadBody"],
+  "companionClasses": [
+    "zombie/iso/IsoObject",
+    "zombie/iso/objects/IsoDeadBody"
+  ],
   "designDoc": "docs/p5-chunk-unload-design-v2.md",
   "patches": [
     {
       "op": "redirect-call",
-      "method": { "name": "ProcessIsoObject", "desc": "()V" },
-      "site": { "opcode": "INVOKEVIRTUAL", "owner": "java/util/ArrayList", "name": "removeAll", "desc": "(Ljava/util/Collection;)Z", "expectedCount": 1 },
+      "method": {
+        "name": "ProcessIsoObject",
+        "desc": "()V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "java/util/ArrayList",
+        "name": "removeAll",
+        "desc": "(Ljava/util/Collection;)Z",
+        "expectedCount": 1
+      },
       "redirect": "zombie/mdc/CellListMembership.removeAll(Ljava/util/ArrayList;Ljava/util/Collection;)Z",
       "rationale": "processIsoObject.removeAll(processIsoObjectRemove) 為 O(P×R)（JDK batchRemove 對每個 P 元素呼叫 c.contains）；常態 R=0 仍付 O(P) 空掃。helper 改單趟保序壓實＋尾端逐刪＝O(P+R)。codex 處方：嚴格 gate（list 或 c 非 ArrayList.class、c==null 一律原生，NPE 與 subclass 的 c.contains 副作用 parity 由原生承擔）；R 快照用固定大小索引走訪（非 iterator，不引入 vanilla 沒有的 CME 面）；尾端 list.remove(i) 每次 modCount++，精確還原 JDK 的 modCount += removedCount（subList.clear() 只加一次，不等價）；結構全成功才 commit sidecar，例外則 expectedSize=-1 毒化後重拋，不半提交。鎖序巢狀 P→R。",
       "evidence": "javap bc0-11：getfield processIsoObject → getfield processIsoObjectRemove → invokevirtual #1889 ArrayList.removeAll → pop。SmokeCheck S3 負對照鎖同方法 size×2/get×1 原樣保留。"
     },
     {
       "op": "redirect-call",
-      "method": { "name": "ProcessIsoObject", "desc": "()V" },
-      "site": { "opcode": "INVOKEVIRTUAL", "owner": "java/util/ArrayList", "name": "clear", "desc": "()V", "expectedCount": 1 },
+      "method": {
+        "name": "ProcessIsoObject",
+        "desc": "()V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "java/util/ArrayList",
+        "name": "clear",
+        "desc": "()V",
+        "expectedCount": 1
+      },
       "redirect": "zombie/mdc/CellListMembership.clear(Ljava/util/ArrayList;)V",
       "rationale": "R 每 tick 歸零；鏡射 set.clear() 維持不變量，順帶讓 sidecar 在每 tick 有一次確定性同步點。",
       "evidence": "javap bc13-16：getfield processIsoObjectRemove → invokevirtual #53 ArrayList.clear。"
     },
     {
       "op": "redirect-call",
-      "method": { "name": "addToProcessIsoObject", "desc": "(Lzombie/iso/IsoObject;)V" },
-      "site": { "opcode": "INVOKEVIRTUAL", "owner": "java/util/ArrayList", "name": "remove|contains|add", "desc": "(Ljava/lang/Object;)Z", "expectedCount": 3 },
+      "method": {
+        "name": "addToProcessIsoObject",
+        "desc": "(Lzombie/iso/IsoObject;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "java/util/ArrayList",
+        "name": "remove|contains|add",
+        "desc": "(Ljava/lang/Object;)Z",
+        "expectedCount": 3
+      },
       "redirect": "zombie/mdc/CellListMembership.{remove,contains,add}",
       "rationale": "載入側：R.remove(o) O(R) 撤銷待移除＋P.contains(o) O(P) 去重 guard＋P.add。玩家移動時載入/卸載 burst 共生，這條路徑與卸載側同樣熱。",
       "evidence": "javap bc6-13 remove(#1867)、bc15-22 contains(#1499)→ifne 34、bc26-33 add(#106)。"
     },
     {
       "op": "redirect-call",
-      "method": { "name": "addToProcessIsoObjectRemove", "desc": "(Lzombie/iso/IsoObject;)V" },
-      "site": { "opcode": "INVOKEVIRTUAL", "owner": "java/util/ArrayList", "name": "contains|add", "desc": "(Ljava/lang/Object;)Z", "expectedCount": 3 },
+      "method": {
+        "name": "addToProcessIsoObjectRemove",
+        "desc": "(Lzombie/iso/IsoObject;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "java/util/ArrayList",
+        "name": "contains|add",
+        "desc": "(Ljava/lang/Object;)Z",
+        "expectedCount": 3
+      },
       "redirect": "zombie/mdc/CellListMembership.{contains,add}",
       "rationale": "thread dump 兩大熱框之一。每個卸載物件必經：P.contains(o) 判斷是否為處理清單成員（~95%+ miss，全掃 P）＋R.contains(o) 去重 guard。這是 P5 最大單項收益點——兩個 O(N) miss 掃描降為 O(1)。注意 contains 有兩處（P 與 R 各一），原 P5 稿誤記為單一（12 呼叫點的錯誤來源）。",
       "evidence": "javap bc10 P.contains(#1499)→ifne 17（不在 P 就 return）、bc22 R.contains(#1499)→ifne 37、bc28-36 R.add(#106)。"
     },
     {
       "op": "redirect-call",
-      "method": { "name": "addToStaticUpdaterObjectList", "desc": "(Lzombie/iso/IsoObject;)V" },
-      "site": { "opcode": "INVOKEVIRTUAL", "owner": "java/util/ArrayList", "name": "contains|add", "desc": "(Ljava/lang/Object;)Z", "expectedCount": 2 },
+      "method": {
+        "name": "addToStaticUpdaterObjectList",
+        "desc": "(Lzombie/iso/IsoObject;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "java/util/ArrayList",
+        "name": "contains|add",
+        "desc": "(Ljava/lang/Object;)Z",
+        "expectedCount": 2
+      },
       "redirect": "zombie/mdc/CellListMembership.{contains,add}",
       "rationale": "S 清單（收音機/電視/可搬燈具/燃燒中火焰/待復活屍體）的去重 guard O(S)。",
       "evidence": "javap bc5-13 contains(#1499)→ifne 25、bc16-24 add(#106)。"
     }
   ],
   "behaviorNotes": "helper 為 identity membership sidecar：set == list 中所有不同 identity 的集合（非 size 對等——支援重複元素）。清單本身仍是迭代與順序的權威，ProcessStaticUpdaters 的 n--/size-- 補償迭代語意完全不動（SmokeCheck 有黃金比對）。生命週期＝IsoCell generation bundle（cell identity 換代整組替換，無 weak reference——codex 指出 State.set→IsoObject.table→舊 ArrayList 可反向釘住弱鍵）。kill 為 process-lifetime terminal，僅 audit divergence（抽驗 set 與 list 不一致）計入門檻 8；size 對帳 rebuild 只觀測不計（重度 MOD 環境的 Lua 旁路自癒不應累積成 kill）。identity 語意成立的前提：IsoObject 全部後代零 equals/hashCode 覆寫——SmokeCheck 以全 jar hierarchy walk 斷言，未來 build 若有子類新增覆寫即建置失敗。",
-  "verification": "部署後：(1) console 出現 [MinidoracatJavaPatch][CellList] ops=… P=… R=… S=… rebuilds=… divergence=… killed=false；(2) killed 必須恆為 false——若翻 true 表示偵測到持續失同步（sidecar 已自動全數回歸 vanilla，安全但收益歸零），需調查 log 中的 divergence 位置；(3) rebuilds 少量正常（Lua 旁路自癒），持續高速增長需調查；(4) fps-dip-sampler 新 dump 中 chunk 卸載主題（addToProcessIsoObjectRemove／IsoObject.removeFromWorld）佔比應顯著下降；(5) 行為面：物件卸載、屍體復活排程、火焰/收音機更新皆須正常。回退：uninstall.sh。"
+  "verification": "部署後：(1) console 出現 [MinidoracatJavaPatch][CellList] ops=… P=… R=… S=… rebuilds=… divergence=… killed=false；(2) killed 必須恆為 false——若翻 true 表示偵測到持續失同步（sidecar 已自動全數回歸 vanilla，安全但收益歸零），需調查 log 中的 divergence 位置；(3) rebuilds 少量正常（Lua 旁路自癒），持續高速增長需調查；(4) fps-dip-sampler 新 dump 中 chunk 卸載主題（addToProcessIsoObjectRemove／IsoObject.removeFromWorld）佔比應顯著下降；(5) 行為面：物件卸載、屍體復活排程、火焰/收音機更新皆須正常。回退：uninstall.sh。",
+  "status": "retired-42.20.2",
+  "retirementNote": "42.20.2 官方收編：IsoCell 原生伴生 Set（processIsoObjectSet/staticUpdaterObjectSet/HashSet 化 R）＋removeFromStaticUpdaterObjectList API＋ProcessIsoObject isEmpty 快速路徑，15 站全數退役（含 IsoObject/IsoDeadBody 伴隨類）。"
 }

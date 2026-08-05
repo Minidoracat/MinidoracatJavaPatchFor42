@@ -284,7 +284,7 @@ full remove、ns/entity、倍增比與可用時的 thread allocation；時間只
 
 ---
 
-## 2h. popman 共享 buffer 執行緒競爭修復（v3 buffer 隔離）
+## 2h.（42.20.2 官方收編，退役）popman 共享 buffer 執行緒競爭修復（v3 buffer 隔離）
 
 **正式服根因證據**：2026-07-30 全日 11 個 log set 共 77 筆
 `IngameState.UpdateStuff> Exception thrown`＝`java.nio.BufferUnderflowException` at
@@ -537,7 +537,7 @@ createSteamAvatarFixed 裸 JVM 不可測(結構鎖+人工 QA);ensureData 的 laz
   **reject 率 >0.9 是本刀有效的判準**，也是 codex 設下的人數上限放寬前提之一。
 - 只動本方法內呼叫點；`CombatManager`、`BaseVehicle.processRangeHit` 等其他呼叫者原樣。
 
-### 2k-2. VehicleManager.connected 512→256
+### 2k-2.（42.20.2 官方收編，退役）VehicleManager.connected 512→256
 
 `serverUpdate` 每 tick 無條件掃 `connected[]` 全部 512 slot × 全部載具做旗標傳播（實際發送
 另有 100ms 節流，~83% 呼叫純空轉）；dump 5/5 停在該迴圈回跳邊（LineNumberTable 對映
@@ -580,7 +580,7 @@ server tick。100 條執行緒堆疊**零我方 patch 類**——純原版 42.20
 ＋一行定位 log——**下次觸發直接知道問題物件在哪**。helper 無狀態零欄位，全 public API。
 TIS 官方修復後 uninstall 即回歸原版。
 
-## 2m. 效能第二波 P5：IsoCell 三清單 identity membership sidecar
+## 2m.（42.20.2 官方收編，退役）效能第二波 P5：IsoCell 三清單 identity membership sidecar
 
 **立案**：第一波後低谷頻率一度塌陷至 1–2 次/日，但 2026-08-03 晚間人數衝上 80（新高）後
 單晚觸發 6 次、FPS 探至 6.1，且 chunk 卸載主題重回榜首（新 dump 3/13＝23%，累計
