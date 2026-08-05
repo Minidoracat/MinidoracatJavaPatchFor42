@@ -39,7 +39,7 @@ echo Game folder: "%GAMEDIR%"
 echo Checking game version...
 call :hash "%GAMEDIR%projectzomboid.jar"
 if /i "%HASH%"=="%EXPECTED_JAR%" goto :versionok
-echo [ERROR] Game version mismatch - this patch is for build 42.20.0 only.
+echo [ERROR] Game version mismatch - this patch is for build __GAME_VERSION__ only.
 echo    expected %EXPECTED_JAR%
 echo    actual   %HASH%
 goto :fail
