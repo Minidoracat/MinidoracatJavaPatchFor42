@@ -234,22 +234,11 @@ public final class PatchConfig {
         a4.expectedHits = 2;
         patches.add(animal);
 
-        // 根因（codex 對抗審查＋v2 clamp 線上 overlap 證據 pageCount=35>readable=28、1024−814=210
-        // =10×21 恰為寫側 10 筆）：this.byteBuffer 由 MCD 背景執行緒寫側（saveLock 互斥）與主執行緒
-        // updateMain 讀側共用，讀側無鎖（vanilla 遺漏）→ position 併發亂跳 → 隨機欄位 underflow
-        // ＋混讀損毀。v3 root fix：updateMain 內全部 10 處 getfield byteBuffer 之後同形換成
-        // PopmanBufferGuard.UPDATE_MAIN_BUFFER 專用 buffer（讀寫隔離、零鎖）；count-clamp 降為
-        // 保險絲（隔離後不應觸發，觸發即記 log）。寫側 beginSaveRealZombies/writeCellSnapshot 不動。
-        Patcher.ClassPatch popman = new Patcher.ClassPatch("zombie/popman/ZombiePopulationManager");
-        Patcher.MethodOps popmanUpdate = popman.method("updateMain", "()V");
-        popmanUpdate.countClamp = new Patcher.CountClamp("zombie/popman/ZombiePopulationManager",
-                "n_getAddZombieData", "(ILjava/nio/ByteBuffer;)I",
-                "zombie/mdc/PopmanBufferGuard", "clampAddZombieCount");
-        popmanUpdate.fieldGetSwap = new Patcher.FieldGetSwap("zombie/popman/ZombiePopulationManager",
-                "byteBuffer", "Ljava/nio/ByteBuffer;",
-                "zombie/mdc/PopmanBufferGuard", "updateMainBuffer");
-        popmanUpdate.expectedHits = 11;   // clamp ×1 ＋ getfield swap ×10（clear、native 參數、8 讀取）
-        patches.add(popman);
+        // 42.20.2 官方收編，退役：popman buffer 隔離 v3（fieldGetSwap ×10＋count-clamp）。
+        // 官方新增 readByteBuffer = allocateDirect(1024) 專用讀 buffer，updateMain 全部 10 處
+        // 讀側 getfield 換用之、n_getAddZombieData 亦改收——正規化後指令序列與我方 v3 完全
+        // 同構（僅欄位替換），寫側 byteBuffer 不動。讀寫共用的 position 併發根因已由官方根治，
+        // clamp 保險絲失去防護對象。原根因鏈與 v1-v3 演進全文見 docs/patches.md 2h。
 
         // ---- 效能第一波（2026-08-02，66 份低谷 thread dump 聚合定案，Claude/codex 雙審一致）----
 
@@ -266,61 +255,23 @@ public final class PatchConfig {
         zvb.expectedHits = 1;
         patches.add(zombieVeh);
 
-        // VehicleManager.connected 512→256：serverUpdate 每 tick 無條件掃 512 slot × 全部載具
-        // （dump 5/5 停在該迴圈回跳邊 line 127），但 RakNet connectionArray 只有 256、
-        // connection ID 一律 getByte()&255 解碼、UdpConnection.setIndex 全 jar 零呼叫者——
-        // index 恆 <256，上半 512 slot 純空轉。<init> 的 sipush 512 改 256 直接砍半。
-        // BaseVehicle.connectionState[512] 不動（同 index 界限，多餘槽位無害）。
-        Patcher.ClassPatch vehMgr = new Patcher.ClassPatch("zombie/vehicles/VehicleManager");
-        Patcher.MethodOps vehMgrInit = vehMgr.method("<init>", "()V");
-        vehMgrInit.consts.add(new Patcher.ConstChange(512, 256));
-        vehMgrInit.expectedHits = 1;
-        patches.add(vehMgr);
+        // 42.20.2 官方收編，退役：VehicleManager.connected 512→256。官方直接刪除 connected[512]
+        // 與 BaseVehicle.connectionState[512] 雙陣列，serverUpdate 的 512-slot 掃描迴圈整段移除，
+        // 改為 per-connection 的 UdpConnection.vehicleStates HashMap（vehicleId 為 key、惰性建立）
+        // ——比我方砍半更徹底。sipush 512 座標已不存在。原分析見 docs/patches.md 2k-2。
 
-        // ---- 效能第二波 P5（2026-08-03 解封：低谷頻率回升 >5/日、chunk 卸載重回榜首）----
-        // IsoCell 三清單的 identity membership sidecar（docs/p5-chunk-unload-design-v2.md，
-        // 雙審定稿＋GO-WITH-FIXES 三修正）：miss O(P)/O(S) → O(1)，removeAll O(P×R) → O(P+R)，
-        // 清單保序權威不動、hit 保留 vanilla、generation bundle 生命週期、audit+kill 保險絲。
-        // 15 呼叫點全部 INVOKEVIRTUAL java/util/ArrayList（javap 定案，非 12——原稿漏數雙 contains）。
-        String clm = "zombie/mdc/CellListMembership";
-        String arrayList = "java/util/ArrayList";
-        String objBool = "(Ljava/lang/Object;)Z";
-
-        Patcher.ClassPatch isoCell = new Patcher.ClassPatch("zombie/iso/IsoCell");
-        Patcher.MethodOps cellProcess = isoCell.method("ProcessIsoObject", "()V");
-        cellProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "removeAll",
-                "(Ljava/util/Collection;)Z", clm, "removeAll"));
-        cellProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "clear",
-                "()V", clm, "clear"));
-        cellProcess.expectedHits = 2;
-        Patcher.MethodOps cellAdd = isoCell.method("addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V");
-        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
-        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
-        cellAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
-        cellAdd.expectedHits = 3;
-        Patcher.MethodOps cellAddRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
-        cellAddRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
-        cellAddRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
-        cellAddRemove.expectedHits = 3;   // contains ×2（P 與 R 各一）＋ add ×1
-        Patcher.MethodOps cellStatic = isoCell.method("addToStaticUpdaterObjectList", "(Lzombie/iso/IsoObject;)V");
-        cellStatic.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
-        cellStatic.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
-        cellStatic.expectedHits = 2;
-        patches.add(isoCell);
-
-        Patcher.ClassPatch isoObjWorld = new Patcher.ClassPatch("zombie/iso/IsoObject");
-        Patcher.MethodOps objRemoveWorld = isoObjWorld.method("removeFromWorld", "()V");
-        objRemoveWorld.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
-        objRemoveWorld.expectedHits = 1;   // staticUpdaterObjectList.remove(this) 的 O(S) miss 全掃
-        patches.add(isoObjWorld);
-
-        Patcher.ClassPatch deadBody = new Patcher.ClassPatch("zombie/iso/objects/IsoDeadBody");
-        Patcher.MethodOps reanimate = deadBody.method("setReanimateTime", "(F)V");
-        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "contains", objBool, clm, "contains"));
-        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "add", objBool, clm, "add"));
-        reanimate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, arrayList, "remove", objBool, clm, "remove"));
-        reanimate.expectedHits = 4;   // contains ×2（兩分支 guard）＋ add ＋ remove——經 getter 的旁路變異者，必須鏡射
-        patches.add(deadBody);
+        // ---- 效能第二波 P5：42.20.2 官方收編，全家族 15 站退役（2026-08-06 四家族覆核定案）----
+        // 官方在 IsoCell 原生實作了我方 sidecar 設計：新增 processIsoObjectSet 與
+        // staticUpdaterObjectSet 伴生 HashSet、processIsoObjectRemove 直接 ArrayList→HashSet、
+        // 新增 removeFromStaticUpdaterObjectList() 公開 API。所有熱路徑（卸載側 contains miss、
+        // 載入側 remove+contains、S 清單去重、IsoObject.removeFromWorld miss、IsoDeadBody 經
+        // getter 的旁路變異）全數 O(1)；ProcessIsoObject 另加 isEmpty 快速路徑（常態 R=0 零成本，
+        // 優於我方 O(P+R)）。ProcessStaticUpdaters 的 n--/size-- 補償迭代逐指令保留。
+        // 15 站中 14 站的 ArrayList 呼叫已改為 Set INVOKEINTERFACE（座標消失），唯一殘存的
+        // ArrayList.removeAll 參數已是 HashSet——「命中數對但語境變了」的教科書案例。
+        // 官方版與我方版差異（記錄在案）：equals-based Set 而非 identity（現行等價，IsoObject
+        // 階層零 equals 覆寫）、無 audit/kill 保險絲、裸 getter 仍外洩（風險轉為官方所有）。
+        // 設計全文 docs/p5-chunk-unload-design-v2.md、覆核證據 docs/patches.md 2m。
 
         // ---- 假死修復（2026-08-02 事故：SmashWindowPacket → removeGlassAttachments 無限迴圈）----
 
