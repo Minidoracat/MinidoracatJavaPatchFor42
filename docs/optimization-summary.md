@@ -127,7 +127,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 項 | 原因 |
 |---|---|
 | ActionStateContainer 抑噪 | TIS 官方自己把 warn 降級為 trace，噪音源已消失 |
-| ZombieCountOptimiser 回收加速 | TIS 重寫了整個壓力模型，舊結論失去依據，重新分析前不恢復 |
+| ZombieCountOptimiser 回收加速 | 重新分析已完成、定案不恢復：42.20 的 culling 只掃 per-connection 的有主殭屍，碰不到無主殭屍（記憶體壓力主源），加速取樣與原始目標脫鉤（patches.md 2a） |
 | SafehouseClaimPacket 修復 | 觸發條件（自訂地圖）已從正式服移除，無症狀不介入驗證路徑 |
 | W3-2 ECS memo | microbenchmark 實測淨劣化，撤刀 |
 

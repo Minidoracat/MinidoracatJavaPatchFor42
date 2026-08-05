@@ -191,7 +191,11 @@ public final class PatchConfig {
 
         // ---- 行為（method 範圍內常數替換；ClassWriter 產新常數池條目，不動共享條目）----
 
-        // 42.20 暫時移除：殭屍 culling 取樣率 1/3 -> 1/2。
+        // 42.20 移除，重新分析後定案**不恢復**（完整論證見 docs/patches.md 2a）：
+        // 新模型的 culling 掃描來源是 per-connection zombiesToSend（只收「有主且主人非本
+        // 連線」的殭屍）——無主殭屍永遠不進列表，而它們正是當初做此手術的理由（大世界
+        // 記憶體壓力主源）。在新模型加速取樣只會多刪一小撮受雙倍保護半徑＋額度上限管制
+        // 的有主殭屍，與目標脫鉤。殭屍堆積要處理得換切入點，不是這個常數。
         // TIS 重寫了 ZombieCountOptimiser——`startCount()`＋`incrementZombie()` 併成
         // `prepareZombiesForDeletion()V`，判定基準從「全域殭屍總數」改為 per-connection 的
         // `zombiesToSend` 列表，且每個連線帶自己的 `zombiesCountForDelete` 遞減額度；
