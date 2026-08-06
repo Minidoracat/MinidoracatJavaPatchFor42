@@ -81,3 +81,16 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
    （前後指令）。42.20 實例：`IsoAnimal.respondToSound` 的壓力算式從 `radius / 20.0F` 改寫成
    `radius * 0.05F`，同時新增了 `fleeDistance = radius * 3.0F + 20.0F`——方法內仍剛好有一個
    `20.0f`，舊座標會**通過守門卻改到逃跑距離**。每次更新都該重跑語境確認，不能只看命中數。
+
+## 授權與免責
+
+本專案採 MIT 授權，見 [LICENSE](LICENSE)。
+
+- **非官方專案**，與 The Indie Stone 無任何隸屬、合作或背書關係。Project Zomboid 與其相關
+  素材之著作權均屬 The Indie Stone 所有。
+- 本 repo **不散布任何遊戲二進位檔案**。所有手術都在使用者自己合法取得的
+  `projectzomboid.jar` 上進行，jar 需自備；本專案只提供 patcher、helper 原始碼與安裝腳本。
+- **修改遊戲檔案風險自負。** 伺服器端 `bash uninstall.sh`、客戶端 `uninstall.bat` 可完整還原
+  原版；安裝前請自行備份。
+- **每次 PZ 更新後都必須重新建置與驗證**。命中數守門擋得住座標漂移，擋不住語境漂移
+  （見上方 SOP 第 3 點）——未重新驗證前，切勿把舊 patch 套到新版遊戲上。
