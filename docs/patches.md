@@ -267,8 +267,11 @@ Array.removeValue
 
 - registry 是 `WeakHashMap<Array<?>, State>`，且只接受 `ordered=false`；`State` 本身只含
   `TIntIntHashMap`／`TIntHashSet` 與 primitive counter，不持有 Array 或 entity 強參照。
-- `TIntIntHashMap` 關閉 remove 時的 auto-compaction，避免同一波 unload 反覆配置／rehash；
-  sidecar 會保留該 Array 的峰值容量，直到 weak key 回收。這是以少量可界定記憶體換掉 hot-path GC。
+- `TIntIntHashMap` 維持 Trove 預設 auto-compaction（factor=loadFactor=0.5，每 0.5×size 次
+  remove 壓實一次，攤提 O(1)/remove）。**不可停用**：Trove remove 只留 REMOVED 墓碑，壓實是
+  唯一主動且有界的回收機制。初版曾設 `setAutoCompactionFactor(0.0F)` 換取「同一波 unload 不
+  反覆 rehash」，結果數小時載卸攪動讓墓碑飽和、FREE 槽耗盡，get/put 探測鏈退化成掃全表——
+  2026-08-06 正式服主迴圈 15-25s 停頓、「Server is too busy」連發實案，thread dump 定罪後回退。
 - identity hash 碰撞或同一 identity 重複時，該 hash 改走原版「由前往後、第一個 identity match」
   的線性語意；每次 fast remove 前仍用 `items[index] == value` 驗證。
 - 偵測到 size/index 漂移時最多 rebuild 一次；再次不一致就失效 sidecar 並呼叫原版
@@ -277,7 +280,10 @@ Array.removeValue
 
 **驗證**：build 會確認四個原呼叫歸零且四個 helper 呼叫各恰一、helper/inner class 不含
 `IdentityHashMap` 或 entity 強參照；另跑 tail-swap 等價性、missing、ordered/equality/null、
-size/same-size/index 漂移、duplicate/hash collision、不同 Array 並行與 deterministic stats。
+size/same-size/index 漂移、duplicate/hash collision、不同 Array 並行與 deterministic stats，
+以及墓碑攪動回歸鎖 `churnKeepsTombstonesBounded`（4096 live×20480 循環，反射計數 Trove
+REMOVED 槽，斷言 maxRemoved≤3072＋rebuild/linearScan/fallback=0；負對照實測停壓實時
+maxRemoved=6500 必紅）。
 尺度 benchmark 固定 N=1024/2048/4096/8192、3 輪 warmup＋7 輪中位數，輸出 add、first remove、
 full remove、ns/entity、倍增比與可用時的 thread allocation；時間只作報告，不設機器相依 pass/fail
 門檻。

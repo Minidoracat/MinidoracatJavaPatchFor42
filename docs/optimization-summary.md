@@ -132,7 +132,9 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **浪費**：批次卸載時逐 entity 對全域陣列做 identity 線性搜尋。
 - **修法**：4 個 callsite 改道 primitive sidecar index，O(N)→O(1)；碰撞/外部
   mutation/ordered 路徑全走原版 fallback。
-- **效果**：benchmark 每 entity 439ns→42ns（8192 尺度）；線上 anomalies=0。
+- **效果**：benchmark 每 entity 439ns→63ns（8192 尺度；2026-08-06 壓實回退後由 42ns 回升，
+  換得墓碑有界——初版停用 Trove auto-compaction 曾致墓碑飽和、主迴圈 15-25s 停頓，見 patches.md 2g）；
+  線上 anomalies=0。
 
 ## 二、修復類
 
