@@ -225,6 +225,12 @@ public final class FastIdentityArrayRemoval {
     }
 
     private static final class State {
+        // Trove 的 remove 只留 REMOVED 墓碑，auto-compaction 是唯一「主動且有界」的回收機制，
+        // 必須維持預設開啟。postInsertHook 的 _free==0 同容量 rehash 只是事後救援：只在 put
+        // 觸發，且墓碑槽重用讓 FREE 可長期不歸零——探測鏈先爛掉。曾為省縮容 rehash 設
+        // setAutoCompactionFactor(0.0F)：數小時載卸攪動把 FREE 槽耗盡後 get/put 退化成掃全表
+        // （2026-08-06 正式服主迴圈 15-25s 停頓實案，thread dump 定罪；回歸鎖 churnKeepsTombstonesBounded）。
+        // 勿改用 IdentityHashMap：零墓碑但持 entity 強參照，違反 State 生命週期契約（SmokeCheck 硬攔）。
         final TIntIntHashMap indices = new TIntIntHashMap(16, 0.5F, 0, NO_INDEX);
         final TIntHashSet collisions = new TIntHashSet();
         int expectedSize;
@@ -232,12 +238,6 @@ public final class FastIdentityArrayRemoval {
         long linearScanCount;
         long fastRemoveCount;
         long fallbackCount;
-
-        State() {
-            // 大量 chunk unload 是連續 remove；Trove 預設縮容會在這段熱路徑反覆配置／rehash。
-            // State 由 weak registry 控制生命週期，保留峰值容量直到 Array 回收即可。
-            indices.setAutoCompactionFactor(0.0F);
-        }
     }
 
     private FastIdentityArrayRemoval() {}

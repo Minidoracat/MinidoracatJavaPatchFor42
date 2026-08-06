@@ -37,6 +37,6 @@
       "evidence": "updateMembership bytecode offset 343 恰有一次 Array.removeValue(entity,true)，offset 346 緊接 POP；containsEntity bucket bit 與 debug contains 負對照仍在原位。"
     }
   ],
-  "behaviorNotes": "只改 updateMembership 內 private unordered entities 的 add/remove；ordered listeners Array 的 add/remove 完全未改。helper 的 registry 使用 weak Array key，State 只含 primitive Trove collections；Trove remove auto-compaction 關閉以避免 unload 熱路徑 rehash，State 隨 Array weak lifecycle 回收。",
+  "behaviorNotes": "只改 updateMembership 內 private unordered entities 的 add/remove；ordered listeners Array 的 add/remove 完全未改。helper 的 registry 使用 weak Array key，State 只含 primitive Trove collections；Trove remove auto-compaction 維持預設開啟（factor=loadFactor=0.5）——初版曾停用致墓碑飽和、2026-08-06 正式服主迴圈 15-25s 停頓，已回退並由 SmokeCheck＋churnKeepsTombstonesBounded 雙鎖；State 隨 Array weak lifecycle 回收。",
   "verification": "PatchConfig aggregate expectedHits=2；SmokeCheck 驗 helper add/remove 各恰一、原呼叫各為零，並驗 helper/State 沒有 IdentityHashMap 或 entity 強參照；行為測試驗 tail swap、first-match collision fallback、不同 Array 不被全域長鎖串行；尺度 benchmark 固定四個 N、3 warmup、7 median，只以正確性守門；CheckClassAdapter、-Xverify:all 與 javap offset 153/343 均通過。"
 }
