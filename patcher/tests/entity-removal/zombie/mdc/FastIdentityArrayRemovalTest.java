@@ -1,9 +1,11 @@
 package zombie.mdc;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -20,6 +22,7 @@ public final class FastIdentityArrayRemovalTest {
         tailSwapAndSequentialRemoval();
         eagerUniqueFastPath();
         interleavedAddRemove();
+        churnKeepsTombstonesBounded();
         missingValue();
         orderedEqualsAndNullFallbacks();
         sizeMismatchRebuild();
@@ -85,6 +88,88 @@ public final class FastIdentityArrayRemovalTest {
             }
             requireSame(vanilla, patched, "interleaved");
         }
+    }
+
+    /**
+     * 長時間穩定規模的載卸攪動下，索引 map 的 REMOVED 墓碑必須被 Trove auto-compaction 回收。
+     * 停用壓實（setAutoCompactionFactor(0.0F)）時墓碑趨近 capacity−live、FREE 槽耗盡，
+     * get/put 探測鏈退化成掃全表——2026-08-06 正式服主迴圈 15-25s 停頓實案的回歸鎖。
+     */
+    private static void churnKeepsTombstonesBounded() throws Exception {
+        int live = 4096;
+        int churn = 20480;
+        List<Object> values = uniqueObjects(live + churn);
+        Array<Object> array = new Array<>(false, live);
+        for (int i = 0; i < live; i++) {
+            FastIdentityArrayRemoval.add(array, values.get(i));
+        }
+
+        FastIdentityArrayRemoval.resetStats(array);
+        int maxRemoved = 0;
+        for (int i = 0; i < churn; i++) {
+            require(FastIdentityArrayRemoval.remove(array, values.get(i), true), "churn remove");
+            FastIdentityArrayRemoval.add(array, values.get(live + i));
+            maxRemoved = Math.max(maxRemoved, countRemovedSlots(array));
+        }
+
+        long[] stats = FastIdentityArrayRemoval.snapshotStats(array);
+        require(stats[0] == 0L, "churn rebuild=0");
+        require(stats[1] == 0L, "churn linearScan=0");
+        require(stats[2] == churn, "churn fastRemove=N");
+        require(stats[3] == 0L, "churn fallback=0");
+        require(array.size == live, "churn size stable");
+        System.out.println("churn INFO   maxRemoved=" + maxRemoved + "／門檻 " + (live * 3 / 4)
+                + "（壓實有效性趨勢觀測；rebuild 會清墓碑故 rebuild=0 斷言擋 vacuous pass）");
+        // 下界擋儀器失效（Trove 若改 REMOVED 數值而名不變，countRemovedSlots 恆 0 會靜默轉綠）；
+        // 上界 3/4×live 隱式耦合 State 的 loadFactor=0.5（壓實間隔=0.5×size→maxRemoved≈2048，
+        // 實測 1644）——若調 loadFactor 需同步重推此門檻。
+        require(maxRemoved > 0 && maxRemoved <= live * 3 / 4,
+                "墓碑未被壓實回收或儀器失效（maxRemoved=" + maxRemoved + "）");
+    }
+
+    // 反射 handle 只解析一次（迴圈內 20480 次取樣，重複 getDeclaredField＋撲空例外是純浪費）。
+    private static Field statesMapField;
+    private static Field stateIndicesField;
+    private static Field troveSlotsField;
+    private static byte troveRemovedMark;
+
+    /** 反射點數索引 map 的 REMOVED 槽（TPrimitiveHash._states == REMOVED 標記）。 */
+    private static int countRemovedSlots(Array<?> array) throws Exception {
+        if (statesMapField == null) {
+            statesMapField = FastIdentityArrayRemoval.class.getDeclaredField("STATES");
+            statesMapField.setAccessible(true);
+        }
+        Object state = ((Map<?, ?>) statesMapField.get(null)).get(array);
+        require(state != null, "churn state present");
+        if (stateIndicesField == null) {
+            stateIndicesField = state.getClass().getDeclaredField("indices");
+            stateIndicesField.setAccessible(true);
+        }
+        Object trove = stateIndicesField.get(state);
+        if (troveSlotsField == null) {
+            troveSlotsField = findInheritedField(trove.getClass(), "_states");
+            troveRemovedMark = findInheritedField(trove.getClass(), "REMOVED").getByte(null);
+        }
+        byte[] slots = (byte[]) troveSlotsField.get(trove);
+        int removed = 0;
+        for (byte slot : slots) {
+            if (slot == troveRemovedMark) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    private static Field findInheritedField(Class<?> type, String name) throws Exception {
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            try {
+                Field field = c.getDeclaredField(name);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new AssertionError("trove field not found: " + name);
     }
 
     private static void missingValue() {

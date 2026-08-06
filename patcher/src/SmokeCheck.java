@@ -473,6 +473,9 @@ public final class SmokeCheck {
                 stateFieldsArePrimitiveOnly(stateNode)
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/util/Array")
                 && !containsUtf8(distJava, fastRemoval + "$State", "zombie/entity/GameEntity"));
+        failed += check("entity helper 未重新引入 setAutoCompactionFactor（2026-08-06 墓碑飽和事故）",
+                !containsUtf8(distJava, fastRemoval, "setAutoCompactionFactor")
+                && !containsUtf8(distJava, fastRemoval + "$State", "setAutoCompactionFactor"));
 
         // ---- 效能第一波（載具預篩；VehicleManager 512→256 已於 42.20.2 退役）----
         String prefilterCls = "zombie/mdc/VehicleIntersectPrefilter";
