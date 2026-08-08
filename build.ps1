@@ -50,7 +50,6 @@ $helperEntries = @(
     'zombie/network/MinidoracatJoinMetrics.class',
     'zombie/mdc/VehicleIntersectPrefilter.class',
     'zombie/mdc/GlassAttachmentGuard.class',
-    'zombie/mdc/FertilizedEggGuard.class',
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class'

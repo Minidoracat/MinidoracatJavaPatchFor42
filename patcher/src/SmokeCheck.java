@@ -24,7 +24,6 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
-import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -87,8 +86,6 @@ public final class SmokeCheck {
             failed += check("預篩幾何：線段上=0、垂距=9、端點外=16、退化線段=點距",
                     onSeg == 0f && perp == 9f && beyond == 16f
                     && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
-
-            failed += checkFertilizedEggGuard(patched);
 
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
@@ -509,104 +506,8 @@ public final class SmokeCheck {
         // 42.20.2 官方收編：P5 全家族 15 站結構斷言隨 patch 退役（官方伴生 Set 原生 O(1)）。
 
 
-        // ---- 受精蛋清除豁免（2026-08-04）----
-        // 命中數守門只保證改道發生一次，擋不住「改到別的呼叫點」——這裡把位置鎖進清除判定鏈：
-        // 改道呼叫的前一條必為 aload（worldItem），後一條必為 ifne（true＝跳過清除），
-        // 再下一條必為 getstatic GameTime.instance（原版清除鏈的下一段）。TIS 改寫 load 時
-        // 建置失敗而非默默把豁免掛到別的地方。
-        String eggGuardCls = "zombie/mdc/FertilizedEggGuard";
-        String squareCls = "zombie/iso/IsoGridSquare";
-        String wioCls = "zombie/iso/objects/IsoWorldInventoryObject";
-        String loadDesc = "(Ljava/nio/ByteBuffer;IZ)V";
-        String ignoreDesc = "()Z";
-        String eggRedirectDesc = "(L" + wioCls + ";)Z";
-
-        MethodNode vanillaLoad = methodFromJar(jar, squareCls, "load", loadDesc);
-        failed += check("vanilla 前提：load 內 isIgnoreRemoveSandbox 恰一、清除鏈 4×listContains＋1×getWorldAgeHours",
-                countExactCalls(vanillaLoad, Opcodes.INVOKEVIRTUAL, wioCls,
-                        "isIgnoreRemoveSandbox", ignoreDesc) == 1
-                && countExactCalls(vanillaLoad, Opcodes.INVOKEVIRTUAL, "zombie/SandboxOptions",
-                        "worldItemRemovalListContains", "(Ljava/lang/String;)Z") == 4
-                && countExactCalls(vanillaLoad, Opcodes.INVOKEVIRTUAL, "zombie/GameTime",
-                        "getWorldAgeHours", "()D") == 1);
-
-        MethodNode patchedLoad = method(distJava, squareCls, "load", loadDesc);
-        failed += check("受精蛋豁免改道恰一次且原呼叫歸零",
-                countExactCalls(patchedLoad, Opcodes.INVOKESTATIC, eggGuardCls,
-                        "isIgnoreRemoveSandbox", eggRedirectDesc) == 1
-                && countExactCalls(patchedLoad, Opcodes.INVOKEVIRTUAL, wioCls,
-                        "isIgnoreRemoveSandbox", ignoreDesc) == 0);
-        failed += check("清除鏈其餘判定原樣（4×listContains＋1×getWorldAgeHours 未被動）",
-                countExactCalls(patchedLoad, Opcodes.INVOKEVIRTUAL, "zombie/SandboxOptions",
-                        "worldItemRemovalListContains", "(Ljava/lang/String;)Z") == 4
-                && countExactCalls(patchedLoad, Opcodes.INVOKEVIRTUAL, "zombie/GameTime",
-                        "getWorldAgeHours", "()D") == 1);
-
-        MethodInsnNode eggCall = findExactCall(patchedLoad, Opcodes.INVOKESTATIC, eggGuardCls,
-                "isIgnoreRemoveSandbox", eggRedirectDesc);
-        boolean eggSeq = false;
-        JumpInsnNode eggIfne = null;
-        if (eggCall != null) {
-            AbstractInsnNode before = prevReal(eggCall);
-            AbstractInsnNode after = nextReal(eggCall);
-            AbstractInsnNode after2 = after == null ? null : nextReal(after);
-            eggSeq = before != null && before.getOpcode() == Opcodes.ALOAD
-                    && after instanceof JumpInsnNode ifne && ifne.getOpcode() == Opcodes.IFNE
-                    && after2 instanceof FieldInsnNode gs && gs.getOpcode() == Opcodes.GETSTATIC
-                            && gs.owner.equals("zombie/GameTime") && gs.name.equals("instance");
-            if (eggSeq) {
-                eggIfne = (JumpInsnNode)after;
-            }
-        }
-        failed += check("受精蛋豁免落在清除判定鏈（aload→guard→ifne→GameTime.instance）", eggSeq);
-
-        // 分支方向鎖：形狀對不代表方向對。guard 回 true 的去處，必須等於清除鏈尾端
-        // 「還沒過期＝保留」的去處（vanilla 594:ifne 625 與 619:ifle 625 同一 label）。
-        // 若 TIS 把語意反轉成「要清除」，指令形狀完全不變、命中數也不變，只有這條擋得住。
-        MethodInsnNode worldAgeCall = findExactCall(patchedLoad, Opcodes.INVOKEVIRTUAL,
-                "zombie/GameTime", "getWorldAgeHours", "()D");
-        JumpInsnNode expiryIfle = null;
-        for (AbstractInsnNode in = worldAgeCall; in != null; in = nextReal(in)) {
-            if (in instanceof JumpInsnNode jump && jump.getOpcode() == Opcodes.IFLE) {
-                expiryIfle = jump;
-                break;
-            }
-        }
-        failed += check("受精蛋豁免的分支方向正確（guard=true 的去處＝未過期保留的去處）",
-                eggIfne != null && expiryIfle != null && eggIfne.label == expiryIfle.label);
-
-        // 匯流鎖：四個 listContains 分支中，判定為「命中清單」的三條必須全部落到 guard 前的
-        // aload。PZ 重排分支讓某個模式繞過 guard 時（例如白名單分支直接 goto 保留），
-        // 命中數與全序鎖都無感，只有這條會紅。
-        AbstractInsnNode eggAload = eggCall == null ? null : prevReal(eggCall);
-        int intoGuard = 0;
-        if (eggAload instanceof LabelNode) {
-            eggAload = nextReal(eggAload);
-        }
-        LabelNode guardLabel = null;
-        for (AbstractInsnNode in = patchedLoad.instructions.getFirst(); in != null; in = in.getNext()) {
-            if (in instanceof LabelNode label && nextReal(label) == eggAload) {
-                guardLabel = label;
-                break;
-            }
-        }
-        for (AbstractInsnNode in : patchedLoad.instructions) {
-            if (in instanceof JumpInsnNode jump && jump.label == guardLabel) {
-                intoGuard++;
-            }
-        }
-        failed += check("四個 listContains 分支中命中清單的三條全部匯流到 guard（" + intoGuard + "/3）",
-                guardLabel != null && intoGuard == 3);
-
-        MethodNode eggRedirect = method(distJava, eggGuardCls, "isIgnoreRemoveSandbox", eggRedirectDesc);
-        failed += check("EggGuard 先取 vanilla 豁免值恰一次（原語意保留）",
-                countExactCalls(eggRedirect, Opcodes.INVOKEVIRTUAL, wioCls,
-                        "isIgnoreRemoveSandbox", ignoreDesc) == 1);
-        ClassNode eggNode = classNode(distJava, eggGuardCls);
-        failed += check("EggGuard static 欄位僅 primitive 且含觀測 log 前綴",
-                !eggNode.fields.isEmpty()
-                && eggNode.fields.stream().allMatch(f -> f.desc.length() == 1 && "ZBCSIJFD".contains(f.desc))
-                && containsUtf8(distJava, eggGuardCls, "[MinidoracatJavaPatch][EggGuard]"));
+        // 2026-08-08 受精蛋豁免退役：IsoGridSquare.load 的改道與 13 條結構／行為斷言隨 patch
+        // 一併移除，IsoGridSquare 回歸原版（server 與 client 行為一致）。詳見 patches.md 2n。
 
 
         // ---- W3 效能第三波結構斷言 ----
@@ -902,122 +803,6 @@ public final class SmokeCheck {
         squareClass.getField("zone").set(square, town);
         boolean vanillaPassThrough = effectiveZone.invoke(null, square) == town;
         return fallbackOk && movedBlocked && vanillaPassThrough;
-    }
-
-    /**
-     * 受精蛋豁免的行為驗證：委派 vanilla 值、判定四象限、以及整條改道路徑端到端。
-     * Food 的建構子會解析 texture 路徑（需要遊戲檔案系統，headless 必 NPE），
-     * 故以 allocateInstance 取裸實例後只設受精相關欄位——本 helper 讀的就只有這些。
-     */
-    static int checkFertilizedEggGuard(ClassLoader patched) throws Exception {
-        int failed = 0;
-        Class<?> wioClass = Class.forName("zombie.iso.objects.IsoWorldInventoryObject", true, patched);
-        Class<?> cellClass = Class.forName("zombie.iso.IsoCell", false, patched);
-        Class<?> itemClass = Class.forName("zombie.inventory.InventoryItem", false, patched);
-        Class<?> foodClass = Class.forName("zombie.inventory.types.Food", true, patched);
-        Class<?> timeClass = Class.forName("zombie.GameTime", true, patched);
-        Class<?> guard = Class.forName("zombie.mdc.FertilizedEggGuard", true, patched);
-        Method redirect = guard.getMethod("isIgnoreRemoveSandbox", wioClass);
-        Method hatchable = guard.getMethod("isHatchableEgg", itemClass);
-        Method inWindow = guard.getMethod("withinHatchWindow", wioClass, foodClass);
-        Method keptLoadsObserved = guard.getMethod("keptLoadsObserved");
-        Method expiredLoadsObserved = guard.getMethod("expiredLoadsObserved");
-        Method anomaliesObserved = guard.getMethod("anomaliesObserved");
-        Method setIgnore = wioClass.getMethod("setIgnoreRemoveSandbox", boolean.class);
-        double windowMultiplier = guard.getDeclaredField("HATCH_WINDOW_MULTIPLIER").getDouble(null);
-
-        // 世界時鐘在建置環境可控：getWorldAgeHours() = nightsSurvived*24 + timeOfDay 修正
-        Object gameTime = timeClass.getMethod("getInstance").invoke(null);
-        Method setNights = timeClass.getMethod("setNightsSurvived", int.class);
-        Method worldAgeHours = timeClass.getMethod("getWorldAgeHours");
-        setNights.invoke(gameTime, 0);
-        double youngWorld = (Double)worldAgeHours.invoke(gameTime);
-
-        // 1) 委派 vanilla：沒有物品時回原值 false；vanilla 豁免（ItemSpawner）原樣 true
-        Object wio = wioClass.getConstructor(cellClass).newInstance(new Object[]{ null });
-        boolean noItemIsVanillaFalse = !(Boolean)redirect.invoke(null, wio);
-        setIgnore.invoke(wio, true);
-        boolean vanillaTruePassThrough = (Boolean)redirect.invoke(null, wio);
-        failed += check("EggGuard 委派 vanilla：無物品＝false、vanilla 豁免＝true",
-                noItemIsVanillaFalse && vanillaTruePassThrough);
-
-        // 2) 判定五種狀態＋null＋非 Food：只有「受精且帶得出物種」才進入豁免候選
-        Object egg = allocateInstance(foodClass);
-        Method setFertilized = foodClass.getMethod("setFertilized", boolean.class);
-        Method setHatch = foodClass.getMethod("setAnimalHatch", String.class);
-        // 直接寫欄位而非 setTimeToHatch()——後者會讀 SandboxOptions.animalEggHatch 的乘數表，
-        // 而 SandboxOptions 的 clinit 需要遊戲檔案系統（headless 必炸）。helper 只讀 getTimeToHatch()。
-        Field timeToHatchField = foodClass.getDeclaredField("timeToHatch");
-        timeToHatchField.setAccessible(true);
-        boolean plainFood = !(Boolean)hatchable.invoke(null, egg);
-        setFertilized.invoke(egg, true);
-        boolean noHatchType = !(Boolean)hatchable.invoke(null, egg);
-        setHatch.invoke(egg, "");
-        boolean emptyHatchType = !(Boolean)hatchable.invoke(null, egg);
-        setHatch.invoke(egg, "hen");
-        boolean fertilizedHatchable = (Boolean)hatchable.invoke(null, egg);
-        setFertilized.invoke(egg, false);
-        boolean cooledBackToRemovable = !(Boolean)hatchable.invoke(null, egg);
-        boolean nullSafe = !(Boolean)hatchable.invoke(null, new Object[]{ null });
-        // 非 Food 的 InventoryItem：擋住「判定被放寬成跨型別字串比對」這類改寫
-        boolean nonFoodItem = !(Boolean)hatchable.invoke(null, allocateInstance(itemClass));
-        failed += check("EggGuard 判定：未受精/無物種/空物種/失去受精/null/非 Food 皆不豁免，受精＋物種才豁免",
-                plainFood && noHatchType && emptyHatchType && fertilizedHatchable
-                && cooledBackToRemovable && nullSafe && nonFoodItem);
-
-        // 3) 孵化視窗天花板——豁免有界的唯一保證（審查發現：原版三條去受精路徑對地上物品全不可達）
-        setFertilized.invoke(egg, true);
-        Field dropTime = wioClass.getField("dropTime");
-        timeToHatchField.setInt(egg, 0);
-        boolean noHatchTimeNotExempt = !(Boolean)inWindow.invoke(null, wio, egg);
-        int hatchHours = 1260;   // 母雞 504×2.5（AnimalEggHatch=5）＝正式服實際值
-        timeToHatchField.setInt(egg, hatchHours);
-        dropTime.setDouble(wio, -1.0);
-        boolean unknownDropTimeNotExempt = !(Boolean)inWindow.invoke(null, wio, egg);
-        dropTime.setDouble(wio, 0.0);
-        boolean freshEggInWindow = (Boolean)inWindow.invoke(null, wio, egg);
-        // 世界時鐘推到剛好超過 dropTime + 倍率×timeToHatch 即應失效
-        setNights.invoke(gameTime, (int)Math.ceil(windowMultiplier * hatchHours / 24.0) + 1);
-        double agedWorld = (Double)worldAgeHours.invoke(gameTime);
-        boolean expiredOutOfWindow = !(Boolean)inWindow.invoke(null, wio, egg);
-        setNights.invoke(gameTime, 0);
-        boolean backInWindow = (Boolean)inWindow.invoke(null, wio, egg);
-        failed += check("EggGuard 孵化視窗：timeToHatch<=0 與 dropTime=-1 不豁免、視窗內豁免、"
-                + "超過 " + windowMultiplier + "× 後失效（world " + youngWorld + "→" + agedWorld + "h）",
-                noHatchTimeNotExempt && unknownDropTimeNotExempt && freshEggInWindow
-                && expiredOutOfWindow && backInWindow && agedWorld > youngWorld);
-
-        // 4) 端到端：非 vanilla 豁免的地上受精蛋，經改道必須回傳豁免。preserved 必須恰為 1，
-        //    證明 log 分支（(preserved & 0x1F)==1）確實被執行過而不是被節流跳過
-        setIgnore.invoke(wio, false);
-        wioClass.getField("item").set(wio, egg);
-        boolean endToEnd = (Boolean)redirect.invoke(null, wio);
-        boolean logBranchTaken = (Long)keptLoadsObserved.invoke(null) == 1L;
-        setFertilized.invoke(egg, false);
-        boolean nonEggStillRemovable = !(Boolean)redirect.invoke(null, wio);
-        // 過期蛋走 expired 計數而非 preserved，且同樣交還原版清除
-        setFertilized.invoke(egg, true);
-        setNights.invoke(gameTime, (int)Math.ceil(windowMultiplier * hatchHours / 24.0) + 1);
-        boolean expiredRemovable = !(Boolean)redirect.invoke(null, wio);
-        boolean expiredCounted = (Long)expiredLoadsObserved.invoke(null) >= 1L;
-        setNights.invoke(gameTime, 0);
-        failed += check("EggGuard 端到端：受精蛋豁免且走過 log 分支、失去受精與過期皆恢復可清除",
-                endToEnd && logBranchTaken && nonEggStillRemovable
-                && expiredRemovable && expiredCounted);
-
-        // 全程零 anomalies——期望 false 的斷言在「helper 全程吞例外」時也會通過，
-        // 沒有這條就分不出「正確回傳 false」與「fail-open 蓋掉一切」（審查發現）
-        failed += check("EggGuard 全程零 anomalies（證明上述 false 是判定結果而非吞例外）",
-                (Long)anomaliesObserved.invoke(null) == 0L);
-        return failed;
-    }
-
-    /** 取得不經建構子的裸實例（Food 的 ctor 需要遊戲檔案系統，headless 不可用）。 */
-    static Object allocateInstance(Class<?> type) throws Exception {
-        Field theUnsafe = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
-        theUnsafe.setAccessible(true);
-        Object unsafe = theUnsafe.get(null);
-        return unsafe.getClass().getMethod("allocateInstance", Class.class).invoke(unsafe, type);
     }
 
 

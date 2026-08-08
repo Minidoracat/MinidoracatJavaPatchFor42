@@ -9,11 +9,15 @@ PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路
 bytecode 做「堆疊形狀不變」的呼叫改道／方法內常數替換，另有兩個窄範圍 null 頭部守衛，
 StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac 對遊戲 jar 編譯，隨 patch 出貨。
 
-## 內容（23 個 patched class、34 個 runtime class、34 處手術、44 個命中點）
+## 內容（22 個 patched class、32 個 runtime class、33 處手術、43 個命中點）
 
 > **42.20.2 里程碑**：官方在此版收編了我方三組 patch——P5 IsoCell sidecar（官方伴生 Set）、
 > popman buffer 隔離（官方 readByteBuffer）、VehicleManager 512→256（官方改 per-connection
 > HashMap）。三組已光榮退役，詳見 docs/optimization-summary.md 第四節。
+>
+> **2026-08-08**：受精蛋清除豁免（`IsoGridSquare`）退役——server 端運作正常，但 client 沒有
+> 對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋。改回原版行為（蛋照清），
+> 受精蛋請養在雞舍孵化。
 
 - **抑噪 6 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／ItemPickInfo／
   PacketsCache／INetworkPacket.logInconsistentPacket，外加 NetworkZombieManager——只攔已知噪音樣式，
@@ -32,11 +36,6 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   unordered identity add/remove callsite，以 weak-key＋primitive sidecar index 把批次卸載的重複
   O(N) 搜尋改成常態 O(1)；碰撞、外部 mutation、ordered/equality/null 路徑都保留原版 fallback。
   （42.20.2 覆核：`EngineEntityManager`/`EntityBucket` 位元組未變，patch 續用。）
-
-- **受精蛋清除豁免 1 項**：`WorldItemRemovalList` 只比對 item type，無法區分受精蛋（受精是 `Food`
-  的 per-instance 欄位，與一般蛋同為 `Base.Egg`），而 24 遊戲小時的清除門檻遠短於 1260 小時的
-  孵化時間——改道 `IsoGridSquare.load` 內唯一的 `isIgnoreRemoveSandbox`，只在 vanilla 判定為
-  不豁免時追加「可孵化且在孵化視窗內」的豁免；視窗天花板保證不會無界累積。
 
 - **效能第三波 W3 三刀**（docs/wave3-design-v1.md v2；三稜鏡對抗審查＋獨立 code review 雙關）：
   (1) 殭屍 ownership 重選舉錯峰——`NetworkZombiePacker.updateAuth` 改道 tick 計數器節流，
