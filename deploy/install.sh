@@ -43,10 +43,23 @@ while IFS=$'\t' read -r entry _rest; do
     [ -n "$entry" ] || continue
     [ -e "$SF/java/$entry" ] && { echo "[中止] $SF/java/$entry 已存在（非本 patch 產物）——請先人工處理" >&2; exit 1; }
 done < "$MF"
-# 第三方 loose class 巡檢（僅警告不中止）：SmokeCheck 的全 jar walk 斷言（identity／
-# behavior 子類）只涵蓋建置基準 jar，現場若另有他人 loose class 可旁路這些前提。
+# 不明 loose class 巡檢（fail-closed，2026-08-08 由警告升級）：任何不在新 manifest 內的
+# loose class 都中止。兩種來源都危險——(a) 我方舊版殘留（patch-manifest.txt 遺失時第 41 行的
+# 閘攔不到，退役項目如 2n 的 IsoGridSquare 會留下改道版 caller，其 helper 已隨新版刪除
+# ⇒ chunk 載入路徑 NoClassDefFoundError）；(b) 他人 loose class 可旁路 SmokeCheck 全 jar
+# walk 斷言（identity／behavior 子類）所依據的「只有建置基準 jar」前提。
+# 確認過來源無害時以 ALLOW_FOREIGN_LOOSE=1 明示放行。
 foreign=$(find "$SF/java" -name '*.class' 2>/dev/null | sed "s|^$SF/java/||" | grep -vxF -f <(cut -f1 "$MF") || true)
-[ -n "$foreign" ] && echo "[警告] 偵測到非本 patch 的 loose class（jar walk 前提可能被旁路）：" && echo "$foreign" | sed 's/^/    /'
+if [ -n "$foreign" ]; then
+    echo "[中止] 偵測到不在本 patch manifest 內的 loose class：" >&2
+    echo "$foreign" | sed 's/^/    /' >&2
+    if [ "${ALLOW_FOREIGN_LOOSE:-0}" != "1" ]; then
+        echo "       我方舊版殘留 → 用該版的 uninstall.sh 移除（或人工刪除）後重試；" >&2
+        echo "       確認是他人 loose class 且無害 → ALLOW_FOREIGN_LOOSE=1 bash install.sh" >&2
+        exit 1
+    fi
+    echo "[警告] ALLOW_FOREIGN_LOOSE=1 已明示放行——jar walk 前提可能被旁路" >&2
+fi
 echo "OK  無衝突"
 
 echo "== 安裝 =="

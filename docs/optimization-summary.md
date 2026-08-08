@@ -1,10 +1,11 @@
 # 全 Patch 優化原理與效果總結
 
-> 最後更新：2026-08-05（W3 上線後）。本文是**面向營運的總覽**——每項只講三件事：
+> 最後更新：2026-08-08（受精蛋豁免退役後）。本文是**面向營運的總覽**——每項只講三件事：
 > 浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
 > [patches.md](patches.md)，各波設計定稿見 `docs/*-design-*.md` 與 [specs/](specs/)。
-> 現況：**23 個 patched class、34 個 runtime class、34 處手術、44 個命中點**（42.20.2）。
+> 現況：**22 個 patched class、32 個 runtime class、33 處手術、43 個命中點**（42.20.2）。
 > 42.20.2 里程碑：官方收編 P5／popman 隔離／512→256 三組（見第四節），我方對應退役。
+> 2026-08-08：受精蛋清除豁免退役（patch 有效但 client 端無對應改道，見 patches.md 2n）。
 
 ## 全 Patch 清單（42.20.2 現役）
 
@@ -17,14 +18,13 @@
 | 效能 | W3-4 車輛 couldSee 死工消除 | `BaseVehicle`（update） | 1 | VehicleCouldSeeGate | server 端結果進 vanilla no-op，直接短路 |
 | 行為 | 動物壓力三調 | `IsoAnimal`（3 常數） | 3 | — | 閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半 |
 | 修復 | 玻璃假死保險絲 | `IsoWindow` | 1 | GlassAttachmentGuard | removeGlassAttachments 無限迴圈改跳過＋定位 log |
-| 修復 | 受精蛋清除豁免 | `IsoGridSquare` | 1 | FertilizedEggGuard | 孵化視窗內的受精蛋不被世界清理刪除 |
 | 修復 | 容器刷新修復 | `LootRespawn` | 2 | （LogFilter 兼任） | 自訂地圖無 TownZone 的原生固定容器恢復刷新 |
 | 防崩潰 | null 頭部守衛 ×2 | `hit/Zombie`＋`hit/Fall` | 1+1 | — | 損壞封包 NPE 崩潰的 guard-before-super |
 | 抑噪 | 已知噪音樣式過濾 ×7 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager` | 1+1+1+9+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出 |
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
 | 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
 
-合計：23 個 patched class、44 個命中點、11 個 runtime helper（34 classes）。
+合計：22 個 patched class、43 個命中點、10 個 runtime helper（32 classes）。
 另有 **client 端獨立包**（貼圖管線門檻＋洩漏根治，發佈於 `output\`，玩家自選安裝，不在 server manifest）。
 
 ### 退役／停用／否決（歷史記錄，詳見第四節）
@@ -38,6 +38,7 @@
 | 安全屋 room/building 修復 | 停用（觸發條件已移除，座標保留可隨時恢復） |
 | ActionStateContainer 抑噪 | 42.20 官方降級 warn→trace，退役 |
 | ZombieCountOptimiser 回收加速 | 42.20 官方重寫壓力模型，定案不恢復 |
+| 受精蛋清除豁免（IsoGridSquare） | 2026-08-08 退役——server 端實測有效，但 client 端無對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋；改回原版（蛋照清），受精蛋請用雞舍孵 |
 
 ## 核心哲學
 
@@ -141,7 +142,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 項 | 問題 | 修法 | 效果/狀態 |
 |---|---|---|---|
 | 玻璃假死保險絲（`IsoWindow.smashWindow`，2l） | vanilla `removeGlassAttachments` 移除失敗時無限迴圈——2026-08-02 全服凍結實案（100 條堆疊零 patch 類） | 重實作迴圈：移除失敗跳過並印出問題物件座標，不再卡死 | 上線後同型凍結零復發 |
-| 受精蛋清除豁免（`IsoGridSquare.load`，2n） | 世界清理只比對 item type，分不出受精蛋；24hr 清除門檻 << 1260hr 孵化時間，地上孵化被封死 | 改道唯一豁免判定點，只對「可孵化且在孵化視窗內」追加豁免；視窗天花板保證不無界堆積 | 生效中 |
+| 受精蛋清除豁免（`IsoGridSquare.load`，2n） | 世界清理只比對 item type，分不出受精蛋；24hr 清除門檻 << 1260hr 孵化時間，地上孵化被封死 | 改道唯一豁免判定點，只對「可孵化且在孵化視窗內」追加豁免；視窗天花板保證不無界堆積 | **2026-08-08 退役**——server 端實測有效（keptLoads 3649／expired 0／anomalies 0，單顆蛋 progress 推進至 1148/1260），但清除區塊無 `GameClient.client` 守衛且 SandboxOptions 由 server 完整同步，client 每次 chunk 載入都自行濾掉那顆蛋（玩家看不到也撿不起來）。改回原版：蛋照清，引導玩家用雞舍孵化 |
 | 原生固定容器刷新修復（`LootRespawn`，2e） | 自訂地圖缺 vanilla TownZone＋黏性 construction 旗標 → 固定容器永不刷新 | 窄範圍 fallback：只放行未搬動的原生固定容器 | 生效中 |
 | 安全屋 room/building 綁定修復（2d） | B42.19 自訂大地圖的 binding 遺失 | 從 authoritative roomList 補回 roomId 再走完整原版驗證 | **2026-07-29 停用**——正式服已回歸原版地圖，觸發條件消失；座標已驗 42.20 仍有效，可隨時解註解恢復 |
 | Client 貼圖管線（2j，獨立 client 包） | 50MB DirectBuffer 硬門檻讓載入執行緒無限 sleep → 實體隱形；另有四處洩漏根因（S1/S2/S4/S6） | 門檻觀測＋洩漏根治第一波 | v2.0 出貨於 output\（玩家自選安裝） |
