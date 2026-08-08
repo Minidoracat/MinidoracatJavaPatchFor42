@@ -626,7 +626,33 @@ removeAll 四情境、補償迭代重入的訪問序列黃金比對）＋10 個�
 歸零、S3 負對照 `size×2/get×1` 原樣、S4 負對照 `ProcessStaticUpdaters` 零改道、S5 六個
 contains 後綴必為 IFNE/IFEQ、全 jar hierarchy walk 斷言 IsoObject 全後代零 equals/hashCode 覆寫）。
 
-## 2n. 受精蛋世界清除豁免（IsoGridSquare.load）
+## 2n.（2026-08-08 退役：client 端無對應改道）受精蛋世界清除豁免（IsoGridSquare.load）
+
+> **退役結論（2026-08-08）**：patch 本身有效，**退役原因是 server-only 改道在此路徑必然
+> 產生玩家端 desync**，不是失效。以下原始設計全文保留，作為「動 client 也會跑的判定路徑」
+> 的教訓案例。
+>
+> **生效證據**：正式服 log（`[MinidoracatJavaPatch][EggGuard]`）本次啟動 `keptLoads=3649`、
+> `expiredLoads=0`、`anomalies=0`，累計 1678 行 kept、738 顆不同的蛋；單顆蛋（`5713,6446`，
+> `dropTime=3770.763916015625`）的 `progress` 跨多次 chunk 卸載／重載由 557 推進到 1121/1260，
+> 全服最高 1148/1260 —— server 端一顆都沒被清掉。
+>
+> **為什麼還是退役**：`IsoGridSquare.load` 的清除區塊沒有 `GameClient.client` 守衛，而
+> `SandboxOptions`（含完整 247 項 `WorldItemRemovalList`）由 server 在連線握手時就完整同步給
+> client（`ConnectionDetails.writeSandboxOptions` → `GameClient` 端 `SandboxOptions.load`
+> 逐項覆蓋）。client 載入 chunk 的兩條路徑（收 server chunk 封包、讀本地 MP 快取）都走同一個
+> `IsoChunk.LoadFromDiskOrBufferInternal` → `gs.load()`，判定條件與 server 一模一樣卻沒有
+> guard，於是**每次載入都自行把蛋濾掉**。判定是 item 狀態＋世界時鐘的純函數，輸入沒變結果就
+> 不變——重連、重開遊戲、清本地快取都一樣，蛋在玩家畫面上永遠不再出現，**也無法撿起**
+> （client 的 square 上根本沒有那個物件），只能等它孵成小雞。玩家實際回報的正是這個現象。
+>
+> **決策**：回歸原版行為（受精蛋照 24 遊戲小時清除），引導玩家把雞養在雞舍（`IsoHutch`）
+> 下蛋——雞舍內的蛋不是 `IsoWorldInventoryObject`，本來就不經這條清除路徑。改道、helper、
+> LoadCheck 簽名守門與 SmokeCheck 13 條斷言一併移除，`IsoGridSquare` 回歸原版位元組。
+>
+> **通則**：server-only patch 若落在 client 也會執行、且沒有 `GameClient.client` 守衛的判定
+> 路徑上，必然產生視覺／互動 desync。動手前先確認守衛存在，否則只有兩條路——連 client 一起
+> 改，或從設定層解決。
 
 **立案**：正式服 `WorldItemRemovalList`（247 項）含 `Base.Egg`。查證後確認清除判定
 **無法區分受精蛋**，而現行參數讓地上的受精蛋 100% 在孵化前被刪除。
@@ -757,27 +783,21 @@ offset 589 的 `aload 13` 是整條清除鏈上**唯一一個 `worldItem` 在堆
    新 dump 中載具主題（getIntersectPoint/getLocalPos/releaseVector3f/serverUpdate）佔比應從
    ~29% 顯著塌陷——這是第二波（P2/P3/P5）的立案量測；(e) `anomalies` 持續增長＝script null
    或幾何異常頻繁，需調查。
-10. **受精蛋豁免驗證**（觀察端一律以**伺服器**為準，見 2n 的 client desync 取捨）：
-   (a) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`——此路徑跑在
-   `ServerChunkLoader` 執行緒上，出現即立刻 uninstall。
-   (b) 正對照：地上放一顆**一般** `Base.Egg`，過 24 遊戲小時並讓該 chunk 卸載後重回，應消失
-   （證明清單仍生效、豁免沒有誤放行）。
-   (c) 豁免對照：地上放一顆**公雞受精過**的蛋，同樣時間後應仍在。**判定依據是伺服器端證據**
-   （`[EggGuard]` log 行、或重新登入/切換區域強制 client 重抓 chunk 後再看），
-   **不要只靠遊戲畫面目視**——client 本地 chunk 快取會造成偽陰性。
-   (d) `[MinidoracatJavaPatch][EggGuard] fertilized egg kept at x,y,z …` 每 32 次豁免印一行，
-   含座標、物種與 `progress=fertilizedTime/timeToHatch`。
-   **注意 `keptLoads` 是「豁免決策次數」不是蛋的顆數**——同一顆蛋每次 chunk 載回來都再計一次，
-   所以它同時被「蛋變多」與「chunk 反覆載入」推高（codex 審查發現）。要數實際顆數請用
-   log 行裡的**座標去重**。**硬性門檻**：去重後的座標數 > 200、或 fps-dip dump 出現
-   `IsoCell.addToProcessItems`／`ArrayList.indexOf` ⇒ 檢討並考慮 `uninstall.sh` 回退
-   （回退後那些蛋在下一次 chunk 載入即被清掉，累積自動歸零）。
-   `expiredLoads` 持續成長是正常的（天花板在回收孵不出來的蛋）。
-   (e) `anomaly n=… <例外類別>: <訊息>` 出現＝`getItem`/`Food` 存取或 log 路徑異常，需調查
-   （實務上應恆為 0）。
-   (f) 地上孵化解封的二階效應：全 jar 沒有全域動物上限（只有 per-hutch 的
-   `IsoHutch.getMaxAnimals()`），24 小時清除原本是自由放養繁殖的煞車之一。觀察線上
-   `IsoAnimal` 數量的週趨勢，異常增長時考慮調低 `HATCH_WINDOW_MULTIPLIER` 或回退。
+10. **受精蛋豁免退役驗證**（2026-08-08，2n 已退役——本項現在是**負向**驗證，確認舊 patch
+   已徹底清除、世界清理回歸原版）：
+   (a) 兩個退役 class 都不在磁碟上：`ls /home/pzserver/serverfiles/java/zombie/iso/IsoGridSquare.class`
+   與 `.../zombie/mdc/FertilizedEggGuard.class` 皆應「No such file」。**只殘留改道版
+   `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
+   最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
+   (b) 新 `patch-manifest.txt` 共 32 筆，`grep -c . patch-manifest.txt` = 32，且
+   `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
+   (c) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`（此路徑跑在
+   `ServerChunkLoader` 執行緒上，出現即立刻 uninstall）。
+   (d) log 不再出現 `[MinidoracatJavaPatch][EggGuard]` 任何一行（重啟後全新 log 起算）。
+   (e) 行為回歸原版：地上的受精蛋與一般蛋一樣，過 24 遊戲小時並讓該 chunk 卸載後重回即消失。
+   玩家端與伺服器端此時**行為一致**（退役正是為了消除這個 desync），可直接目視驗證。
+   (f) 玩家引導：受精蛋要孵化請放**雞舍**（`IsoHutch`）——雞舍內的蛋不是
+   `IsoWorldInventoryObject`，不經 `IsoGridSquare.load` 的清除路徑，本來就不受清單影響。
 11. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
