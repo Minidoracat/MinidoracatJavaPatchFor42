@@ -423,6 +423,26 @@ public final class PatchConfig {
         avatarM.expectedHits = 1;
         patches.add(texId);
 
+        // ---- v2.1 chunk 串流觀測（黑邊事件鑑識，2026-08-11 兩起實案；純觀測不改行為）----
+        // 三個 headCall 全部 receiver-only：updateMain=心跳＋節流讀態＋STALL 判定，
+        // receiveChunkPart/receiveNotRequired=接收計數（黑邊期間凍結＝斷流證據）。
+        // 假說待驗：largeArea 停送 gate（pendingRequests1>20）×server 端 3 次重試放棄。
+        String cso = "zombie/mdc/ChunkStreamObserver";
+        String csoDesc = "(Lzombie/iso/WorldStreamer;)V";
+        Patcher.ClassPatch streamer = new Patcher.ClassPatch("zombie/iso/WorldStreamer");
+        Patcher.MethodOps um = streamer.method("updateMain", "()V");
+        um.headCall = new Patcher.HeadCall(cso, "onUpdateMain", csoDesc);
+        um.expectedHits = 1;
+        Patcher.MethodOps rcp = streamer.method("receiveChunkPart",
+                "(Lzombie/core/network/ByteBufferReader;)V");
+        rcp.headCall = new Patcher.HeadCall(cso, "onReceiveChunkPart", csoDesc);
+        rcp.expectedHits = 1;
+        Patcher.MethodOps rnr = streamer.method("receiveNotRequired",
+                "(Lzombie/core/network/ByteBufferReader;)V");
+        rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
+        rnr.expectedHits = 1;
+        patches.add(streamer);
+
         return patches;
     }
 

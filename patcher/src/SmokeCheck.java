@@ -677,7 +677,58 @@ public final class SmokeCheck {
                         "zombie/core/textures/MipMapLevel", "dispose", "()V")
                 == countExactCalls(vDispose, Opcodes.INVOKEVIRTUAL,
                         "zombie/core/textures/MipMapLevel", "dispose", "()V"));
+
+        // ---- v2.1 chunk 串流觀測（WorldStreamer 三 headCall）----
+        String wsCls = "zombie/iso/WorldStreamer";
+        String csoCls = "zombie/mdc/ChunkStreamObserver";
+        String csoDesc = "(Lzombie/iso/WorldStreamer;)V";
+        String bbrDesc = "(Lzombie/core/network/ByteBufferReader;)V";
+        MethodNode vUm = methodFromJar(jar, wsCls, "updateMain", "()V");
+        failed += check("vanilla 前提：updateMain 錨定（觸碰 GameClient.connection）且無既存 observer 呼叫",
+                countFieldTouches(vUm, "zombie/network/GameClient", "connection") >= 1
+                && countExactCalls(vUm, Opcodes.INVOKESTATIC, csoCls, "onUpdateMain", csoDesc) == 0);
+        MethodNode pUm = method(distJava, wsCls, "updateMain", "()V");
+        MethodNode pRcp = method(distJava, wsCls, "receiveChunkPart", bbrDesc);
+        MethodNode pRnr = method(distJava, wsCls, "receiveNotRequired", bbrDesc);
+        failed += check("ChunkStream 三個 head-call 全序（aload_0→helper 恰一次）",
+                headCallOk(pUm, csoCls, "onUpdateMain", csoDesc)
+                && headCallOk(pRcp, csoCls, "onReceiveChunkPart", csoDesc)
+                && headCallOk(pRnr, csoCls, "onReceiveNotRequired", csoDesc));
+        MethodNode vRcp = methodFromJar(jar, wsCls, "receiveChunkPart", bbrDesc);
+        failed += check("receiveChunkPart 原體保留（sentRequests 觸碰數未變＝head-call 未破壞原邏輯）",
+                countFieldTouches(pRcp, wsCls, "sentRequests")
+                == countFieldTouches(vRcp, wsCls, "sentRequests"));
+        // helper 反射依賴的八個私有欄位契約：名稱＋descriptor 逐一鎖進建置期
+        //（漂移時 helper 會 fail-quiet 降級僅計數——這道守門把「默默降級」變成建置失敗）
+        ClassNode vWs = classNodeFromJar(jar, wsCls);
+        failed += check("ChunkStream 反射欄位契約（8 欄位名稱＋型別）",
+                hasField(vWs, "pendingRequests", "Ljava/util/ArrayList;")
+                && hasField(vWs, "pendingRequests1", "Ljava/util/ArrayList;")
+                && hasField(vWs, "chunkRequests0", "Ljava/util/concurrent/ConcurrentLinkedQueue;")
+                && hasField(vWs, "chunkRequests1", "Ljava/util/ArrayList;")
+                && hasField(vWs, "sentRequests", "Ljava/util/concurrent/ConcurrentLinkedQueue;")
+                && hasField(vWs, "requestingLargeArea", "Z")
+                && hasField(vWs, "largeAreaDownloads", "I")
+                && hasField(vWs, "requestNumber", "I"));
         return failed;
+    }
+
+    static boolean hasField(ClassNode cn, String name, String desc) {
+        return cn.fields.stream().anyMatch(f -> f.name.equals(name) && f.desc.equals(desc));
+    }
+
+    /** 讀 jar 內 vanilla class 的完整 ClassNode（欄位契約守門用）。 */
+    static ClassNode classNodeFromJar(Path jar, String cls) throws Exception {
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            java.util.jar.JarEntry entry = jf.getJarEntry(cls + ".class");
+            if (entry == null) {
+                throw new IllegalStateException("jar 內找不到 " + cls + ".class（遊戲版本結構已變？）");
+            }
+            byte[] bytes = jf.getInputStream(entry).readAllBytes();
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, 0);
+            return cn;
+        }
     }
 
     /** head-call 全序鎖：方法首兩條真指令＝aload_0；invokestatic helper，且該 helper 呼叫全方法恰一次。 */

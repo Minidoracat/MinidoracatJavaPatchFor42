@@ -3,8 +3,9 @@
 # client 與 server 的 projectzomboid.jar 逐版 class 內容相同，共用 work\projectzomboid.jar
 #（42.20.2 起兩側整檔 SHA 可能因重新打包而異，install 閘以 build 當下的 work jar SHA 注入）。
 $ErrorActionPreference = 'Stop'
-# patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波
-$PATCH_VERSION = 'v2.0'
+# patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波、
+# v2.1=chunk 串流觀測（黑邊鑑識）
+$PATCH_VERSION = 'v2.1'
 # 支援的遊戲版本（出包檔名與 install.bat 訊息；整 jar SHA 閘由 work jar 自動注入）
 $GAME_VERSION = '42.20.2'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -48,7 +49,8 @@ Assert-Ok "Patcher client"
 # helper 條目前置（origSha=- 表無 jar 原版）；部署順序＝先 helper、再 patched caller
 $helperEntries = @(
     'zombie/mdc/TexturePipelineGuard.class',
-    'zombie/core/textures/MinidoracatTextureLeakGuard.class'
+    'zombie/core/textures/MinidoracatTextureLeakGuard.class',
+    'zombie/mdc/ChunkStreamObserver.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\$entry").Hash.ToLower()
@@ -77,6 +79,8 @@ java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zom
 Assert-Ok "TexturePipelineGuardBehaviorTest"
 java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest
 Assert-Ok "MinidoracatTextureLeakGuardBehaviorTest"
+java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkStreamObserverBehaviorTest
+Assert-Ok "ChunkStreamObserverBehaviorTest"
 
 Write-Host "[8/8] 打包玩家安裝 zip（SHA 閘門注入 install/uninstall.bat）..."
 $pkg = "$R\dist-client\pkg"

@@ -758,6 +758,53 @@ offset 589 的 `aload 13` 是整條清除鏈上**唯一一個 `worldItem` 在堆
 **全程零 anomalies**——沒有最後這條，期望 `false` 的斷言在「helper 全程吞例外」時也會綠燈）。
 逐項 javap 證據見 `docs/specs/zombie_iso_IsoGridSquare.json`。
 
+## 2o. Client chunk 串流觀測（v2.1，黑邊事件鑑識）
+
+**動機**：2026-08-11 同一玩家兩起「黑邊」實案（凌晨 3 點卡死 10 分鐘不可恢復需重開遊戲、
+早上 7 點卡 5 分鐘自癒）。server 端同時段實測全綠（tick 正常、該 client 持續收到 Toxic
+廣播＝網路活著），卡點在 client 串流管線；但事故 log 被翻譯警告洪水沖掉（另案修復於
+MinidoracatLangFor42），無法定位是哪一環。本 patch **純觀測不改行為**，為下一次發作留證。
+
+**觀測對象**（`zombie.iso.WorldStreamer`，簽名與私有欄位已 javap 對真 jar 驗證）：
+請求生命週期 sendRequests→pendingRequests1＋mainThreadRequestQueue→updateMain 發
+RequestZipList→sentRequests→receiveChunkPart/receiveNotRequired 配對 requestNumber→
+loadReceivedChunks 完成。**待驗假說**：(a) `requestingLargeArea` 期間 `pendingRequests1>20`
+時 sendRequests 頭部 gate 完全停送新請求；(b) server 端 `ClientChunkRequest.getRetryChunk`
+重試 ≥3 次回 null＝永久放棄該 requestNumber——兩者疊加＝pending 永遠清不掉、新請求全面
+停擺＝黑邊永不恢復。開大地圖觸發 largeArea 模式，與「黑邊時大地圖也打不開」的症狀吻合。
+
+**手術**（三處 headCall，全部 receiver-only `(Lzombie/iso/WorldStreamer;)V`，
+helper `zombie.mdc.ChunkStreamObserver`）：
+- `updateMain()V`：心跳。每 10 秒視窗才反射讀佇列水位（平時每幀只做一次時間比較）；
+  卡滯判定：有未完成請求且 >30 秒零接收→`STALL noReceiveMs=…` 行（每 10 秒至多一行，
+  含全部佇列水位＋largeArea 旗標）；常態每 60 秒 periodic 行（無活動不報，單機安靜）。
+- `receiveChunkPart`／`receiveNotRequired`：接收計數＋lastReceive 時戳
+  （黑邊期間計數凍結＝斷流方向的直接證據）。
+
+**安全論證**（codex 對抗審查修正兩處後定稿）：headCall 於方法首指令前插入
+`aload_0; invokestatic`（進入點堆疊為空，參數與 locals 不動）；helper 非 fatal 例外
+一律吞（fatal 照拋）。**執行緒模型**：receive 兩掛點由 UdpEngine 網路執行緒呼叫
+（經 GameClient.addIncoming）——與主執行緒**零共用鎖**（審查抓到初版共用 class
+monitor 會讓封包處理被主執行緒的反射/組字串卡住＝改變行為），receive 路徑只做
+AtomicLong 遞增＋volatile 時戳，決策狀態全部主執行緒單獨持有。**STALL 雙基準**：
+outstanding 上升沿與最後接收都 ≥30 秒才報（審查抓到單基準會在「閒置數分鐘後剛發
+新請求」時假報）；基準污染以「心跳斷檔 >30 秒＝重置」防護（Claude 審查修正：
+不持有 WorldStreamer 參考——static 強參考會釘住退役實例的 IsoChunk 串列＋native
+Inflater＝改變行為；斷檔法同治 relog／in-place 重連／凍結三情境）。反射欄位漂移→
+一次性 disabled 宣告後永久降級僅計數。SmokeCheck：vanilla 錨定（updateMain 觸碰
+`GameClient.connection`＋零既存 observer 呼叫）＋三 headCall 全序鎖＋receiveChunkPart
+原體保留（sentRequests 觸碰數不變）＋**八個反射欄位的名稱/型別契約守門**（漂移＝
+建置失敗而非默默降級）。行為測試全時間注入：STALL 雙基準/節流、閒置後新請求不假報、
+實例更換重置、靜默抑制、復原。
+
+**判讀指南**（下次發作的 log；注意 `reqQ0` 計的是 chunk **串列頭**數——每個元素是
+`chunk.next` 串起的整條清單，`reqQ0=1` 可能代表 1 也可能代表 200 個 chunk，
+展平後才進 `reqQ1`）：
+- `STALL … pending1=20 largeArea=true`＋parts 凍結 → 假說 (a)+(b) 成立，
+  下一步做 server 端 retry 上限／largeArea gate 的修復刀。
+- `STALL` 但 parts 持續增加 → 接收活著、載入端（DoChunk/refs）卡住，另闢分析。
+- 無 `STALL` 行但玩家見黑邊 → 卡點在 WorldStreamer 之外（IsoChunkMap/渲染層）。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
