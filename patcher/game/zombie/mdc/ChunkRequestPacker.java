@@ -108,6 +108,7 @@ public final class ChunkRequestPacker {
      */
     public static void packQueue(PlayerDownloadServer pds) {
         try {
+            PatchInfo.announceOnce();     // 版本橫幅（冪等；此路徑每 tick 每連線必經）
             packList(pds.ccrWaiting);
             maybeLog();
         } catch (Throwable t) {

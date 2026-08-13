@@ -518,6 +518,8 @@ public final class SmokeCheck {
                 hasField(vPds, "ccrWaiting", "Ljava/util/List;")
                 && hasField(vCcr, "chunks", "Ljava/util/List;")
                 && hasField(vCcr, "largeArea", "Z"));
+        failed += check("PatchInfo 版本指紋已生成且四個常數非空（server）",
+                patchInfoOk(distJava, "server"));
         // 批次上限必須綁回 vanilla 自己的 isChunksFilled 門檻（TIS 調小而我們沒跟＝超發）
         failed += check("W4-1 vanilla 批次上限仍為 20（isChunksFilled 的 bipush）",
                 countIntConst(methodFromJar(jar, "zombie/network/ClientChunkRequest",
@@ -743,7 +745,9 @@ public final class SmokeCheck {
                 headCallOk(pUm, csoCls, "onUpdateMain", csoDesc)
                 && headCallOk(pRcp, csoCls, "onReceiveChunkPart", csoDesc)
                 && headCallOk(pRnr, csoCls, "onReceiveNotRequired", csoDesc));
-        // W4-2 chunk 請求逾時 8s→30s（全 class 僅一處 8000L）
+        failed += check("PatchInfo 版本指紋已生成且四個常數非空（client）",
+                patchInfoOk(distJava, "client"));
+        // W4-2 chunk 請求逾時 8s→15s（全 class 僅一處 8000L）
         MethodNode vResend = methodFromJar(jar, wsCls, "resendTimedOutRequests", "()V");
         failed += check("vanilla 前提：resendTimedOutRequests 恰一個 8000L、零個 15000L",
                 countLongConst(vResend, 8000L) == 1 && countLongConst(vResend, 15000L) == 0);
@@ -767,6 +771,27 @@ public final class SmokeCheck {
                 && hasField(vWs, "largeAreaDownloads", "I")
                 && hasField(vWs, "requestNumber", "I"));
         return failed;
+    }
+
+    /**
+     * PatchInfo 是建置期生成的版本指紋——四個常數必須存在且非空，
+     * 且 SIDE 要與本次建置的側別相符（生成失敗或寫錯側別＝log 會說謊，比沒版本號更糟）。
+     */
+    static boolean patchInfoOk(Path distJava, String expectedSide) throws Exception {
+        ClassNode cn = classNode(distJava, "zombie/mdc/PatchInfo");
+        for (String name : new String[]{"SIDE", "VERSION", "BUILT", "JAR"}) {
+            String v = cn.fields.stream()
+                    .filter(f -> f.name.equals(name) && f.desc.equals("Ljava/lang/String;"))
+                    .map(f -> f.value instanceof String s ? s : null)
+                    .findFirst().orElse(null);
+            if (v == null || v.isBlank()) {
+                return false;
+            }
+            if (name.equals("SIDE") && !v.equals(expectedSide)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static boolean hasField(ClassNode cn, String name, String desc) {

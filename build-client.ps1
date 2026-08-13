@@ -24,17 +24,26 @@ if (-not (Test-Path "$R\work\projectzomboid.jar")) {
     throw "缺 work\projectzomboid.jar —— 可從本機 client 安裝複製（SHA 與伺服器相同）"
 }
 
-Remove-Item -Recurse -Force "$R\work\out-client", "$R\dist-client" -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$R\work\out-client", "$R\dist-client\java" | Out-Null
+Remove-Item -Recurse -Force "$R\work\out-client", "$R\work\gen-client", "$R\dist-client" -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$R\work\out-client", "$R\work\gen-client", "$R\dist-client\java" | Out-Null
+
+# 版本指紋（與出包 zip 檔名同源，杜絕手寫漂移）
+$gitSha = (& git rev-parse --short HEAD 2>$null)
+if (-not $gitSha) { $gitSha = 'nogit' }
+if (& git status --porcelain 2>$null) { $gitSha = "$gitSha+dirty" }
+$builtAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm')
+$jarSha8 = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower().Substring(0, 8)
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
 
 Write-Host "[1/8] 編譯 patcher..."
 javac -encoding UTF-8 -cp $ASM_CP -d "$R\work\out-client" (Get-ChildItem "$R\patcher\src\*.java").FullName
 Assert-Ok "javac patcher"
 
-Write-Host "[2/8] 編譯 client helper（對遊戲 jar）..."
+Write-Host "[2/8] 生成 PatchInfo（版本指紋）＋編譯 client helper（對遊戲 jar）..."
+java -cp "$R\work\out-client" PatchInfoGen "$R\work\gen-client" 'client' "$PATCH_VERSION($gitSha)" $builtAt $jarSha8
+Assert-Ok "PatchInfoGen"
 javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist-client\java" `
-    (Get-ChildItem "$R\patcher\game-client" -Recurse -Filter *.java).FullName
+    ((Get-ChildItem "$R\patcher\game-client" -Recurse -Filter *.java).FullName + (Get-ChildItem "$R\work\gen-client" -Recurse -Filter *.java).FullName)
 Assert-Ok "javac client helper"
 
 Write-Host "[3/8] 編譯 client 行為測試..."
@@ -50,7 +59,8 @@ Assert-Ok "Patcher client"
 $helperEntries = @(
     'zombie/mdc/TexturePipelineGuard.class',
     'zombie/core/textures/MinidoracatTextureLeakGuard.class',
-    'zombie/mdc/ChunkStreamObserver.class'
+    'zombie/mdc/ChunkStreamObserver.class',
+    'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\$entry").Hash.ToLower()

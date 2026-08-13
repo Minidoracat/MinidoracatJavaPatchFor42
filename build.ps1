@@ -20,16 +20,26 @@ if (-not (Test-Path "$R\work\projectzomboid.jar")) {
     throw "缺 work\projectzomboid.jar —— 先從伺服器拉取（scp <your-server>:/home/pzserver/serverfiles/java/projectzomboid.jar work\）"
 }
 
-Remove-Item -Recurse -Force "$R\work\out", "$R\dist\java" -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$R\work\out", "$R\dist\java" | Out-Null
+Remove-Item -Recurse -Force "$R\work\out", "$R\work\gen", "$R\dist\java" -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$R\work\out", "$R\work\gen", "$R\dist\java" | Out-Null
+
+# 版本指紋（生成而非手寫——手寫會忘記更新，說謊的版本號比沒有更糟）
+$gitSha = (& git rev-parse --short HEAD 2>$null)
+if (-not $gitSha) { $gitSha = 'nogit' }
+if (& git status --porcelain 2>$null) { $gitSha = "$gitSha+dirty" }
+$builtAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm')
+$jarSha8 = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower().Substring(0, 8)
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
 
 Write-Host "[1/10] 編譯 patcher..."
 javac -encoding UTF-8 -cp $ASM_CP -d "$R\work\out" (Get-ChildItem "$R\patcher\src\*.java").FullName
 Assert-Ok "javac patcher"
 
-Write-Host "[2/10] 編譯 runtime helpers（對遊戲 jar）..."
-javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist\java" (Get-ChildItem "$R\patcher\game" -Recurse -Filter *.java).FullName
+Write-Host "[2/10] 生成 PatchInfo（版本指紋）＋編譯 runtime helpers（對遊戲 jar）..."
+java -cp "$R\work\out" PatchInfoGen "$R\work\gen" 'server' $gitSha $builtAt $jarSha8
+Assert-Ok "PatchInfoGen"
+javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist\java" `
+    ((Get-ChildItem "$R\patcher\game" -Recurse -Filter *.java).FullName + (Get-ChildItem "$R\work\gen" -Recurse -Filter *.java).FullName)
 Assert-Ok "javac runtime helpers"
 
 Write-Host "[3/10] 編譯全部行為測試與 benchmark..."
@@ -53,7 +63,8 @@ $helperEntries = @(
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
-    'zombie/mdc/ChunkRequestPacker.class'
+    'zombie/mdc/ChunkRequestPacker.class',
+    'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()
