@@ -26,7 +26,10 @@ New-Item -ItemType Directory -Force "$R\work\out", "$R\work\gen", "$R\dist\java"
 # 版本指紋（生成而非手寫——手寫會忘記更新，說謊的版本號比沒有更糟）
 $gitSha = (& git rev-parse --short HEAD 2>$null)
 if (-not $gitSha) { $gitSha = 'nogit' }
-if (& git status --porcelain 2>$null) { $gitSha = "$gitSha+dirty" }
+# dirty 判定只看「會進到產物的東西」：追蹤檔的任何修改，或 patcher\ 下的未追蹤新檔。
+# （docs\ 之類的未追蹤草稿不影響建置產物，不該汙染版本指紋）
+if ((& git status --porcelain --untracked-files=no 2>$null) -or
+    (& git status --porcelain -- patcher 2>$null)) { $gitSha = "$gitSha+dirty" }
 $builtAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm')
 $jarSha8 = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower().Substring(0, 8)
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
