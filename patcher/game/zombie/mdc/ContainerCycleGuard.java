@@ -49,8 +49,13 @@ public final class ContainerCycleGuard {
 
     /** 正常巢狀（背包→袋→小包）實務上個位數；64 給足餘裕又遠低於 stack 上限。 */
     static final int DEFAULT_MAX_DEPTH = 64;
-    private static final int MAX_DEPTH = Math.max(0,
-            Integer.getInteger("mdc.cycleGuard.maxDepth", DEFAULT_MAX_DEPTH));
+    /**
+     * 硬上限 256（codex 審查）：{@code Integer.getInteger} 本身無上界，
+     * 若有人把它設成 100000 就等於恢復 StackOverflow 風險——旋鈕不該能關掉保險絲。
+     */
+    static final int HARD_MAX_DEPTH = 256;
+    private static final int MAX_DEPTH = clamp(
+            Integer.getInteger("mdc.cycleGuard.maxDepth", DEFAULT_MAX_DEPTH), 0, HARD_MAX_DEPTH);
 
     private static final int MAX_CHAIN_WALK = 128;      // 診斷走鏈的硬上限
     private static final int MAX_REPORTS = 5;           // 每場次最多印幾次完整鏈
@@ -59,8 +64,21 @@ public final class ContainerCycleGuard {
     private static final long HEARTBEAT_INTERVAL_NS = 600_000_000_000L;
     private static final int MAX_ANOMALY_TRACES = 3;
 
-    /** 每執行緒遞迴深度（int[1] 免裝箱）。server 端主要是主迴圈，但不假設單執行緒。 */
-    private static final ThreadLocal<int[]> DEPTH = ThreadLocal.withInitial(() -> new int[1]);
+    /**
+     * 每執行緒的爬升路徑（identity）。用路徑而非單純深度計數，是為了<b>區分兩種失效</b>
+     * （codex 審查）：receiver 重複出現＝真環（通常 2-3 層就抓到，不必等到門檻）；
+     * 只是很深＝ OVER_DEPTH 保險絲。純深度計數會把合法的深巢狀誤報成環。
+     *
+     * <p>server 端另有 load/recalc/save/command 執行緒，且這些 public inventory API 可被 mod
+     * 呼叫，故不假設單執行緒。ThreadLocal 只隔離「走訪狀態」，不會讓容器圖本身變 thread-safe。
+     * finally 清 slot（不 remove 整個 State）避免長壽命執行緒抓住遊戲物件。
+     */
+    private static final class State {
+        final ItemContainer[] path = new ItemContainer[HARD_MAX_DEPTH + 1];
+        int size;
+    }
+
+    private static final ThreadLocal<State> STATE = ThreadLocal.withInitial(State::new);
 
     // 以下 static 計數器刻意不加同步：多執行緒下最壞只是多印幾行或計數略偏，
     // 全部後果良性，不值得為觀測欄位付 Atomic 成本。
@@ -87,17 +105,51 @@ public final class ContainerCycleGuard {
         if (MAX_DEPTH <= 0) {
             return container.getCharacter(); // 旋鈕停用：完全等同 vanilla（含原本的爆掉行為）
         }
-        int[] depth = DEPTH.get();
-        if (depth[0] >= MAX_DEPTH) {
-            onCycleDetected(container);
+        State st = STATE.get();
+        int slot = enter(st, container, "getCharacter");
+        if (slot < 0) {
             return null;
         }
-        depth[0]++;
         try {
             return container.getCharacter();
         } finally {
-            depth[0]--;
+            exit(st, slot);
         }
+    }
+
+    /**
+     * 進入一層爬升：先查環（identity 重複＝真環，通常 2-3 層就命中）、再查深度保險絲。
+     * 回傳佔用的 slot；-1 代表必須切斷。
+     */
+    private static int enter(State st, ItemContainer container, String site) {
+        for (int i = 0; i < st.size; i++) {
+            if (st.path[i] == container) {
+                trip(site, "CYCLE", container, i, st.size);
+                return -1;
+            }
+        }
+        if (st.size >= MAX_DEPTH) {
+            trip(site, "OVER_DEPTH", container, -1, st.size);
+            return -1;
+        }
+        st.path[st.size] = container;
+        return st.size++;
+    }
+
+    /** 離開一層：清 slot（不 remove 整個 State）避免長壽命執行緒抓住遊戲物件。 */
+    private static void exit(State st, int slot) {
+        st.path[slot] = null;
+        st.size = slot;
+    }
+
+    private static void trip(String site, String reason, ItemContainer container,
+            int repeatAt, int depth) {
+        if ("getCharacter".equals(site)) {
+            trips++;
+        } else {
+            tripsInv++;
+        }
+        onCycleDetected(container, site, reason, repeatAt, depth);
     }
 
     /**
@@ -118,24 +170,22 @@ public final class ContainerCycleGuard {
         if (MAX_DEPTH <= 0) {
             return container.isInCharacterInventory(chr);
         }
-        int[] depth = DEPTH.get();
-        if (depth[0] >= MAX_DEPTH) {
-            tripsInv++;
-            onCycleDetected(container);
+        State st = STATE.get();
+        int slot = enter(st, container, "isInCharacterInventory");
+        if (slot < 0) {
             return false;
         }
-        depth[0]++;
         try {
             return container.isInCharacterInventory(chr);
         } finally {
-            depth[0]--;
+            exit(st, slot);
         }
     }
 
     /** 切斷時的診斷；本身絕不能再拋或再遞迴。 */
-    private static void onCycleDetected(ItemContainer container) {
+    private static void onCycleDetected(ItemContainer container, String site,
+            String reason, int repeatAt, int depth) {
         try {
-            trips++;
             long now = System.nanoTime();
             if (!reportPrimed) {
                 reportPrimed = true;
@@ -144,8 +194,10 @@ public final class ContainerCycleGuard {
             if (reports < MAX_REPORTS && now - lastReportNs >= REPORT_INTERVAL_NS) {
                 lastReportNs = now;
                 reports++;
-                DebugLog.log("[MinidoracatJavaPatch][CycleGuard] 容器環偵測，已切斷遞迴"
-                        + "（getCharacter=" + trips + " isInCharInv=" + tripsInv
+                DebugLog.log("[MinidoracatJavaPatch][CycleGuard] " + reason + " 已切斷遞迴"
+                        + "（site=" + site + " depth=" + depth
+                        + (repeatAt >= 0 ? " 環起點=第 " + repeatAt + " 層" : "")
+                        + " getCharacter=" + trips + " isInCharInv=" + tripsInv
                         + " maxDepth=" + MAX_DEPTH + "）——以下為鏈上物品：");
                 for (String line : describeChain(container)) {
                     DebugLog.log("[MinidoracatJavaPatch][CycleGuard]   " + line);
@@ -243,6 +295,10 @@ public final class ContainerCycleGuard {
         }
     }
 
+    private static int clamp(int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
     private static void rethrowFatal(Throwable t) {
         if (t instanceof VirtualMachineError || t instanceof ThreadDeath || t instanceof LinkageError) {
             throw (Error) t;
@@ -259,12 +315,14 @@ public final class ContainerCycleGuard {
         lastHeartbeatNs = 0;
         heartbeatTrips = 0;
         reportPrimed = false;
-        DEPTH.get()[0] = 0;
+        State st = STATE.get();
+        java.util.Arrays.fill(st.path, null);
+        st.size = 0;
     }
 
     /** trips, reports, anomalies, currentDepth, tripsInv */
     static long[] statsForTest() {
-        return new long[]{trips, reports, anomalies, DEPTH.get()[0], tripsInv};
+        return new long[]{trips, reports, anomalies, STATE.get().size, tripsInv};
     }
 
     static int maxDepthForTest() {
