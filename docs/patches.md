@@ -844,6 +844,68 @@ per-UdpConnection daemon thread，故只有該玩家卡、server 全域指標全
 斷言。行為測試 8 案：守恆／批次上限／去重保留／largeArea 雙向／順序／退化輸入／
 上限不超過 vanilla／視窗預算封頂。
 
+## 2q. 容器環防崩潰守衛（W5，server）
+
+**事故**：2026-08-13 21:31:10 正式服主迴圈死於 `java.lang.StackOverflowError`，堆疊 1024 層
+全部是 `ItemContainer.getCharacter` 自我遞迴。伺服器假死 13 分鐘（frame 凍在 f:54247）、
+21:40 的 graceful `quit` 收不進去、看門狗 21:44 強制重啟。存檔在 21:30:10 成功、凍結在
+21:31:10，故世界資料只掉約 1 分鐘，但玩家 21:31–21:44 的操作全部沒被 server 收到。
+
+**vanilla 缺陷**：`getCharacter()` 沿「容器→裝著它的物品→該物品所在容器」爬升找擁有者，
+**零迴圈偵測**；`ItemContainer` 全類別無防環檢查，`AddItem` 只擋同 ID 重複、不阻止把容器
+放進自己的子孫。MP 封包驅動的搬移即可造出「A 裝在 B 裡、B 又裝在 A 裡」。
+
+**環只可能是執行期產物**（故掃存檔找不到兇手）：`containingItem` 只在 `InventoryContainer`
+建構時設定一次且不序列化；`InventoryContainer.save` 是巢狀遞迴寫入，若存檔內有環，存檔本身
+就會先爆——而崩潰前 60 秒的 `World saved` 是成功的。
+
+**手術**（兩處，皆為堆疊形狀不變的呼叫改道，method-scope 鎖定）：
+
+| 方法 | 改道點 | 截斷語意 |
+|---|---|---|
+| `getCharacter()` | 唯一自身遞迴（javap offset 42） | 回 `null`＝查不出擁有者，與 vanilla 對「放在地上的容器」同值 |
+| `isInCharacterInventory(IsoGameCharacter)` | 唯一自身遞迴（offset 52） | 回 `false`，與 vanilla 走完鏈的 fall-through 同值 |
+
+第二刀是審查指出的「下一個最會炸」：`Transaction.getDuration()` 會呼叫它，而 `getDuration()`
+**只在 server 端、於 `ItemTransactionPacket` 驅動的 `Transaction` 建構時執行**——正是造出環的
+同一條封包路徑。helper `zombie.mdc.ContainerCycleGuard` 以 ThreadLocal 計深度（兩刀共用），
+超過 `MAX_DEPTH`（預設 64，實際允許鏈長 65：第一層走 vanilla 不經 helper）即切斷。
+
+**診斷**：切斷時走鏈印出環上的 containerId／itemId／fullType 與閉合點（走鏈有 128 步硬上限，
+只用欄位讀取與 trivial getter，逐一驗證不會二次遞迴）。完整鏈每 60 秒至多一次、全場最多 5 次；
+之後改印 **10 分鐘 trips 心跳**（環不會自己消失，運維不能在第一天後就看不到）。
+helper 自身例外有界印出堆疊（前 3 次）。
+
+**旋鈕**：`-Dmdc.cycleGuard.maxDepth=0` 停用兩把刀（回到 vanilla 的爆掉行為，stack 消耗約 2 倍），
+免重新部署。
+
+**⚠ 已知降級（必讀）**：`GameServer` 的五個庫存廣播
+（`sendAddItemToContainer` / `sendAddItemsToContainer` / `sendReplaceItemInContainer` /
+`sendRemoveItemFromContainer` / `sendRemoveItemsFromContainer`）對「巢狀在物品裡的容器」
+只有三條分支：`getCharacter() instanceof IsoPlayer` → `getParent() != null` → **vanilla 寫成空的第三條**。
+環上容器的 `getCharacter()` 回 null 且 `getParent()` 為 null，於是**封包完全不送、不 log**——
+該容器的加/刪/換物品 client 端永遠收不到（玩家體感：東西憑空消失）。
+這比 vanilla 的「整台死掉」好，但是一個**新的、靜默的、持久的**降級。同理
+`ItemContainer.Remove` 的 `removeFromHands` 會被跳過（物品從容器移除卻留在手上）。
+**因此本刀是止血＋捕手，不是根治。**
+
+**根因仍待處理（W5-2，不可進 backlog）**：`AddItem`（`ItemContainer.java:458`）與
+`AddItemBlind` 應在加入前拒絕成環。vanilla 自己已有現成述詞
+`TransactionManager.chainContainsContainingItem(ItemContainer,int)`，而 `AddItem` 的
+`containsID` 呼叫點（javap offset 11）堆疊恰為 `[ItemContainer, itemId]`，與該述詞簽名吻合。
+**風險**：拒絕加入會讓 `AddItem` 回 null，若呼叫端已先把物品從舊容器移除，物品會憑空消失
+——修 bug 修出物品遺失更糟，故需獨立的分析與審查循環。在 W5-2 落地前，**不可認定此類假死已排除**。
+同一條鏈上另有 `isInside` 與 `InventoryContainer.save`（存檔路徑）仍無防環。
+
+**驗證**：SmokeCheck——兩刀各自的 vanilla 前提（恰一個自身遞迴）、改道恰一次且原遞迴歸零、
+**指令總數未變**（1:1 替換的結構事實）、原體保留（`getParent` 呼叫數與 `containingItem`
+觸碰數不變）、全 class 負對照（其他 27 個呼叫端保持 vanilla）。行為測試 7 案＋kill switch 模式：
+**vanilla 必爆負對照**（用 vanilla 爬升邏輯走同一個環必拋 SOE，證明環是真的）、守衛切斷回 null、
+**正向回傳真實擁有者**（堵住「永遠回 null」的假 helper 假綠通道）、正常巢狀零觸發、
+診斷指出閉合點、深度歸零不污染、門檻邊界（63 不觸發／66 觸發）。
+測試以 `sun.reflect.ReflectionFactory` 分配未初始化物件造環（`InventoryItem` 建構子會拉起
+ZomboidFileSystem），classpath 中 `dist\java` 排在 jar 前，故測到的是**改道後**的方法。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。

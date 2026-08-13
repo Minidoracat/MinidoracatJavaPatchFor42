@@ -370,6 +370,35 @@ public final class PatchConfig {
         // 是同一 Chunk 實例雙重 releaseChunk 進 static freeChunks 池＝跨玩家汙染。
         // removeOlderDuplicateRequests 全 class 僅被 update() 呼叫一次（javap 實證）且就在
         // ready 閘內、vanilla 去重之前——正是本刀需要的位置。
+        // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
+        // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
+        // 自我遞迴 → 假死 13 分鐘、graceful quit 收不進去、看門狗強制重啟。
+        // vanilla 沿「容器→裝著它的物品→該物品所在容器」爬升找擁有者且零迴圈偵測，
+        // 而 AddItem 只擋同 ID 重複、不阻止把容器放進自己的子孫——MP 封包驅動搬移即可造環。
+        // 改道 getCharacter() 內唯一的遞迴呼叫點（javap offset 42），讓每層遞迴都經過 helper
+        // 以計深度並在失控前切斷回 null（vanilla 對「不屬於任何角色」本就回 null，
+        // 呼叫端普遍做 null 檢查），同時印出環上物品供事後追查。
+        Patcher.ClassPatch itemCont = new Patcher.ClassPatch("zombie/inventory/ItemContainer");
+        Patcher.MethodOps getChar = itemCont.method("getCharacter",
+                "()Lzombie/characters/IsoGameCharacter;");
+        getChar.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/inventory/ItemContainer", "getCharacter",
+                "()Lzombie/characters/IsoGameCharacter;",
+                "zombie/mdc/ContainerCycleGuard", "getCharacter"));
+        getChar.expectedHits = 1;
+        // 同一條鏈上的第二條無防環遞迴，且是「下一個最可能炸的」：Transaction.getDuration()
+        // 會呼叫它，而 getDuration() 只在 server 端、於 ItemTransactionPacket 驅動的
+        // Transaction 建構時執行——正是造出環的同一條封包路徑。截斷回 false 與 vanilla
+        // 走完鏈的 fall-through 同值。
+        Patcher.MethodOps inCharInv = itemCont.method("isInCharacterInventory",
+                "(Lzombie/characters/IsoGameCharacter;)Z");
+        inCharInv.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/inventory/ItemContainer", "isInCharacterInventory",
+                "(Lzombie/characters/IsoGameCharacter;)Z",
+                "zombie/mdc/ContainerCycleGuard", "isInCharacterInventory"));
+        inCharInv.expectedHits = 1;
+        patches.add(itemCont);
+
         Patcher.ClassPatch pds = new Patcher.ClassPatch("zombie/network/PlayerDownloadServer");
         Patcher.MethodOps pdsDedupe = pds.method("removeOlderDuplicateRequests", "()V");
         pdsDedupe.headCall = new Patcher.HeadCall("zombie/mdc/ChunkRequestPacker", "packQueue",

@@ -67,6 +67,7 @@ $helperEntries = @(
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
     'zombie/mdc/ChunkRequestPacker.class',
+    'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -115,6 +116,13 @@ Assert-Ok "JoinMetricsBehaviorTest"
 Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
 Assert-Ok "FastIdentityArrayRemovalTest"
+
+Write-Host "[9a/10] 容器環守衛（W5）行為驗證（含原版必爆負對照）＋kill switch..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
+Assert-Ok "ContainerCycleGuardTest"
+# 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場
+java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
+Assert-Ok "ContainerCycleGuardTest（maxDepth=0 kill switch）"
 
 Write-Host "[9b/10] chunk 供給併包（W4-1）行為驗證＋kill switch 模式..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest

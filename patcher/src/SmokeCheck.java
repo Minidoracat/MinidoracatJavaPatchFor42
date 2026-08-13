@@ -474,6 +474,62 @@ public final class SmokeCheck {
                 !containsUtf8(distJava, fastRemoval, "setAutoCompactionFactor")
                 && !containsUtf8(distJava, fastRemoval + "$State", "setAutoCompactionFactor"));
 
+        // ---- W5 容器環防崩潰守衛（ItemContainer.getCharacter 遞迴點改道）----
+        String icCls = "zombie/inventory/ItemContainer";
+        String guardCls = "zombie/mdc/ContainerCycleGuard";
+        String getCharDesc = "()Lzombie/characters/IsoGameCharacter;";
+        String guardDesc = "(Lzombie/inventory/ItemContainer;)Lzombie/characters/IsoGameCharacter;";
+        MethodNode vGetChar = methodFromJar(jar, icCls, "getCharacter", getCharDesc);
+        // vanilla 前提：方法內恰一個自我遞迴呼叫（就是要攔的那個），且尚未被改道
+        failed += check("vanilla 前提：getCharacter 內恰一個自身遞迴呼叫、零 guard 呼叫",
+                countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls, "getCharacter", getCharDesc) == 1
+                && countExactCalls(vGetChar, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc) == 0);
+        // vanilla 前提：無限遞迴的兩個前置條件仍在（getParent instanceof 分支＋containingItem 欄位）
+        failed += check("vanilla 前提：getCharacter 仍讀 containingItem 且有 getParent 分支",
+                countFieldTouches(vGetChar, icCls, "containingItem") >= 1
+                && countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls,
+                        "getParent", "()Lzombie/iso/IsoObject;") >= 1);
+        MethodNode pGetChar = method(distJava, icCls, "getCharacter", getCharDesc);
+        failed += check("W5 遞迴點改道恰一次且原自身遞迴歸零",
+                countExactCalls(pGetChar, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc) == 1
+                && countExactCalls(pGetChar, Opcodes.INVOKEVIRTUAL, icCls, "getCharacter", getCharDesc) == 0);
+        // 原體保留：非遞迴的兩條返回路徑（角色 parent／null）未被動
+        failed += check("W5 原體保留（getParent 呼叫數與 containingItem 觸碰數未變）",
+                countExactCalls(pGetChar, Opcodes.INVOKEVIRTUAL, icCls,
+                        "getParent", "()Lzombie/iso/IsoObject;")
+                == countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls,
+                        "getParent", "()Lzombie/iso/IsoObject;")
+                && countFieldTouches(pGetChar, icCls, "containingItem")
+                == countFieldTouches(vGetChar, icCls, "containingItem"));
+        // 指令總數不變＝redirect 是嚴格 1:1 替換（把「沒有增刪任何指令」變成結構事實）
+        failed += check("W5 getCharacter 指令總數未變（1:1 替換）",
+                pGetChar.instructions.size() == vGetChar.instructions.size());
+        // 第二刀：isInCharacterInventory（Transaction.getDuration 會走的那條）
+        String inCharDesc = "(Lzombie/characters/IsoGameCharacter;)Z";
+        String guardInvDesc = "(Lzombie/inventory/ItemContainer;Lzombie/characters/IsoGameCharacter;)Z";
+        MethodNode vInChar = methodFromJar(jar, icCls, "isInCharacterInventory", inCharDesc);
+        MethodNode pInChar = method(distJava, icCls, "isInCharacterInventory", inCharDesc);
+        failed += check("vanilla 前提：isInCharacterInventory 內恰一個自身遞迴呼叫",
+                countExactCalls(vInChar, Opcodes.INVOKEVIRTUAL, icCls,
+                        "isInCharacterInventory", inCharDesc) == 1);
+        failed += check("W5 isInCharacterInventory 改道恰一次、原遞迴歸零、指令總數未變",
+                countExactCalls(pInChar, Opcodes.INVOKESTATIC, guardCls,
+                        "isInCharacterInventory", guardInvDesc) == 1
+                && countExactCalls(pInChar, Opcodes.INVOKEVIRTUAL, icCls,
+                        "isInCharacterInventory", inCharDesc) == 0
+                && pInChar.instructions.size() == vInChar.instructions.size());
+        // 負對照：兩把刀都只在自己的方法內改道（method-scope 鎖定）
+        ClassNode pIc = classNode(distJava, icCls);
+        int guardCallsWholeClass = 0;
+        int guardInvCallsWholeClass = 0;
+        for (MethodNode m : pIc.methods) {
+            guardCallsWholeClass += countExactCalls(m, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc);
+            guardInvCallsWholeClass += countExactCalls(m, Opcodes.INVOKESTATIC, guardCls,
+                    "isInCharacterInventory", guardInvDesc);
+        }
+        failed += check("W5 負對照：全 class 各僅一處改道（其他呼叫端保持 vanilla）",
+                guardCallsWholeClass == 1 && guardInvCallsWholeClass == 1);
+
         // ---- W4-1 chunk 供給併包（PlayerDownloadServer.update headCall）----
         String pdsCls = "zombie/network/PlayerDownloadServer";
         String packerCls = "zombie/mdc/ChunkRequestPacker";
