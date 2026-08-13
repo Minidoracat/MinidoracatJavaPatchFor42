@@ -67,6 +67,7 @@ public final class TexturePipelineGuard {
         long bytes = DirectBufferAllocator.getBytesAllocated();
         try {
             if (!announced) {
+                PatchInfo.announceOnce();     // 版本橫幅（冪等；單機也會經過此路徑）
                 DebugLog.log("[MinidoracatJavaPatch][TexPipelineGuard] active vanillaLimitBytes="
                         + VANILLA_LIMIT_BYTES + " patchedLimitBytes=" + PATCHED_LIMIT_BYTES);
                 // log 成功才設旗標：DebugLog 未就緒（例外被下方吞掉）時下次取樣重試
