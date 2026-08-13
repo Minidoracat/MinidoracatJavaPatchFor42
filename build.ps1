@@ -52,7 +52,8 @@ $helperEntries = @(
     'zombie/mdc/GlassAttachmentGuard.class',
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
-    'zombie/mdc/VehicleCouldSeeGate.class'
+    'zombie/mdc/VehicleCouldSeeGate.class',
+    'zombie/mdc/ChunkRequestPacker.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
     $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist\java\$entry").Hash.ToLower()
@@ -100,6 +101,15 @@ Assert-Ok "JoinMetricsBehaviorTest"
 Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
 Assert-Ok "FastIdentityArrayRemovalTest"
+
+Write-Host "[9b/10] chunk 供給併包（W4-1）行為驗證＋kill switch 模式..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
+Assert-Ok "ChunkRequestPackerTest"
+# 緊急降級旋鈕必須真的能停刀（正式服不重新部署即可回到 vanilla）
+java "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
+Assert-Ok "ChunkRequestPackerTest（windowBudget=0 kill switch）"
+java "-Dmdc.chunkPacker.batch=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
+Assert-Ok "ChunkRequestPackerTest（batch=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

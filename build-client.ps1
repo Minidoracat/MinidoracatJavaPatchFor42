@@ -4,8 +4,8 @@
 #（42.20.2 起兩側整檔 SHA 可能因重新打包而異，install 閘以 build 當下的 work jar SHA 注入）。
 $ErrorActionPreference = 'Stop'
 # patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波、
-# v2.1=chunk 串流觀測（黑邊鑑識）
-$PATCH_VERSION = 'v2.1'
+# v2.1=chunk 串流觀測（黑邊鑑識）、v2.2=W4-2 chunk 請求逾時 8s→30s（livelock 斷鏈）
+$PATCH_VERSION = 'v2.2'
 # 支援的遊戲版本（出包檔名與 install.bat 訊息；整 jar SHA 閘由 work jar 自動注入）
 $GAME_VERSION = '42.20.2'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
