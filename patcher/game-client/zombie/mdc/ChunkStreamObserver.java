@@ -86,6 +86,7 @@ public final class ChunkStreamObserver {
             long now = System.nanoTime();
             noteGap(now);
             if (!announced) {
+                PatchInfo.announceOnce();     // 版本橫幅（冪等，與觀測宣告同時）
                 DebugLog.log("[MinidoracatJavaPatch][ChunkStream] active stallAfterMs="
                         + STALL_AFTER_NS / 1_000_000L);
                 announced = true;
