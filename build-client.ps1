@@ -30,7 +30,9 @@ New-Item -ItemType Directory -Force "$R\work\out-client", "$R\work\gen-client", 
 # 版本指紋（與出包 zip 檔名同源，杜絕手寫漂移）
 $gitSha = (& git rev-parse --short HEAD 2>$null)
 if (-not $gitSha) { $gitSha = 'nogit' }
-if (& git status --porcelain 2>$null) { $gitSha = "$gitSha+dirty" }
+# dirty 判定只看會進到產物的東西（見 build.ps1 同段說明）
+if ((& git status --porcelain --untracked-files=no 2>$null) -or
+    (& git status --porcelain -- patcher 2>$null)) { $gitSha = "$gitSha+dirty" }
 $builtAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm')
 $jarSha8 = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower().Substring(0, 8)
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
