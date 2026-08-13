@@ -474,6 +474,55 @@ public final class SmokeCheck {
                 !containsUtf8(distJava, fastRemoval, "setAutoCompactionFactor")
                 && !containsUtf8(distJava, fastRemoval + "$State", "setAutoCompactionFactor"));
 
+        // ---- W4-1 chunk 供給併包（PlayerDownloadServer.update headCall）----
+        String pdsCls = "zombie/network/PlayerDownloadServer";
+        String packerCls = "zombie/mdc/ChunkRequestPacker";
+        String packerDesc = "(Lzombie/network/PlayerDownloadServer;)V";
+        MethodNode vPdsUpdate = methodFromJar(jar, pdsCls, "update", "()V");
+        // vanilla 前提：三個同簽名 List.remove(I)（1 個 ccrWaiting、2 個 ccr.chunks）——
+        // 正因無法以 owner/name/desc 區分才選 headCall 而非 redirect；數量漂移＝重新分析
+        failed += check("vanilla 前提：update 有 3 個 List.remove(I)、1 個 removeOlderDuplicateRequests、無既存 packer 呼叫",
+                countExactCalls(vPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;") == 3
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "removeOlderDuplicateRequests", "()V") == 1
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
+        // **掛點必須在 ready 閘內**：update() 頭部（閘外）會與 WorkerThread.sendArray 同時
+        // 改 ccrWaiting。以下兩條把「掛在 removeOlderDuplicateRequests、且 update() 內零 packer
+        // 呼叫」鎖進建置期——重打包導致掛點漂移會建置失敗而非靜默回到 race。
+        MethodNode pPdsUpdate = method(distJava, pdsCls, "update", "()V");
+        MethodNode pPdsDedupe = method(distJava, pdsCls, "removeOlderDuplicateRequests", "()V");
+        failed += check("W4-1 掛點在 ready 閘內（dedupe 頭部全序 aload_0→packQueue，且 update 內零 packer 呼叫）",
+                headCallOk(pPdsDedupe, packerCls, "packQueue", packerDesc)
+                && countExactCalls(pPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
+        failed += check("W4-1 原體保留（update 的三個 List.remove(I) 與 dedupe 呼叫數未變）",
+                countExactCalls(pPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;") == 3
+                && countExactCalls(pPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "removeOlderDuplicateRequests", "()V") == 1);
+        // dedupe 原體保留：vanilla 的空 ccr 回收（我們依賴它）與去重掃描未被破壞
+        MethodNode vPdsDedupe = methodFromJar(jar, pdsCls, "removeOlderDuplicateRequests", "()V");
+        failed += check("W4-1 dedupe 原體保留（List.remove(I) 與 cancelDuplicateChunk 呼叫數未變）",
+                countExactCalls(pPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;")
+                == countExactCalls(vPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;")
+                && countExactCalls(pPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z")
+                == countExactCalls(vPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z"));
+        // helper 依賴的三個 public 成員契約（漂移＝建置失敗而非上線 IllegalAccessError）
+        ClassNode vPds = classNodeFromJar(jar, pdsCls);
+        ClassNode vCcr = classNodeFromJar(jar, "zombie/network/ClientChunkRequest");
+        failed += check("W4-1 欄位契約：ccrWaiting/chunks/largeArea 皆 public 且型別未變",
+                hasField(vPds, "ccrWaiting", "Ljava/util/List;")
+                && hasField(vCcr, "chunks", "Ljava/util/List;")
+                && hasField(vCcr, "largeArea", "Z"));
+        // 批次上限必須綁回 vanilla 自己的 isChunksFilled 門檻（TIS 調小而我們沒跟＝超發）
+        failed += check("W4-1 vanilla 批次上限仍為 20（isChunksFilled 的 bipush）",
+                countIntConst(methodFromJar(jar, "zombie/network/ClientChunkRequest",
+                        "isChunksFilled", "()Z"), 20) == 1);
+
         // ---- 效能第一波（載具預篩；VehicleManager 512→256 已於 42.20.2 退役）----
         String prefilterCls = "zombie/mdc/VehicleIntersectPrefilter";
         String intersectDesc = "(Lorg/joml/Vector3f;Lorg/joml/Vector3f;Lorg/joml/Vector3f;)Lorg/joml/Vector3f;";
@@ -694,6 +743,13 @@ public final class SmokeCheck {
                 headCallOk(pUm, csoCls, "onUpdateMain", csoDesc)
                 && headCallOk(pRcp, csoCls, "onReceiveChunkPart", csoDesc)
                 && headCallOk(pRnr, csoCls, "onReceiveNotRequired", csoDesc));
+        // W4-2 chunk 請求逾時 8s→30s（全 class 僅一處 8000L）
+        MethodNode vResend = methodFromJar(jar, wsCls, "resendTimedOutRequests", "()V");
+        failed += check("vanilla 前提：resendTimedOutRequests 恰一個 8000L、零個 15000L",
+                countLongConst(vResend, 8000L) == 1 && countLongConst(vResend, 15000L) == 0);
+        MethodNode pResend = method(distJava, wsCls, "resendTimedOutRequests", "()V");
+        failed += check("W4-2 逾時常數已換（8000L 歸零、15000L 恰一個）",
+                countLongConst(pResend, 8000L) == 0 && countLongConst(pResend, 15000L) == 1);
         MethodNode vRcp = methodFromJar(jar, wsCls, "receiveChunkPart", bbrDesc);
         failed += check("receiveChunkPart 原體保留（sentRequests 觸碰數未變＝head-call 未破壞原邏輯）",
                 countFieldTouches(pRcp, wsCls, "sentRequests")
@@ -756,6 +812,10 @@ public final class SmokeCheck {
         int count = 0;
         for (AbstractInsnNode in : m.instructions) {
             if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Integer i && i == value) {
+                count++;
+            } else if (in instanceof IntInsnNode push && push.operand == value
+                    && (push.getOpcode() == Opcodes.BIPUSH || push.getOpcode() == Opcodes.SIPUSH)) {
+                // 小整數常數編碼成 bipush/sipush 而非 ldc（例：isChunksFilled 的 bipush 20）
                 count++;
             }
         }

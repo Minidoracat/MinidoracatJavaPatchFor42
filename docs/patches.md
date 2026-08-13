@@ -805,6 +805,45 @@ Inflater＝改變行為；斷檔法同治 relog／in-place 重連／凍結三情
 - `STALL` 但 parts 持續增加 → 接收活著、載入端（DoChunk/refs）卡住，另闢分析。
 - 無 `STALL` 行但玩家見黑邊 → 卡點在 WorldStreamer 之外（IsoChunkMap/渲染層）。
 
+## 2p. chunk 供給併包（W4-1，server）＋請求逾時 8s→15s（W4-2，client）
+
+**根因**（八路鑑識＋對抗驗證；完整設計見 `docs/chunk-throughput-design-v1.md`）：
+vanilla 的 chunk 供給只跑到設計值的 15%——client 每幀送一包 `RequestZipList`（約 3 chunk）→
+`RequestZipListPacket.parse` 每包無條件 new 一個 `ClientChunkRequest` 入列（從不併入未滿的
+ccr）→ `PlayerDownloadServer.update()` 每 worker 週期只處理一個 ccr（10Hz）＝實際約
+30 chunk/s，而 `NON_LARGE_AREA_CHUNKS_LIMIT`=20 × 10Hz = 200 chunk/s 的預算浪費 85%。
+積壓越過 client 的 8 秒逾時後，`resendTimedOutRequests` 設 `flagsWs|=9` →
+`loadReceivedChunks` 丟棄**已送達**的整包資料並重新排隊、且不通知 server 取消 →
+自我維持 livelock（實測 pending 恆＝請求率×8s＝240、18 分鐘重發約 141 輪、
+燒掉約 105MB 全丟棄、零 chunk 載入＝永久黑邊）。`PlayerDownloadServer` 是
+per-UdpConnection daemon thread，故只有該玩家卡、server 全域指標全綠、同安全屋別人正常。
+
+**W4-1 手術**：`PlayerDownloadServer.removeOlderDuplicateRequests()V` 頭部 headCall →
+`zombie.mdc.ChunkRequestPacker.packQueue`，把佇列前段併包到批次上限。
+**掛點不是 `update()V`**（審查抓到的 blocking）：`update()` 對 `ccrWaiting` 的存取全包在
+`if (workerThread.ready)` 內，那是與 WorkerThread（`sendArray` 會 add `ccrForRetries` 並持續
+`chunks.add`）互斥的唯一機制；插在 offset 0 會落在閘外，最壞情況是同一 `Chunk` 實例雙重
+`releaseChunk` 進 **static** `freeChunks` 池＝跨玩家汙染。`removeOlderDuplicateRequests`
+全 class 僅被 `update()` 呼叫一次（javap 實證）且就在閘內、vanilla 去重之前。
+
+去重語意保留：vanilla 只偵測跨 ccr 重複，故隊首已含同 `(wx,wy)` 者跳過不搬，留給 vanilla
+去重原樣處理。搬空的 ccr 由同一方法後段的 vanilla 本體移除並回收進物件池。largeArea 不介入。
+
+成本閘：批次上限預設 **8**（vanilla 上限 20 的 40%）、全域每 100ms 視窗「額外搬移」預算
+預設 **120**，皆可用 `-Dmdc.chunkPacker.batch` / `-Dmdc.chunkPacker.windowBudget` 調整
+（後者設 0 即整刀停用，等同 vanilla，**緊急降級不需重新部署**）。
+
+**W4-2 手術**：`WorldStreamer.resendTimedOutRequests()V` 的 `8000L`→`15000L`
+（方法內常數替換，全 class 僅此一處）。`RequestZipList` 與 `SentChunkPacket` 皆
+`reliability=2`（RELIABLE），故此逾時幾乎不是在救真的遺失，而是在懲罰 server 慢。
+
+**驗證**：SmokeCheck——vanilla 前提（`update` 恰 3 個同簽名 `List.remove(I)`＋1 個 dedupe
+呼叫；`resendTimedOutRequests` 恰 1 個 8000L）、**掛點在 ready 閘內**（dedupe 頭部全序 ＋
+`update()` 內零 packer 呼叫，把 B1 鎖進建置期）、update/dedupe 雙邊原體保留、三個 public
+欄位契約、`isChunksFilled` 的 `bipush 20` 綁定（TIS 調小而我們沒跟＝超發）、W4-2 常數雙向
+斷言。行為測試 8 案：守恆／批次上限／去重保留／largeArea 雙向／順序／退化輸入／
+上限不超過 vanilla／視窗預算封頂。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
