@@ -355,6 +355,28 @@ public final class PatchConfig {
         vehUpdate.expectedHits = 1;
         patches.add(baseVeh);
 
+        // ---- W4-1 chunk 供給併包（黑邊根因修復；docs/chunk-throughput-design-v1.md）----
+        // vanilla 供給只跑到設計值 15%：client 每幀送一包（約 3 chunk）→ parse 每包無條件
+        // new 一個 ccr 入列 → update() 每 worker 週期只處理一個 ccr（10Hz）＝約 30 chunk/s，
+        // 而 NON_LARGE_AREA_CHUNKS_LIMIT=20 × 10Hz = 200 chunk/s 的預算浪費 85%。
+        // 需求超過供給後越過 client 8 秒逾時 → client 丟棄已送達資料並重發且不通知取消
+        // → 自我維持 livelock（實測 pending 恆＝請求率×8s＝240、18 分鐘燒 105MB 全丟棄）。
+        // headCall 把佇列前段併包：不新增 chunk、不改順序、不碰 largeArea；隊首已含同座標者
+        // 不搬（保留 vanilla 跨 ccr 去重語意）；搬空的 ccr 由同一方法後段的 vanilla 本體回收。
+        // **掛點是 removeOlderDuplicateRequests()V 而非 update()V**（審查抓到的 blocking）：
+        // update() 對 ccrWaiting 的存取全包在 if (workerThread.ready) 內，那是 vanilla 與
+        // WorkerThread（sendArray 會 add ccrForRetries 並持續 chunks.add）互斥的唯一機制；
+        // headCall 插在 offset 0 會落在閘外，與 worker 同時改同一個 plain ArrayList，最壞情況
+        // 是同一 Chunk 實例雙重 releaseChunk 進 static freeChunks 池＝跨玩家汙染。
+        // removeOlderDuplicateRequests 全 class 僅被 update() 呼叫一次（javap 實證）且就在
+        // ready 閘內、vanilla 去重之前——正是本刀需要的位置。
+        Patcher.ClassPatch pds = new Patcher.ClassPatch("zombie/network/PlayerDownloadServer");
+        Patcher.MethodOps pdsDedupe = pds.method("removeOlderDuplicateRequests", "()V");
+        pdsDedupe.headCall = new Patcher.HeadCall("zombie/mdc/ChunkRequestPacker", "packQueue",
+                "(Lzombie/network/PlayerDownloadServer;)V");
+        pdsDedupe.expectedHits = 1;
+        patches.add(pds);
+
         return patches;
     }
 
@@ -383,6 +405,19 @@ public final class PatchConfig {
         wait.consts.add(new Patcher.ConstChange(52428800L, 4294967296L));
         wait.expectedHits = 2;
         patches.add(tex);
+
+        // ---- W4-2 chunk 請求逾時 8s→30s（黑邊 livelock 斷鏈；docs/chunk-throughput-design-v1.md）----
+        // resendTimedOutRequests 對超過 8000ms 未完成的請求設 flagsWs|=9 → loadReceivedChunks
+        // 因 flagsWs&8 直接丟棄「已經送達、只是慢了一點」的整包資料並把 chunk 重新排隊，
+        // 且不送 NotRequiredInZip 通知 server 取消 → server 繼續送作廢資料 → 供給更擠 →
+        // 更多逾時。實測：pending 恆＝請求率×8s、每個卡住的 chunk 重發約 141 輪、
+        // 18 分鐘燒掉約 105MB 全數丟棄、零 chunk 載入。
+        // RequestZipList 與 SentChunkPacket 皆 reliability=2（RELIABLE，RakNet 保證送達），
+        // 故此逾時幾乎不是在救「真的遺失」，而是在懲罰「server 慢」——放寬到 30s 讓遲到的
+        // 資料被接受即可斷鏈。上界仍有限（server 真的不回時 30s 後照樣重試）。
+        // 全 class 僅此一處 8000L（javap 實證），方法範圍鎖定。
+        // 註：與 v2.1 的三個 ChunkStream 觀測 headCall 同屬一個 WorldStreamer ClassPatch，
+        //     在下方 v2.1 區塊一併宣告（同一 class 只能有一個 ClassPatch）。
 
         // ---- v2.0 貼圖洩漏根治第一波（四路 retention trace＋對抗評審定罪；docs/patches.md 2j）----
         // 主犯 1（40-60%）：ImageData.dispose() 只釋放 data＋mipMaps、完全不碰 frames——
@@ -441,6 +476,10 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;)V");
         rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
         rnr.expectedHits = 1;
+        // W4-2（見本方法上方說明）：同一 ClassPatch 內追加逾時常數 8s→30s
+        Patcher.MethodOps resend = streamer.method("resendTimedOutRequests", "()V");
+        resend.consts.add(new Patcher.ConstChange(8000L, 15000L));
+        resend.expectedHits = 1;
         patches.add(streamer);
 
         return patches;
