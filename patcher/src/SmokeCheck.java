@@ -200,6 +200,79 @@ public final class SmokeCheck {
                     countExactCalls(gSw, Opcodes.INVOKESTATIC, "zombie/iso/IsoChunk", "SafeWrite",
                             "(IILjava/nio/ByteBuffer;)V") == 5);
 
+            // ---- W9 存檔管線隔離：CRC 執行緒私有性＋機制錨＋私有池行為（根治刀的可測核心）----
+            Class<?> csi = Class.forName("zombie.mdc.ChunkSaveIsolation", true, patched);
+            Method hcM = csi.getMethod("headerCrc", java.util.zip.CRC32.class);
+            Method dcM = csi.getMethod("dedupCrc", java.util.zip.CRC32.class);
+            java.util.zip.CRC32 sharedCrc = new java.util.zip.CRC32();
+            Object hc1 = hcM.invoke(null, sharedCrc);
+            Object hc2 = hcM.invoke(null, sharedCrc);
+            Object dc1 = dcM.invoke(null, sharedCrc);
+            Object[] hcOther = new Object[1];
+            Thread crcWorker = new Thread(() -> {
+                try {
+                    hcOther[0] = hcM.invoke(null, sharedCrc);
+                } catch (ReflectiveOperationException e) {
+                    hcOther[0] = e;
+                }
+            }, "W9-smoke-worker");
+            crcWorker.start();
+            crcWorker.join();
+            failed += check("W9 headerCrc：非共享實例、同緒穩定、跨緒相異（指紋競態消失的充要條件）",
+                    hc1 != null && hc1 != sharedCrc && hc1 == hc2
+                    && hcOther[0] != null && !(hcOther[0] instanceof Throwable)
+                    && hcOther[0] != hc1 && hcOther[0] != sharedCrc);
+            failed += check("W9 dedupCrc：與 headerCrc 分族隔離（同緒序列化中途做去重不互踩）",
+                    dc1 != null && dc1 != sharedCrc && dc1 != hc1);
+            // 機制錨（定罪的最小重演，單緒確定性模擬交錯）：外部 reset 插在 update 與
+            // getValue 之間 → 指紋 0（A 組 16 筆歷史＋W8 首晚 3 筆的簽名）；外部 update
+            // 疊入 → 垃圾值（B 組 27 筆＋5 筆）。body/len 由各自序列化者完整寫入，故
+            // len 恆正確——與 8/8 現行犯觀測相容的唯一機制。
+            java.util.zip.CRC32 anchor = new java.util.zip.CRC32();
+            byte[] anchorBody = new byte[]{1, 2, 3, 4, 5, 6, 7};
+            anchor.update(anchorBody);
+            long anchorCorrect = anchor.getValue();
+            anchor.reset();
+            anchor.update(anchorBody);
+            anchor.reset();
+            long anchorZero = anchor.getValue();
+            anchor.reset();
+            anchor.update(anchorBody);
+            anchor.update(anchorBody);
+            long anchorGarbage = anchor.getValue();
+            failed += check("W9 機制錨：共用 CRC32 遭外部 reset→0（A 組簽名）、遭疊 update→垃圾（B 組簽名）",
+                    anchorZero == 0L && anchorGarbage != anchorCorrect && anchorCorrect != 0L);
+            // 私有池行為：租→還→再租重用同殼同 buffer、歸還後 bb=null、retriesCount 重置，
+            // 且全程不動 ClientChunkRequest 全域池（隔離的定義本身）
+            Class<?> ccrClsR = Class.forName("zombie.network.ClientChunkRequest", true, patched);
+            Class<?> chunkClsR = Class.forName("zombie.network.ClientChunkRequest$Chunk", true, patched);
+            Method gcM = csi.getMethod("getChunk", ccrClsR);
+            Method gbM = csi.getMethod("getByteBuffer", ccrClsR, chunkClsR);
+            Method rcM = csi.getMethod("releaseChunk", ccrClsR, chunkClsR);
+            java.lang.reflect.Field fcField = ccrClsR.getDeclaredField("freeChunks");
+            fcField.setAccessible(true);
+            java.lang.reflect.Field fbField = ccrClsR.getDeclaredField("freeBuffers");
+            fbField.setAccessible(true);
+            int fcBefore = ((java.util.Collection<?>) fcField.get(null)).size();
+            int fbBefore = ((java.util.Collection<?>) fbField.get(null)).size();
+            Object pc1 = gcM.invoke(null, new Object[]{null});
+            gbM.invoke(null, new Object[]{null, pc1});
+            java.lang.reflect.Field bbField = chunkClsR.getField("bb");
+            java.lang.reflect.Field retriesField = chunkClsR.getField("retriesCount");
+            Object pb1 = bbField.get(pc1);
+            retriesField.setInt(pc1, 7);
+            rcM.invoke(null, new Object[]{null, pc1});
+            boolean bbNulled = bbField.get(pc1) == null;
+            Object pc2 = gcM.invoke(null, new Object[]{null});
+            gbM.invoke(null, new Object[]{null, pc2});
+            failed += check("W9 私有池：租還往返重用同殼同 buffer、歸還 null bb、retriesCount 重置",
+                    pb1 != null && bbNulled && pc2 == pc1
+                    && bbField.get(pc2) == pb1 && retriesField.getInt(pc2) == 0);
+            failed += check("W9 隔離定義：私有池全程往返後 ClientChunkRequest 全域池計數不變",
+                    ((java.util.Collection<?>) fcField.get(null)).size() == fcBefore
+                    && ((java.util.Collection<?>) fbField.get(null)).size() == fbBefore);
+            rcM.invoke(null, new Object[]{null, pc2});
+
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
             Class<?> throttle = Class.forName("zombie.mdc.ZombieAuthThrottle", true, patched);
@@ -1032,6 +1105,76 @@ public final class SmokeCheck {
         failed += check("W8 負對照：IsoChunk 除 Save(Z)V 外零改道（含其他 Save 多載；SafeWrite 本體無遞迴）",
                 safeWriteClean);
 
+        // ---- W9 存檔管線隔離（addLoadedJob 的指紋 CRC＋池租借；SaveLoadedTask 的去重 CRC＋歸還）----
+        String sctCls = "zombie/network/ServerChunkLoader$SaveChunkThread";
+        String csiCls = "zombie/mdc/ChunkSaveIsolation";
+        String ccrRef = "zombie/network/ClientChunkRequest";
+        String chunkRef = "zombie/network/ClientChunkRequest$Chunk";
+        String getChunkDesc = "()L" + chunkRef + ";";
+        String chunkArgDesc = "(L" + chunkRef + ";)V";
+        String addLoadedDesc = "(Lzombie/iso/IsoChunk;)V";
+        MethodNode vAdd = methodFromJar(jar, sctCls, "addLoadedJob", addLoadedDesc);
+        failed += check("W9 vanilla 前提：addLoadedJob 內 crc32 讀 x1、getChunk/getByteBuffer/releaseChunk 各 x1",
+                countInstanceFieldReads(vAdd, sctCls, "crc32") == 1
+                && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 1
+                && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
+                && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
+        failed += check("W9 vanilla 前提：SaveLoadedTask.save 內 crcSave 讀 x4（reset/update/getValue×2 四連讀）",
+                countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4);
+        MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");
+        failed += check("W9 vanilla 前提：SaveLoadedTask.release 內 releaseChunk x1",
+                countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
+        // 耦合鎖：兩顆共用 CRC32 的讀者清冊釘死——競態分析的完整性依賴「讀者只有這些」，
+        // TIS 新增讀者＝清冊過期＝建置失敗強制重新分析
+        failed += check("W9 耦合鎖：crcSave 讀者僅 SaveLoadedTask（x4）、crc32 讀者僅 SaveChunkThread（x1）",
+                classWideInstanceFieldReads(classNodeFromJar(jar, sltCls), "zombie/network/ServerChunkLoader", "crcSave") == 4
+                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader"), "zombie/network/ServerChunkLoader", "crcSave") == 0
+                && classWideInstanceFieldReads(classNodeFromJar(jar, sctCls), "zombie/network/ServerChunkLoader", "crcSave") == 0
+                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader$SaveUnloadedTask"), "zombie/network/ServerChunkLoader", "crcSave") == 0
+                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader$LoaderThread"), "zombie/network/ServerChunkLoader", "crcSave") == 0
+                && classWideInstanceFieldReads(classNodeFromJar(jar, sctCls), sctCls, "crc32") == 1);
+        // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者恰 2（addLoadedJob＝本刀隔離；
+        // PlayerDownloadServer.update 用 per-connection CRC32 且僅主緒＝分析上安全）。
+        // 第三個序列化者出現＝共用性分析要重做
+        failed += check("W9 census：全 jar SaveLoadedChunk 呼叫點恰 2",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk",
+                        "(L" + chunkRef + ";Ljava/util/zip/CRC32;)V") == 2);
+        // 手術後：同形替換緊鄰性（GETFIELD 之後必須緊接 helper——隔開＝吃錯堆疊值）＋原呼叫歸零
+        MethodNode pAdd = method(distJava, sctCls, "addLoadedJob", addLoadedDesc);
+        failed += check("W9 手術後：addLoadedJob crc32→headerCrc 緊鄰 x1、三呼叫改道、原 invokevirtual 歸零",
+                swapAdjacency(pAdd, sctCls, "crc32", csiCls, "headerCrc") == 1
+                && countExactCalls(pAdd, Opcodes.INVOKESTATIC, csiCls, "getChunk",
+                        "(L" + ccrRef + ";)L" + chunkRef + ";") == 1
+                && countExactCalls(pAdd, Opcodes.INVOKESTATIC, csiCls, "getByteBuffer",
+                        "(L" + ccrRef + ";L" + chunkRef + ";)V") == 1
+                && countExactCalls(pAdd, Opcodes.INVOKESTATIC, csiCls, "releaseChunk",
+                        "(L" + ccrRef + ";L" + chunkRef + ";)V") == 1
+                && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 0
+                && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 0
+                && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 0);
+        failed += check("W9 手術後：save() crcSave→dedupCrc 緊鄰 x4",
+                swapAdjacency(pSlt, "zombie/network/ServerChunkLoader", "crcSave", csiCls, "dedupCrc") == 4);
+        MethodNode pRel = method(distJava, sltCls, "release", "()V");
+        failed += check("W9 手術後：release() releaseChunk 改道 x1、原呼叫歸零",
+                countExactCalls(pRel, Opcodes.INVOKESTATIC, csiCls, "releaseChunk",
+                        "(L" + ccrRef + ";L" + chunkRef + ";)V") == 1
+                && countExactCalls(pRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 0);
+        // 負對照：SaveChunkThread 其餘方法（addUnloadedJob/run/update/saveNow/saveLater/quit）零波及
+        ClassNode pSctNode = classNode(distJava, sctCls);
+        boolean sctClean = pSctNode.methods.stream()
+                .filter(m -> !(m.name.equals("addLoadedJob") && m.desc.equals(addLoadedDesc)))
+                .allMatch(m -> countCallsToOwner(m, csiCls) == 0);
+        failed += check("W9 負對照：SaveChunkThread 除 addLoadedJob 外零 ChunkSaveIsolation 呼叫", sctClean);
+        // helper off 路徑保真：kill switch（-Dmdc.chunkSaveIsolation=0）的委派路徑必須是原味
+        // vanilla 呼叫——三個池 helper 各含恰 1 個對應 invokevirtual
+        failed += check("W9 helper off 路徑：getChunk/getByteBuffer/releaseChunk 各含 vanilla 委派 x1",
+                countExactCalls(method(distJava, csiCls, "getChunk", "(L" + ccrRef + ";)L" + chunkRef + ";"),
+                        Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 1
+                && countExactCalls(method(distJava, csiCls, "getByteBuffer", "(L" + ccrRef + ";L" + chunkRef + ";)V"),
+                        Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
+                && countExactCalls(method(distJava, csiCls, "releaseChunk", "(L" + ccrRef + ";L" + chunkRef + ";)V"),
+                        Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -1434,6 +1577,11 @@ public final class SmokeCheck {
      * 的 false-green（codex 審查修正）。
      */
     static int jarWideCallsiteCensus(Path jar, String owner, String name, String desc) throws Exception {
+        return jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, owner, name, desc);
+    }
+
+    /** opcode 參數版（W9 需要 INVOKEVIRTUAL 的 SaveLoadedChunk 序列化者清冊）。 */
+    static int jarWideCallsiteCensus(Path jar, int opcode, String owner, String name, String desc) throws Exception {
         int count = 0;
         try (ZipFile zf = new ZipFile(jar.toFile())) {
             Enumeration<? extends ZipEntry> en = zf.entries();
@@ -1445,7 +1593,7 @@ public final class SmokeCheck {
                 ClassNode cn = new ClassNode();
                 new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
                 for (MethodNode m : cn.methods) {
-                    count += countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc);
+                    count += countExactCalls(m, opcode, owner, name, desc);
                 }
             }
         }
@@ -1707,6 +1855,58 @@ public final class SmokeCheck {
                     && field.getOpcode() == Opcodes.GETSTATIC
                     && field.owner.equals(owner)
                     && field.name.equals(name)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** GETFIELD 版欄位讀取計數（countFieldReads 是 GETSTATIC 版；W9 的兩顆共用 CRC32 都是 instance 欄位）。 */
+    static int countInstanceFieldReads(MethodNode method, String owner, String name) {
+        int count = 0;
+        for (AbstractInsnNode in : method.instructions) {
+            if (in instanceof FieldInsnNode field
+                    && field.getOpcode() == Opcodes.GETFIELD
+                    && field.owner.equals(owner)
+                    && field.name.equals(name)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static int classWideInstanceFieldReads(ClassNode cls, String owner, String name) {
+        int total = 0;
+        for (MethodNode m : cls.methods) {
+            total += countInstanceFieldReads(m, owner, name);
+        }
+        return total;
+    }
+
+    /**
+     * 同形替換緊鄰性：GETFIELD owner.name 之後<b>緊接</b> INVOKESTATIC helperOwner.helperName
+     * 的配對數（W9）。FieldGetSwap 的插入語意就是緊鄰——中間隔任何指令＝helper 吃錯堆疊值。
+     */
+    static int swapAdjacency(MethodNode m, String owner, String name, String helperOwner, String helperName) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
+                    && fi.owner.equals(owner) && fi.name.equals(name)) {
+                AbstractInsnNode next = nextReal(in);
+                if (next instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
+                        && mi.owner.equals(helperOwner) && mi.name.equals(helperName)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /** 方法內對指定 owner 的呼叫總數（任何方法名／opcode；W9 負對照用）。 */
+    static int countCallsToOwner(MethodNode m, String owner) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(owner)) {
                 count++;
             }
         }
