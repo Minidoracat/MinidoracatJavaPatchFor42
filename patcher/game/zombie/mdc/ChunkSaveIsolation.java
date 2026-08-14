@@ -48,10 +48,12 @@ import zombie.network.ClientChunkRequest;
  *       chunk 的自洽資料」可通過 CRC 驗證——私有化後此路徑物理上不存在。</li>
  * </ol>
  *
- * <p><b>私有池語意</b>：逐行鏡射 vanilla（getChunk 重置 retriesCount、getByteBuffer
- * poll-or-allocate(16384)-else-clear、releaseChunk 先還 buffer 再還殼並 null bb）。
- * 池上限＝存檔佇列在途峰值（LinkedBlockingQueue 深度），與 vanilla 同界。
- * {@code Save()} 擴容回傳的長大 buffer 一樣流回私有池，尺寸異質行為與 vanilla 一致。
+ * <p><b>私有池語意</b>（codex 對抗審查後收緊為 exactly-once）：Chunk 殼<b>不入池</b>
+ * ——每次 new，雙重歸還的殼自然 GC、物理上無法二次出租；buffer 歸還走
+ * {@code synchronized(c)} 原子摘取，雙重 release 的第二次拿到 null＝no-op。
+ * getByteBuffer 語意鏡射 vanilla（poll-or-allocate(16384)-else-clear）；
+ * {@code Save()} 擴容回傳的長大 buffer 一樣流回私有池（容量 ≤256KB 且池內 &lt;256 顆
+ * 才收，否則丟棄給 GC——vanilla 全域池無界，本池反而更緊）。
  *
  * <p><b>驗證閉環</b>：W8 ChunkWriteGuard 的 {@code flagged} 計數器是現成 A/B 儀表——
  * 本刀上線後 flagged 應歸零；不歸零＝機制另有分支，BLOCKED stack 續查。
@@ -69,9 +71,25 @@ public final class ChunkSaveIsolation {
     /** 去重比對用（SaveLoadedTask.save 的 reset/update/getValue×2 四連讀）。 */
     private static final ThreadLocal<CRC32> DEDUP_CRC = ThreadLocal.withInitial(CRC32::new);
 
-    /** 存檔管線私有池——與 ClientChunkRequest 的全域 static 池零交集。 */
-    private static final ConcurrentLinkedQueue<ClientChunkRequest.Chunk> CHUNKS = new ConcurrentLinkedQueue<>();
+    /**
+     * 存檔管線私有 buffer 池——與 ClientChunkRequest 的全域 static 池零交集。
+     * <b>Chunk 殼刻意不入池</b>（codex 對抗審查 blocking 修正）：vanilla 的
+     * {@code SaveChunkThread.update()} 用無同步的 savedChunks ArrayList 歸還，
+     * 主迴圈與 shutdown hook 並行 updateSaved 時同一 task 可被 release 兩次——
+     * 入池的殼會被二次出租給兩個主人（正是本刀要根絕的競態，在私有池內復刻）。
+     * 殼每次 new（~40 bytes × 存檔頻率＝微不足道），雙重歸還的殼自然 GC，
+     * 物理上無法二次出租；buffer 則以 {@code synchronized(c)} 原子摘取達成
+     * exactly-once 歸還（雙重 release 的第二次拿到 null＝no-op）。
+     *
+     * <p>池上限（codex 審查 major 修正；vanilla 全域池無界——sendLargeArea 的
+     * clear() 經全 jar 普查為死碼，從不執行）：數量 256（軟上限，併發下可微幅
+     * 超出）、單顆容量 256KB（Save 擴容以 64KB 倍數成長，超大者為離群值，
+     * 直接丟棄給 GC）。典型駐留 ≤16MB，與 vanilla 峰值同量級。
+     */
     private static final ConcurrentLinkedQueue<ByteBuffer> BUFFERS = new ConcurrentLinkedQueue<>();
+    private static final java.util.concurrent.atomic.AtomicInteger pooled = new java.util.concurrent.atomic.AtomicInteger();
+    private static final int MAX_POOLED_BUFFERS = 256;
+    private static final int MAX_POOLED_CAPACITY = 262144;
 
     private static final AtomicBoolean banner = new AtomicBoolean();
 
@@ -89,17 +107,15 @@ public final class ChunkSaveIsolation {
         return ENABLED ? DEDUP_CRC.get() : shared;
     }
 
-    /** INVOKEVIRTUAL ClientChunkRequest.getChunk 改道目標（receiver 僅 off 路徑使用）。 */
+    /**
+     * INVOKEVIRTUAL ClientChunkRequest.getChunk 改道目標（receiver 僅 off 路徑使用）。
+     * 殼永遠是新的（欄位預設值即 vanilla getChunk 的重置後狀態：retriesCount=0、bb=null）。
+     */
     public static ClientChunkRequest.Chunk getChunk(ClientChunkRequest ccr) {
         if (!ENABLED) {
             return ccr.getChunk();
         }
-        ClientChunkRequest.Chunk c = CHUNKS.poll();
-        if (c == null) {
-            c = new ClientChunkRequest.Chunk();
-        }
-        c.retriesCount = 0;
-        return c;
+        return new ClientChunkRequest.Chunk();
     }
 
     /** INVOKEVIRTUAL ClientChunkRequest.getByteBuffer 改道目標。 */
@@ -108,25 +124,41 @@ public final class ChunkSaveIsolation {
             ccr.getByteBuffer(c);
             return;
         }
-        c.bb = BUFFERS.poll();
-        if (c.bb == null) {
-            c.bb = ByteBuffer.allocate(16384);
+        ByteBuffer b = BUFFERS.poll();
+        if (b != null) {
+            pooled.decrementAndGet();
+            b.clear();
+            c.bb = b;
         } else {
-            c.bb.clear();
+            c.bb = ByteBuffer.allocate(16384);
         }
     }
 
-    /** INVOKEVIRTUAL ClientChunkRequest.releaseChunk 改道目標（addLoadedJob 例外路徑＋release()）。 */
+    /**
+     * INVOKEVIRTUAL ClientChunkRequest.releaseChunk 改道目標（addLoadedJob 例外路徑＋release()）。
+     * {@code synchronized(c)} 原子摘取 bb：vanilla update() 的無同步 savedChunks 可讓
+     * 同一 task 被 release 兩次——第二次摘到 null＝no-op，buffer 不會雙重入池。
+     */
     public static void releaseChunk(ClientChunkRequest ccr, ClientChunkRequest.Chunk c) {
         if (!ENABLED) {
             ccr.releaseChunk(c);
             return;
         }
-        if (c.bb != null) {
-            BUFFERS.add(c.bb);
+        ByteBuffer b;
+        synchronized (c) {
+            b = c.bb;
             c.bb = null;
         }
-        CHUNKS.add(c);
+        if (b == null) {
+            return;
+        }
+        // 軟上限：cap 檢查與 increment 非原子，併發下可微幅超出 256——可接受，
+        // 硬性精確會需要鎖，不值得
+        if (b.capacity() <= MAX_POOLED_CAPACITY && pooled.get() < MAX_POOLED_BUFFERS) {
+            BUFFERS.add(b);
+            pooled.incrementAndGet();
+        }
+        // 超限或超大：直接丟棄給 GC
     }
 
     private static void firstUse() {

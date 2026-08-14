@@ -1443,14 +1443,19 @@ B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還�
 2. `SaveLoadedTask.save()` 的 GETFIELD `crcSave` ×4 → `dedupCrc`（ThreadLocal）——
    去重競態根絕；
 3. `getChunk`／`getByteBuffer`／`releaseChunk`（addLoadedJob 租用＋例外歸還、
-   release() 歸還）→ 私有池——存檔管線徹底退出 `ClientChunkRequest` 的全域 static
+   release() 歸還）→ 私有化——存檔管線徹底退出 `ClientChunkRequest` 的全域 static
    共用池（`freeChunks` private static／`freeBuffers` **public** static，與 N 條
-   PlayerDownloadServer WorkerThread、RequestZipListPacket.parse 共用），恢復單一
-   所有權鏈；同時關閉 W8 的理論盲區（池雙發同一 buffer 時「完整重填成別塊 chunk
-   的自洽資料」可通過 CRC 驗證——私有化後此路徑物理上不存在）。
+   PlayerDownloadServer WorkerThread、RequestZipListPacket.parse 共用）；同時關閉
+   W8 的理論盲區（池雙發同一 buffer 時「完整重填成別塊 chunk 的自洽資料」可通過
+   CRC 驗證——私有化後此路徑物理上不存在）。
 
-私有池語意逐行鏡射 vanilla（retriesCount 重置、poll-or-allocate(16384)-else-clear、
-先還 buffer 再還殼並 null bb）；上限＝存檔佇列在途峰值，與 vanilla 同界。
+**私有化語意（codex 對抗審查後收緊為 exactly-once）**：Chunk 殼**不入池**——每次
+new（vanilla update() 用無同步的 savedChunks ArrayList 歸還，主迴圈與 shutdown hook
+並行 updateSaved 時同一 task 可被 release 兩次；入池殼會被二次出租＝在私有池內
+復刻本刀要根絕的競態。順帶：這也揭露 vanilla 全域池本就有同款雙重歸還孔，可能是
+運行中爆發的第二機制）。buffer 歸還走 `synchronized(c)` 原子摘取（雙重 release
+第二次拿到 null＝no-op）；私有 buffer 池有界（≤256 顆軟上限＋單顆 ≤256KB，超限
+丟 GC——vanilla 全域池無界，`sendLargeArea` 的 clear() 經普查為死碼從不執行）。
 
 **驗證閉環**：W8 的 `flagged` 計數器是現成 A/B 儀表——本刀生效後 flagged 應歸零；
 不歸零＝機制另有分支，用 BLOCKED stack 續查。W8 不拆，永久保險絲。
@@ -1458,12 +1463,16 @@ B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還�
 **Kill switch**：`-Dmdc.chunkSaveIsolation=0` 完全停用（helper 原樣委派回共用
 實例／共用池——off 路徑的 bytecode 就是 vanilla 呼叫，SmokeCheck 釘保真）。
 
-**驗證閘**（SmokeCheck 14 項）：行為 5（headerCrc 跨緒相異／dedupCrc 分族／機制錨
-——共用 CRC32 遭外部 reset→0、疊 update→垃圾的最小重演／私有池租還往返／隔離定義
-——全域池計數不變）＋結構 9（vanilla 前提三方法形狀、**耦合鎖**——兩顆 CRC32 的
-讀者清冊釘死、**序列化者清冊**——全 jar SaveLoadedChunk 呼叫點恰 2、手術後
-**swap 緊鄰性**（GETFIELD 之後必須緊接 helper）＋改道歸零、SaveChunkThread 負對照、
-helper off 路徑保真）。
+**驗證閘**（SmokeCheck 15 項＋獨立 JVM off 測試；codex 對抗審查後補強 4 項）：
+行為 6（headerCrc 跨緒相異／dedupCrc 分族／機制錨——共用 CRC32 遭外部 reset→0、
+疊 update→垃圾的最小重演／私有池 fresh-shell＋buffer 重用／隔離定義——全域池計數
+不變／**雙重歸還冪等**——release 兩次只入池一次）＋結構 9（vanilla 前提三方法形狀、
+**耦合鎖全 jar 版**——兩顆 CRC32 的讀者全 jar 普查總數＝已釘位置數（硬編類別清單
+掃不到新增 nestmate，codex 修正）、**序列化者清冊**——全 jar SaveLoadedChunk 恰 2
+＋逐類分佈、手術後 **swap 緊鄰性**（GETFIELD 之後必須緊接 helper）＋改道歸零、
+SaveChunkThread 負對照、helper off 路徑 bytecode 保真）；build 步驟 9d 以
+`-Dmdc.chunkSaveIsolation=0` 獨立 JVM **真的執行** off 分支（CRC identity、全域池
+同一性 marker 驗證、私有池零使用——off 分支不該首跑於事故現場）。
 
 **未涵蓋（誠實界定）**：`PlayerDownloadServer.update` 的發送序列化仍用共用 buffer 池
 （其 CRC32 為 per-connection 且僅主緒＝分析上安全）——發送方向若有池污染，客戶端
@@ -1550,8 +1559,8 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
    (d) blam/ 不再新增任何 CRC 類目錄（`SANITY CHECK FAIL` 歸零）。
    (e) 行為不變：chunk 正常存讀、玩家離開區域後重回內容不回退、客戶端 chunk 下載正常
    （發送路徑一概未動）。
-   (f) kill switch 演練過（build 步驟 7 的 off 路徑保真閘）；線上如需停用：
-   JAVA_OPTS 加 `-Dmdc.chunkSaveIsolation=0` 後重啟。
+   (f) kill switch 演練過（build 步驟 9d 以獨立 JVM 真的執行 off 分支＋步驟 7 的
+   bytecode 保真閘）；線上如需停用：JAVA_OPTS 加 `-Dmdc.chunkSaveIsolation=0` 後重啟。
 14. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
