@@ -69,6 +69,7 @@ $helperEntries = @(
     'zombie/mdc/ChunkRequestPacker.class',
     'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/ContainerCycleGuard$State.class',
+    'zombie/mdc/ChunkLoadGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -133,6 +134,15 @@ java "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$R\work\pr
 Assert-Ok "ChunkRequestPackerTest（windowBudget=0 kill switch）"
 java "-Dmdc.chunkPacker.batch=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
 Assert-Ok "ChunkRequestPackerTest（batch=0 kill switch）"
+
+Write-Host "[9c/10] 地圖格載入捕手（W6）行為驗證（含替身必拋負對照）＋kill switch..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest
+Assert-Ok "ChunkLoadGuardTest"
+# 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場。
+# 傳 disabled 讓測試自己斷言旋鈕真的生效——只看 exit code 的話，property 名稱打錯會變成
+# 「把 enabled 版再跑一遍、照樣 exit 0」，降級路徑其實從未被測到。
+java "-Dmdc.chunkLoadGuard.enabled=false" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest disabled
+Assert-Ok "ChunkLoadGuardTest（enabled=false kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

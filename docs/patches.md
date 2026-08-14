@@ -906,6 +906,265 @@ helper 自身例外有界印出堆疊（前 3 次）。
 測試以 `sun.reflect.ReflectionFactory` 分配未初始化物件造環（`InventoryItem` 建構子會拉起
 ZomboidFileSystem），classpath 中 `dist\java` 排在 jar 前，故測到的是**改道後**的方法。
 
+## 2r. 地圖格載入捕手（W6，server）
+
+**事故**：2026-08-14 01:34:56 正式服主迴圈 frame 永久停在 `f:46186`，直到 03:28 排程的
+mod 更新重啟才結束——**凍結 114 分鐘，而且沒有任何人是為了救它而重啟的**。進程活著、
+Steam／Discord／網路執行緒照常，玩家連得進來但世界完全靜止（01:48「484現在登不上去了」、
+01:59「還在線上的快登出吧 不要撐了」，期間 170 次斷線）。同一條**逐行相同**的 stack 在
+2026-08-07 18:05 也發生過一次（兇手 sprite `fencing_01_57`；本次 `blends_natural_01_53`）。
+
+**vanilla 缺陷**：`EngineEntityManager` 維護兩份平行結構——`entitySet`（「登記過了嗎」）與
+`entities`（每圈要走訪的陣列）。`addEntityInternal` offset 0-8 是 `entitySet.contains(entity)`，
+為真就在 offset 11-27 `athrow`：
+
+```
+java.lang.IllegalArgumentException: Entity is already registered <sprite>:zombie.iso.IsoObject@…
+  EngineEntityManager.addEntityInternal(:137)   ← throw
+  Engine.addEntity(:58) → GameEntityManager.RegisterEntity(:253)
+  GameEntity.addToWorld(:527) → IsoObject.addToWorld(:4497)
+  IsoChunk.doLoadGridsquare(:3973)
+  ServerMap$ServerCell.RecalcAll2(:385) → Load2(:224) → ServerMap.preupdate(:969)
+  GameServer.main(:972)
+```
+
+**為何是永久活鎖而非崩潰**：`GameServer.main` 攔住例外只印出來，但攔截點在迴圈**最上方**
+——這一圈剩下的工作（更新世界、處理封包、推進 frame）全數跳過，而那個地圖格**還留在待載入
+佇列裡**。下一圈同一個物件、同樣被拒絕，每 0.1 秒一次。log 只印 25 次就靜音（PZ 對重複例外
+有抑制），但 frame 從此再沒前進過。**這是活鎖，任何「進程掛掉就重啟」的保護都救不了。**
+
+**事故走的是 `addEntity` 的直通分支，`addedToEngine` 守衛從未被求值**（本節初稿寫成
+「vanilla 上一層已經擋了、正式服走 return」，是 bytecode 誤讀，經兩輪審查更正）：
+
+```
+addEntity(GameEntity):
+   0-21:  if (delayed.value() || bucketsUpdating.value())   →  ifeq 116
+  24-47:      if (scheduledForEngineRemoval || removingFromEngine) throw
+  48-71:      if (addedToEngine) { if (Core.debug) throw; return; }   ← 只在這個分支內
+  72-113:     addedToEngine = true; 排進 pendingOperations
+    116:  addEntityInternal(entity)    ← 另一條路，完全不看 addedToEngine
+```
+
+**證據是 log 自己給的行號，不是推論**：事故 stack 記錄 `addEntity(EngineEntityManager.java:55)`，
+而 `javap -l` 的 LineNumberTable 顯示 **`line 55: 116`**——正是那條直通呼叫。
+（`delayed` = `Engine.processing`，只在 `Engine.update()`／`simulationUpdate()`／`renderLast()`
+內為 true，而 `ServerMap.preupdate → Load2 → RecalcAll2 → doLoadGridsquare` 不在其中。）
+
+**這件事改變了根因的形狀，也改變了該往哪查**：
+
+- 不需要任何「引擎兩個內部旗標不一致」的不可重現破壞。
+  `addedToEngine == true` 且 `entitySet.contains == true` 是**完全自洽的狀態**，在直通分支上
+  照樣拋。也就是說最可能的根因就是**有東西對已經在世界裡的物件又呼叫了一次 `addToWorld()`**。
+- 搜尋空間從「誰弄壞了 `addedToEngine`」（十餘個 class 會碰）縮成
+  「誰重複 add／哪個物件同時在兩個 list」——後者可查得多。
+- 也解釋了**為什麼不自癒**：直通分支拋在 `addEntityInternal` 的第一個 statement，
+  **沒有任何欄位被寫過**，下一圈狀態位元相同、原樣再拋。
+
+初稿據以宣告「沒有重現條件、不強修」的前提因此不成立。**W6 的診斷特意加了
+`isAddedToEngine()`（`GameEntity` 的 `public final` 方法）**：第一次命中就能把假說砍成兩半——
+`true` ＝ 單純重複 add（照上面查）；`false` ＝ 才是真的不變量破壞，且 `entitySet.add`
+與 `addedToEngine = true` 之間唯一會拋的是 `setComponentOperationHandler`，範圍縮到一個方法。
+在拿到那一行之前，**本刀仍是止血＋蒐證，不是治療**。
+
+**非本專案 patch 所致**（javap 實證；不能靠時間相關性——log 只回溯到 7/29，而
+`FastIdentityArrayRemoval` 也是 7/29 上線，沒有乾淨的 pre-patch 基準線）：`addEntityInternal`
+的 throw 在 offset 27，我方改道的 `entities.add` 在 **offset 38**，拋出時根本執行不到；
+`removeEntityInternal` 由 offset 5 的 `entitySet.remove` 決定所有分支，我方改道的
+`Array.removeValue` 在 offset 29 而 **offset 32 是 `pop`**，回傳值被丟棄不可能影響判斷。
+`entitySet` 全程未被碰過。
+
+**手術**：`doLoadGridsquare` 內共有**三**處 `addToWorld`，全部通往同一個 throw 點。
+初版只擋第一處（等於守衛對三分之二觸發路徑失效）——**兩道獨立審查都由此抓到 blocking**，
+因為 `countExactCalls` 依 owner 過濾，「全 class 僅此一處」是過濾器造成的假象。
+
+| offset | site owner | 迴圈 | 處置 |
+|---|---|---|---|
+| 457 | `BaseVehicle` | `vehicles` | **刻意留 vanilla** |
+| 737 | `IsoObject` | `square.getObjects()` | 改道（兩次事故的兇手） |
+| 947 | `IsoMovingObject` | `getStaticMovingObjects()` | 改道 |
+
+`IsoMovingObject` **自己沒宣告 `addToWorld`**（SmokeCheck 有斷言），offset 947 派送到的是
+**同一個方法體**，包住它零額外語意風險；且該迴圈裝屍體（`IsoDeadBody`，正式服 DeadBody id
+已發到 287089），是很有可能的下一個兇手。
+
+**`BaseVehicle` 排除的真正理由是「順序」，不是「它有守衛」**（初稿的理由太弱，審查更正）：
+
+```
+BaseVehicle.addToWorld(Z):
+   0-26: if (addedToWorld) { DebugType.Vehicle.error(...); return; }
+  45-47: addedToWorld = true                              ← 旗標在這裡就設了
+  55-56: invokespecial IsoMovingObject.addToWorld()       ← 拋出點在這之後
+```
+
+旗標賦值（offset 47）**早於** super 呼叫（offset 56），所以拋出後 `addedToWorld` 已是 true，
+下一圈走 offset 26 早退——**每個 vehicle 實體最多只能拋一次**，代價是掉一個 frame（約 100 ms），
+不是 114 分鐘活鎖。`IsoObject` 沒有任何旗標（offset 0 就是 super），所以永遠拋。這才是兩者
+可以不同處置的完整依據。SmokeCheck 因此把**這個順序本身**釘成結構事實：若 TIS 哪天把旗標
+賦值移到 super 之後（一個看起來像 bug fix 的改動），這條刻意排除會無聲變成活的凍結路徑，
+而其他所有斷言全綠。
+
+**邊界由程式碼保證，不由呼叫者巧合保證**：`BaseVehicle extends IsoMovingObject`，而
+`getStaticMovingObjects()` 不是型別同質的（vanilla 自己在 `getDeadBody()`／`getDeadBodys()`
+都要 `instanceof IsoDeadBody` 過濾）。若有 vehicle 進到那個 list，就會經由
+`addToWorld(IsoMovingObject)` 多載被吞掉——正是本節明文拒絕的那件事。helper 因此加了
+`instanceof BaseVehicle` 直通，並有對應行為測試（拿掉直通後測試會失敗）。
+
+helper `zombie.mdc.ChunkLoadGuard` 只攔 **`RuntimeException`**：`Error`（OOM／SOE／
+LinkageError）必須保持致命且可見，吞掉 VM 級故障遠比凍結更糟；反過來也不只攔
+`IllegalArgumentException`——凍結機制與例外型別無關，同位置換一種 RuntimeException 一樣鎖死
+114 分鐘。攔截型別由 SmokeCheck 從 **exception table** 上鎖定（舊版用 `containsUtf8` 找
+`VirtualMachineError` 字串，但那是診斷 getter 的 `rethrowFatal` 帶進常數池的，放寬成
+`Throwable` 照樣通過——mutation 實測確認新版會 FAIL、舊版不會）。
+
+**降級範圍取決於 runtime class，不是單一方法體**（codex 審查推翻了本節前兩版的核心論證）：
+改道點的 site owner 只是**靜態型別**，實際執行的是虛擬派送到的覆寫版本。javap 確認至少四種形狀：
+
+| runtime class | 形狀 | 吞掉之後少了什麼 |
+|---|---|---|
+| `IsoObject` | offset 0 就是 super（拋出點） | `createContainersFromSpriteProperties()`、各容器 `addItemsToProcessItems()`、`addObjectPoweredByGenerator`，以及 `GameEntity.addToWorld` 自己的 `addedToWorldOrEquipped = true` 與 `sendEntityEvent(AddedToWorld)` |
+| `IsoDeadBody` | super 在 offset 1，**side effect 在後** | `CorpseCount.corpseAdded`、`FliesSound.corpseAdded`、**`ObjectIDManager.addObject`**——屍體不進 ID 登記表。**而這正是 offset 947 那個 `getStaticMovingObjects()` 迴圈的主要內容** |
+| `IsoWorldInventoryObject` | **side effect 在 super 之前** | `getProcessWorldItems().add()` 已經執行——「拋出時什麼都還沒跑」對這型**是假的**，守衛吞掉的是一個**部分完成**的狀態 |
+| `IsoGenerator` | **完全不呼叫 super** | 走不到拋出點，不受影響 |
+
+也就是說「拋出前尚無 side effect」只對 super-first 的形狀成立。**這是有意識接受的
+production 風險**：凍結 114 分鐘的代價遠大於單一物件的部分狀態，而診斷的 `class=` 欄位
+可讓事後辨識當次是哪一型——但**不能再宣稱降級一律極小**。
+
+**跳過為什麼是安全的，承重的是 identity 而不是「先前做過了」**（審查給出比初稿更強的論證）：
+`IsoObject` **沒有覆寫 `equals`／`hashCode`**（javap 確認），所以 `entitySet`（`ObjectSet`）
+是 identity 語意。若真的發生過 unload → 從磁碟 reload，那會是一個**全新反序列化的實例**，
+identity 不同、`entitySet.contains` 必為 false、**根本不會拋**。
+
+於是「它拋了」本身就蘊含「同一個實例從來沒被 unregister 過」，也就蘊含「沒有發生真正的
+unload」，於是先前那次 add 掛上的 ProcessItems 與 generator 註冊**都還活著**——跳過確實無損。
+
+**但這條鏈依賴 `entitySet` 的內容與物件生命週期沒有脫鉤。** 若診斷回報
+`addedToEngine=false`（＝真的不變量破壞），這條鏈就斷了，跳過會留下：沒有 container 的容器
+家具（開了是空的）、沒進 ProcessItems 的冷藏／腐敗物品（食物永不腐壞或永不冷藏）、
+沒掛上發電機的用電物件（發電機在跑但這台沒電）——三者全部靜默、全部持續到重啟、全部無 log。
+**這正是把 `isAddedToEngine()` 列為必要診斷欄位的理由：沒有它，我們無法知道自己身處哪個世界。**
+log 行本身也直接寫明「該物件的容器處理與供電掛載本次載入未執行」，讓玩家回報進來時對得上。
+
+**診斷**：這是本刀最主要的產出——現況出事只拿得到 25 份一模一樣的 stack 然後靜音，連是哪一格
+都不知道。捕手留下**方格座標＋sprite 名＋class＋`addedToEngine`＋identity＋chunk jobType＋
+執行緒名＋例外**。三個決定性欄位的用途：
+
+| 欄位 | 它能分開什麼 |
+|---|---|
+| `addedToEngine`（`GameEntity` 的 `public final` 方法） | `true`＝引擎狀態自洽、單純重複 add（查「誰重複呼叫」）；`false`＝真的不變量破壞（範圍縮到 `setComponentOperationHandler` 一個方法）。**兩者後續調查方向完全不同。** |
+| `identityHashCode` | 同一個兇手一直拋（單一物件）vs 一堆不同物件（系統性） |
+| `IsoChunk.jobType`（`public` 欄位） | 驗「SoftReset job 對活著的物件重跑 `doLoadGridsquare`」這個假說——`doLoadGridsquare` 自己就有 SoftReset 專屬分支（offset 835-842），這是目前最具體、最可驗的根因方向 |
+
+去重鍵**只有座標**，明細才是全欄位——診斷含 identityHashCode，若拿完整明細當去重鍵，
+同一格的每個不同實例都會算成新方格，去重就失效了（實際踩到並修正）。
+
+以下每一條都是審查抓出來的，不是原始設計：
+
+- **明細額度按「相異方格」計，不按事件計**。損壞的方格每次玩家經過都會再觸發，按事件計的話
+  一格幾小時就能吃光 20 格額度；之後 B、C、D 格陸續損壞卻只在 `lastSite` 互相覆蓋、座標永久
+  遺失——而「是否集中於特定建築」正是本刀唯一想回答的問題，需要的是 20 格的證據而非一格 ×20。
+- **心跳用 primed 而非 `lastHeartbeatNs = 0` 哨兵**。`System.nanoTime()` 原點任意且規格明文
+  允許為負，負原點時 `now - 0 >= 10 分鐘` 恆為假＝**心跳一輩子不印**。W5 的 `reportPrimed`
+  早已是正解，只是同檔的心跳漏套——**兩邊一併修正**。心跳同時印本區間增量（累計值看不出惡化速率）。
+- **執行緒名**：「這次是 WorldStreamer 背景執行緒（本來就不凍主迴圈）還是主迴圈（本來凍 114
+  分鐘）」是本刀最有運維價值的一個 bit。
+- **哨兵值逐種可分辨**：`方格=none`／`方格=getter-threw`／`方格=partial(getter-threw)`、
+  `sprite=null-sprite`／`unnamed`／`getter-threw`，並另計 `診斷取值失敗` 次數。否則凌晨三點
+  看到 200 行 `方格=null sprite=?` 的人無法分辨「物件本來就怪」與「每次取值都在爆、什麼都沒蒐到」。
+  座標改為三軸全成功才印——逐軸退化會讓 `方格=7130,-2147483648,0` 看起來像有個真 X。
+- **null receiver 用不同語氣**（`世界資料異常：方格物件清單含 null 項`）：那是與本案無關、
+  可能更嚴重的另一種損壞，不能被當成同一個 bug 的第 N 次。
+- **啟動橫幅**印出 `enabled` 與 property 原值。沒有它，下次若從未守衛的 vehicles 路徑凍結，
+  運維只看得到「已安裝但一行都沒印」，無法分辨「沒蓋到這條路徑」與「守衛壞了」；也順帶抓
+  `-D...=0`／`=no` 這類會靜默保持啟用的打錯。
+- **`DebugLog` 全壞時退到 `System.err`**：那是本設計唯一的完全靜默失敗（額度被無聲扣光、
+  心跳全滅），而 stderr 是獨立通道且 LinuxGSM console log 抓得到——把「完全失明」降級成
+  「看得見但簡陋」。
+- **anomaly 處理自帶最後一道網**：若拋出的正是 `DebugLog.log` 本身，用「再 log 一次」回應
+  會讓例外逃出守衛回到 `doLoadGridsquare`——把捕手變成新的凍結源（**W5 同缺陷一併修正**）。
+- **`rethrowFatal` 只重拋 `VirtualMachineError`**。它只用在診斷路徑，而診斷路徑撞到的
+  `LinkageError`（例如 `getSimpleName()` 讀不到 InnerClasses——對改寫 bytecode 的專案正是最該
+  防的一類）100% 是診斷子系統的缺陷，不是「世界不可續跑」的訊號；在已決定放棄診斷的那一行
+  把它升級成凍結，正好是這道網存在的理由的反面（**W5 同缺陷一併修正**）。
+- 主路徑刻意**不**呼叫 `rethrowFatal`——它用 `catch (RuntimeException)`，所有 `Error` 自然穿透。
+  兩條路徑對 `AssertionError` 的處置因此不同，這是有意的：「遊戲自己的操作失敗」與「我們的
+  log 失敗」契約本來就不同。
+
+**共享狀態一律在鎖內**（codex 審查抓到的 blocking，前一版是錯的）：前一版註解宣稱「共享
+欄位只有 primitive 或 String，最壞只是少報」——`distinctSites` 是 `LinkedHashSet`，**非
+thread-safe**。並行 `add`／`size` 沒有任何定義保證，HashMap 家族在 resize 期間被併發改動
+可能讓內部鏈結成環而**空轉**——那正是本刀要防的凍結形態，等於守衛自己變成新的凍結源。
+延遲的 `caught++` 寫入也能覆蓋較新值，讓計數倒退、心跳的「本區間 +N」變負，不只是「下限」。
+
+成本論證也站不住：整段只在例外**已經拋出之後**才執行，一次 `fillInStackTrace` 就是數微秒級，
+鎖的奈秒級成本在這條路徑上不可觀測。現行做法：診斷取值在鎖**外**（那是遊戲物件的 getter，
+持鎖呼叫等於把不可控的第三方程式碼拉進 critical section），共享狀態全部在鎖內，
+log 輸出用快照在鎖外做。
+
+**橫幅不是「開機證明」**（codex 更正）：helper 是被 patch 的 `IsoChunk` 在**第一次執行到受
+守衛的 callsite** 時才觸發載入的，單純載入 patched `IsoChunk` 不會初始化它；而且 vehicles
+迴圈排在兩個 redirect 之前。看不到橫幅只代表還沒有方格走過那兩個 callsite。訊息文字已改為
+「首次生效」。另外 `<clinit>` 的 catch 原本連 OOM／SOE 都吞，與本檔「Error 必須致命且可見」
+的契約矛盾，已補 `rethrowFatal`。
+
+**`objectChunkJob` 是 best-effort**（codex 更正命名）：讀的是**該物件自己的 chunk**，
+不是正在執行載入的那個 `IsoChunk`。若物件掛在錯誤的 square／list 上（本案的可能形態之一），
+讀到的會是另一個 chunk 的 job。`identityHashCode` 可能碰撞且不可跨重啟視為唯一 ID；
+`isAddedToEngine()` 是同執行緒下的有效快照，不是與 `entitySet` 線性一致的跨執行緒視圖。
+
+**旋鈕**：`-Dmdc.chunkLoadGuard.enabled=false` 完全回到 vanilla（含原本的凍結行為），免重新部署。
+
+**考慮過並拒絕／延後的其他層級**（審查指出初稿完全沒列，等於讓下一個人重做一次功課）：
+
+| 層級 | 判定 |
+|---|---|
+| **`ServerCell.Load2` 的 `RecalcAll2()` callsite** | **延後為 W7，比值最佳但不塞進本刀**。`Load2` 的 `RecalcAll2()` 在 offset 37、`loaded2.remove(i)` 在 offset 44——**出隊在可失敗工作的下游，這一個順序就是活鎖的全部成因**，與「是哪個呼叫拋的」無關。改道它等於封掉整個活鎖 class（`doLoadGridsquare` 的例外表三格都不覆蓋事故點，所以任何一個虛擬呼叫拋出都會產生同一個 114 分鐘）。**代價**：單次爆炸半徑大兩三個數量級——整個 cell 的 8×8 chunk 全跳過、`loadVehicles()` 跳過，且 cell 被標記處理完。兩者不是替代品而是不同層：per-object 守衛讓常見情況維持小傷口，`Load2` 守衛保證佇列在任何情況下都排空。**獨立成 W7，不擴大本刀範圍。** |
+| `EngineEntityManager.addEntityInternal` | **拒絕**。失效模式其實最好（`addToWorld` 會繼續跑完 containers／ProcessItems／generator，W6 全跳過）且覆蓋所有呼叫端；但語意改動最廣，且該方法是 package-private，helper 必須放進 `zombie.entity` 而非 `zombie.mdc`，違反本專案 helper 全部集中於 `zombie/mdc` 的慣例。 |
+| `RecalcAll2` 層 | **拒絕**。嚴格劣於 `Load2`——出隊在 `Load2` offset 44，在 `RecalcAll2` 內捕捉**修不好活鎖**。 |
+| `GameServer.main` 層 | 已經存在，而且它就是活鎖的產生器：不做出隊的話捕捉再多都沒用。 |
+| 外部 frame 停滯 watchdog | 互補不是替代；代價是全服重啟（50-100 人 session 全滅）。對本類的比值最低，但對**未知**停頓仍值得有。 |
+
+**⚠ 已知殘留**：
+1. `BaseVehicle` 那處（offset 457）仍是活的凍結路徑——但依上面的順序論證，它**每個實體最多
+   拋一次**（掉一個 frame，非活鎖）。附帶損害：那一次拋出後 vehicle 停在 `addedToWorld=true`
+   而 `createPhysics()`／`parts.addToWorld()` 全沒跑，**且因旗標已設所以永遠不會重試**
+   ——一台永久沒有物理與零件的車。比守衛跳過一個 object 更糟，但有界。
+2. **新的穩態成本**：修好之後，壞掉的方格從「拋一次然後凍結」變成「每次載入都拋，永遠」。
+   `fillInStackTrace` 在該深度約 1-5 µs，乘上 chunk 載入速率是一筆之前不存在的 CPU 稅。
+   淨值仍遠優於凍結，但心跳的「本區間 +N」就是為了讓運維估得出它的量級。
+3. 根因未定位。**不可據此認定此類假死已排除**——但下次命中時 `addedToEngine` 那一欄會直接
+   指出往哪查（見上）。
+4. 本刀只擋 `doLoadGridsquare`。主迴圈若因其他未知原因卡死（如 W5 之前的 SOE）仍會靜默凍到
+   下次排程重啟——`Load2` 守衛（W7）與 frame 停滯 watchdog 都是互補而非重複的投資
+   （8/14 那 114 分鐘完全是因為沒有東西在看）。
+
+**驗證**：SmokeCheck——vanilla 前提（三個 owner 各 1 處、`IsoMovingObject` 未自行宣告
+`addToWorld`）、兩處改道各一次且原呼叫歸零、**指令總數未變**、`BaseVehicle` 範圍宣告釘死、
+**`BaseVehicle` 排除前提兩段式**——先釘 `addToWorld()V` 恰委派到 `(Z)V`（未守衛的 callsite 是
+`()V`，但旗標邏輯在 `(Z)V`，不先釘住委派就等於驗了一個無關的方法），再釘 `(Z)V` 內
+`addedToWorld=true` 唯一、`super` 唯一、賦值在 super 之前，且**存的是 `ICONST_1`**
+（存 `false` 一樣通過順序檢查卻讓早退永不觸發）。唯一性是 CFG dominance 的窮人版——
+完整支配分析過重，刻意停在此強度，殘留是「理論上仍可能有繞過旗標的分支」、
+**位置錨**（改道點之後最近的呼叫必須是 `getSprite()`，釘住是 tile 迴圈而非屍體迴圈——否則
+計數相同但改到別的 callsite 會全綠）、原體保留（`getSprite`／`getPipedFuelAmount` 數不變**且非零**）、
+負對照改用**相對 vanilla 的差值**（絕對零會在 PZ 於他處新增同名呼叫時誤報）、主 catch 型別鎖定。
+行為測試 16 案＋kill switch 模式：替身必拋負對照、守衛吞下、**正向真的入世界**（堵「空 helper」
+假綠通道）、屍體迴圈多載、**vehicle 不得被吞**（拿掉 `instanceof BaseVehicle` 直通即失敗，
+讓宣告的範圍邊界變成可執行而非註解）、座標定位（含 `addedToEngine`／identity／jobType 三欄）、
+**真實 `DebugLogStream` 落地**（堵「刪光 log 仍全綠」——
+原本所有鑑識斷言只讀 package-private 測試欄位）、logger 丟 `RuntimeException` 不外逃、
+**logger 丟 `LinkageError` 不外逃**（Probe 原本結構上無法注入 `Error`，那行 `rethrowFatal`
+對測試而言是死碼）、**心跳真的印出來**（原本只斷言計數器，哨兵壞掉照樣全綠）、
+**額度按相異方格**（同一格 50 次只花一格額度、換格仍拿得到）、anomaly 路徑、`Error` 不吞、
+半初始化 getter（哨兵逐種釘死＋`診斷取值失敗` 計數）、null receiver（兩模式行為不同，各自釘住）、
+明細額度釘死 `MAX_REPORTS`。kill switch 執行傳 `disabled` 參數讓測試自行斷言旋鈕生效
+（只看 exit code 的話，property 名稱打錯會變成「把 enabled 版再跑一遍、照樣 exit 0」，
+降級路徑其實從未被測到）。
+
+**Mutation 實測**（證明新閘不是裝飾，兩者在修正前都會全綠通過）：
+`catch (RuntimeException)` → `catch (Throwable)` ⇒ `struct FAIL 主 catch 型別鎖定`；
+刪掉 production log 行 ⇒ `應恰好輸出一行，實得 0`。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
