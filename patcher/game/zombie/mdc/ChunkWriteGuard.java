@@ -214,7 +214,8 @@ public final class ChunkWriteGuard {
                 crcField = (crcField << 8) | (snap[i] & 0xFF);
             }
         }
-        String msg = "[MinidoracatJavaPatch][ChunkWriteGuard] BLOCKED " + kind
+        String action = MODE == MODE_ENFORCE ? "BLOCKED" : "FLAGGED";   // observe 模式照常寫入，不得謊稱擋下
+        String msg = "[MinidoracatJavaPatch][ChunkWriteGuard] " + action + " " + kind
                 + " chunk=" + wx + "," + wy + " len=" + len + " lenField=" + lenField
                 + " crcField=" + crcField + " mode=" + MODE
                 + " flagged=" + count + " thread=" + Thread.currentThread().getName();
