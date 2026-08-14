@@ -91,6 +91,7 @@ public final class ContainerCycleGuard {
     private static long lastHeartbeatNs;
     private static long heartbeatTrips;  // 上次心跳時的 trips 總和（沒動就不印）
     private static boolean reportPrimed;
+    private static boolean heartbeatPrimed;
 
     private ContainerCycleGuard() {}
 
@@ -204,8 +205,17 @@ public final class ContainerCycleGuard {
                 }
                 return;
             }
-            // 完整鏈額度用完後仍要有心跳：環不會自己消失，運維不能在第一天之後看不到它
+            // 完整鏈額度用完後仍要有心跳：環不會自己消失，運維不能在第一天之後看不到它。
+            // lastHeartbeatNs=0 當哨兵是壞的——System.nanoTime() 原點任意且規格允許為負，
+            // 負原點時 (now - 0 >= 10 分鐘) 恆為假＝心跳一輩子不印。上面 lastReportNs 已用
+            // primed 模式處理，心跳漏套（審查抓到；W6 同缺陷一併修）。
             long total = trips + tripsInv;
+            if (!heartbeatPrimed) {
+                heartbeatPrimed = true;
+                lastHeartbeatNs = now;
+                heartbeatTrips = total;
+                return;
+            }
             if (now - lastHeartbeatNs >= HEARTBEAT_INTERVAL_NS && total != heartbeatTrips) {
                 lastHeartbeatNs = now;
                 heartbeatTrips = total;
@@ -215,11 +225,17 @@ public final class ContainerCycleGuard {
         } catch (Throwable t) {
             rethrowFatal(t);
             anomalies++;
+            // 若剛才拋出的正是 DebugLog.log 本身，用「再 log 一次」回應會讓例外逃出診斷、
+            // 逃回遞迴點——把守衛本身變成新的故障源。診斷失敗絕不得升級為當機。
             if (anomalyTraces < MAX_ANOMALY_TRACES) {
                 anomalyTraces++;
-                DebugLog.log("[MinidoracatJavaPatch][CycleGuard] anomaly #" + anomalies + ": " + t);
-                for (StackTraceElement e : t.getStackTrace()) {
-                    DebugLog.log("[MinidoracatJavaPatch][CycleGuard]     at " + e);
+                try {
+                    DebugLog.log("[MinidoracatJavaPatch][CycleGuard] anomaly #" + anomalies + ": " + t);
+                    for (StackTraceElement e : t.getStackTrace()) {
+                        DebugLog.log("[MinidoracatJavaPatch][CycleGuard]     at " + e);
+                    }
+                } catch (Throwable ignored) {
+                    rethrowFatal(ignored);
                 }
             }
         }
@@ -299,9 +315,15 @@ public final class ContainerCycleGuard {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
+    /**
+     * <b>只重拋 {@link VirtualMachineError}</b>。本方法只用在診斷路徑，而診斷路徑撞到的
+     * {@code LinkageError} 100% 是診斷子系統的缺陷、不是「世界不可續跑」的訊號——在已經
+     *決定放棄診斷的那一行把它升級成當機，正好是這道網存在的理由的反面（審查抓到；
+     * W6 的 {@link ChunkLoadGuard} 同缺陷一併修）。堆真的爆了（OOM／SOE）則必須穿透。
+     */
     private static void rethrowFatal(Throwable t) {
-        if (t instanceof VirtualMachineError || t instanceof ThreadDeath || t instanceof LinkageError) {
-            throw (Error) t;
+        if (t instanceof VirtualMachineError) {
+            throw (VirtualMachineError) t;
         }
     }
 
@@ -315,6 +337,7 @@ public final class ContainerCycleGuard {
         lastHeartbeatNs = 0;
         heartbeatTrips = 0;
         reportPrimed = false;
+        heartbeatPrimed = false;
         State st = STATE.get();
         java.util.Arrays.fill(st.path, null);
         st.size = 0;

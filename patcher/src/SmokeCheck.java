@@ -530,6 +530,133 @@ public final class SmokeCheck {
         failed += check("W5 負對照：全 class 各僅一處改道（其他呼叫端保持 vanilla）",
                 guardCallsWholeClass == 1 && guardInvCallsWholeClass == 1);
 
+        // ---- W6 地圖格載入捕手（IsoChunk.doLoadGridsquare 的 addToWorld 改道）----
+        String chunkCls = "zombie/iso/IsoChunk";
+        String isoObjCls = "zombie/iso/IsoObject";
+        String loadGuardCls = "zombie/mdc/ChunkLoadGuard";
+        String loadGuardDesc = "(Lzombie/iso/IsoObject;)V";
+        String movingObjCls = "zombie/iso/IsoMovingObject";
+        String vehicleCls = "zombie/vehicles/BaseVehicle";
+        String movingGuardDesc = "(Lzombie/iso/IsoMovingObject;)V";
+        MethodNode vLoadSquare = methodFromJar(jar, chunkCls, "doLoadGridsquare", "()V");
+        // vanilla 前提要列**全部三個** owner。初版只數 IsoObject，於是「僅此一處」這句話
+        // 是 countExactCalls 的 owner 過濾造成的假象——兩道獨立審查都由此抓到 blocking：
+        // IsoMovingObject 那處派送到同一個方法體，卻整個沒被守衛蓋到。
+        failed += check("vanilla 前提：doLoadGridsquare 的三處 addToWorld（IsoObject／IsoMovingObject／BaseVehicle 各 1）",
+                countExactCalls(vLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls, "addToWorld", "()V") == 1
+                && countExactCalls(vLoadSquare, Opcodes.INVOKEVIRTUAL, movingObjCls, "addToWorld", "()V") == 1
+                && countExactCalls(vLoadSquare, Opcodes.INVOKEVIRTUAL, vehicleCls, "addToWorld", "()V") == 1
+                && countExactCalls(vLoadSquare, Opcodes.INVOKESTATIC, loadGuardCls, "addToWorld",
+                        loadGuardDesc) == 0);
+        // IsoMovingObject 必須「不自己宣告 addToWorld」，否則 offset 947 派送到的就不是同一個
+        // 方法體，本刀的等價性論證（包住它零額外語意風險）即失效
+        failed += check("vanilla 前提：IsoMovingObject 未自行宣告 addToWorld（故派送到 IsoObject 同一方法體）",
+                classNodeFromJar(jar, movingObjCls).methods.stream()
+                        .noneMatch(m -> "addToWorld".equals(m.name) && "()V".equals(m.desc)));
+        MethodNode pLoadSquare = method(distJava, chunkCls, "doLoadGridsquare", "()V");
+        failed += check("W6 兩處改道各一次、原呼叫歸零、指令總數未變（1:1 替換）",
+                countExactCalls(pLoadSquare, Opcodes.INVOKESTATIC, loadGuardCls, "addToWorld",
+                        loadGuardDesc) == 1
+                && countExactCalls(pLoadSquare, Opcodes.INVOKESTATIC, loadGuardCls, "addToWorld",
+                        movingGuardDesc) == 1
+                && countExactCalls(pLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls, "addToWorld", "()V") == 0
+                && countExactCalls(pLoadSquare, Opcodes.INVOKEVIRTUAL, movingObjCls, "addToWorld", "()V") == 0
+                && pLoadSquare.instructions.size() == vLoadSquare.instructions.size());
+        // BaseVehicle 是刻意留下的活凍結路徑（它自帶 addedToWorld 早退守衛、方法體含 parts／
+        // engine 掛載）。把它釘成一個**可見的數字**而非過濾器假象：出現第四處即建置失敗，
+        // 強迫下一個人重新做這個取捨，而不是無聲地繼承它。
+        failed += check("W6 範圍宣告：BaseVehicle 那處刻意保持 vanilla（恰 1 處，多一處即重新決定）",
+                countExactCalls(pLoadSquare, Opcodes.INVOKEVIRTUAL, vehicleCls, "addToWorld", "()V") == 1);
+        // 排除 BaseVehicle 的**真正**理由是順序（審查更正了本節初稿的弱版理由）：
+        // BaseVehicle.addToWorld(Z) 在 offset 47 就把 addedToWorld 設為 true，而 super 呼叫
+        // （即拋出點）在 offset 56——所以拋出後旗標已是 true，下一圈 doLoadGridsquare 會走
+        // offset 26 的早退，**每個 vehicle 實體最多只能拋一次**＝掉一個 frame 而非 114 分鐘活鎖。
+        // IsoObject 沒有任何旗標（offset 0 就是 super），所以永遠拋——這才是兩者的差別。
+        // 若 TIS 哪天把旗標賦值移到 super 之後（看起來像 bug fix 的改動），這條刻意排除就會
+        // 無聲變成活的凍結路徑，而其他所有斷言全綠。故把順序本身釘成結構事實。
+        // 未守衛的 callsite 是 addToWorld()V，但旗標邏輯在 (Z)V 裡——所以必須先釘住
+        // ()V 真的委派到 (Z)V，否則整條斷言驗的是一個與該 callsite 無關的方法（codex 抓到）。
+        MethodNode vehAdd0 = methodFromJar(jar, vehicleCls, "addToWorld", "()V");
+        failed += check("W6 排除前提(1)：BaseVehicle.addToWorld()V 恰委派到 (Z)V",
+                countExactCalls(vehAdd0, Opcodes.INVOKEVIRTUAL, vehicleCls, "addToWorld", "(Z)V") == 1);
+        MethodNode vehAdd = methodFromJar(jar, vehicleCls, "addToWorld", "(Z)V");
+        int vehFlagIdx = -1;
+        int vehSuperIdx = -1;
+        int vehFlagWrites = 0;
+        int vehSupers = 0;
+        boolean vehFlagStoresTrue = false;
+        int vehIdx = 0;
+        for (AbstractInsnNode in : vehAdd.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD
+                    && vehicleCls.equals(f.owner) && "addedToWorld".equals(f.name)) {
+                vehFlagWrites++;
+                if (vehFlagIdx < 0) {
+                    vehFlagIdx = vehIdx;
+                    // 必須是存 true。存 false 一樣通過「順序」檢查，卻讓早退永遠不觸發，
+                    // 於是排除前提失效而所有計數斷言全綠（codex 點名的 mutation 之一）。
+                    AbstractInsnNode prev = prevReal(f);
+                    vehFlagStoresTrue = prev != null && prev.getOpcode() == Opcodes.ICONST_1;
+                }
+            }
+            if (in instanceof MethodInsnNode m && m.getOpcode() == Opcodes.INVOKESPECIAL
+                    && movingObjCls.equals(m.owner) && "addToWorld".equals(m.name)) {
+                vehSupers++;
+                if (vehSuperIdx < 0) {
+                    vehSuperIdx = vehIdx;
+                }
+            }
+            vehIdx++;
+        }
+        // 唯一性是 dominance 的窮人版：只有一處寫入、只有一處 super，且寫入在前，
+        // 就沒有「另一條分支繞過旗標直達 super」的空間。完整 CFG dominance 分析過重，
+        // 此處刻意停在這個強度，殘留記於 docs/patches.md 2r。
+        failed += check("W6 排除前提(2)：(Z)V 內 addedToWorld=true 唯一、super 唯一、且賦值在 super 之前",
+                vehFlagWrites == 1 && vehSupers == 1 && vehFlagStoresTrue
+                && vehFlagIdx >= 0 && vehSuperIdx >= 0 && vehFlagIdx < vehSuperIdx);
+        // 位置錨：計數相同但「改到另一個 callsite」會讓所有計數檢查全綠。tile 迴圈的改道點
+        // 後面緊接著 getSprite()（燃料判定），staticMovingObjects 迴圈沒有——用它釘住位置。
+        MethodInsnNode w6Anchor = findExactCall(pLoadSquare, Opcodes.INVOKESTATIC, loadGuardCls,
+                "addToWorld", loadGuardDesc);
+        AbstractInsnNode afterW6 = w6Anchor == null ? null : nextReal(w6Anchor);
+        while (afterW6 != null && !(afterW6 instanceof MethodInsnNode)) {
+            afterW6 = nextReal(afterW6);
+        }
+        failed += check("W6 位置錨：IsoObject 改道點之後最近的呼叫是 getSprite()（釘住是 tile 迴圈而非屍體迴圈）",
+                afterW6 instanceof MethodInsnNode m6
+                && m6.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && isoObjCls.equals(m6.owner) && "getSprite".equals(m6.name)
+                && "()Lzombie/iso/sprite/IsoSprite;".equals(m6.desc));
+        // 原體保留：例外發生後 vanilla 仍要用同一個 local 讀 sprite／燃料，這些不能被動到。
+        // vanilla 側同時斷言 > 0，否則 PZ 拿掉該呼叫後這條會退化成 0 == 0 的空檢查。
+        int vSprite = countExactCalls(vLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls,
+                "getSprite", "()Lzombie/iso/sprite/IsoSprite;");
+        int vFuel = countExactCalls(vLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls,
+                "getPipedFuelAmount", "()I");
+        failed += check("W6 原體保留（getSprite 與 getPipedFuelAmount 呼叫數未變且非零）",
+                vSprite > 0 && vFuel > 0
+                && countExactCalls(pLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls,
+                        "getSprite", "()Lzombie/iso/sprite/IsoSprite;") == vSprite
+                && countExactCalls(pLoadSquare, Opcodes.INVOKEVIRTUAL, isoObjCls,
+                        "getPipedFuelAmount", "()I") == vFuel);
+        // 負對照用「相對 vanilla 的差」而非絕對零：PZ 任何版本在 IsoChunk 其他方法新增一個
+        // IsoObject.addToWorld 都會讓絕對值檢查誤報成「改道外洩」。
+        ClassNode pChunk = classNode(distJava, chunkCls);
+        ClassNode vChunk = classNodeFromJar(jar, chunkCls);
+        failed += check("W6 負對照：改道恰好各發生一次，其餘呼叫端逐一未動（相對 vanilla 差值）",
+                classWideCalls(pChunk, Opcodes.INVOKESTATIC, loadGuardCls, "addToWorld", loadGuardDesc) == 1
+                && classWideCalls(pChunk, Opcodes.INVOKESTATIC, loadGuardCls, "addToWorld", movingGuardDesc) == 1
+                && classWideCalls(pChunk, Opcodes.INVOKEVIRTUAL, isoObjCls, "addToWorld", "()V")
+                        == classWideCalls(vChunk, Opcodes.INVOKEVIRTUAL, isoObjCls, "addToWorld", "()V") - 1
+                && classWideCalls(pChunk, Opcodes.INVOKEVIRTUAL, movingObjCls, "addToWorld", "()V")
+                        == classWideCalls(vChunk, Opcodes.INVOKEVIRTUAL, movingObjCls, "addToWorld", "()V") - 1);
+        // 攔截型別必須釘在 exception table 上。舊版用 containsUtf8 找 VirtualMachineError 字串，
+        // 但那兩個常數是 rethrowFatal（診斷 getter 用）帶進常數池的——把主 catch 放寬成
+        // Throwable 也照樣通過，等於這條斷言完全擋不住它自稱要擋的那個 mutation。
+        MethodNode guardBody = method(distJava, loadGuardCls, "addToWorld", loadGuardDesc);
+        failed += check("W6 主 catch 型別鎖定為 RuntimeException（Error 必須穿透）",
+                guardBody.tryCatchBlocks != null && guardBody.tryCatchBlocks.size() == 1
+                && "java/lang/RuntimeException".equals(guardBody.tryCatchBlocks.get(0).type));
+
         // ---- W4-1 chunk 供給併包（PlayerDownloadServer.update headCall）----
         String pdsCls = "zombie/network/PlayerDownloadServer";
         String packerCls = "zombie/mdc/ChunkRequestPacker";
@@ -1221,6 +1348,15 @@ public final class SmokeCheck {
             }
         }
         return count;
+    }
+
+    /** 全 class 累計某個精確 callsite 的出現次數（負對照用差值比對，避免絕對零的脆弱性）。 */
+    static int classWideCalls(ClassNode cls, int opcode, String owner, String name, String desc) {
+        int total = 0;
+        for (MethodNode m : cls.methods) {
+            total += countExactCalls(m, opcode, owner, name, desc);
+        }
+        return total;
     }
 
     static MethodInsnNode findExactCall(MethodNode method, int opcode, String owner, String name, String desc) {
