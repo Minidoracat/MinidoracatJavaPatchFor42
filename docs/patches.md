@@ -1347,8 +1347,19 @@ payload preflight、以及開機健檢（驗證清單 11a）。
    成立，不符＝100% 上游損毀，**零合法誤判空間**）；
 3. 通過 → 把驗證過的快照交給 vanilla `SafeWrite`（鎖／sanityCheck／目錄建立全走原版）；
 4. 失敗 → **跳過寫入**（磁碟保留上一版好檔案）＋前 10 筆帶完整 stack 的 BLOCKED log
-   （兇手路徑蒐證）＋損毀 buffer 傾印 `blamguard/`（上限 16 份）＋
-   `ChunkChecksum.setChecksum(wx,wy,0)` 讓下個存檔週期必然重試乾淨序列化（自癒）。
+   （兇手路徑蒐證）＋損毀 buffer 傾印 `blamguard/`（上限 16 份，檔名帶序號防同毫秒覆蓋）＋
+   `ChunkChecksum.setChecksum(wx,wy,0)` 使下輪存檔的 CRC 比對必然不符而重寫。
+
+**重試語意的誠實界定**（codex 審查修正——「保證自癒」是過度宣稱）：
+- **仍載入的 chunk**（SaveLoadedTask 路徑、定期存檔）：live IsoChunk 還在世界裡，
+  下輪 `SaveWorldEveryMinutes` 週期重新序列化＋checksum 已歸零 → 必然重寫。真自癒。
+- **unload／quit 的最終存檔被擋**：`SaveUnloadedTask.release()` 隨後把 IsoChunk 交給
+  reuser、記憶體內容不可恢復——**該 chunk 回退到上次成功落盤的版本，沒有重試**。
+  損失上限＝上次成功存檔以來的變更（正常節奏 ≤ SaveWorldEveryMinutes=30 分）。
+  對照組是 vanilla 把損毀 buffer 寫進磁碟 → 下次載入 Blam → **自上古以來的一切全滅**。
+  回退 30 分鐘 vs 全滅，仍嚴格更好，但要知道它不是零損失。
+- **刻意不做 A 簽名 header 修復**：物件池重用下 body 可能屬於別塊 chunk，補上正確
+  CRC 等於把跨 chunk 汙染合法化成能通過驗證的檔案。拒寫是唯一保守正確的選擇。
 
 **掛點（安全關鍵）**：redirect 三個呼叫端而非 hook `SafeWrite` 內部——它的
 `new FileOutputStream(outFile)` 建構當下就 truncate 舊檔，內部攔截來不及保住上一版。
@@ -1369,16 +1380,31 @@ payload preflight、以及開機健檢（驗證清單 11a）。
 - verify 對 len≤17 回 MALFORMED：空 body 的 CRC=0 會與 crc 欄位 0 假相符，必須先擋
   （這同時攔下「truncate 後零位元組寫入」的檔案抹除情境）。
 
-**失敗紀律**：守衛自身故障（非 array buffer、快照失敗）＝anomaly 計數＋回退 vanilla 寫入
-（fail-open）——只有「驗證明確失敗」才擋。`MODE` 三態：`-Dmdc.chunkWriteGuard=0` 停用
-（零開銷 passthrough）／`1` enforce（預設）／`2` observe（驗證＋log＋傾印但照常寫入）。
+**失敗紀律**（codex 審查後精確分層）：
+- **不可寫 buffer（null／非 heap array）＝各模式一律拒寫**：vanilla 對它的行為是
+  「FileOutputStream 建構先 truncate 舊檔、之後才炸」＝把好檔案換成空檔。拒寫是唯一
+  不毀檔的選項，observe 的「零行為改變」在毀檔面前讓位。
+- **守衛內部故障（buffer 已確認合法後的 RuntimeException）＝fail-open 回退 vanilla**
+  ——守衛的 bug 不得癱瘓全部存檔。
+- **log／傾印基礎設施的 RuntimeException 與 LinkageError 一律吞下**（W6 教訓），
+  不得外逃進存檔路徑。
+
+`MODE` 三態：`-Dmdc.chunkWriteGuard=0` 停用（零開銷 passthrough）／`1` enforce（預設）／
+`2` observe——照常驗證＋log＋傾印但一律寫入活 buffer。**observe 的兩個誠實限定**：
+log 印 `FLAGGED` 而非 `BLOCKED`（沒有擋任何東西）；`blamguard/` 傾印是驗證當下的快照，
+實際落盤的活 buffer 之後仍可能被改動，兩者不保證相同。
 成本：CRC32 硬體加速 ≤64KB ~30µs，最壞 200 塊/s 佔單核 <1%。
 
-**驗證閘**（SmokeCheck 14 項）：verify 四情境行為 smoke（自洽→OK、**A 組實案簽名→
-CRC_MISMATCH**、len 竄改→LEN_MISMATCH、截斷→MALFORMED）＋resolveMode 四值；
-vanilla 前提（兩方法的 SafeWrite/setChecksum 計數、全 jar census=5、hot-save 閘 pin、
-格式常數 249/17 pin 防 helper 硬編 offset 漂移）；手術後改道到位＋原呼叫歸零；
-負對照（`SafeWrite` 本體保持 vanilla——helper 委派回它，改道到它自己＝無限遞迴）。
+**驗證閘**（SmokeCheck 19 項，codex 審查後補強 5 項堵 false-green）：verify 四情境
+行為 smoke（自洽→OK、**A 組實案簽名→CRC_MISMATCH**、len 竄改→LEN_MISMATCH、
+截斷→MALFORMED）＋resolveMode 四值＋**safeWrite 本體執行級 smoke 三條決策路徑**
+（損毀 buffer 靜默擋下＋checksum 歸零實測、null buffer 拒寫、自洽 buffer 真的委派
+vanilla——測試環境必拋＝到達寫入路徑的證明）；vanilla 前提（兩方法 SafeWrite/
+setChecksum 計數＋**setChecksum 先於 SafeWrite 的順序鎖**、census 總數 5＋**逐類分佈**
+堵新舊呼叫點互抵、hot-save 閘 **getstatic→ifne 方向鎖**、格式 offset **語境鎖**
+（17→CRC32.update、5→ByteBuffer.position，非僅常數存在））；手術後改道到位＋原呼叫
+歸零；負對照（排除條件鎖到精確簽名 `Save(Z)V`，其他 Save 多載也受檢；SafeWrite 本體
+無遞迴）。
 
 **歷史損失的還原路線**（另案執行）：A 組 16 筆改寫 header CRC 後即可還原（Player-B 案優先）；
 B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還原一律在閘門上線後進行——
@@ -1443,9 +1469,12 @@ B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還�
    (a) 開機健檢無 linkage 錯誤（改道方法跑在存檔與 chunk 出貨路徑上，出現即立刻 uninstall）。
    (b) **心跳**：`grep 'ChunkWriteGuard' <DebugLog>` 應出現 `passed=N flagged=0` 週期行
    （每 2048 次通過印一行）——證明閘門真的在驗，而非默默 passthrough。
-   (c) **BLOCKED 事件**＝雙重訊號：該 chunk 逃過一次抹除（止血生效），且 log 內的
-   stack trace 直接指認寫入路徑（蒐證到手）。出現時把前 10 筆的完整 stack 與
-   `blamguard/` 傾印檔一起歸檔分析——這就是根因獵捕的決勝證據。
+   (c) **BLOCKED 事件**（enforce 模式）＝雙重訊號：該 chunk 逃過一次抹除（止血生效），
+   且 log 內的 stack trace 直接指認寫入路徑（蒐證到手）。出現時把前 10 筆的完整 stack
+   與 `blamguard/` 傾印檔一起歸檔分析——這就是根因獵捕的決勝證據。
+   **判讀注意**：observe 模式印的是 `FLAGGED` 且照常寫入＝沒有保護，不可誤讀成已擋下；
+   若 BLOCKED 發生在 unload/quit 的最終存檔，該 chunk 回退到上次成功落盤版本
+   （見 2t 重試語意），玩家可能回報「東西回到半小時前」——那是止血的代價，不是新 bug。
    (d) `flagged` 持續為 0 且 blam/ 不再新增 CRC 類目錄 = 缺陷可能與 W4-1 或特定時序相關，
    繼續觀察；`flagged>0` 且 blam/ 不再新增 = 閘門正在攔截現行損毀。
    (e) **anomalies 增長**＝守衛遇到非預期 buffer 狀態走了 fail-open，需調查。

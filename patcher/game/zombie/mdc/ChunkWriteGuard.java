@@ -86,12 +86,16 @@ public final class ChunkWriteGuard {
     static final int VERIFY_MALFORMED = 1;
     static final int VERIFY_LEN = 2;
     static final int VERIFY_CRC = 3;
+    /** 非 verify() 產出：buffer 本身不可寫（null／非 heap array），僅供 log 分類。 */
+    static final int VERIFY_UNWRITABLE = 4;
 
     private static final int HEADER_SIZE = 17;   // byte isDebug + int ver + int len + long crc
     private static final int MAX_DETAIL_LOGS = 10;
     private static final int MAX_DUMPS = 16;
 
     private static final int MODE = resolveMode(System.getProperty("mdc.chunkWriteGuard"));
+    /** 傾印目錄覆寫（-Dmdc.chunkWriteGuard.dumpDir）。SmokeCheck 用它把測試傾印導離真實存檔目錄。 */
+    private static final String DUMP_DIR = System.getProperty("mdc.chunkWriteGuard.dumpDir");
 
     private static final AtomicLong passed = new AtomicLong();
     private static final AtomicLong flagged = new AtomicLong();
@@ -109,21 +113,30 @@ public final class ChunkWriteGuard {
             IsoChunk.SafeWrite(wx, wy, bb);
             return;
         }
+        // 不可寫 buffer（null／非 heap array）＝各模式一律拒寫（codex 審查 blocking 修正）：
+        // vanilla 對這種 buffer 的行為是「FileOutputStream 建構先 truncate 舊檔、之後才在
+        // bb.array()/write 炸掉」＝把舊的好檔案換成空檔。拒寫是唯一不毀檔的選項——
+        // observe 的「零行為改變」承諾在毀檔面前讓位。
+        if (bb == null || !bb.hasArray()) {
+            long fu = flagged.incrementAndGet();
+            logBlock(wx, wy, null, -1, VERIFY_UNWRITABLE, fu);
+            if (MODE == MODE_ENFORCE) {
+                ChunkChecksum.setChecksum(wx, wy, 0L);
+            }
+            return;
+        }
         byte[] snap;
         int len;
         int verdict;
         try {
-            if (!bb.hasArray()) {
-                throw new IllegalStateException("non-array buffer");
-            }
             len = bb.position();
             snap = snapshotOf(bb, len);
             verdict = verify(snap, len);
         } catch (RuntimeException e) {
+            // 守衛自身故障（此時 buffer 已確認為合法 heap array）＝fail-open 回退 vanilla：
+            // 守衛的 bug 不得癱瘓全部存檔
             anomalies.incrementAndGet();
-            DebugType.General.printException(e,
-                    "[MinidoracatJavaPatch][ChunkWriteGuard] anomaly at chunk " + wx + "," + wy
-                            + " — fallback to vanilla write", LogSeverity.Error);
+            safeLogAnomaly(wx, wy, e);
             IsoChunk.SafeWrite(wx, wy, bb);
             return;
         }
@@ -148,7 +161,12 @@ public final class ChunkWriteGuard {
             IsoChunk.SafeWrite(wx, wy, bb);
             return;
         }
-        // 不寫入：磁碟保留上一版好檔案；checksum 歸零讓下個存檔週期必然重試乾淨序列化
+        // 不寫入：磁碟保留上一版好檔案。checksum 歸零的效果誠實界定（codex 審查修正）：
+        // 仍載入的 chunk 在下輪週期存檔會因 CRC 不符而重寫乾淨序列化；unload/quit 的
+        // 最終存檔被擋則「無下一輪」——該 chunk 回退到上次成功落盤的版本（損失上限＝
+        // 上次成功存檔以來的變更，仍嚴格優於 vanilla 寫壞檔→Blam 全滅）。
+        // 刻意不做 A 簽名 header 修復：物件池重用下 body 可能屬於別塊 chunk，
+        // 補上正確 CRC 等於把跨 chunk 汙染合法化成可通過驗證的檔案。
         ChunkChecksum.setChecksum(wx, wy, 0L);
     }
 
@@ -199,55 +217,79 @@ public final class ChunkWriteGuard {
     }
 
     private static void logBlock(int wx, int wy, byte[] snap, int len, int verdict, long count) {
-        String kind = switch (verdict) {
-            case VERIFY_MALFORMED -> "MALFORMED";
-            case VERIFY_LEN -> "LEN_MISMATCH";
-            default -> "CRC_MISMATCH";
-        };
-        long lenField = len > HEADER_SIZE
-                ? (((snap[5] & 0xFFL) << 24) | ((snap[6] & 0xFFL) << 16) | ((snap[7] & 0xFFL) << 8) | (snap[8] & 0xFFL))
-                : -1;
-        long crcField = -1;
-        if (len > HEADER_SIZE) {
-            crcField = 0L;
-            for (int i = 9; i < HEADER_SIZE; i++) {
-                crcField = (crcField << 8) | (snap[i] & 0xFF);
+        // W6 教訓沿用：log 基礎設施本身的 RuntimeException／LinkageError 不得外逃進存檔路徑
+        try {
+            String kind = switch (verdict) {
+                case VERIFY_MALFORMED -> "MALFORMED";
+                case VERIFY_LEN -> "LEN_MISMATCH";
+                case VERIFY_UNWRITABLE -> "UNWRITABLE";
+                default -> "CRC_MISMATCH";
+            };
+            boolean parsable = snap != null && len > HEADER_SIZE;
+            long lenField = parsable
+                    ? (((snap[5] & 0xFFL) << 24) | ((snap[6] & 0xFFL) << 16) | ((snap[7] & 0xFFL) << 8) | (snap[8] & 0xFFL))
+                    : -1;
+            long crcField = -1;
+            if (parsable) {
+                crcField = 0L;
+                for (int i = 9; i < HEADER_SIZE; i++) {
+                    crcField = (crcField << 8) | (snap[i] & 0xFF);
+                }
             }
+            // UNWRITABLE 在各模式都拒寫；其餘 verdict 依模式標示（observe 照常寫入，不得謊稱擋下）
+            String action = (MODE == MODE_ENFORCE || verdict == VERIFY_UNWRITABLE) ? "BLOCKED" : "FLAGGED";
+            String msg = "[MinidoracatJavaPatch][ChunkWriteGuard] " + action + " " + kind
+                    + " chunk=" + wx + "," + wy + " len=" + len + " lenField=" + lenField
+                    + " crcField=" + crcField + " mode=" + MODE
+                    + " flagged=" + count + " thread=" + Thread.currentThread().getName();
+            if (detailLogs.incrementAndGet() <= MAX_DETAIL_LOGS) {
+                // 兇手蒐證：這條 stack 直接指出是哪條路徑把髒 buffer 送來寫檔
+                DebugType.General.printException(new Throwable("write-path capture"), msg, LogSeverity.Error);
+            } else {
+                DebugLog.log(msg);
+            }
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
         }
-        String action = MODE == MODE_ENFORCE ? "BLOCKED" : "FLAGGED";   // observe 模式照常寫入，不得謊稱擋下
-        String msg = "[MinidoracatJavaPatch][ChunkWriteGuard] " + action + " " + kind
-                + " chunk=" + wx + "," + wy + " len=" + len + " lenField=" + lenField
-                + " crcField=" + crcField + " mode=" + MODE
-                + " flagged=" + count + " thread=" + Thread.currentThread().getName();
-        if (detailLogs.incrementAndGet() <= MAX_DETAIL_LOGS) {
-            // 兇手蒐證：這條 stack 直接指出是哪條路徑把髒 buffer 送來寫檔
-            DebugType.General.printException(new Throwable("write-path capture"), msg, LogSeverity.Error);
-        } else {
-            DebugLog.log(msg);
+    }
+
+    private static void safeLogAnomaly(int wx, int wy, RuntimeException e) {
+        try {
+            DebugType.General.printException(e,
+                    "[MinidoracatJavaPatch][ChunkWriteGuard] anomaly at chunk " + wx + "," + wy
+                            + " — fallback to vanilla write", LogSeverity.Error);
+        } catch (RuntimeException | LinkageError ignored) {
+            // anomalies 已由呼叫端計數
         }
     }
 
     private static void dumpEvidence(int wx, int wy, byte[] snap, int len) {
-        if (dumps.incrementAndGet() > MAX_DUMPS) {
+        int n = dumps.incrementAndGet();
+        if (n > MAX_DUMPS) {
             return;
         }
         try {
-            File dir = ZomboidFileSystem.instance.getFileInCurrentSave("blamguard");
+            File dir = DUMP_DIR != null ? new File(DUMP_DIR)
+                    : ZomboidFileSystem.instance.getFileInCurrentSave("blamguard");
             File sub = new File(dir, String.valueOf(wx));
             sub.mkdirs();
-            File out = new File(sub, wy + "-" + System.currentTimeMillis() + ".bin");
+            // 檔名帶全域序號：同 chunk 同毫秒的併發事件不互相覆蓋（codex 審查 minor 修正）
+            File out = new File(sub, wy + "-" + System.currentTimeMillis() + "-" + n + ".bin");
             try (FileOutputStream fos = new FileOutputStream(out)) {
                 fos.write(snap, 0, Math.max(0, Math.min(len, snap.length)));
             }
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             // 傾印是輔助蒐證，失敗不得影響主流程
             anomalies.incrementAndGet();
         }
     }
 
     private static void heartbeat() {
-        DebugLog.log("[MinidoracatJavaPatch][ChunkWriteGuard] passed=" + passed.get()
-                + " flagged=" + flagged.get() + " anomalies=" + anomalies.get() + " mode=" + MODE);
+        try {
+            DebugLog.log("[MinidoracatJavaPatch][ChunkWriteGuard] passed=" + passed.get()
+                    + " flagged=" + flagged.get() + " anomalies=" + anomalies.get() + " mode=" + MODE);
+        } catch (RuntimeException | LinkageError ignored) {
+        }
     }
 
     private ChunkWriteGuard() {}
