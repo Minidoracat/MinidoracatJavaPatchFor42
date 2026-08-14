@@ -399,6 +399,48 @@ public final class PatchConfig {
         inCharInv.expectedHits = 1;
         patches.add(itemCont);
 
+        // ---- W6 地圖格載入捕手（2026-08-14 全服假死實案，凍結 114 分鐘；docs/patches.md 2r）----
+        // 事故：IllegalArgumentException「Entity is already registered」由
+        // GameServer.main(:972) → ServerMap.preupdate(:969) → ServerCell.Load2/RecalcAll2
+        // → IsoChunk.doLoadGridsquare(:3973) → IsoObject.addToWorld(:4497) 拋出。
+        // GameServer.main 攔住例外只印出來，但攔截點在迴圈最上方——這一圈剩下的工作
+        // （更新世界、處理封包、推進 frame）全數跳過，而該地圖格還留在待載入佇列裡，
+        // 下一圈同一個物件同樣被拒絕，每 0.1 秒一次。frame 永久停在 46186、凍結 114 分鐘，
+        // 靠排程的 mod 更新重啟才結束（沒有任何人是為了救它而重啟）。此為活鎖非崩潰，
+        // 「進程掛掉就重啟」的保護救不了。同一條逐行相同的 stack 在 8/07 18:05 也發生過。
+        // **非本專案所致（javap 實證，非時間相關性——log 只回溯到 7/29，entity patch 亦是
+        // 7/29 上線，無乾淨基準線）**：addEntityInternal offset 0-8 是 entitySet.contains、
+        // offset 11-27 就 athrow，而 FastIdentityArrayRemoval 改道在 offset 38 的
+        // entities.add，位於 throw 之後拋出時執行不到；removeEntityInternal 由 offset 5 的
+        // entitySet.remove 決定所有分支，我方改道的 removeValue 在 offset 29 而 offset 32
+        // 是 pop，回傳值被丟棄不可能影響判斷。entitySet 全程未被碰過。
+        // 手術：改道 doLoadGridsquare 內的 addToWorld callsite，catch 後記座標＋sprite 名跳過。
+        // 降級極小：IsoObject.addToWorld offset 0 就是拋出點 GameEntity.addToWorld()，
+        // 故後續 createContainersFromSpriteProperties／addItemsToProcessItems／
+        // addObjectPoweredByGenerator 都還沒執行；且會拋出正代表該 entity 已登記在世界裡，
+        // 先前成功的那次 add 已做過這些步驟。
+        // doLoadGridsquare 內共有三處 addToWorld，全部通往同一個 throw 點（審查抓到的
+        // blocking：初版只擋第一處，等於守衛對三分之二的觸發路徑失效）：
+        //   offset 457  BaseVehicle.addToWorld()V        vehicles 迴圈           → 刻意留 vanilla
+        //   offset 737  IsoObject.addToWorld()V          square.getObjects()    → 改道（兩次事故兇手）
+        //   offset 947  IsoMovingObject.addToWorld()V    getStaticMovingObjects → 改道
+        // IsoMovingObject 自己沒宣告 addToWorld（javap 計數 0），offset 947 派送到的是同一個
+        // 方法體，包住它零額外語意風險；且該迴圈裝屍體（IsoDeadBody，正式服 id 已到 287089）。
+        // BaseVehicle 相反：自己宣告 addToWorld 且開頭就有 addedToWorld 早退守衛（offset 0-26），
+        // 方法體另含 parts／engine 掛載，包住它等於吞一個大得多的範圍——它仍是活的凍結路徑，
+        // 此為有意識取捨，由 SmokeCheck 把它的呼叫數釘在 1（出現第四處即建置失敗）。
+        // redirectDesc 以 site owner 組簽名，故 helper 需兩個同名多載。
+        Patcher.ClassPatch isoChunk = new Patcher.ClassPatch("zombie/iso/IsoChunk");
+        Patcher.MethodOps loadSquare = isoChunk.method("doLoadGridsquare", "()V");
+        loadSquare.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoObject", "addToWorld", "()V",
+                "zombie/mdc/ChunkLoadGuard", "addToWorld"));
+        loadSquare.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoMovingObject", "addToWorld", "()V",
+                "zombie/mdc/ChunkLoadGuard", "addToWorld"));
+        loadSquare.expectedHits = 2;
+        patches.add(isoChunk);
+
         Patcher.ClassPatch pds = new Patcher.ClassPatch("zombie/network/PlayerDownloadServer");
         Patcher.MethodOps pdsDedupe = pds.method("removeOlderDuplicateRequests", "()V");
         pdsDedupe.headCall = new Patcher.HeadCall("zombie/mdc/ChunkRequestPacker", "packQueue",
