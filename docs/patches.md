@@ -1165,6 +1165,151 @@ log 輸出用快照在鎖外做。
 `catch (RuntimeException)` → `catch (Throwable)` ⇒ `struct FAIL 主 catch 型別鎖定`；
 刪掉 production log 行 ⇒ `應恰好輸出一行，實得 0`。
 
+## 2s. 朝向暫存執行緒隔離（W7，server）
+
+**事故**：2026-08-13 19:55:03，玩家 Player-A 的雞舍連同旁邊的水桶整組消失。chunk 1160,968
+（方格 9280-9287 / 7744-7751）在重啟後 4 秒載入失敗，被原版的 `Blam + LoadBrandNew`
+清空重生：**46,142 bytes → 8,549 bytes**，雞舍、32 隻家禽的完整基因組、`Base.Bucket`
+全滅，只剩草地。完整鑑識報告在 `temp/report/incident-2026-08-13-hutch-chunk-blam.md`
+（`temp/` 已 gitignore，**僅存在於調查者本機**，不隨 repo 散佈；本節已收錄其全部技術結論）。
+
+```
+Error loading chunk 1160,968
+java.lang.RuntimeException: java.lang.IllegalStateException:
+    Forward Direction cannot be zero length vector.
+  IsoGameCharacter.setForwardDirection(:2827)   ← throw
+  IsoGameCharacter.setForwardDirectionFromIsoDirection(:5104)
+  IsoAnimal.load(:1536) → IsoHutch.load(:953)   ← 雞舍內的雞在反序列化
+  IsoGridSquare.load(:3275/3281)
+  IsoChunk.LoadFromDisk → LoadOrCreate(:2353) → LoadChunk(:2332)
+  ServerChunkLoader$LoaderThread.run(:70)       ← 背景執行緒
+```
+
+**vanilla 缺陷**：`setForwardDirectionFromIsoDirection()` 用一個 **JVM 全域共用**的
+`private static final Vector2 tempVector2_2` 當暫存：
+
+```java
+this.getVectorFromDirection(tempVector2_2);   // ① 寫入共用 static
+this.setForwardDirection(tempVector2_2);      // ② 讀回來 normalize()
+```
+
+而 `IsoMovingObject.getVectorFromDirection(Vector2, IsoDirections)` 的第一件事是
+**把 x、y 都歸零**再依方向填回真值。主執行緒（每 tick 為殭屍／動物／玩家呼叫）與
+`ServerChunkLoader$LoaderThread` 同時走這段、零同步：一方在歸零空窗期、另一方讀取，
+就拿到 (0,0)，`normalize()` 長度 0 → 拋例外。
+
+**存檔本身沒有壞**：`IsoDirections.fromIndex(int)` 是 `VALUES[index & 7]`，8 個方向
+全都有非零向量，存進檔案的方向值不可能產生零向量。失敗純屬競態擲骰——**這是判定
+`blam/` 備份可直接還原的關鍵前提**。
+
+**非本專案所致**（三重實證，完整推導見事故報告第五節）：
+(a) 正式服 jar sha256 `09a80a46…` 與反編譯快照來源逐位元組相同，jar 未被改動；
+(b) 崩潰路徑上的 `IsoGameCharacter`／`IsoMovingObject`／`IsoChunk`／`IsoGridSquare`／
+`IsoHutch` 全部不在 loose class 覆寫清單內，直接由 jar 載入；
+(c) 堆疊上唯一被我方 patch 的 `IsoAnimal`，其 `load()` 經常數池正規化後與原版 411 條
+指令逐條相同（本 class 四刀全在 `updateStress`／`respondToSound`／`killed`／`updateLOS`）。
+
+**手術**：`FieldGetSwap`（本次擴充為可吃 `GETSTATIC`，原僅支援 `GETFIELD`）在方法內
+兩處 `getstatic tempVector2_2` 之後各插一個 `INVOKESTATIC ForwardVectorGuard.swap`
+——吃掉共享實例、回傳執行緒私有替身。vanilla 方法體只有 8 條指令、無分支無 frame：
+
+```
+ 0: aload_0 / 1: getstatic tempVector2_2 / 4: invokevirtual getVectorFromDirection
+ 7: pop / 8: aload_0 / 9: getstatic tempVector2_2
+12: invokevirtual setForwardDirection / 15: return
+```
+
+`getstatic` 與插入的 `invokestatic` 皆 3 bytes、堆疊 1→1，形狀最單純的一類手術。
+同一執行緒內 ① 寫和 ② 讀拿到同一個實例，語意與原版逐字相同；跨執行緒互不可見。
+
+**不複製共享實例的內容**（刻意）：站點 ① 之後緊接的 `getVectorFromDirection` 無條件
+覆寫 x、y，內容不具意義；站點 ② 要讀的正是站點 ① 寫進私有實例的值。複製共享內容
+反而會把別的執行緒的髒值帶進來。
+
+**移除副作用的耦合核對**：本刀讓該方法不再於共享實例留下值。原版 `tempVector2_2`
+類別內共 12 個 `getstatic`（另有 1 個 `putstatic` 在 `static {}` 初始化欄位），本方法
+佔 2 個，其餘 10 個**逐一核對全部先寫後讀**，無人依賴該遺留值：
+
+| 方法 | 次數 | 用法 |
+|---|---|---|
+| `processHitDamage` | 2 | `.set(wielder 座標)` → `getVectorFromDirection(tempVector2_2)` |
+| `renderlast` | 4 | `getNameCoordForPlayer`／`getNameCoords` 填入後才讀 `.x`/`.y` |
+| `isObjectBehind` | 1 | `.set(this 座標)` |
+| `isBehind` | 1 | `.set(chr 座標)` |
+| `updateMovementStatistics` | 2 | `.set(this 座標)` → `distanceTo(tempVector2_2)` |
+
+SmokeCheck 把類別內 `getstatic` 總數釘在 12——TIS 新增任何讀者都得重新做這份核對。
+
+**範圍界定（刻意不做的部分）**：全 log 保留期共 **67 次**同一例外，落點統計：
+
+| 落點 | 次數 | 外層處理 | 後果 |
+|---|---|---|---|
+| `IsoAnimal.load` ← `IsoHutch.load`（chunk loader 執行緒） | 1 | `Blam + LoadBrandNew` | **整塊 chunk 抹除** |
+| `VirtualZombieManager.createRealZombieAlways`（主執行緒） | 66 | `IngameState.UpdateStuff` try | 掉一個 tick，無資料損失 |
+
+後者走的是 **`IsoDirections.TEMP`** 這條**獨立**競態（`ToVector()` 直接回傳共用 static
+實例，呼叫端接著 `temp.x += rand; temp.y += rand; temp.normalize()`），本刀不涵蓋。
+`IsoDirections` 是全遊戲高流量核心 enum，爆炸半徑與本刀不同級，待本刀上線觀察後另案評估。
+
+**`ThreadLocal` 有界性**：vanilla 只有一個 static-final `ServerChunkLoader`，其 constructor
+只建立**一條**固定 `LoaderThread`（`ServerChunkLoader:34`、`ServerMap:823`），不是逐 chunk
+起執行緒——故每條長生命週期執行緒各持有一個 8 bytes 的 `Vector2`，不隨 job 累積。
+helper 的 `<clinit>` 也只建立 supplier 與 `ThreadLocal` 本身，`Vector2::new` 要到各執行緒
+首次 `get()` 才執行。
+
+**驗證閘**（SmokeCheck 11 項，含 3 項真開執行緒的行為 smoke）：
+
+- vanilla 前提：方法體全序＝8 條指令；`getstatic tempVector2_2` 恰 2 次；
+  **兩個 `invokevirtual` 的 owner/name/desc 各鎖 1 次**
+- 手術後：全序＝兩組 `getstatic → swap → invokevirtual`；swap 改道 x2 且 getstatic 保留 x2；
+  **兩個 `invokevirtual` 目標未被動到**
+- 負對照：`IsoGameCharacter` 其餘方法零 swap 改道
+- 耦合鎖：類別內 `getstatic` 總數＝12 且手術前後一致
+- helper 行為：回傳非 null 且不是傳入實例／同執行緒兩次回同一實例／**跨執行緒回不同實例**
+
+其中兩項 `invokevirtual` 目標鎖是 codex 審查抓出的 fail-closed 缺口：`matchOpcodeSeq`
+只比 opcode 是 operand-blind 的，PZ 若保留相同 opcode 形狀與兩個 `tempVector2_2` 讀取、
+只把 call target 換掉，原本的全序閘仍會全綠，違反「任何方法改寫都讓建置失敗」的契約。
+同輪另修 `Patcher.FieldGetSwap` 的 compact constructor，把 opcode 封死為 GETFIELD／GETSTATIC
+——誤傳 PUT 會對「已被消費的值」插入 helper，而那類 bytecode 不保證 verifier 會攔住。
+
+**全類別爆炸半徑實證**：正規化常數池後比對原版與修補版的完整 javap，
+**零指令被刪除、恰好新增兩條 `invokestatic ForwardVectorGuard.swap`**，
+其餘差異全部是 `ldc`↔`ldc_w` 編碼互換與隨之位移的 offset。
+
+**無重入**（`ThreadLocal` 私有實例在兩站點之間不會被同執行緒覆寫的依據）：兩個站點之間
+只有 `getVectorFromDirection(Vector2, IsoDirections)`，它是 static 純 switch 無回呼；
+其內部呼叫的 `getForwardIsoDirection()` 全樹**僅一處宣告**（`IsoObject:1920`，零覆寫），
+`setForwardIsoDirection(IsoDirections)` 也只有 `IsoObject` 與 `IsoGameCharacter` 兩處
+（全樹 grep 實證，非臆測）。另外 `setForwardDirection(Vector2)` 只把 `dir.x`／`dir.y`
+複製進 `this.forwardDirection`，**不保留參照**，故私有實例不會被別名進角色狀態。
+
+**降級分析（helper 若載入失敗會怎樣）**：這是本刀最危險的假想面——patch 自己變成
+毀存檔的來源。結論是**不會**：`NoClassDefFoundError`／`LinkageError` 屬 `Error`，而
+`IsoChunk.LoadOrCreate` 的失敗分支是 `catch (Exception var7)`，**攔不到 Error**。
+因此 helper 缺席時例外會穿透 `LoadOrCreate` → `LoadChunk`，`Blam()`／`LoadBrandNew()`／
+`BackupBlam()` 一個都不會執行，直接打死 `ServerChunkLoader$LoaderThread`——
+**吵鬧的停止載入，而非安靜的大規模抹除**。且此情境已被三道閘擋在上線前：build 的
+manifest 完整性守門（dist\java 任何 class 未登記即中止）、install.sh 的 fail-closed
+payload preflight、以及開機健檢（驗證清單 11a）。
+
+**效能**：`setForwardIsoDirection`／`setForwardDirectionFromIsoDirection` 全樹 48 個
+呼叫點，且**沒有角色的 per-tick 無條件呼叫路徑**（render loop 那幾處是 `IsoMannequin`，
+走 `IsoObject` 版不經本方法）——本方法只在轉向、spawn 與載入時被呼叫。
+`ThreadLocal.get()` 相對原版 `getstatic` 約多 1–2ns，在此頻率下不可量測。
+
+**沒有計數觀測**（刻意）：本 helper 是唯一會被多執行緒同時呼叫的 helper，靜態計數器
+本身就是競態；且驗證訊號現成且更強——見部署後驗證清單第 11 項。
+
+**沒有 kill switch**（刻意，偏離 W4-1／W5／W6 慣例，故在此說明理由）：那三刀都會
+**改變行為**（併包改變送出批次、守衛吞掉例外、捕手跳過入世界），旋鈕的價值在於
+「懷疑是它造成的就先關掉，不必整包 uninstall」。W7 不同——它是**語意保持**的：
+全類別 javap 多重集合比對證明零刪除、僅新增 2 條指令，且同執行緒行為與原版逐字相同。
+更關鍵的是，本刀的「關掉」等同於**把共享 static 換回去，也就是把毀存檔的競態放回來**；
+提供這種旋鈕是提供一把傷害自己的刀。真要退場就是 `uninstall.sh`（整包），
+那才是正確的粒度。唯一無法被旋鈕挽救的情境（helper 載入失敗）也不需要旋鈕——
+見上方降級分析，那是吵鬧的執行緒死亡而非資料損失。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -1205,7 +1350,22 @@ log 輸出用快照在鎖外做。
    玩家端與伺服器端此時**行為一致**（退役正是為了消除這個 desync），可直接目視驗證。
    (f) 玩家引導：受精蛋要孵化請放**雞舍**（`IsoHutch`）——雞舍內的蛋不是
    `IsoWorldInventoryObject`，不經 `IsoGridSquare.load` 的清除路徑，本來就不受清單影響。
-11. **PZ 更新**（順序不可調換）：
+11. **W7 朝向暫存執行緒隔離驗證**（2s）：
+   (a) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`NoClassDefFoundError`——本刀改的是
+   `IsoGameCharacter`（全遊戲最熱的 class 之一）且 helper 跑在 chunk loader 執行緒上，
+   出現即立刻 uninstall。
+   (b) **主驗證訊號＝例外歸零**：`grep -c 'Forward Direction cannot be zero' <DebugLog>`
+   對照修前的每日 0–13 次。**注意分母**：修前 67 次裡有 66 次走的是 `IsoDirections.TEMP`
+   那條**本刀不涵蓋**的獨立競態（`createRealZombieAlways`，主執行緒），所以正確的預期是
+   **「stack 內含 `IsoAnimal.load`／`setForwardDirectionFromIsoDirection` 的那一類歸零」**，
+   而不是總數歸零。只看總數會誤判成「patch 沒效」。
+   (c) `blam/` 不再新增 Forward Direction 類型的目錄：
+   `grep -l 'Forward Direction' /home/pzserver/Zomboid/Saves/Multiplayer/pzserver/blam/*/*_error.txt`
+   應只剩 `1160/968_error.txt` 這一筆歷史紀錄。
+   (d) 行為不變：角色／殭屍／動物轉向正常，動物出雞舍後朝向不亂跳。
+   (e) **還原前置**：本刀確認生效後才把 `blam/1160/968.bin` 複製回 `map/1160/968.bin`
+   （必須在 server 進程停止的窗口內，否則記憶體版本會在下次世界存檔打回去）。
+12. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
       本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。

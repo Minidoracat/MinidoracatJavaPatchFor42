@@ -448,6 +448,42 @@ public final class PatchConfig {
         pdsDedupe.expectedHits = 1;
         patches.add(pds);
 
+        // ---- W7 朝向暫存執行緒隔離（2026-08-13 Player-A 雞舍實案；docs/patches.md 2s）----
+        // 事故：chunk 1160,968（方格 9280-9287, 7744-7751）在 19:55:03 載入失敗被 Blam 重生，
+        // 46,142 → 8,549 bytes（雞舍＋32 隻家禽的完整基因組＋水桶全滅，只剩草地）。
+        // 根因是 vanilla 的共用 static 暫存競態，**非本專案所致**（三重實證）：
+        //   (a) 正式服 jar sha256 09a80a46… 與反編譯快照來源逐位元組相同，jar 未被改動；
+        //   (b) 崩潰路徑上的 IsoGameCharacter／IsoMovingObject／IsoChunk／IsoGridSquare／
+        //       IsoHutch 全部不在 loose class 覆寫清單內，直接由 jar 載入；
+        //   (c) 堆疊上唯一被我方 patch 的 IsoAnimal，其 load() 經常數池正規化後與原版
+        //       411 條指令逐條相同（本 class 的四刀全在 updateStress／respondToSound／
+        //       killed／updateLOS，皆不在 chunk 載入路徑上）。
+        // 機制：setForwardDirectionFromIsoDirection() 用全域共用的 tempVector2_2 當暫存，
+        // 而 IsoMovingObject.getVectorFromDirection 開頭無條件把 x、y 歸零再填值——
+        // 主執行緒與 ServerChunkLoader$LoaderThread 同時走這段就可能讀到 (0,0)，
+        // normalize() 長度 0 → IllegalStateException → chunk 載入失敗 → Blam + LoadBrandNew。
+        //
+        // 手術：方法內兩處 getstatic tempVector2_2 各接一個 INVOKESTATIC 到 helper，
+        // 回傳執行緒私有替身。vanilla 方法體只有 8 條指令、無分支無 frame：
+        //   0: aload_0 / 1: getstatic tempVector2_2 / 4: invokevirtual getVectorFromDirection
+        //   7: pop / 8: aload_0 / 9: getstatic tempVector2_2
+        //  12: invokevirtual setForwardDirection / 15: return
+        // getstatic 與插入的 invokestatic 皆 3 bytes、堆疊 1→1，形狀最單純的一類手術。
+        //
+        // **範圍界定**：本刀只治「毀存檔」那條路徑。全 log 保留期 67 次同一例外中，
+        // 另外 66 次走的是 IsoDirections.TEMP（ToVector() 直接回傳共用 static 實例）
+        // → VirtualZombieManager.createRealZombieAlways 這條**獨立**競態，落在主執行緒、
+        // 被 IngameState.UpdateStuff 的 try 吞掉（每次帶掉一個 tick，無資料損失）。
+        // IsoDirections 是全遊戲高流量核心 enum，爆炸半徑與本刀不同級，故不併入；
+        // 待本刀上線觀察後另案評估。
+        Patcher.ClassPatch gameChr = new Patcher.ClassPatch("zombie/characters/IsoGameCharacter");
+        Patcher.MethodOps fwdFromIso = gameChr.method("setForwardDirectionFromIsoDirection", "()V");
+        fwdFromIso.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETSTATIC,
+                "zombie/characters/IsoGameCharacter", "tempVector2_2", "Lzombie/iso/Vector2;",
+                "zombie/mdc/ForwardVectorGuard", "swap");
+        fwdFromIso.expectedHits = 2;
+        patches.add(gameChr);
+
         return patches;
     }
 

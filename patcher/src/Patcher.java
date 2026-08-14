@@ -47,12 +47,25 @@ public final class Patcher {
                       String helperOwner, String helperName) {}
 
     /**
-     * getfield 同形替換（v3 buffer 隔離）：在每個 GETFIELD owner.name:desc 之後插入
+     * 欄位讀取同形替換：在每個 {@code opcode}（GETFIELD／GETSTATIC）owner.name:desc 之後插入
      * 「INVOKESTATIC helper(desc)desc」——吃掉共享欄位值、回傳替身。堆疊 1→1、線性、
      * 無新分支；只作用於所屬 MethodOps 的方法，命中數計入該方法守門。
+     *
+     * <p>GETFIELD 版原用於 popman v3 buffer 隔離（42.20.2 官方收編已退役）；
+     * GETSTATIC 版用於 W7 朝向暫存執行緒隔離（見 PatchConfig）。指令長度兩者皆 3 bytes，
+     * 且插入的 INVOKESTATIC 同樣 3 bytes，故 offset 位移只來自插入本身，frames 不受影響。
      */
-    record FieldGetSwap(String owner, String name, String desc,
+    record FieldGetSwap(int opcode, String owner, String name, String desc,
                         String helperOwner, String helperName) {
+        // 契約封死：只有兩種 GET 的堆疊效果是 1→1（推一個值），插入 helper 才是同形替換。
+        // 誤傳 PUT 會讓 visitor 對「已被消費的值」插入 helper——assignment-expression 那類
+        // 留有 duplicated value 的 bytecode 甚至不保證 verifier 會攔住（codex 審查發現）。
+        FieldGetSwap {
+            if (opcode != Opcodes.GETFIELD && opcode != Opcodes.GETSTATIC) {
+                throw new IllegalArgumentException(
+                        "FieldGetSwap 只支援 GETFIELD／GETSTATIC，收到 opcode=" + opcode);
+            }
+        }
         String helperDesc() {
             return "(" + desc + ")" + desc;
         }
@@ -223,7 +236,7 @@ public final class Patcher {
         public void visitFieldInsn(int opcode, String owner, String name, String desc) {
             super.visitFieldInsn(opcode, owner, name, desc);
             FieldGetSwap sw = ops.fieldGetSwap;
-            if (sw != null && opcode == Opcodes.GETFIELD
+            if (sw != null && opcode == sw.opcode()
                     && sw.owner().equals(owner) && sw.name().equals(name) && sw.desc().equals(desc)) {
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, sw.helperOwner(), sw.helperName(), sw.helperDesc(), false);
                 ops.actualHits++;

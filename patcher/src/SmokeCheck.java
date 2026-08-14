@@ -87,6 +87,32 @@ public final class SmokeCheck {
                     onSeg == 0f && perp == 9f && beyond == 16f
                     && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
 
+            // ---- W7 朝向暫存執行緒隔離：helper 的執行緒私有性（本刀的全部價值所在）----
+            // 修的是跨執行緒競態，故「跨執行緒拿到不同實例」是充要條件，必須真的開執行緒驗。
+            Class<?> fwdGuard = Class.forName("zombie.mdc.ForwardVectorGuard", true, patched);
+            Class<?> vec2Cls = Class.forName("zombie.iso.Vector2", true, patched);
+            Method swapM = fwdGuard.getMethod("swap", vec2Cls);
+            Object sharedSentinel = vec2Cls.getDeclaredConstructor().newInstance();
+            Object mainFirst = swapM.invoke(null, sharedSentinel);
+            Object mainSecond = swapM.invoke(null, sharedSentinel);
+            Object[] otherThread = new Object[1];
+            Thread worker = new Thread(() -> {
+                try {
+                    otherThread[0] = swapM.invoke(null, sharedSentinel);
+                } catch (ReflectiveOperationException e) {
+                    otherThread[0] = e;
+                }
+            }, "W7-smoke-worker");
+            worker.start();
+            worker.join();
+            failed += check("W7 helper：回傳非 null，且不是傳入的共享實例（確實換掉了）",
+                    mainFirst != null && mainFirst != sharedSentinel);
+            failed += check("W7 helper：同執行緒兩次呼叫回傳同一實例（① 寫 ② 讀語意與原版等價）",
+                    mainFirst == mainSecond);
+            failed += check("W7 helper：跨執行緒回傳不同實例（競態消失的充要條件）",
+                    otherThread[0] instanceof Object v && !(otherThread[0] instanceof Throwable)
+                            && v != mainFirst && v != sharedSentinel);
+
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
             Class<?> throttle = Class.forName("zombie.mdc.ZombieAuthThrottle", true, patched);
@@ -800,6 +826,60 @@ public final class SmokeCheck {
         failed += check("W3-4 no-op 鏈結：getTargetAlpha server→1.0F 指紋",
                 checkGetTargetAlphaGuard(methodFromJar(jar, "zombie/iso/IsoObject", "getTargetAlpha", "(I)F")));
 
+        // ---- W7 朝向暫存執行緒隔離（IsoGameCharacter.setForwardDirectionFromIsoDirection）----
+        String igcCls = "zombie/characters/IsoGameCharacter";
+        String fwdGuardCls = "zombie/mdc/ForwardVectorGuard";
+        String vec2Desc = "Lzombie/iso/Vector2;";
+        String swapDesc = "(" + vec2Desc + ")" + vec2Desc;
+        MethodNode vFwd = methodFromJar(jar, igcCls, "setForwardDirectionFromIsoDirection", "()V");
+        // vanilla 前提：方法體恰為 8 條無分支指令。PZ 若改寫此方法（例如自己修了競態、
+        // 或改用別的暫存），全序不符即建置失敗，而非默默把刀插到錯的地方。
+        failed += check("W7 vanilla 前提：方法體全序＝aload/getstatic/invokevirtual/pop ×2 收 return",
+                matchOpcodeSeq(vFwd, new int[]{
+                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKEVIRTUAL, Opcodes.POP,
+                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKEVIRTUAL, Opcodes.RETURN}));
+        failed += check("W7 vanilla 前提：方法內 getstatic tempVector2_2 恰 2 次",
+                countFieldReads(vFwd, igcCls, "tempVector2_2") == 2);
+        // matchOpcodeSeq 只比 opcode，operand-blind（codex 審查發現的 fail-closed 缺口）：
+        // PZ 若保留相同 opcode 形狀與兩個 tempVector2_2 讀取、只把 call target 換掉，
+        // 上面的全序閘仍會全綠，違反「任何方法改寫都讓建置失敗」的契約。故把兩個
+        // invokevirtual 的 owner/name/desc 一併鎖住——手術本身不動它們，前後都該恰 1 次。
+        String getVecDesc = "(" + vec2Desc + ")" + vec2Desc;
+        String setFwdDesc = "(" + vec2Desc + ")V";
+        failed += check("W7 vanilla 前提：兩個 invokevirtual 目標鎖定（getVectorFromDirection／setForwardDirection 各 1）",
+                countExactCalls(vFwd, Opcodes.INVOKEVIRTUAL, igcCls, "getVectorFromDirection", getVecDesc) == 1
+                && countExactCalls(vFwd, Opcodes.INVOKEVIRTUAL, igcCls, "setForwardDirection", setFwdDesc) == 1);
+        MethodNode pFwd = method(distJava, igcCls, "setForwardDirectionFromIsoDirection", "()V");
+        failed += check("W7 手術後：全序＝兩組 getstatic→swap→invokevirtual（swap 緊接 getstatic）",
+                matchOpcodeSeq(pFwd, new int[]{
+                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKESTATIC, Opcodes.INVOKEVIRTUAL,
+                        Opcodes.POP,
+                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKESTATIC, Opcodes.INVOKEVIRTUAL,
+                        Opcodes.RETURN}));
+        failed += check("W7 手術後：swap 改道 x2，且 getstatic 保留 x2（吃掉共享值而非刪除讀取）",
+                countExactCalls(pFwd, Opcodes.INVOKESTATIC, fwdGuardCls, "swap", swapDesc) == 2
+                && countFieldReads(pFwd, igcCls, "tempVector2_2") == 2);
+        failed += check("W7 手術後：兩個 invokevirtual 目標未被動到（手術只插入，不改 call target）",
+                countExactCalls(pFwd, Opcodes.INVOKEVIRTUAL, igcCls, "getVectorFromDirection", getVecDesc) == 1
+                && countExactCalls(pFwd, Opcodes.INVOKEVIRTUAL, igcCls, "setForwardDirection", setFwdDesc) == 1);
+        ClassNode pIgcNode = classNode(distJava, igcCls);
+        failed += check("W7 負對照：IsoGameCharacter 其餘方法零 swap 改道",
+                pIgcNode.methods.stream()
+                        .filter(m -> !m.name.equals("setForwardDirectionFromIsoDirection"))
+                        .allMatch(m -> countExactCalls(m, Opcodes.INVOKESTATIC,
+                                fwdGuardCls, "swap", swapDesc) == 0));
+        // 耦合鎖：本刀移除了「setForwardDirectionFromIsoDirection 會在共享實例留下值」這個
+        // 副作用。原版其餘 10 個讀取點（processHitDamage x2／renderlast x4／isObjectBehind／
+        // isBehind／updateMovementStatistics x2）已逐一核對皆為先寫後讀，無人依賴該遺留值。
+        // 把類別內 getstatic 總數釘住——TIS 新增任何讀者都得重新做這份核對。
+        ClassNode vIgcNode = classNodeFromJar(jar, igcCls);
+        int vanillaReads = vIgcNode.methods.stream()
+                .mapToInt(m -> countFieldReads(m, igcCls, "tempVector2_2")).sum();
+        int patchedReads = pIgcNode.methods.stream()
+                .mapToInt(m -> countFieldReads(m, igcCls, "tempVector2_2")).sum();
+        failed += check("W7 耦合鎖：tempVector2_2 類別內 getstatic 總數＝12 且手術前後一致",
+                vanillaReads == 12 && patchedReads == 12);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -1193,6 +1273,25 @@ public final class SmokeCheck {
     static boolean checkGetTargetAlphaGuard(MethodNode m) {
         int[] want = { Opcodes.GETSTATIC, Opcodes.IFEQ, Opcodes.FCONST_1, Opcodes.FRETURN };
         return matchHead(m, want);
+    }
+
+    /**
+     * 方法體全序鎖：真指令（跳過 label／line／frame 等虛節點）的 opcode 序列必須與 want
+     * <b>完全一致</b>，長度也要相同——比 matchHead 的前綴比對嚴格，用於本來就只有數條
+     * 指令、任何漂移都該讓建置失敗的短方法（W7）。
+     */
+    static boolean matchOpcodeSeq(MethodNode m, int[] want) {
+        int i = 0;
+        for (AbstractInsnNode in = m.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            if (i >= want.length || in.getOpcode() != want[i]) {
+                return false;
+            }
+            i++;
+        }
+        return i == want.length;
     }
 
     private static boolean matchHead(MethodNode m, int[] want) {
