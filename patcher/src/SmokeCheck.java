@@ -265,13 +265,23 @@ public final class SmokeCheck {
             boolean bbNulled = bbField.get(pc1) == null;
             Object pc2 = gcM.invoke(null, new Object[]{null});
             gbM.invoke(null, new Object[]{null, pc2});
-            failed += check("W9 私有池：租還往返重用同殼同 buffer、歸還 null bb、retriesCount 重置",
-                    pb1 != null && bbNulled && pc2 == pc1
+            // codex 對抗審查修正：殼不入池（fresh shell）——vanilla update() 的無同步
+            // savedChunks 可雙重 release，入池殼會被二次出租；buffer 則重用
+            failed += check("W9 私有池：殼每次全新（不入池）、buffer 重用、歸還 null bb、新殼 retriesCount=0",
+                    pb1 != null && bbNulled && pc2 != pc1
                     && bbField.get(pc2) == pb1 && retriesField.getInt(pc2) == 0);
             failed += check("W9 隔離定義：私有池全程往返後 ClientChunkRequest 全域池計數不變",
                     ((java.util.Collection<?>) fcField.get(null)).size() == fcBefore
                     && ((java.util.Collection<?>) fbField.get(null)).size() == fbBefore);
+            // 雙重歸還冪等：同一殼 release 兩次，buffer 只入池一次（synchronized 原子摘取）
+            java.lang.reflect.Field privBufsField = csi.getDeclaredField("BUFFERS");
+            privBufsField.setAccessible(true);
+            int privBefore = ((java.util.Collection<?>) privBufsField.get(null)).size();
             rcM.invoke(null, new Object[]{null, pc2});
+            rcM.invoke(null, new Object[]{null, pc2});
+            failed += check("W9 雙重歸還冪等：release 兩次只入池一次、bb 維持 null",
+                    ((java.util.Collection<?>) privBufsField.get(null)).size() == privBefore + 1
+                    && bbField.get(pc2) == null);
 
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
@@ -1124,21 +1134,24 @@ public final class SmokeCheck {
         MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");
         failed += check("W9 vanilla 前提：SaveLoadedTask.release 內 releaseChunk x1",
                 countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
-        // 耦合鎖：兩顆共用 CRC32 的讀者清冊釘死——競態分析的完整性依賴「讀者只有這些」，
-        // TIS 新增讀者＝清冊過期＝建置失敗強制重新分析
-        failed += check("W9 耦合鎖：crcSave 讀者僅 SaveLoadedTask（x4）、crc32 讀者僅 SaveChunkThread（x1）",
-                classWideInstanceFieldReads(classNodeFromJar(jar, sltCls), "zombie/network/ServerChunkLoader", "crcSave") == 4
-                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader"), "zombie/network/ServerChunkLoader", "crcSave") == 0
-                && classWideInstanceFieldReads(classNodeFromJar(jar, sctCls), "zombie/network/ServerChunkLoader", "crcSave") == 0
-                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader$SaveUnloadedTask"), "zombie/network/ServerChunkLoader", "crcSave") == 0
-                && classWideInstanceFieldReads(classNodeFromJar(jar, "zombie/network/ServerChunkLoader$LoaderThread"), "zombie/network/ServerChunkLoader", "crcSave") == 0
-                && classWideInstanceFieldReads(classNodeFromJar(jar, sctCls), sctCls, "crc32") == 1);
-        // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者恰 2（addLoadedJob＝本刀隔離；
-        // PlayerDownloadServer.update 用 per-connection CRC32 且僅主緒＝分析上安全）。
-        // 第三個序列化者出現＝共用性分析要重做
-        failed += check("W9 census：全 jar SaveLoadedChunk 呼叫點恰 2",
-                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk",
-                        "(L" + chunkRef + ";Ljava/util/zip/CRC32;)V") == 2);
+        // 耦合鎖（codex 對抗審查改為全 jar fail-closed：硬編類別清單掃不到新增的
+        // nestmate 讀者）：兩顆共用 CRC32 的讀者全 jar 總數＝已釘位置的數量——
+        // TIS 在任何 class 新增讀者＝總數超標＝建置失敗強制重新分析
+        failed += check("W9 耦合鎖：全 jar crcSave 讀者恰 4（全在 SaveLoadedTask.save）、crc32 讀者恰 1（全在 addLoadedJob）",
+                jarWideFieldReadCensus(jar, Opcodes.GETFIELD, "zombie/network/ServerChunkLoader", "crcSave") == 4
+                && countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4
+                && jarWideFieldReadCensus(jar, Opcodes.GETFIELD, sctCls, "crc32") == 1
+                && countInstanceFieldReads(vAdd, sctCls, "crc32") == 1);
+        // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者恰 2 且逐類分佈釘死（codex 修正：
+        // 只比總數會讓「舊點消失＋新點出現」互抵通過）。addLoadedJob＝本刀隔離；
+        // PlayerDownloadServer.update 用 per-connection CRC32 且僅主緒＝分析上安全。
+        String slcDesc = "(L" + chunkRef + ";Ljava/util/zip/CRC32;)V";
+        failed += check("W9 census：全 jar SaveLoadedChunk 呼叫點恰 2 且分佈＝SaveChunkThread 1／PlayerDownloadServer 1",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 2
+                && classWideCalls(classNodeFromJar(jar, sctCls), Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, "zombie/network/PlayerDownloadServer"), Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1);
         // 手術後：同形替換緊鄰性（GETFIELD 之後必須緊接 helper——隔開＝吃錯堆疊值）＋原呼叫歸零
         MethodNode pAdd = method(distJava, sctCls, "addLoadedJob", addLoadedDesc);
         failed += check("W9 手術後：addLoadedJob crc32→headerCrc 緊鄰 x1、三呼叫改道、原 invokevirtual 歸零",
@@ -1875,12 +1888,29 @@ public final class SmokeCheck {
         return count;
     }
 
-    static int classWideInstanceFieldReads(ClassNode cls, String owner, String name) {
-        int total = 0;
-        for (MethodNode m : cls.methods) {
-            total += countInstanceFieldReads(m, owner, name);
+    /** 全 jar 欄位讀取普查（opcode 指定 GETFIELD／GETSTATIC）——W9 耦合鎖的 fail-closed 版。 */
+    static int jarWideFieldReadCensus(Path jar, int opcode, String owner, String name) throws Exception {
+        int count = 0;
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                for (MethodNode m : cn.methods) {
+                    for (AbstractInsnNode in : m.instructions) {
+                        if (in instanceof FieldInsnNode fi && fi.getOpcode() == opcode
+                                && fi.owner.equals(owner) && fi.name.equals(name)) {
+                            count++;
+                        }
+                    }
+                }
+            }
         }
-        return total;
+        return count;
     }
 
     /**

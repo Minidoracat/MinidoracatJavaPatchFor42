@@ -149,6 +149,12 @@ Assert-Ok "ChunkLoadGuardTest"
 java "-Dmdc.chunkLoadGuard.enabled=false" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest disabled
 Assert-Ok "ChunkLoadGuardTest（enabled=false kill switch）"
 
+Write-Host "[9d/10] 存檔管線隔離（W9）kill switch off 路徑行為驗證（獨立 JVM）..."
+# enabled 路徑由 SmokeCheck 覆蓋；off 路徑必須真的執行過（緊急降級不該首跑於事故現場）。
+# 測試自驗 property 到位——名稱打錯會炸在測試裡，不會默默跑 enabled 版假綠
+java "-Dmdc.chunkSaveIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkSaveIsolationTest
+Assert-Ok "ChunkSaveIsolationTest（chunkSaveIsolation=0 kill switch）"
+
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
 Assert-Ok "FastIdentityArrayRemovalBenchmark"
