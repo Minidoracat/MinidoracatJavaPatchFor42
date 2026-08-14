@@ -20,7 +20,7 @@ if (-not (Test-Path "$R\work\projectzomboid.jar")) {
     throw "缺 work\projectzomboid.jar —— 先從伺服器拉取（scp <your-server>:/home/pzserver/serverfiles/java/projectzomboid.jar work\）"
 }
 
-Remove-Item -Recurse -Force "$R\work\out", "$R\work\gen", "$R\dist\java" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$R\work\out", "$R\work\gen", "$R\work\smoke-dumps", "$R\dist\java" -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$R\work\out", "$R\work\gen", "$R\dist\java" | Out-Null
 
 # 版本指紋（生成而非手寫——手寫會忘記更新，說謊的版本號比沒有更糟）
@@ -108,7 +108,9 @@ java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$R\work\projectzom
 Assert-Ok "BytecodeVerify"
 
 Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
-java -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
+# dumpDir 導離真實 Zomboid 存檔目錄（W8 blocked-path 行為測試會觸發傾印；ZomboidFileSystem
+# 在測試 JVM 能完整初始化，未導向會把垃圾寫進本機 Saves/）
+java "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
 Assert-Ok "SmokeCheck"
 
 Write-Host "[8/10] LoginMetrics／JoinMetrics 行為與例外 precedence 驗證..."

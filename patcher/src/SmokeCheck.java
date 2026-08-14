@@ -160,6 +160,45 @@ public final class SmokeCheck {
                     && (Integer) modeM.invoke(null, "0") == 0
                     && (Integer) modeM.invoke(null, "2") == 2
                     && (Integer) modeM.invoke(null, "junk") == 1);
+            // safeWrite 本體執行級 smoke（codex 審查補強：先前只測 verify() 純函式，
+            // 擋下/委派/不可寫三條決策路徑從未真正跑過）。測試 JVM 未設 property → enforce。
+            Method swExec = cwg.getDeclaredMethod("safeWrite", int.class, int.class, java.nio.ByteBuffer.class);
+            swExec.setAccessible(true);
+            Class<?> ckCls = Class.forName("zombie.network.ChunkChecksum", true, patched);
+            Method setCk = ckCls.getMethod("setChecksum", int.class, int.class, long.class);
+            Method getCk = ckCls.getMethod("getChecksumIfExists", int.class, int.class);
+            // (1) A 組簽名 buffer → 擋下：無例外返回、不觸 vanilla 寫入、checksum 歸零
+            setCk.invoke(null, 4242, 4242, 424242L);
+            java.nio.ByteBuffer badBb = java.nio.ByteBuffer.wrap(aSig.clone());
+            badBb.position(tlen);
+            boolean blockedQuietly;
+            try {
+                swExec.invoke(null, 4242, 4242, badBb);
+                blockedQuietly = true;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                blockedQuietly = false;
+            }
+            failed += check("W8 safeWrite 執行：損毀 buffer 靜默擋下（log 基礎設施故障不外逃）且 checksum 歸零",
+                    blockedQuietly && (Long) getCk.invoke(null, 4242, 4242) == 0L);
+            // (2) null buffer → UNWRITABLE 拒寫（vanilla 會先 truncate 舊檔再炸＝毀檔，拒寫是唯一不毀檔選項）
+            boolean nullQuietly;
+            try {
+                swExec.invoke(null, 4243, 4243, (Object) null);
+                nullQuietly = true;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                nullQuietly = false;
+            }
+            failed += check("W8 safeWrite 執行：null buffer → UNWRITABLE 拒寫（不進 vanilla 的 truncate 路徑）",
+                    nullQuietly);
+            // (3) 委派證明改用結構斷言（初版「必拋」設計實測會把垃圾寫進本機真實
+            //     Zomboid 存檔目錄——ZomboidFileSystem 在測試 JVM 能完整初始化並寫檔成功。
+            //     絕不可在測試中執行 OK 路徑）。safeWrite 恰 5 個 vanilla 委派點：
+            //     MODE_OFF／anomaly fail-open／OK-observe／OK-enforce（快照）／flagged-observe。
+            MethodNode gSw = method(distJava, "zombie/mdc/ChunkWriteGuard", "safeWrite",
+                    "(IILjava/nio/ByteBuffer;)V");
+            failed += check("W8 safeWrite 結構：恰 5 個 IsoChunk.SafeWrite 委派點（off/anomaly/ok-obs/ok-enf/flag-obs）",
+                    countExactCalls(gSw, Opcodes.INVOKESTATIC, "zombie/iso/IsoChunk", "SafeWrite",
+                            "(IILjava/nio/ByteBuffer;)V") == 5);
 
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
@@ -944,21 +983,37 @@ public final class SmokeCheck {
                 countExactCalls(vSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
                 && countExactCalls(vSlt, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum",
                         "setChecksum", "(IIJ)V") == 1);
-        // 全 jar census：SafeWrite 呼叫點恰 5 個（Save(Z) x2＋SaveLoadedTask x1＋
-        // ChunkSaveWorker x1＋WorldGenerate x1）。PZ 新增呼叫點＝出現閘門外的寫檔路徑＝建置失敗重新分析。
+        // 順序鎖（codex 審查修正）：guard 的 checksum 歸零假設「caller 先 setChecksum 再
+        // SafeWrite」；PZ 重排即建置失敗，而非讓歸零默默覆寫錯的時序
+        failed += check("W8 順序鎖：兩方法內 setChecksum 皆先於 SafeWrite（歸零重試假設的時序錨）",
+                firstCallIndex(vSaveB, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum", "setChecksum", "(IIJ)V")
+                        < firstCallIndex(vSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc)
+                && firstCallIndex(vSlt, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum", "setChecksum", "(IIJ)V")
+                        < firstCallIndex(vSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc));
+        // 全 jar census（總數）＋逐類分佈（堵「舊點消失＋新點出現」互相抵銷的 false-green）
         failed += check("W8 census：全 jar SafeWrite 呼叫點恰 5 個（新增即代表有未設閘的寫檔路徑）",
                 jarWideCallsiteCensus(jar, w8IcCls, "SafeWrite", swDesc) == 5);
-        // 排除論證的錨 1：ChunkSaveWorker 唯一入列點 AddHotSave 被 GameServer.server 閘住
+        failed += check("W8 census 分佈：IsoChunk=2／ChunkSaveWorker=1／WorldGenerate=1／SaveLoadedTask=1",
+                classWideCalls(classNodeFromJar(jar, w8IcCls), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 2
+                && classWideCalls(classNodeFromJar(jar, "zombie/iso/ChunkSaveWorker"), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, "zombie/iso/WorldGenerate"), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, sltCls), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1);
+        // 排除論證的錨 1：ChunkSaveWorker 唯一入列點 AddHotSave 被 GameServer.server 閘住，
+        // 且方向鎖定（getstatic server 緊接 ifne＝server 為真即跳離；codex 審查補強）
         MethodNode vIcmUpd = methodFromJar(jar, "zombie/iso/IsoChunkMap", "updateInternal", "()V");
-        failed += check("W8 排除前提：IsoChunkMap.updateInternal 有 AddHotSave x1 且讀 GameServer.server（伺服器不走 hot-save）",
+        failed += check("W8 排除前提：IsoChunkMap.updateInternal 有 AddHotSave x1 且 GameServer.server→ifne 方向鎖",
                 countExactCalls(vIcmUpd, Opcodes.INVOKEVIRTUAL, "zombie/iso/ChunkSaveWorker",
                         "AddHotSave", "(Lzombie/iso/IsoChunk;)V") == 1
-                && countFieldReads(vIcmUpd, "zombie/network/GameServer", "server") >= 1);
-        // 格式前提：helper 的固定 offset（5/9/17）與版本常數 249 綁定 Save(ByteBuffer,CRC32,Z)
+                && existsFieldReadThenJump(vIcmUpd, "zombie/network/GameServer", "server", Opcodes.IFNE));
+        // 格式前提：helper 硬編 offset 的語境鎖（非僅常數存在）——17 必須是 CRC32.update 的
+        // offset 引數、5 必須是 position() 的引數；版本常數 249 恰 1（codex 審查補強）
         MethodNode vSaveBuf = methodFromJar(jar, w8IcCls, "Save",
                 "(Ljava/nio/ByteBuffer;Ljava/util/zip/CRC32;Z)Ljava/nio/ByteBuffer;");
-        failed += check("W8 格式前提：Save(ByteBuffer) 內 249 恰 1、17 至少 1（helper 硬編 offset 的防漂移錨）",
-                countIntConst(vSaveBuf, 249) == 1 && countIntConst(vSaveBuf, 17) >= 1);
+        failed += check("W8 格式前提：249 恰 1、17→CRC32.update 語境、5→ByteBuffer.position 語境",
+                countIntConst(vSaveBuf, 249) == 1
+                // 17 與 update 之間隔著 len-1-4-4-8 的四次 isub 展開（javap 實測 9 條真指令）
+                && existsConstThenCall(vSaveBuf, 17, "java/util/zip/CRC32", "update", 12)
+                && existsConstThenCall(vSaveBuf, 5, "java/nio/ByteBuffer", "position", 2));
         // 手術後：改道到位、原呼叫歸零
         MethodNode pSaveB = method(distJava, w8IcCls, "Save", "(Z)V");
         failed += check("W8 手術後：Save(Z) 改道 x2、原 SafeWrite 呼叫歸零",
@@ -968,12 +1023,13 @@ public final class SmokeCheck {
         failed += check("W8 手術後：SaveLoadedTask.save 改道 x1、原呼叫歸零",
                 countExactCalls(pSlt, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 1
                 && countExactCalls(pSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
-        // 負對照：SafeWrite 本體必須保持 vanilla（helper 委派回它——改道到它自己＝無限遞迴）
+        // 負對照：SafeWrite 本體必須保持 vanilla（helper 委派回它——改道到它自己＝無限遞迴）。
+        // 排除條件鎖到精確簽名 Save(Z)V——其他 Save 多載也在受檢範圍（codex 審查修正）
         ClassNode pIcNode = classNode(distJava, w8IcCls);
         boolean safeWriteClean = pIcNode.methods.stream()
-                .filter(m -> !m.name.equals("Save"))
+                .filter(m -> !(m.name.equals("Save") && m.desc.equals("(Z)V")))
                 .allMatch(m -> countExactCalls(m, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 0);
-        failed += check("W8 負對照：IsoChunk 除 Save(Z) 外零改道（SafeWrite 本體保持 vanilla、無遞迴）",
+        failed += check("W8 負對照：IsoChunk 除 Save(Z)V 外零改道（含其他 Save 多載；SafeWrite 本體無遞迴）",
                 safeWriteClean);
 
         if (failed > 0) {
@@ -1372,8 +1428,10 @@ public final class SmokeCheck {
     }
 
     /**
-     * 全 jar 呼叫點普查：計數整個 jar 內對 owner.name:desc 的 INVOKESTATIC 呼叫。
-     * W8 用它把 SafeWrite 的呼叫點總數釘死——PZ 新增寫檔路徑＝出現閘門外的寫入＝建置失敗。
+     * 全 jar 呼叫點普查：計數整個 jar（不限 zombie/ 前綴）對 owner.name:desc 的
+     * INVOKESTATIC 呼叫。W8 用它把 SafeWrite 呼叫點總數釘死——PZ 新增寫檔路徑＝
+     * 出現閘門外的寫入＝建置失敗。搭配逐類分佈斷言堵「舊點消失＋新點出現互相抵銷」
+     * 的 false-green（codex 審查修正）。
      */
     static int jarWideCallsiteCensus(Path jar, String owner, String name, String desc) throws Exception {
         int count = 0;
@@ -1381,7 +1439,7 @@ public final class SmokeCheck {
             Enumeration<? extends ZipEntry> en = zf.entries();
             while (en.hasMoreElements()) {
                 ZipEntry e = en.nextElement();
-                if (!e.getName().endsWith(".class") || !e.getName().startsWith("zombie/")) {
+                if (!e.getName().endsWith(".class")) {
                     continue;
                 }
                 ClassNode cn = new ClassNode();
@@ -1392,6 +1450,58 @@ public final class SmokeCheck {
             }
         }
         return count;
+    }
+
+    /** 真指令序中第一個符合的呼叫位置（1 起算）；不存在＝MAX_VALUE（順序斷言自然失敗）。 */
+    static int firstCallIndex(MethodNode m, int opcode, String owner, String name, String desc) {
+        int i = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            i++;
+            if (in instanceof MethodInsnNode mi && mi.getOpcode() == opcode
+                    && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)) {
+                return i;
+            }
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    /** 是否存在「GETSTATIC owner.name 之後緊接指定跳轉 opcode」的指令對（W8 hot-save 閘方向鎖）。 */
+    static boolean existsFieldReadThenJump(MethodNode m, String owner, String name, int jumpOpcode) {
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETSTATIC
+                    && fi.owner.equals(owner) && fi.name.equals(name)) {
+                AbstractInsnNode next = nextReal(in);
+                if (next != null && next.getOpcode() == jumpOpcode) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 是否存在「int 常數（bipush/sipush/iconst_N）之後 window 條真指令內出現
+     * owner.name 呼叫」的語境（W8 格式 offset 鎖：17→CRC32.update、5→ByteBuffer.position）。
+     */
+    static boolean existsConstThenCall(MethodNode m, int constVal, String callOwner, String callName, int window) {
+        for (AbstractInsnNode in : m.instructions) {
+            boolean hit = (in instanceof IntInsnNode ii && ii.operand == constVal)
+                    || (constVal >= -1 && constVal <= 5 && in.getOpcode() == Opcodes.ICONST_0 + constVal);
+            if (!hit) {
+                continue;
+            }
+            AbstractInsnNode cur = in;
+            for (int step = 0; step < window && cur != null; step++) {
+                cur = nextReal(cur);
+                if (cur instanceof MethodInsnNode mi && mi.owner.equals(callOwner) && mi.name.equals(callName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
