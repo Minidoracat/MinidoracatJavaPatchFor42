@@ -1310,6 +1310,80 @@ payload preflight、以及開機健檢（驗證清單 11a）。
 那才是正確的粒度。唯一無法被旋鈕挽救的情境（helper 載入失敗）也不需要旋鈕——
 見上方降級分析，那是吵鬧的執行緒死亡而非資料損失。
 
+## 2t. chunk 寫入閘（W8，server）
+
+**事故家族**：正式服累計 **43 個 chunk** 因 `SANITY CHECK FAIL`（CRC／長度不符）在載入時
+被 vanilla 的 `Blam + LoadBrandNew` 抹除重生，累計損失 ~143KB 玩家建造資料，且持續發生
+（8/14 單日 8 筆）。實案：玩家 Player-B 的基地箱子（chunk 1009,1428，28,401→5,470 bytes，
+8/14 03:38）。與 2s 的 Player-A 案**進同一條毀滅路徑，但成因不同**——W7 治不了這族。
+
+**鑑識定案（三個關鍵事實）**：
+
+1. **載入側完全無辜**：43/43 筆 log 的 `load=` 等於對磁碟檔自算的 body CRC、`save=`
+   等於檔案 header 欄位——遊戲讀到的就是檔案裡的東西，SanityCheck 是正確地偵測到
+   「檔案真的壞了」。損毀發生在**寫入磁碟的那一刻**。
+2. **兩種簽名**：A 組 16 筆 header CRC=0＋len 正確＋body 完整自洽（被捕捉在 `Save()`
+   尾端「回填 len」與「回填 crc」相鄰兩行之間的狀態）；B 組 27 筆 header CRC 屬於
+   別份 body（寫檔與重填撕裂）。A 組資料 100% 可救（改寫 header 8 bytes 後還原）。
+3. **正常 chunk 的 CRC 都是好的**（抽樣 25/25 相符）——這不是系統性「不寫 CRC」，
+   是個案級的寫入競態。
+
+**根因狀態：機制未定罪**（誠實記錄，防止未來重查）：
+- ~~載入側共用 static（`sliceBufferLoad`/`crcLoad`）競態~~ → 43/43 逐位元組對帳證偽；
+- ~~`ChunkSaveWorker` 池化 buffer 與 `AddHotSave` 重填競賽~~ → 簽名完美吻合，但 hot-save
+  入列點被 `!GameServer.server` 閘死（`IsoChunkMap.updateInternal`），伺服器不走；
+- 現行首嫌：`ClientChunkRequest.Chunk` **跨玩家共用 static 物件池**的 pending-write 與
+  重填競賽（`ServerChunkLoader$SaveLoadedTask.save` 寫 `chunk.bb` 時，同一實例可能被
+  重新入列填另一份資料）——未逐行證實。
+- **W4-1 交互**：W4-1（8/13 17:09）上線後發生率 0.30→0.80 筆/重啟（2.7 倍；樣本僅
+  10 次重啟且 8/14 為異常日）。W4-1 是否為放大器未定案；本閘的 BLOCKED stack 會直接
+  指認寫入路徑，比關刀對照更快得到答案（使用者決策：W4-1 照跑）。
+
+**閘門設計（不依賴根因）**：所有 chunk 寫檔收斂到 `IsoChunk.SafeWrite`——在唯一的橋上
+驗證，不論上游誰弄髒的。**快照 → 驗證 → 放行/擋下**：
+
+1. 活 buffer 複製進執行緒私有陣列（關閉驗證與寫入間的 TOCTOU——驗過的位元組就是寫入的位元組）；
+2. 驗 header len == 實際長度、header CRC == body 自算 CRC（`Save()` 正常收尾時兩者必然
+   成立，不符＝100% 上游損毀，**零合法誤判空間**）；
+3. 通過 → 把驗證過的快照交給 vanilla `SafeWrite`（鎖／sanityCheck／目錄建立全走原版）；
+4. 失敗 → **跳過寫入**（磁碟保留上一版好檔案）＋前 10 筆帶完整 stack 的 BLOCKED log
+   （兇手路徑蒐證）＋損毀 buffer 傾印 `blamguard/`（上限 16 份）＋
+   `ChunkChecksum.setChecksum(wx,wy,0)` 讓下個存檔週期必然重試乾淨序列化（自癒）。
+
+**掛點（安全關鍵）**：redirect 三個呼叫端而非 hook `SafeWrite` 內部——它的
+`new FileOutputStream(outFile)` 建構當下就 truncate 舊檔，內部攔截來不及保住上一版。
+全 jar 恰 **5 個** SafeWrite 呼叫點（SmokeCheck census 釘死，新增即建置失敗）：
+
+| 呼叫點 | 處置 | 理由 |
+|---|---|---|
+| `IsoChunk.Save(Z)` ×2 | **改道** | 伺服器世界存檔主路徑 |
+| `ServerChunkLoader$SaveLoadedTask.save` ×1 | **改道** | chunk 出貨存檔路徑（首嫌所在） |
+| `ChunkSaveWorker.WriteQueuedSave` ×1 | 不改 | 唯一入列點 `AddHotSave` 被 `!GameServer.server` 閘死（SmokeCheck pin） |
+| `WorldGenerate` ×1 | 不改 | 只寫首次生成 chunk（method-local buffer），寫壞也沒有玩家資料可失 |
+
+**取捨（誠實記錄）**：
+- 跳過寫入 = 該 chunk 磁碟版本暫停在上一版，直到下次內容變更觸發重寫。「舊而有效」勝過
+  「被 Blam 全滅」，且 checksum 歸零保證必然重試。
+- 閘門攔不住「buffer 被**完整地**填成另一塊 chunk 的自洽資料」（header 無座標欄位）——
+  已觀測 43 筆全是不自洽型，全數會被攔下；該殘餘情境窄得多。
+- verify 對 len≤17 回 MALFORMED：空 body 的 CRC=0 會與 crc 欄位 0 假相符，必須先擋
+  （這同時攔下「truncate 後零位元組寫入」的檔案抹除情境）。
+
+**失敗紀律**：守衛自身故障（非 array buffer、快照失敗）＝anomaly 計數＋回退 vanilla 寫入
+（fail-open）——只有「驗證明確失敗」才擋。`MODE` 三態：`-Dmdc.chunkWriteGuard=0` 停用
+（零開銷 passthrough）／`1` enforce（預設）／`2` observe（驗證＋log＋傾印但照常寫入）。
+成本：CRC32 硬體加速 ≤64KB ~30µs，最壞 200 塊/s 佔單核 <1%。
+
+**驗證閘**（SmokeCheck 14 項）：verify 四情境行為 smoke（自洽→OK、**A 組實案簽名→
+CRC_MISMATCH**、len 竄改→LEN_MISMATCH、截斷→MALFORMED）＋resolveMode 四值；
+vanilla 前提（兩方法的 SafeWrite/setChecksum 計數、全 jar census=5、hot-save 閘 pin、
+格式常數 249/17 pin 防 helper 硬編 offset 漂移）；手術後改道到位＋原呼叫歸零；
+負對照（`SafeWrite` 本體保持 vanilla——helper 委派回它，改道到它自己＝無限遞迴）。
+
+**歷史損失的還原路線**（另案執行）：A 組 16 筆改寫 header CRC 後即可還原（Player-B 案優先）；
+B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還原一律在閘門上線後進行——
+否則還原完可能再被同一缺陷吃掉。
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -1365,7 +1439,17 @@ payload preflight、以及開機健檢（驗證清單 11a）。
    (d) 行為不變：角色／殭屍／動物轉向正常，動物出雞舍後朝向不亂跳。
    (e) **還原前置**：本刀確認生效後才把 `blam/1160/968.bin` 複製回 `map/1160/968.bin`
    （必須在 server 進程停止的窗口內，否則記憶體版本會在下次世界存檔打回去）。
-12. **PZ 更新**（順序不可調換）：
+12. **W8 chunk 寫入閘驗證**（2t）：
+   (a) 開機健檢無 linkage 錯誤（改道方法跑在存檔與 chunk 出貨路徑上，出現即立刻 uninstall）。
+   (b) **心跳**：`grep 'ChunkWriteGuard' <DebugLog>` 應出現 `passed=N flagged=0` 週期行
+   （每 2048 次通過印一行）——證明閘門真的在驗，而非默默 passthrough。
+   (c) **BLOCKED 事件**＝雙重訊號：該 chunk 逃過一次抹除（止血生效），且 log 內的
+   stack trace 直接指認寫入路徑（蒐證到手）。出現時把前 10 筆的完整 stack 與
+   `blamguard/` 傾印檔一起歸檔分析——這就是根因獵捕的決勝證據。
+   (d) `flagged` 持續為 0 且 blam/ 不再新增 CRC 類目錄 = 缺陷可能與 W4-1 或特定時序相關，
+   繼續觀察；`flagged>0` 且 blam/ 不再新增 = 閘門正在攔截現行損毀。
+   (e) **anomalies 增長**＝守衛遇到非預期 buffer 狀態走了 fail-open，需調查。
+13. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
       本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。

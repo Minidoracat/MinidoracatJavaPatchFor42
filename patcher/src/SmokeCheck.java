@@ -113,6 +113,54 @@ public final class SmokeCheck {
                     otherThread[0] instanceof Object v && !(otherThread[0] instanceof Throwable)
                             && v != mainFirst && v != sharedSentinel);
 
+            // ---- W8 chunk 寫入閘：verify()/resolveMode() 純函式行為（不碰磁碟的可測核心）----
+            Class<?> cwg = Class.forName("zombie.mdc.ChunkWriteGuard", true, patched);
+            Method verifyM = cwg.getDeclaredMethod("verify", byte[].class, int.class);
+            verifyM.setAccessible(true);
+            Method modeM = cwg.getDeclaredMethod("resolveMode", String.class);
+            modeM.setAccessible(true);
+            // 依 42.20.2 格式手工組一個自洽 chunk buffer
+            java.nio.ByteBuffer tb = java.nio.ByteBuffer.allocate(256);
+            tb.put((byte) 0);
+            tb.putInt(249);
+            tb.putInt(0);      // len 佔位
+            tb.putLong(0L);    // crc 佔位
+            byte[] bodyBytes = new byte[64];
+            for (int i = 0; i < bodyBytes.length; i++) {
+                bodyBytes[i] = (byte) (i * 7 + 3);
+            }
+            tb.put(bodyBytes);
+            int tlen = tb.position();
+            java.util.zip.CRC32 tcrc = new java.util.zip.CRC32();
+            tcrc.update(tb.array(), 17, tlen - 17);
+            tb.position(5);
+            tb.putInt(tlen);
+            tb.putLong(tcrc.getValue());
+            byte[] tArr = tb.array();
+            failed += check("W8 verify：自洽 buffer → OK",
+                    (Integer) verifyM.invoke(null, tArr, tlen) == 0);
+            // A 組實案簽名：crc 欄位歸零（len 正確、body 完整）——必須被抓到
+            byte[] aSig = tArr.clone();
+            for (int i = 9; i < 17; i++) {
+                aSig[i] = 0;
+            }
+            failed += check("W8 verify：A 組簽名（crc=0、len 正確）→ CRC_MISMATCH",
+                    (Integer) verifyM.invoke(null, aSig, tlen) == 3);
+            // len 欄位竄改 → LEN_MISMATCH（等價 vanilla checkLength）
+            byte[] lSig = tArr.clone();
+            lSig[8] ^= 1;
+            failed += check("W8 verify：len 欄位不符 → LEN_MISMATCH",
+                    (Integer) verifyM.invoke(null, lSig, tlen) == 2);
+            // header-only／截斷寫入 → MALFORMED（len<=17 時空 body CRC=0 會與 crc 欄位 0 假相符，須先擋）
+            failed += check("W8 verify：len<=17 → MALFORMED（防空 body 假相符）",
+                    (Integer) verifyM.invoke(null, tArr, 17) == 1
+                    && (Integer) verifyM.invoke(null, tArr, 10) == 1);
+            failed += check("W8 resolveMode：null→enforce、0→off、2→observe、垃圾→enforce",
+                    (Integer) modeM.invoke(null, (Object) null) == 1
+                    && (Integer) modeM.invoke(null, "0") == 0
+                    && (Integer) modeM.invoke(null, "2") == 2
+                    && (Integer) modeM.invoke(null, "junk") == 1);
+
             // ---- W3 效能第三波行為 smoke（W3-2 已撤刀：microbenchmark 實測 memo 為淨劣化）----
             // W3-1 stagger：任意 onlineId（含負短整數極端）在任意連續 PERIOD(=3) 個 tick 內恰命中一次
             Class<?> throttle = Class.forName("zombie.mdc.ZombieAuthThrottle", true, patched);
@@ -880,6 +928,54 @@ public final class SmokeCheck {
         failed += check("W7 耦合鎖：tempVector2_2 類別內 getstatic 總數＝12 且手術前後一致",
                 vanillaReads == 12 && patchedReads == 12);
 
+        // ---- W8 chunk 寫入閘（IsoChunk.Save(Z) ×2＋ServerChunkLoader$SaveLoadedTask.save ×1）----
+        String w8IcCls = "zombie/iso/IsoChunk";
+        String cwgCls = "zombie/mdc/ChunkWriteGuard";
+        String swDesc = "(IILjava/nio/ByteBuffer;)V";
+        String sltCls = "zombie/network/ServerChunkLoader$SaveLoadedTask";
+        // vanilla 前提：兩個手術方法內的 SafeWrite 呼叫數與 checksum 互動形狀
+        MethodNode vSaveB = methodFromJar(jar, w8IcCls, "Save", "(Z)V");
+        failed += check("W8 vanilla 前提：IsoChunk.Save(Z) 內 SafeWrite x2、setChecksum x1",
+                countExactCalls(vSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 2
+                && countExactCalls(vSaveB, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum",
+                        "setChecksum", "(IIJ)V") == 1);
+        MethodNode vSlt = methodFromJar(jar, sltCls, "save", "()V");
+        failed += check("W8 vanilla 前提：SaveLoadedTask.save 內 SafeWrite x1、setChecksum x1（歸零重試假設的錨）",
+                countExactCalls(vSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
+                && countExactCalls(vSlt, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum",
+                        "setChecksum", "(IIJ)V") == 1);
+        // 全 jar census：SafeWrite 呼叫點恰 5 個（Save(Z) x2＋SaveLoadedTask x1＋
+        // ChunkSaveWorker x1＋WorldGenerate x1）。PZ 新增呼叫點＝出現閘門外的寫檔路徑＝建置失敗重新分析。
+        failed += check("W8 census：全 jar SafeWrite 呼叫點恰 5 個（新增即代表有未設閘的寫檔路徑）",
+                jarWideCallsiteCensus(jar, w8IcCls, "SafeWrite", swDesc) == 5);
+        // 排除論證的錨 1：ChunkSaveWorker 唯一入列點 AddHotSave 被 GameServer.server 閘住
+        MethodNode vIcmUpd = methodFromJar(jar, "zombie/iso/IsoChunkMap", "updateInternal", "()V");
+        failed += check("W8 排除前提：IsoChunkMap.updateInternal 有 AddHotSave x1 且讀 GameServer.server（伺服器不走 hot-save）",
+                countExactCalls(vIcmUpd, Opcodes.INVOKEVIRTUAL, "zombie/iso/ChunkSaveWorker",
+                        "AddHotSave", "(Lzombie/iso/IsoChunk;)V") == 1
+                && countFieldReads(vIcmUpd, "zombie/network/GameServer", "server") >= 1);
+        // 格式前提：helper 的固定 offset（5/9/17）與版本常數 249 綁定 Save(ByteBuffer,CRC32,Z)
+        MethodNode vSaveBuf = methodFromJar(jar, w8IcCls, "Save",
+                "(Ljava/nio/ByteBuffer;Ljava/util/zip/CRC32;Z)Ljava/nio/ByteBuffer;");
+        failed += check("W8 格式前提：Save(ByteBuffer) 內 249 恰 1、17 至少 1（helper 硬編 offset 的防漂移錨）",
+                countIntConst(vSaveBuf, 249) == 1 && countIntConst(vSaveBuf, 17) >= 1);
+        // 手術後：改道到位、原呼叫歸零
+        MethodNode pSaveB = method(distJava, w8IcCls, "Save", "(Z)V");
+        failed += check("W8 手術後：Save(Z) 改道 x2、原 SafeWrite 呼叫歸零",
+                countExactCalls(pSaveB, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 2
+                && countExactCalls(pSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
+        MethodNode pSlt = method(distJava, sltCls, "save", "()V");
+        failed += check("W8 手術後：SaveLoadedTask.save 改道 x1、原呼叫歸零",
+                countExactCalls(pSlt, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 1
+                && countExactCalls(pSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
+        // 負對照：SafeWrite 本體必須保持 vanilla（helper 委派回它——改道到它自己＝無限遞迴）
+        ClassNode pIcNode = classNode(distJava, w8IcCls);
+        boolean safeWriteClean = pIcNode.methods.stream()
+                .filter(m -> !m.name.equals("Save"))
+                .allMatch(m -> countExactCalls(m, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 0);
+        failed += check("W8 負對照：IsoChunk 除 Save(Z) 外零改道（SafeWrite 本體保持 vanilla、無遞迴）",
+                safeWriteClean);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -1273,6 +1369,29 @@ public final class SmokeCheck {
     static boolean checkGetTargetAlphaGuard(MethodNode m) {
         int[] want = { Opcodes.GETSTATIC, Opcodes.IFEQ, Opcodes.FCONST_1, Opcodes.FRETURN };
         return matchHead(m, want);
+    }
+
+    /**
+     * 全 jar 呼叫點普查：計數整個 jar 內對 owner.name:desc 的 INVOKESTATIC 呼叫。
+     * W8 用它把 SafeWrite 的呼叫點總數釘死——PZ 新增寫檔路徑＝出現閘門外的寫入＝建置失敗。
+     */
+    static int jarWideCallsiteCensus(Path jar, String owner, String name, String desc) throws Exception {
+        int count = 0;
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class") || !e.getName().startsWith("zombie/")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                for (MethodNode m : cn.methods) {
+                    count += countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc);
+                }
+            }
+        }
+        return count;
     }
 
     /**
