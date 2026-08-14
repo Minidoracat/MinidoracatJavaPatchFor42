@@ -71,6 +71,7 @@ $helperEntries = @(
     'zombie/mdc/ContainerCycleGuard$State.class',
     'zombie/mdc/ChunkLoadGuard.class',
     'zombie/mdc/ForwardVectorGuard.class',
+    'zombie/mdc/ChunkWriteGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {

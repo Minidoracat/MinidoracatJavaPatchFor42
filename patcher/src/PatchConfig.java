@@ -484,6 +484,40 @@ public final class PatchConfig {
         fwdFromIso.expectedHits = 2;
         patches.add(gameChr);
 
+        // ---- W8 chunk 寫入閘（2026-08-14；CRC-blam 家族 43 筆資料損失的止血＋蒐證；
+        //      docs/patches.md 2t）----
+        // 鑑識定案：43/43 筆 SANITY CHECK blam 的 log 值與磁碟檔逐位元組相符＝載入側無辜、
+        // 檔案是寫入時就壞的（A 組 16 筆 crc=0＋body 自洽＝被捕捉在 Save() 回填 len 與 crc
+        // 兩行之間；B 組 27 筆 header 屬於別份 body＝寫檔與重填撕裂）。機制未定罪——
+        // 兩個假說已證偽（載入側共用 static＝43/43 對帳排除；ChunkSaveWorker 池化 buffer＝
+        // hot-save 為 !GameServer.server 單機專屬），首嫌 ClientChunkRequest.Chunk 共用池
+        // 未逐行證實。故閘門設計為**不依賴根因**：全 jar 恰 5 個 SafeWrite 呼叫點
+        // （SmokeCheck census 釘死），伺服器實際可達的 3 個全部改道到快照→驗證→放行/擋下
+        // 的 helper；被擋的寫入跳過（磁碟保留上一版）＋stack 蒐證＋checksum 歸零自癒重試。
+        //
+        // 掛點選擇：必須在「進入 SafeWrite 之前」——它的 new FileOutputStream 建構當下就
+        // truncate 舊檔，內部攔截點來不及保住上一版。故 redirect 呼叫端而非 headCall 本體。
+        // 不涵蓋的 2 個呼叫點：ChunkSaveWorker.WriteQueuedSave（唯一入列點 AddHotSave 被
+        // !GameServer.server 閘死，SmokeCheck pin 該閘）、WorldGenerate（只寫首次生成
+        // chunk、method-local buffer，寫壞也沒有玩家資料可失）。
+        //
+        // W4-1 交互：上線後 CRC-blam 由 0.30 升至 0.80 筆/重啟（2.7 倍，樣本 10 次重啟），
+        // W4-1 是否為放大器未定案；本閘上線後壞寫入進不了磁碟，且 BLOCKED log 的 stack
+        // 會直接指認寫入路徑——比關掉 W4-1 對照更快得到答案（使用者決策：W4-1 照跑）。
+        Patcher.MethodOps chunkSaveB = isoChunk.method("Save", "(Z)V");
+        chunkSaveB.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/iso/IsoChunk", "SafeWrite", "(IILjava/nio/ByteBuffer;)V",
+                "zombie/mdc/ChunkWriteGuard", "safeWrite"));
+        chunkSaveB.expectedHits = 2;   // 單機分支＋伺服器 checksum-diff 分支（伺服器只走後者，前者改道無害）
+
+        Patcher.ClassPatch sclSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveLoadedTask");
+        Patcher.MethodOps sclSaveM = sclSave.method("save", "()V");
+        sclSaveM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/iso/IsoChunk", "SafeWrite", "(IILjava/nio/ByteBuffer;)V",
+                "zombie/mdc/ChunkWriteGuard", "safeWrite"));
+        sclSaveM.expectedHits = 1;
+        patches.add(sclSave);
+
         return patches;
     }
 
