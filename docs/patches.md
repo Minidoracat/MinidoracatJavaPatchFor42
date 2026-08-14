@@ -1409,6 +1409,67 @@ setChecksum 計數＋**setChecksum 先於 SafeWrite 的順序鎖**、census 總�
 **歷史損失的還原路線**（另案執行）：A 組 16 筆改寫 header CRC 後即可還原（Player-B 案優先）；
 B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還原一律在閘門上線後進行——
 否則還原完可能再被同一缺陷吃掉。
+（2026-08-14 18:11 已執行：A 組 16/16 全數還原成功，含 Player-B 基地 1009,1428。）
+
+## 2u. 存檔管線隔離（W9，server）
+
+**根治刀**。W8 閘上線首晚攔下 8 筆損毀寫入（零資料損失），現行犯證據把根因從
+「嫌疑」推進到「定罪」：
+
+- **8/8 呼叫堆疊一致**：`SaveChunkThread → SaveLoadedTask.save`（`IsoChunk.Save(Z)`
+  直接路徑零事件）；
+- **8/8 簽名一致**：len 欄位正確、CRC 欄位＝0（3 筆）或垃圾值（5 筆）——與歷史
+  43 筆（A 組 16＋B 組 27）同款兩簽名；
+- **機制**（bytecode 實證）：`Save(ByteBuffer,CRC32,Z)` 的 header 指紋用**呼叫者傳入的
+  CRC32** 計算；序列化入口 `SaveChunkThread.addLoadedJob` 傳入的是**單一共用實例**
+  `SaveChunkThread.crc32`。兩執行緒同時序列化：對方 `reset()` 插在我 `update` 與
+  `getValue` 之間 → 指紋 **0**（A 組）；`update` 交錯 → **垃圾**（B 組）。body/len
+  由各自執行緒完整寫入 → **len 恆正確**——與 8/8 觀測相容的唯一機制（buffer 竊用
+  假說解釋不了 len 恆正確，且 unpack 雙重歸還路徑經全 jar 普查證實為死碼）。
+- **並行序列化實證**：`QueuedSaveAll` 走 `GameServer$1`（shutdown hook 執行緒），與
+  主迴圈的 `ServerCell.update → saveChunk` 同時進 `addLoadedJob`——歷史 blam 集中在
+  重啟窗口（0.8 筆/重啟）由此解釋。運行中爆發（21:50、22:15 兩波與 `growing
+  ByteBuffer` 擴容事件同叢集）的第二執行緒未逐一指認；本刀不依賴指認——任何並行
+  呼叫者都被 ThreadLocal 隔離。
+- **第二處同款競態**：`SaveLoadedTask.save()` 的去重比對四連讀外層
+  `ServerChunkLoader.crcSave` 共用實例，而 save() 可在 SaveChunkThread 與
+  LoaderThread（經 `saveNow`——載入前沖存檔，`LoaderThread.run` 偏移 214 實證存活，
+  非死碼）並行——污染 ChunkChecksum（去重誤判＝陳舊跳寫；客戶端校驗錯亂＝重送，
+  疑與黑邊案「crc 恆 0」同根）。
+
+**三刀**（helper：`zombie/mdc/ChunkSaveIsolation`，全部只動存檔管線）：
+
+1. `addLoadedJob` 的 GETFIELD `crc32` → `headerCrc`（ThreadLocal）——指紋競態根絕；
+2. `SaveLoadedTask.save()` 的 GETFIELD `crcSave` ×4 → `dedupCrc`（ThreadLocal）——
+   去重競態根絕；
+3. `getChunk`／`getByteBuffer`／`releaseChunk`（addLoadedJob 租用＋例外歸還、
+   release() 歸還）→ 私有池——存檔管線徹底退出 `ClientChunkRequest` 的全域 static
+   共用池（`freeChunks` private static／`freeBuffers` **public** static，與 N 條
+   PlayerDownloadServer WorkerThread、RequestZipListPacket.parse 共用），恢復單一
+   所有權鏈；同時關閉 W8 的理論盲區（池雙發同一 buffer 時「完整重填成別塊 chunk
+   的自洽資料」可通過 CRC 驗證——私有化後此路徑物理上不存在）。
+
+私有池語意逐行鏡射 vanilla（retriesCount 重置、poll-or-allocate(16384)-else-clear、
+先還 buffer 再還殼並 null bb）；上限＝存檔佇列在途峰值，與 vanilla 同界。
+
+**驗證閉環**：W8 的 `flagged` 計數器是現成 A/B 儀表——本刀生效後 flagged 應歸零；
+不歸零＝機制另有分支，用 BLOCKED stack 續查。W8 不拆，永久保險絲。
+
+**Kill switch**：`-Dmdc.chunkSaveIsolation=0` 完全停用（helper 原樣委派回共用
+實例／共用池——off 路徑的 bytecode 就是 vanilla 呼叫，SmokeCheck 釘保真）。
+
+**驗證閘**（SmokeCheck 14 項）：行為 5（headerCrc 跨緒相異／dedupCrc 分族／機制錨
+——共用 CRC32 遭外部 reset→0、疊 update→垃圾的最小重演／私有池租還往返／隔離定義
+——全域池計數不變）＋結構 9（vanilla 前提三方法形狀、**耦合鎖**——兩顆 CRC32 的
+讀者清冊釘死、**序列化者清冊**——全 jar SaveLoadedChunk 呼叫點恰 2、手術後
+**swap 緊鄰性**（GETFIELD 之後必須緊接 helper）＋改道歸零、SaveChunkThread 負對照、
+helper off 路徑保真）。
+
+**未涵蓋（誠實界定）**：`PlayerDownloadServer.update` 的發送序列化仍用共用 buffer 池
+（其 CRC32 為 per-connection 且僅主緒＝分析上安全）——發送方向若有池污染，客戶端
+CRC 檢查會擋下並重新請求，不落盤；黑邊／重送觀測歸 W4-1 戰場。`saveNow` 的佇列
+重排（同 chunk 新舊存檔順序可顛倒）與 `run()` 例外路徑的 task 洩漏是兩個獨立的
+vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
 ## 3. 部署後驗證清單
 
@@ -1478,7 +1539,20 @@ B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還�
    (d) `flagged` 持續為 0 且 blam/ 不再新增 CRC 類目錄 = 缺陷可能與 W4-1 或特定時序相關，
    繼續觀察；`flagged>0` 且 blam/ 不再新增 = 閘門正在攔截現行損毀。
    (e) **anomalies 增長**＝守衛遇到非預期 buffer 狀態走了 fail-open，需調查。
-13. **PZ 更新**（順序不可調換）：
+13. **W9 存檔管線隔離驗證**（2u）：
+   (a) 開機健檢無 linkage 錯誤（改道方法跑在主迴圈與存檔執行緒上，出現即立刻 uninstall）。
+   (b) **首次生效橫幅**：`grep 'ChunkSaveIsolation' <DebugLog>` 應出現「首次生效」一行
+   （第一次 chunk 存檔序列化時印）——證明改道真的被走到。
+   (c) **主驗證訊號＝W8 flagged 歸零**：`ChunkWriteGuard` 心跳應變成 `passed=N flagged=0`
+   長期維持（修前基線：首晚 2.5 小時 8 筆）。**尤其盯重啟窗口**——關機存檔
+   （QueuedSaveAll on shutdown hook）正是定罪的競態場景，連續數次重啟 flagged 仍為 0
+   才算根治確認。flagged>0＝機制另有分支，取該筆 BLOCKED stack 續查。
+   (d) blam/ 不再新增任何 CRC 類目錄（`SANITY CHECK FAIL` 歸零）。
+   (e) 行為不變：chunk 正常存讀、玩家離開區域後重回內容不回退、客戶端 chunk 下載正常
+   （發送路徑一概未動）。
+   (f) kill switch 演練過（build 步驟 7 的 off 路徑保真閘）；線上如需停用：
+   JAVA_OPTS 加 `-Dmdc.chunkSaveIsolation=0` 後重啟。
+14. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
       本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。

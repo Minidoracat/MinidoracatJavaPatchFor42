@@ -515,8 +515,55 @@ public final class PatchConfig {
         sclSaveM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/iso/IsoChunk", "SafeWrite", "(IILjava/nio/ByteBuffer;)V",
                 "zombie/mdc/ChunkWriteGuard", "safeWrite"));
-        sclSaveM.expectedHits = 1;
+        // ---- W9 之二（同方法追加）：去重 CRC 執行緒隔離 ----
+        // save() 可在 SaveChunkThread（run）與 LoaderThread（saveNow 沖存檔）並行執行，
+        // 四連讀外層 ServerChunkLoader.crcSave 共用實例（reset/update/getValue×2）——
+        // 競態污染 ChunkChecksum（去重誤判＝陳舊跳寫；客戶端校驗錯亂＝重送）。
+        // 四個 GETFIELD 全部同形替換為執行緒私有實例（docs/patches.md 2u）。
+        sclSaveM.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETFIELD,
+                "zombie/network/ServerChunkLoader", "crcSave", "Ljava/util/zip/CRC32;",
+                "zombie/mdc/ChunkSaveIsolation", "dedupCrc");
+        sclSaveM.expectedHits = 5;   // SafeWrite 改道 ×1 ＋ crcSave 同形替換 ×4
+        // W9 之三（後半）：release() 歸還改道私有池（與 addLoadedJob 的租用配對）
+        Patcher.MethodOps sclRelM = sclSave.method("release", "()V");
+        sclRelM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/ClientChunkRequest", "releaseChunk",
+                "(Lzombie/network/ClientChunkRequest$Chunk;)V",
+                "zombie/mdc/ChunkSaveIsolation", "releaseChunk"));
+        sclRelM.expectedHits = 1;
         patches.add(sclSave);
+
+        // ---- W9 存檔管線隔離（2026-08-14；CRC-blam 家族根治刀；docs/patches.md 2u）----
+        // 定罪：W8 首晚 8 筆 BLOCKED 全走 SaveLoadedTask 路徑、簽名全為「len 正確＋crc 0/垃圾」
+        // ——唯一相容機制是 header 指紋競態：addLoadedJob 傳給 Save() 的 SaveChunkThread.crc32
+        // 是單一共用實例，而 addLoadedJob 可在主迴圈（ServerCell.update→saveChunk）與
+        // GameServer$1（shutdown hook 的 QueuedSaveAll）並行執行。對方 reset() 插在我
+        // update 與 getValue 之間 → 指紋 0（A 組 16 筆歷史簽名）；update 交錯 → 垃圾
+        // （B 組 27 筆）。body/len 各自完整 → len 恆正確（8/8 觀測鐵律）。
+        // 之一：GETFIELD crc32 → ThreadLocal（根絕指紋競態）。
+        // 之三（前半）：getChunk/getByteBuffer/releaseChunk 改道私有池——存檔管線退出
+        // ClientChunkRequest 全域 static 共用池（與 N 條發送 WorkerThread 共用），恢復
+        // 單一所有權鏈，同時關閉 W8 閘「完整重填自洽資料」的理論盲區。
+        // 驗證閉環：W8 flagged 計數器應歸零；kill switch -Dmdc.chunkSaveIsolation=0。
+        Patcher.ClassPatch sctIso = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveChunkThread");
+        Patcher.MethodOps sctAddM = sctIso.method("addLoadedJob", "(Lzombie/iso/IsoChunk;)V");
+        sctAddM.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETFIELD,
+                "zombie/network/ServerChunkLoader$SaveChunkThread", "crc32", "Ljava/util/zip/CRC32;",
+                "zombie/mdc/ChunkSaveIsolation", "headerCrc");
+        sctAddM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/ClientChunkRequest", "getChunk",
+                "()Lzombie/network/ClientChunkRequest$Chunk;",
+                "zombie/mdc/ChunkSaveIsolation", "getChunk"));
+        sctAddM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/ClientChunkRequest", "getByteBuffer",
+                "(Lzombie/network/ClientChunkRequest$Chunk;)V",
+                "zombie/mdc/ChunkSaveIsolation", "getByteBuffer"));
+        sctAddM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/ClientChunkRequest", "releaseChunk",
+                "(Lzombie/network/ClientChunkRequest$Chunk;)V",
+                "zombie/mdc/ChunkSaveIsolation", "releaseChunk"));
+        sctAddM.expectedHits = 4;   // crc32 同形替換 ×1 ＋ 租用/配 buffer/例外歸還改道 ×3
+        patches.add(sctIso);
 
         return patches;
     }
