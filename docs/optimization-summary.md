@@ -30,7 +30,7 @@
 | 防資損 | W7 朝向暫存執行緒隔離 | `IsoGameCharacter` | 2 | ForwardVectorGuard | 共用 static `tempVector2_2` 競態致 chunk 載入失敗被 Blam 抹除，換執行緒私有替身 |
 | 防資損 | W8 chunk 寫入閘 | `IsoChunk`（Save）＋`ServerChunkLoader$SaveLoadedTask`（save） | 2+1 | ChunkWriteGuard | 寫入前快照驗 len/CRC，損毀就擋下（磁碟保留上一版）＋蒐證＋checksum 歸零重試 |
 | 防資損 | W9 存檔管線隔離 | `ServerChunkLoader$SaveChunkThread`（addLoadedJob）＋`$SaveLoadedTask`（save／release） | 4+4+1 | ChunkSaveIsolation | 共用 CRC32 與全域 chunk 池的存檔競態根治（CRC-blam 家族根因） |
-| 抑噪 | 已知噪音樣式過濾 ×8 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding） | 1+1+1+9+1+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條佔 console 34.4%（PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
+| 抑噪 | 已知噪音樣式過濾 ×8 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding） | 1+1+1+9+1+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條抑噪前佔 console **45.5%**（15.41h／8 session 實測 164,176／360,669 行；PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
 | 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
 
@@ -185,7 +185,8 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
   PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding）：只攔
   已知噪音樣式，未知警告與**反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的
   訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的第 8 項是
-  最大單一噪音源：`Send Toxic Building at [ … ]` 佔 console **34.4%**（9512/27682 行／57 分鐘），
+  最大單一噪音源：`Send Toxic Building at [ … ]` 抑噪前佔 console **45.5%**（15.41 小時／8 session
+  實測 164,176／360,669 行，逐 session 35.5%–80.8%），
   來源是 PSR 的 `PBSystem.suppressToxic` 掛 `Events.EveryOneMinute`（Day Length=1h → 每 2.5
   真實秒）逐 powerbank 無條件 `setToxic`，而 `IsoBuilding.setToxic` 的 putfield 沒有變更比對。
   **只攔 log、不動封包**——封包本身是 client 端 toxic 狀態的來源，攔它會把玩家鎖在毒氣室。
@@ -226,7 +227,8 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 8/13（W4 上線＋版本指紋＋兩起事故） | 黑邊根因修復上線：W4-1 chunk 供給併包（server）＋W4-2 請求逾時 8s→15s（client），供給從約 30 chunk/s 解放、livelock 的自我維持條件被拆掉；同日 patch 版本指紋（建置期生成 `zombie.mdc.PatchInfo`，log 印側別/版本/建置時間/jar 同源指紋）落地。事故：19:55 Player-A 雞舍所在 chunk 因 `tempVector2_2` 競態載入失敗被 Blam 抹除（46,142 → 8,549 bytes）；21:31 容器環 `StackOverflowError` 全服假死 13 分鐘（graceful `quit` 收不進去、看門狗強制重啟）→ W5 容器環守衛當晚落地 |
 | 8/14（一起事故＋四刀） | 01:34 `Entity is already registered` 活鎖 **凍結 114 分鐘**（frame 停在 f:46186，靠排程 mod 更新重啟才結束）→ W6 捕手；同日 CRC-blam 家族鑑識定案（43 筆、~143KB 損失，證明寫入側有罪）→ W7 朝向暫存隔離＋W8 寫入閘上線，W8 首晚攔下 8 筆損毀寫入、零資料損失；這 8 筆現行犯把根因從「嫌疑」推進到「定罪」（共用 `CRC32` 指紋競態）→ 同日 W9 三刀根治，CRC-blam 家族收口 |
 | 8/15（PSR 回歸回報） | 回報 PSR v1.71 的 CPU 回歸（`docs/report/psr-1.71-server-fps-report.md`）：23 人時 8.8→6.4 fps 且持續下滑、`coverage REMOVE` 1103 行/2.5h（`complete=true` 僅 11/1067）、`Server is too busy` 12 次、12 份 jstack 指向 87,035 squares 的 per-square `RecalcAllWithNeighbours`；我方以 `ChargeFreq=2` 暫時止血 |
-| 8/16（巡檢實測＋第 8 把抑噪刀） | 約 **63 人在線**、主迴圈 **9.36–10.10 fps**、**所有 patch 計數器 anomalies=0**。PSR 作者已在 **v1.72** 修掉我方回報的回歸（刪除 `psrSweepRect` 內的 per-square `RecalcAllWithNeighbours`，並在註解引用我方數據）：`coverage REMOVE` **1103 行/2.5h → 20 行/46min**（`complete=true` 從 11/1067 變成 5/8）、`Server is too busy` **12 次 → 0 次**。同日巡檢另抓到最大單一噪音源——`Send Toxic Building at [ … ]` 佔 console **34.4%**（9512/27682 行／57 分鐘）→ 新增 `GameServer.sendToxicBuilding` 抑噪（第 8 項，只攔 log 不動封包）。`ChargeFreq=2` 尚未回復為 1；PSR 殘留三項（連鎖 ADD sweep、同 pass 重複消耗重試額度、`suppressToxic` 缺 per-building 去重）待回報 |
+| 8/16（巡檢實測＋第 8 把抑噪刀） | 約 **63 人在線**、主迴圈 **9.36–10.10 fps**、**所有 patch 計數器 anomalies=0**。PSR 作者已在 **v1.72** 修掉我方回報的回歸（刪除 `psrSweepRect` 內的 per-square `RecalcAllWithNeighbours`，並在註解引用我方數據）：`coverage REMOVE` **1103 行/2.5h → 20 行/46min**（`complete=true` 從 11/1067 變成 5/8）、`Server is too busy` **12 次 → 0 次**。同日巡檢另抓到最大單一噪音源——`Send Toxic Building at [ … ]`（當時單一時間窗估 34.4%／9512 行；**8/17 以 15.41 小時 8 session 重算為 45.5%／164,176 行**）→ 新增 `GameServer.sendToxicBuilding` 抑噪（第 8 項，只攔 log 不動封包）。`ChargeFreq=2` 尚未回復為 1；PSR 殘留項待回報（8/17 重寫為四項） |
+| 8/17（部署生效＋PSR 1.72 對照＋記憶化定案） | 兩刀於 **01:28** 重啟生效（`PatchInfo built=00:16` → 部署後第一次排程重啟；`01-28`／`04-04`／`04-53` 三 session 的 toxic 皆為 0）：`Send Toxic Building` 10,654 行/h → **0**，其餘 Multiplayer 訊息照常；48 個 loose class 在位、SHA 對帳 bad=0。PSR v1.72 的 14.12 小時／8 session 對照：REMOVE **107.7/h → 11.5/h**（平均 **9.4×**，per-session 4.7×–29×）、fps **9.93–10.02 平坦 3.5h**、`too busy` 12 次 → **1 次**（該次前 10 幀無 PSR 行＝另有成因）。殘留四項寫成 `docs/report/psr-1.72-followup.md`。ChunkPacker `overrunTicks` 觀察點結案（`overrunTicks/calls` 恆定 0.14–0.15%＝預算閘正常累計）。**食材重量記憶化實測定案不啟用 `on`**：命中率 99.997% 但呼叫速率僅 328–732/s、單次 2.1µs ⇒ 上限 0.11% 主迴圈（≈0.011 fps），不足以承擔 RNG 序列位移＋首次執行共用實例的風險 |
 
 誠實邊界：主迴圈是單執行緒，Amdahl 定律決定了沒有銀彈——每一波都是「低谷變淺、
 變稀」而非平均 FPS 飆升；80+ 人的瀰漫負載（LOS thread 飽和、join chunk 同步、

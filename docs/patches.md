@@ -1485,8 +1485,10 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
 **根因**：MOD PSR（Plysken Solar Revolution）在每個遊戲分鐘（~2.5 真實秒）無條件呼叫
 `IsoBuilding.setToxic(false)` 遍歷所有 powerbank，導致建築毒氣狀態隨機刷新。server 的
-`GameServer.sendToxicBuilding` 每次變動都廣播給全部 63 人，正式服單場 57 分鐘 9512 行毒氣訊息
-等於全 console 27682 行的 34.4%，淹沒真正的錯誤。
+`GameServer.sendToxicBuilding` 每次變動都廣播給全部 63 人。抑噪前 15.41 小時／8 session 實測：
+**164,176 行毒氣訊息／全 console 360,669 行 ＝ 45.5%**（逐 session 35.5%–80.8%、17–25 個相異座標），
+淹沒真正的錯誤。**按 `(frame, building, value)` 去重只能消除 19.8%**——`(frame,building)` 組合
+96,451 個只出現一次、30,982 個兩次，主體是同一 building 每 2.5 秒跨 frame 反覆送，不是同 frame 重複。
 
 **為什麼只攔 log、不動封包**：client 的 `WorldRegionToMetaGrid.lambda$updateSquares$0` 自己計算
 「該室內有 activated generator」並本地標記 `toxic=true`，**不通知 server**。若 server 端做去重來
@@ -1704,7 +1706,8 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
    grep 'server patch' "$LOG"                    # 指紋必須是新版，否則下面的數字沒有意義
    grep -c 'Send Toxic Building' "$LOG"          # 主驗證訊號：應為 0
    ```
-   修前基線：2026-08-17 00:12 那個 session（舊版 `5f5f466`）在 ~1 小時內累積 **11945 行**。
+   修前基線：`2026-08-17_00-12` session（舊版 `5f5f466`）1.25 小時內 **18,117 行**（≈14,494/h）；
+   抑噪前 15.41 小時平均 **10,654/h**。
    (c) 同期其餘 Multiplayer 頻道訊息（`Receive`／`Network`／`Packets` 等）必須照常輸出——
    若一起消失，代表攔錯了（`logType` 只比對 `Send Toxic Building at [ ` 前綴）。
    (d) 廣播封包正常：玩家在毒氣區域仍被扣血、生命值介面正確更新，只是 server 端 log 安靜。
@@ -1724,13 +1727,25 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
       - `misses` = 首見且可快取的型別數（開局成長快，型別集合穩定後放緩）
       - `uncacheable` = null 或被五道門擋下的呼叫。這些在 on 模式下**每次仍會重新建構**，
         故不計入命中率；佔比高就代表這把刀的天花板低
-      - `vanillaNsAvg` = 原版單次建構耗時（乘上呼叫頻率才是 on 能省下的量級）
+      - `vanillaNsAvg` = 原版單次建構耗時。**單看它沒有意義，必須乘上呼叫速率**
+        （由相鄰週期行的 `Δattempts / Δt` 求得）才是 on 能省下的量級——2026-08-17 就是漏了
+        這一項才把一把 0.11% 的刀誤判為主要優化機會
       - `anomalies` ≠ 0 或 `overflow` ≠ 0 ＝ 異常，需調查
       - `types`（observe 模式）＝ SEEN 的型別數，等於 `misses`（只有首見且可快取才寫入）
    (d) 行為不變：背包容量計算正常、玩家負重值正確、背包滿時拒絕插入照常工作。
-   (e) **`on` 模式未啟用**（一期設計）：本版本不在命令列指定 `-Dmdc.itemWeightMemo=on`；產生的
-   log 應為 `mode=observe`。啟用條件是 `hits/(hits+misses)` 明顯偏高、`uncacheable` 佔比不高、
-   且 `vanillaNsAvg` × 呼叫頻率確實佔得到 tick 預算——並須經 review 通過才能上線。
+   (e) **`on` 模式已實測否決，不再排程啟用**（2026-08-17 定案，見 2w 的「實測結論」段）：
+   命令列不得指定 `-Dmdc.itemWeightMemo=on`，產生的 log 應恆為 `mode=observe`。
+   14 小時／4 session 實測：命中率 99.997%、`uncacheable=0`、型別集合 25–54，看似漂亮，
+   但呼叫速率僅 **328–732 calls/s**、單次建構約 **2.1 µs** ⇒ 收益上限 ≈ 1.09 ms/s
+   ≈ 主迴圈 **0.11%** ≈ 0.011 fps。而 `on` 的代價是全域 RNG 序列位移＋**首次真正執行共用實例
+   路徑**（observe 不走 memo 命中分支，故既有 `anomalies=0` 完全沒演練過共用實例）。
+   **風險與 0.11% 不成比例，維持 observe。**
+   ⚠️ 本項不是「等條件達成再開」——條件已量測且**未達標**。若日後要重啟評估，必須先有
+   新的呼叫速率量測（例如遊戲更新改了 `Moodle.Update` 的走訪方式），單憑命中率不足以翻案；
+   且 `on` 期**無法自帶對照組**（`vanillaNs` 只在 miss 走 factory 時累加，on 模式 miss ≈ 型別數
+   且須撞上 `(attempts & TIMING_MASK)==0` 才取樣 ⇒ `vanillaSamples` 幾乎必為 0），
+   對照基準只能用 observe 期歷史值 2.1 µs 比 `on` 期 `memoNsAvg`。
+   下次重建若確認仍無收益，可考慮整刀退役（redirect＋helper 一併移除）。
 
 16. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
