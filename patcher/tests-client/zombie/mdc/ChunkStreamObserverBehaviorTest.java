@@ -20,8 +20,9 @@ public final class ChunkStreamObserverBehaviorTest {
         reflectionOffCountersOnly();
         notReadyIndependentBaseline();
         notReadyOnlyPeriodicActivity();
+        productionWiringOrder();
         System.out.println("chunk-stream OK  STALL 雙基準/節流、periodic、閒置不假報、斷檔重置、"
-                + "ChunkNotReady 獨立基準/分型、notReady-only periodic 全數通過");
+                + "ChunkNotReady 獨立基準/分型、notReady-only periodic、production 接線全數通過");
     }
 
     private static String decide(long nowNs, int pending, int pending1, int reqQ1, boolean largeArea) {
@@ -86,6 +87,24 @@ public final class ChunkStreamObserverBehaviorTest {
         String line = decide(61 * S, 0, 0, 0, false);       // 無 outstanding、僅 notReady 活動
         require(line != null && line.contains("periodic") && line.contains(" notReady=1"),
                 "notReady-only 活動仍出 periodic 行：" + line);
+    }
+
+    /**
+     * production 接線覆蓋（外部 codex post-fix review）：經 dispatchDecide 走與
+     * onUpdateMain 相同的傳參——交換 lastReceiveNs/lastNotReadyNs 的接線突變體
+     * 會讓 noReceive=1s<30s 不 STALL 或分型值錯，此案即炸。
+     */
+    private static void productionWiringOrder() {
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);       // payload 基準=0
+        ChunkStreamObserver.primeNotReadyForTest(39 * S);  // notReady 基準=39s
+        require(ChunkStreamObserver.dispatchDecide(1 * S, 3, 1, 0, 0, 0, false, 0, 0) == null,
+                "上升沿起算（production 接線）");
+        String line = ChunkStreamObserver.dispatchDecide(40 * S, 3, 1, 0, 0, 0, false, 0, 0);
+        require(line != null && line.contains("STALL")
+                        && line.contains("noReceiveMs=40000") && line.contains("notReadyAgoMs=1000"),
+                "production 接線：兩基準各就各位（交換即不 STALL 或值錯）：" + line);
     }
 
     /** 完全無活動（主選單/單機）：永不出行。 */

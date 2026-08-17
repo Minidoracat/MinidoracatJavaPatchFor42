@@ -42,6 +42,19 @@ public final class TexturePipelineGuardBehaviorTest {
                 && readLong("patchedStallSamples") == 0L);
         failed += check("超標區間起點已記錄", readLong("aboveVanillaSinceNs") != 0L);
 
+        // ---- 真入口對照（production 接線）：同一 60MB+ 真水位，兩入口 effective 門檻不同
+        // ——鎖住「LowMem 入口誤接 4GB」的突變體（外部 codex post-fix review 抓到的缺口）
+        long vb = readLong("vanillaStallSamples");
+        long pb = readLong("patchedStallSamples");
+        TexturePipelineGuard.bytesAllocatedObservedLowMem();
+        failed += check("真入口 lowmem：65MB 計 patched（effective=50MB）",
+                readLong("vanillaStallSamples") == vb + 1
+                && readLong("patchedStallSamples") == pb + 1);
+        TexturePipelineGuard.bytesAllocatedObserved();
+        failed += check("真入口 standard：65MB 不計 patched（effective=4GB）",
+                readLong("vanillaStallSamples") == vb + 2
+                && readLong("patchedStallSamples") == pb + 1);
+
         small.dispose();
         big.dispose();
         failed += check("全部 dispose 後水位歸零",
@@ -71,27 +84,28 @@ public final class TexturePipelineGuardBehaviorTest {
                 && line.contains("floorBytes=" + 5L * MB)
                 && readLong("floorWindowBytes") == 6L * MB);
 
+        long vb2 = readLong("vanillaStallSamples");
+        long pb2 = readLong("patchedStallSamples");
         setLong("lastStallLogNs", now - 6_000_000_000L);
         setLong("lastPeriodicLogNs", now - 61_000_000_000L);
         line = obs(60L * MB);
         failed += check("stall 行優先於 hwm/periodic 且 periodic tick 仍重置 floor 窗",
                 line != null && line.contains("aboveVanillaMs=")
-                && line.contains("vanillaStallSamples=2")
+                && line.contains("vanillaStallSamples=" + (vb2 + 1))
                 && !line.contains("periodic")
                 && readLong("floorWindowBytes") == 60L * MB);
 
         obs(5L * 1024L * MB);
         failed += check("合成越過 4GB：vanilla 與 patched（標準 effective 門檻）計數都遞增",
-                readLong("vanillaStallSamples") == 3L
-                && readLong("patchedStallSamples") == 1L);
+                readLong("vanillaStallSamples") == vb2 + 2
+                && readLong("patchedStallSamples") == pb2 + 1);
 
-        // ---- lowmem 對照：同一水位、effective 門檻＝50MB → patched 計數也遞增 ----
-        // （effective 門檻烘進入口而非版本字串——lowmem 包的 stall 分類不說謊）
+        // ---- lowmem 對照（合成路徑）：同一水位、effective 門檻＝50MB → patched 計數也遞增
         setLong("lastStallLogNs", System.nanoTime());
         obsLow(60L * MB);
         failed += check("lowmem 入口：50MB<bytes<4GB 也計 patched（effective=50MB）",
-                readLong("vanillaStallSamples") == 4L
-                && readLong("patchedStallSamples") == 2L);
+                readLong("vanillaStallSamples") == vb2 + 3
+                && readLong("patchedStallSamples") == pb2 + 2);
         long std = TexturePipelineGuard.bytesAllocatedObserved();
         long low = TexturePipelineGuard.bytesAllocatedObservedLowMem();
         failed += check("兩入口 passthrough 一致（真實水位 0）", std == 0L && low == 0L

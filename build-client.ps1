@@ -153,8 +153,31 @@ foreach ($bat in @('install', 'uninstall')) {
     # ASCII 無 BOM：cmd 對 BOM 開頭的 @echo off 會直接報錯
     [System.IO.File]::WriteAllText("$pkg\$bat.bat", $body, [System.Text.Encoding]::ASCII)
 }
-# 檔名一律 ASCII：Compress-Archive 對非 ASCII 檔名會寫出 OEM 亂碼 entry（實測）
-Copy-Item "$R\deploy-client\README-INSTALL.txt" $pkg -Force
+# README 依 variant 生成（template 置換；lowmem 的門檻/橫幅/建議段與 standard 相反，
+# 共用單一檔案會攜帶錯誤安裝指示——外部 codex post-fix review 抓到）
+$limitSection = if ($Variant -eq 'lowmem') {
+    "2.（低記憶體變體）**不放寬** 50MB 門檻（保持原版行為）——本包給 16GB 以下 RAM 的`n" +
+    "   電腦使用：4GB 天花板的一般記憶體（RAM）預算對這類機器過大。洩漏根治（第 1 點）`n" +
+    "   已讓水位可回收，50MB 門檻恢復「短暫等待」的原版設計語意。"
+} else {
+    "2.（保險）把遊戲貼圖載入管線的 50MB 記憶體門檻放寬到 4GB——原版超過 50MB 時`n" +
+    "   載入執行緒會無限等待；根治後水位應遠低於此，這層變成第二道保險。`n" +
+    "`n" +
+    "記憶體說明：放寬的是一般記憶體（RAM）的使用上限，不是顯示記憶體（VRAM）。`n" +
+    "原本會「卡住等待」的時刻改為「多用一些 RAM 繼續載入」，最壞情況可能比原版`n" +
+    "多用數 GB 的 RAM（給大量探索留的餘裕）。這是給受影響玩家的實驗版本，**建議`n" +
+    "32GB 以上 RAM 的電腦使用**；RAM 較小（16GB 以下）請改用 lowmem 版本。"
+}
+$effectiveLimit = if ($Variant -eq 'lowmem') { '52428800' } else { '4294967296' }
+$readme = (Get-Content -Raw "$R\deploy-client\README-INSTALL.txt.template") `
+    -replace '__GAME_VERSION__', $GAME_VERSION `
+    -replace '__PATCH_VERSION__', $PATCH_VERSION `
+    -replace '__PAYLOAD_COUNT__', $payload.Count `
+    -replace '__EFFECTIVE_LIMIT__', $effectiveLimit `
+    -replace '__LIMIT_SECTION__', $limitSection
+if ($readme -match '__[A-Z_]+__') { throw "README 模板還有未注入的 placeholder" }
+[System.IO.File]::WriteAllText("$pkg\README-INSTALL.txt", ($readme -replace "`r?`n", "`r`n"),
+    [System.Text.UTF8Encoding]::new($false))
 $zip = "$DIST\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION.zip"
 Get-ChildItem "$DIST\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
@@ -162,7 +185,8 @@ Compress-Archive -Path "$pkg\*" -DestinationPath $zip
 # 發布到 output\（gitignore）：zip＋未壓縮目錄一站式，舊版自動清掉避免混發
 $out = "$R\output"
 New-Item -ItemType Directory -Force $out | Out-Null
-Get-ChildItem "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Remove-Item "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION.zip" -ErrorAction SilentlyContinue
+Remove-Item -Recurse "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION" -ErrorAction SilentlyContinue
 Copy-Item $zip $out
 Copy-Item -Recurse $pkg "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION"
 Write-Host "完成：$zip"
