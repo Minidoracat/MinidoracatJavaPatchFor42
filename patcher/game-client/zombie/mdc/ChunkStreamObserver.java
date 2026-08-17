@@ -22,6 +22,9 @@ import zombie.iso.WorldStreamer;
  *   (a) requestingLargeArea 期間 pendingRequests1>20 會完全停送新請求（sendRequests
  *       頭部 gate）；(b) server 端 ClientChunkRequest.getRetryChunk 重試≥3 次回 null＝
  *       永久放棄該 requestNumber——兩者疊加＝pending 永遠清不掉、新請求全面停擺。
+ *       ⚠ 42.20.3 起假說 (b) 失效：server 重試機制整個刪除，未生成 chunk 改由
+ *       pending 機制＋ChunkNotReady 封包主動告知 client（docs/patches.md 2p 遷移記錄）；
+ *       本 helper 隨 v2.x client 包於 42.20.3 全面失效，重建前須逐錨點重驗。
  *
  * 執行緒模型（codex 對抗審查修正）：receiveChunkPart/receiveNotRequired 由
  * **UdpEngine 網路執行緒**（經 GameClient.addIncoming）呼叫，updateMain 在主執行緒

@@ -243,10 +243,13 @@ public final class SmokeCheck {
             long anchorGarbage = anchor.getValue();
             failed += check("W9 機制錨：共用 CRC32 遭外部 reset→0（A 組簽名）、遭疊 update→垃圾（B 組簽名）",
                     anchorZero == 0L && anchorGarbage != anchorCorrect && anchorCorrect != 0L);
-            // 私有池行為：租→還→再租重用同殼同 buffer、歸還後 bb=null，
+            // 私有池行為：殼每次全新（不入池）、buffer 歸還後重用、release 後 bb=null，
             // 且全程不動 ClientChunkRequest 全域池（隔離的定義本身）。
-            // 42.20.3 起 vanilla 刪除重試機制（Chunk.retriesCount／MAX_CHUNK_SEND_TRIES／
-            // getRetryChunk 全移除），fresh shell 的欄位預設值等價命題只剩 bb=null。
+            // 42.20.3 起 vanilla 刪除整個重試機制（Chunk.retriesCount／MAX_CHUNK_SEND_TRIES／
+            // getRetryChunk 移除），且 getChunk 不再重置任何欄位（池回收殼帶舊值直接出租）。
+            // 零值新殼安全的真正依據不是「欄位預設值＝vanilla 重置後狀態」，而是消費端
+            // 先寫後讀：addLoadedJob 使用前寫 wx/wy、getByteBuffer 指派 bb，存檔路徑只讀
+            // wx/wy/bb——該依據由下方 W9 vanilla 前提的 PUTFIELD census 釘死。
             Class<?> ccrClsR = Class.forName("zombie.network.ClientChunkRequest", true, patched);
             Class<?> chunkClsR = Class.forName("zombie.network.ClientChunkRequest$Chunk", true, patched);
             Method gcM = csi.getMethod("getChunk", ccrClsR);
@@ -265,12 +268,13 @@ public final class SmokeCheck {
             rcM.invoke(null, new Object[]{null, pc1});
             boolean bbNulled = bbField.get(pc1) == null;
             Object pc2 = gcM.invoke(null, new Object[]{null});
+            boolean freshBbNull = bbField.get(pc2) == null;   // 新殼 bb 必為欄位預設 null（在 getByteBuffer 指派前探測）
             gbM.invoke(null, new Object[]{null, pc2});
             // codex 對抗審查修正：殼不入池（fresh shell）——vanilla update() 的無同步
             // savedChunks 可雙重 release，入池殼會被二次出租；buffer 則重用
-            failed += check("W9 私有池：殼每次全新（不入池）、buffer 重用、歸還 null bb",
+            failed += check("W9 私有池：殼每次全新（不入池）、新殼 bb 預設 null、buffer 重用、歸還 null bb",
                     pb1 != null && bbNulled && pc2 != pc1
-                    && bbField.get(pc2) == pb1);
+                    && freshBbNull && bbField.get(pc2) == pb1);
             failed += check("W9 隔離定義：私有池全程往返後 ClientChunkRequest 全域池計數不變",
                     ((java.util.Collection<?>) fcField.get(null)).size() == fcBefore
                     && ((java.util.Collection<?>) fbField.get(null)).size() == fbBefore);
@@ -867,9 +871,12 @@ public final class SmokeCheck {
                 && countExactCalls(vPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
                         "removeOlderDuplicateRequests", "()V") == 1
                 && countExactCalls(vPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
-        // **掛點必須在 ready 閘內**：update() 頭部（閘外）會與 WorkerThread.sendArray 同時
-        // 改 ccrWaiting。以下兩條把「掛在 removeOlderDuplicateRequests、且 update() 內零 packer
-        // 呼叫」鎖進建置期——重打包導致掛點漂移會建置失敗而非靜默回到 race。
+        // **掛點必須在 ready 閘內**：update() 頭部（閘外）落在 vanilla 唯一互斥機制之外。
+        // 42.20.2 當時 WorkerThread.sendArray 會把 ccrForRetries 掛回 ccrWaiting＝閘外插入
+        // 有雙重 releaseChunk 風險；42.20.3 起重試機制刪除、worker 改走 queuedByWorker
+        // concurrent queue 不再寫 ccrWaiting，互斥前提更寬鬆，掛點維持不動。以下兩條把
+        // 「掛在 removeOlderDuplicateRequests、且 update() 內零 packer 呼叫」鎖進建置期
+        // ——重打包導致掛點漂移會建置失敗而非靜默回到 race。
         MethodNode pPdsUpdate = method(distJava, pdsCls, "update", "()V");
         MethodNode pPdsDedupe = method(distJava, pdsCls, "removeOlderDuplicateRequests", "()V");
         failed += check("W4-1 掛點在 ready 閘內（dedupe 頭部全序 aload_0→packQueue，且 update 內零 packer 呼叫）",
@@ -1130,6 +1137,36 @@ public final class SmokeCheck {
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
+        // 零值新殼安全的機械依據（42.20.3 起 vanilla getChunk 不再重置任何欄位）：
+        // addLoadedJob 對租出殼「先寫後讀」——wx/wy 各恰一次 PUTFIELD，且首個 PUTFIELD
+        // 位於 getByteBuffer 呼叫之前。PZ 若讓存檔路徑讀取未寫欄位或改寫此順序，
+        // 這條會失敗強制重新分析，而不是讓私有池新殼與 vanilla 回收殼靜默分歧。
+        int wxWrites = 0;
+        int wyWrites = 0;
+        int firstPutIdx = -1;
+        int gbCallIdx = -1;
+        int addIdx = 0;
+        for (AbstractInsnNode in : vAdd.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD
+                    && chunkRef.equals(f.owner)) {
+                if ("wx".equals(f.name)) {
+                    wxWrites++;
+                } else if ("wy".equals(f.name)) {
+                    wyWrites++;
+                }
+                if (("wx".equals(f.name) || "wy".equals(f.name)) && firstPutIdx < 0) {
+                    firstPutIdx = addIdx;
+                }
+            } else if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
+                    && ccrRef.equals(mi.owner) && "getByteBuffer".equals(mi.name)
+                    && chunkArgDesc.equals(mi.desc) && gbCallIdx < 0) {
+                gbCallIdx = addIdx;
+            }
+            addIdx++;
+        }
+        failed += check("W9 vanilla 前提：addLoadedJob 先寫後讀（Chunk.wx/wy PUTFIELD 各 x1、首個早於 getByteBuffer）",
+                wxWrites == 1 && wyWrites == 1
+                && firstPutIdx >= 0 && gbCallIdx >= 0 && firstPutIdx < gbCallIdx);
         failed += check("W9 vanilla 前提：SaveLoadedTask.save 內 crcSave 讀 x4（reset/update/getValue×2 四連讀）",
                 countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4);
         MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");

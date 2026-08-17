@@ -15,6 +15,10 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 > popman buffer 隔離（官方 readByteBuffer）、VehicleManager 512→256（官方改 per-connection
 > HashMap）。三組已光榮退役，詳見 docs/optimization-summary.md 第四節。
 >
+> **42.20.3（2026-08-17）**：TIS 重構 chunk 供給管線（pending＋ChunkNotReady、重試機制刪除）；
+> 29 刀逐指令重驗全數存續、僅 SmokeCheck retriesCount 斷言退場，client v2.2 包全面失效。
+> 見 docs/report/pz-42.20.3-update-analysis.md。
+>
 > **2026-08-08**：受精蛋清除豁免（`IsoGridSquare`）退役——server 端運作正常，但 client 沒有
 > 對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋。改回原版行為（蛋照清），
 > 受精蛋請養在雞舍孵化。

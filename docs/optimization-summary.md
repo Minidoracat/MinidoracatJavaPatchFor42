@@ -10,8 +10,11 @@
 > 2026-08-08：受精蛋清除豁免退役（patch 有效但 client 端無對應改道，見 patches.md 2n）。
 > 2026-08-13～14 的四起事故（容器環假死、地圖格載入活鎖 114 分鐘、雞舍 chunk 被抹除、
 > CRC-blam 家族 43 筆資料損失）催生 W5–W9 五刀，全部是 vanilla 缺陷而非本專案所致。
+> **42.20.3（2026-08-17）**：TIS 重構 chunk 供給管線（pending 機制＋ChunkNotReady、重試刪除）
+> ——29 刀逐指令重驗**全數存續**、僅 SmokeCheck retriesCount 斷言退場；client v2.2 包全面失效。
+> 完整存續判定與官方變更分析見 [report/pz-42.20.3-update-analysis.md](report/pz-42.20.3-update-analysis.md)。
 
-## 全 Patch 清單（42.20.2 現役）
+## 全 Patch 清單（42.20.3 現役）
 
 | 類別 | Patch 項目 | 對象 class | 命中 | Runtime helper | 一句話 |
 |---|---|---|---|---|---|
