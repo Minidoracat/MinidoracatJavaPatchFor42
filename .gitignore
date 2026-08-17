@@ -10,3 +10,4 @@ AGENTS.md
 CLAUDE.md
 
 temp/
+.playwright-cli/
