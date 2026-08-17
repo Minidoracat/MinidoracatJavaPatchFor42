@@ -33,7 +33,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
-## 1. 抑噪類（7 項）——為什麼值得做
+## 1. 抑噪類（8 項）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：
 (a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與
@@ -48,6 +48,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 | 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
 | 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
+| 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
 
 > **42.20 變更**：`ActionStateContainer.tryInsertChildState` 的抑噪已移除——TIS 自己把那兩個
 > `DebugType.warn` 降級為 `trace`（全 class warn 8→6、trace 1→3），噪音源由官方修掉。
@@ -1480,6 +1481,109 @@ CRC 檢查會擋下並重新請求，不落盤；黑邊／重送觀測歸 W4-1 �
 重排（同 chunk 新舊存檔順序可顛倒）與 `run()` 例外路徑的 task 洩漏是兩個獨立的
 vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
+## 2v. 抑噪第 8 項—— toxic log 改道
+
+**根因**：MOD PSR（Plysken Solar Revolution）在每個遊戲分鐘（~2.5 真實秒）無條件呼叫
+`IsoBuilding.setToxic(false)` 遍歷所有 powerbank，導致建築毒氣狀態隨機刷新。server 的
+`GameServer.sendToxicBuilding` 每次變動都廣播給全部 63 人，正式服單場 57 分鐘 9512 行毒氣訊息
+等於全 console 27682 行的 34.4%，淹沒真正的錯誤。
+
+**為什麼只攔 log、不動封包**：client 的 `WorldRegionToMetaGrid.lambda$updateSquares$0` 自己計算
+「該室內有 activated generator」並本地標記 `toxic=true`，**不通知 server**。若 server 端做去重來
+減少廣播，會把玩家鎖在會扣血的毒氣室裡——client 認為有毒而 server 說沒有，結果玩家進去直接扣血
+但看不到警告。這是本項最有價值的知識：server 的 `isToxic` 只是「上次送了什麼」的殘影，不是
+真實狀態。**只有攔 log 才是安全的**。
+
+**手術**：`zombie/network/GameServer` 的 `sendToxicBuilding (IIZ)V`，offset 11 的
+`INVOKESTATIC zombie/debug/DebugLog.log:(Lzombie/debug/DebugType;Ljava/lang/String;)V` 改道
+`zombie/mdc/LogFilter.logType`，expectedHits = 1。訊息由 offset 6 的 `invokedynamic makeConcatWithConstants`
+組成（BSM recipe = `Send Toxic Building at [ \u0001 , \u0001 Toxic: \u0001 ]`），座標與 boolean 都是
+變數→ 必須 `startsWith`，不能 `equals`。
+
+**為什麼安全**：
+
+- **method-scoped**：`GameServer` 全 class 有 21 個同 descriptor 的 `DebugLog.log` 呼叫點，本方法內
+  恰 1 個。其他 20 個呼叫點保持原版。
+- **廣播封包不動**：`sendToxicBuilding` 的 putInt 序列、`udpEngine.connections` 廣播路徑完全保留。
+  所有玩家仍會收到最新的毒氣狀態——不是斷網，只是 console 安靜。
+- **client 端狀態不變**：client jar 完全未動，`receiveToxicBuilding` 照常執行。
+
+**已知代價**：server console 少了一條「client 還在收廣播」的 liveness 訊號。該訊號的對稱項在 client
+端 `GameClient.receiveToxicBuilding` 的 `Receive Toxic Building at [ ... ]` 仍在，本 patch 未動。
+
+**SmokeCheck 斷言**：vanilla 前提（恰 1 個 `DebugLog.log(DebugType,String)` ＋封包段 `PacketType.send` 存在）
+／手術後（改道 ×1、原呼叫歸零、`send` 與 `putInt` 數量與 vanilla 相同）／負對照（全 class
+21→20 保持 vanilla、helper 恰 1）。
+
+---
+
+## 2w. 食材重量記憶化（**預設 observe，尚未啟用 on**）
+
+**浪費**：`InventoryItem.getExtraItemsWeight ()F` 對 `extraItems` 内每個 fullType 字串完整建構
+一個 InventoryItem，只為讀 `getActualWeight()` 就丟棄。單次建構含 `ScriptManager.FindItem`（兩次
+hash、miss 退化為 moduleList 線性掃描）＋`Item.InstanceItem`（codeLen=4064 ＞ FreqInlineSize=325
+故永不 inline）＋4 個 ArrayList＋10 次 `Translator.getText`＋`synchWithVisual`＋`ConfigureItemOnCreate`，
+保守估 ~1.6-2.0 KB 配置、1.5-5 µs。
+
+**頻率**：`Moodle.Update` 的 HEAVY_LOAD 分支（無節流）→`ItemContainer.getCapacityWeight`
+→`IsoGameCharacter.getInventoryWeight`→`getUnequippedWeight`／`ItemContainer.getContentsWeight`
+**相互遞迴走訪整棵巢狀背包樹**，每玩家每 tick 一次。2026-08-16 jstack 46 樣本命中 2 次。
+
+**無法死工消除**：`IsoGameCharacter.updateInternal` 有兩個 `Moodles.Update` callsite——`:9103` 在
+`GameClient.client` 為真時、`:9129` 在 `!client` 分支——vanilla 刻意讓 dedicated server 跑。
+HEAVY_LOAD 被 `calculateBaseSpeed`（減速）、`Fitness.reduceEndurance`、`testDefense`、
+`getClimbingFailChanceFloat` 消費，是 server 權威 gameplay。
+
+**手術**：`zombie/inventory/InventoryItem` 的 `getExtraItemsWeight ()F`，offset 35 的
+`INVOKESTATIC zombie/inventory/InventoryItemFactory.CreateItem:(Ljava/lang/String;)Lzombie/inventory/InventoryItem;`
+改道 `zombie/mdc/ItemWeightMemo.createItem`，expectedHits = 1。Helper 新檔 `patcher/game/zombie/mdc/ItemWeightMemo.java`。
+
+**三態旋鈕** `-Dmdc.itemWeightMemo`（class 初始化時讀一次，改值需重啟）：
+
+- **`observe`**（預設，第一版唯一上線的模式）：完全不保留任何 InventoryItem 實例。`SEEN` 只存字串，
+  且只收「通得過五道門的型別」——因為只有它們在 on 模式下真的進得了 CACHE。`hits` = 重複且可快取的
+  呼叫數（＝**啟用 on 之後真正會命中的次數**）、`misses` = 首見且可快取的型別數、`uncacheable` = null
+  或被門擋下的呼叫（on 模式下每次仍會重新建構，**不計入命中率**）、`vanillaNsAvg` = 原版單次建構耗時。
+  **行為與原版逐位元相同**。（第二輪 review 抓到早期版本把 null 與被門擋下的型別也算 hit，
+  會讓唯一的上線決策依據灌水，已修正。）
+- **`on`**：命中即回傳共用實例。**尚未經正式服量測驗證，預設不啟用**。
+- **`off`**：純轉發。
+
+**factory 恰好呼叫一次**：`createItem` 切成三段（呼叫前觀測／原版 factory／呼叫後觀測），factory
+不在任何 try 之内。前後兩段各自吞 `RuntimeException | LinkageError`。拋例外時不重跑 factory
+（避免 `Rand.Next`、`initialiseItem` 的 Lua OnCreate、MOVEABLE 的 script 寫回執行兩次）。
+
+**`on` 模式的五道門**（`cacheable`）：非 null 且 `scriptItem != null`／`getLuaCreate() == null`
+（`Item.InstanceItem:1916-1918` 的 Lua 回呼）／`getItemConfig() == null`（`:1915` 的 `ConfigureItemOnCreate`
+→`ItemConfig.ConfigureEntityOnCreate`）／`!isItemType(MOVEABLE)`／`!hasComponents()`。
+**MOVEABLE 是三方 review 抓到的實質風險**：`Item.InstanceItem:1801-1805` 對 MOVEABLE 執行
+`this.actualWeight = moveable.getActualWeight()`，寫回共享的 script 單例，而所有 `Moveables.<sprite>`
+共用同一份 script。**第五道門用 vanilla 自己的判斷**：`Item.InstanceItem:1909` 無條件呼叫
+`GameEntityFactory.CreateInventoryItemEntity`，而它內部正是以 `itemScript.hasComponents()` 決定要不要
+`createEntity`（GameEntityFactory.java:114-117），所以拿同一個謂詞當門，跳過建構就不會漏掉任何 ECS
+component 建立／連接。
+
+**`on` 模式的已知行為差異**：全域 RNG 序列位移（命中時少抽的 `Rand.Next` 至少兩次——`createItemInternal:139`
+的 id、`InstanceItem:1911` 的 OutfitRNG 種子；實際次數依型別分支增加：KEY 的 keyId、CLOTHING／ALARM_CLOCK_CLOTHING
+的 palette、MAP 的 pickRandom、RADIO 的 setRandomChannel）。PZ MP 非 lockstep（server 權威＋client 預測），
+故不 desync，但抽樣序列不同。不做補抽補償（次數隨分支而異，猜錯更糟）。
+
+**共用實例的安全性**：`getExtraItemsWeight` 內該區域變數（slot 3）只被 `IFNULL` 與兩次
+`getActualWeight()` 讀取，迴圈下一圈即覆寫，從不逃逸——由 SmokeCheck 的 `extraWeightNoEscape`
+語境指紋鎖住（factory 結果緊接 `ASTORE`、該 slot 恰 3 次 ALOAD 且消費者僅那三處）。
+
+**不做 null 負快取**：`InventoryItemFactory.createItemInternal:113` 找不到 script item 時印 `Couldn't find item`
+並回 null，那是「有 recipe 引用不存在的 item」的訊號；快取 null 會讓它只出現第一次、也讓 mod 之後補註冊時
+永遠取不到。`nullResults` 計數追蹤它。
+
+**SmokeCheck 斷言**：vanilla 語境指紋（恰 1 個 `CreateItem(String)` ＋2 個 `getActualWeight()` ＋零逃逸
+——factory 結果緊接 `ASTORE`，該 slot 只被 1 次 `IFNULL` 與 2 次 `getActualWeight` 讀取，共 3 次 ALOAD）
+／手術後（改道 ×1、原呼叫歸零、真指令總數與 vanilla 相同 = 1:1 替換）／負對照（全 class 5→4 保持 vanilla、
+`createCloneItem` 未被動到、helper 恰 1）／helper 契約（factory 委派恰 2 處 = off 純轉發＋phase 2，無第三處
+重試路徑）／五道門各恰一次。已用 mutation test（把 21／5／3 改成錯值）確認這些斷言真的會紅。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -1561,7 +1665,47 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
    （發送路徑一概未動）。
    (f) kill switch 演練過（build 步驟 9d 以獨立 JVM 真的執行 off 分支＋步驟 7 的
    bytecode 保真閘）；線上如需停用：JAVA_OPTS 加 `-Dmdc.chunkSaveIsolation=0` 後重啟。
-14. **PZ 更新**（順序不可調換）：
+14. **抑噪第 8 項（toxic log）驗證**（2v）：
+   (a) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`NoClassDefFoundError`——改道方法跑在
+   `sendToxicBuilding` callsite 上，出現即立刻 uninstall。
+   (b) **先確認驗的是新版**，再看訊號。一律用**帶時間戳的 per-session** log，不要用
+   `server-console.txt`：後者在本伺服器實測是每次重啟覆寫（`server patch` 指紋恰 1 次、
+   `LOADING ASSETS: START` 恰 1 次、toxic 行數與 per-session DebugLog 完全相同），但那是
+   未文件化的行為——LinuxGSM 或 PZ 改成 append 就會讓總量計數靜默給出跨 session 的錯答案。
+   ```bash
+   LOG=$(ls -t /home/pzserver/Zomboid/Logs/*DebugLog-server.txt | head -1)
+   grep 'server patch' "$LOG"                    # 指紋必須是新版，否則下面的數字沒有意義
+   grep -c 'Send Toxic Building' "$LOG"          # 主驗證訊號：應為 0
+   ```
+   修前基線：2026-08-17 00:12 那個 session（舊版 `5f5f466`）在 ~1 小時內累積 **11945 行**。
+   (c) 同期其餘 Multiplayer 頻道訊息（`Receive`／`Network`／`Packets` 等）必須照常輸出——
+   若一起消失，代表攔錯了（`logType` 只比對 `Send Toxic Building at [ ` 前綴）。
+   (d) 廣播封包正常：玩家在毒氣區域仍被扣血、生命值介面正確更新，只是 server 端 log 安靜。
+   (e) 行為不變：`GameServer.sendToxicBuilding` 的 `doPacket`／`putInt`×2／`putBoolean`／`send`
+   與廣播迴圈完全保留（已由 SmokeCheck 逐項與 vanilla 對數，含真指令總數）。
+
+15. **食材重量記憶化驗證**（2w）：
+   (a) 開機健檢無 linkage 錯誤（改道方法跑在 `getExtraItemsWeight` 熱路徑上，出現即立刻 uninstall）。
+   (b) **首次生效橫幅**：對同一個 per-session log
+   `grep 'ItemWeightMemo' "$LOG"` 應出現「首次生效 mode=observe」一行
+   （第一次呼叫 `getExtraItemsWeight` 時印）——證明改道真的被走到。
+   (c) **observe 模式判讀**（預設）：`hits` 已與 `on` 的實際行為對齊——只計「通得過五道門」的型別，
+   不再是單純的型別重複率（第二輪 review 抓到舊語意會讓命中率灌水）：
+      - `attempts` = 所有呼叫次數（取樣與週期 log 的時鐘，不受 cacheability 偏置）
+      - `hits` = 重複且可快取的呼叫數 ＝ **啟用 on 之後真正會命中的次數**；
+        `hits/attempts` 才是「on 能省下的建構比例」，`hits/(hits+misses)` 是可快取型別內的命中率
+      - `misses` = 首見且可快取的型別數（開局成長快，型別集合穩定後放緩）
+      - `uncacheable` = null 或被五道門擋下的呼叫。這些在 on 模式下**每次仍會重新建構**，
+        故不計入命中率；佔比高就代表這把刀的天花板低
+      - `vanillaNsAvg` = 原版單次建構耗時（乘上呼叫頻率才是 on 能省下的量級）
+      - `anomalies` ≠ 0 或 `overflow` ≠ 0 ＝ 異常，需調查
+      - `types`（observe 模式）＝ SEEN 的型別數，等於 `misses`（只有首見且可快取才寫入）
+   (d) 行為不變：背包容量計算正常、玩家負重值正確、背包滿時拒絕插入照常工作。
+   (e) **`on` 模式未啟用**（一期設計）：本版本不在命令列指定 `-Dmdc.itemWeightMemo=on`；產生的
+   log 應為 `mode=observe`。啟用條件是 `hits/(hits+misses)` 明顯偏高、`uncacheable` 佔比不高、
+   且 `vanillaNsAvg` × 呼叫頻率確實佔得到 tick 預算——並須經 review 通過才能上線。
+
+16. **PZ 更新**（順序不可調換）：
    1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
       **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。
       本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。

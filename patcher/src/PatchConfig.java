@@ -14,6 +14,7 @@ public final class PatchConfig {
     private static final String WARN_OBJ = "(Ljava/lang/Object;)V";
     private static final String DL = "zombie/debug/DebugLog";
     private static final String LOG_STR = "(Ljava/lang/String;)V";
+    private static final String DL_TYPE_STR = "(Lzombie/debug/DebugType;Ljava/lang/String;)V";
     private static final String LOGIN_METRICS = "zombie/network/MinidoracatLoginMetrics";
     private static final String JOIN_METRICS = "zombie/network/MinidoracatJoinMetrics";
     private static final String TWO_STR_VOID = "(Ljava/lang/String;Ljava/lang/String;)V";
@@ -162,6 +163,24 @@ public final class PatchConfig {
                 "serverLoadNetworkCharacter", "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;",
                 JOIN_METRICS, "serverLoadNetworkCharacter"));
         rpc.expectedHits = 2;
+
+        // 抑噪：`Send Toxic Building at [ x , y Toxic: b ]` 佔正式服 console 34.4%
+        // （2026-08-16 實測 9512/27682 行／57 分鐘）。來源不是 vanilla——全服 77 個 mod 只有
+        // PSR 呼叫 IsoBuilding.setToxic，其 PBSystem.suppressToxic 掛 Events.EveryOneMinute
+        // （Day Length=1h → 每 2.5 真實秒）逐 powerbank 無條件 setToxic(false)，而
+        // IsoBuilding.setToxic 的 putfield 沒有變更比對，每次都真的走到這個方法。
+        // 訊息由 invokedynamic makeConcatWithConstants 組成（座標與 boolean 是變數）→ startsWith。
+        // 只攔 log，封包一個不少：**不可**在 server 側做狀態去重——client 的
+        // WorldRegionToMetaGrid.lambda$updateSquares$0（只在 IsoRegions.update 的 !GameServer.server
+        // 分支執行）會自己把建築標成 toxic=true 且不回報 server，server 的 isToxic 只是「上次送了什麼」
+        // 的殘影；去重等於把玩家鎖在會扣血的毒氣室（PSR 作者 v1.39→v1.40 已實證）。
+        // 必須 method-scoped：GameServer 全 class 有 21 個 DebugLog.log(DebugType,String) 呼叫點，
+        // 本方法內只有一個（offset 11）。
+        // 代價：server console 少了一條「client 還在收廣播」的 liveness 訊號；該訊號在玩家端的
+        // GameClient.receiveToxicBuilding（`Receive Toxic Building at [ `）仍在，本 patch 不動 client jar。
+        Patcher.MethodOps toxicLog = gameServer.method("sendToxicBuilding", "(IIZ)V");
+        toxicLog.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, DL, "log", DL_TYPE_STR, "logType"));
+        toxicLog.expectedHits = 1;
         patches.add(gameServer);
 
         // 大量 chunk unload 會逐 entity 從 Engine 全域陣列與各 bucket 做 identity 線性搜尋；
@@ -188,6 +207,30 @@ public final class PatchConfig {
                 "(Ljava/lang/Object;Z)Z", FAST_ARRAY_REMOVAL, "remove"));
         bucketMembership.expectedHits = 2;
         patches.add(entityBucket);
+
+        // evolved-recipe 食材重量：getExtraItemsWeight 對每個 extraItem 字串建構一個完整
+        // InventoryItem 只為讀 getActualWeight() 就丟棄（Item.InstanceItem codeLen=4064＞
+        // FreqInlineSize=325 故永不 inline，含 4 個 ArrayList／10 次 Translator.getText／
+        // synchWithVisual／ConfigureItemOnCreate，~1.6-2.0 KB 配置）。而呼叫端是
+        // Moodle.Update 的 HEAVY_LOAD 分支（無節流）→ getCapacityWeight → getInventoryWeight
+        // → getUnequippedWeight ↔ ItemContainer.getContentsWeight 相互遞迴走訪整棵背包樹，
+        // 每玩家每 tick 一次（2026-08-16 jstack 46 樣本命中 2 次）。
+        // 不能做死工消除：Moodles.Update 的 :9129 callsite 在 !GameClient.client 分支，
+        // HEAVY_LOAD 的 moodleLevel 被 calculateBaseSpeed（speed -= level*0.15）、
+        // Fitness.reduceEndurance、getClimbingFailChanceFloat 消費，是 server 權威 gameplay。
+        // 故只做值保存的 per-item-type 記憶化，且**預設 observe 模式**（行為同原版、只量測
+        // 兩側耗時與等價性），確認收益後才用 -Dmdc.itemWeightMemo=on 啟用——W3-2 ECS memo
+        // 的教訓是「審查證明無風險，只有量測證明有收益」。
+        // 必須 method-scoped：InventoryItem 全 class 另有 4 個 CreateItem(String) 命中
+        // （DoTooltipEmbedded ×2、update、createCloneItem），其中 createCloneItem 若被改道
+        // 成回傳共用實例會讓所有 clone 指向同一物件。本方法內只有 offset 35 這一個。
+        Patcher.ClassPatch invItem = new Patcher.ClassPatch("zombie/inventory/InventoryItem");
+        Patcher.MethodOps extraWeight = invItem.method("getExtraItemsWeight", "()F");
+        extraWeight.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/inventory/InventoryItemFactory",
+                "CreateItem", "(Ljava/lang/String;)Lzombie/inventory/InventoryItem;",
+                "zombie/mdc/ItemWeightMemo", "createItem"));
+        extraWeight.expectedHits = 1;
+        patches.add(invItem);
 
         // ---- 行為（method 範圍內常數替換；ClassWriter 產新常數池條目，不動共享條目）----
 
@@ -594,15 +637,15 @@ public final class PatchConfig {
         wait.expectedHits = 2;
         patches.add(tex);
 
-        // ---- W4-2 chunk 請求逾時 8s→30s（黑邊 livelock 斷鏈；docs/chunk-throughput-design-v1.md）----
+        // ---- W4-2 chunk 請求逾時 8s→15s（黑邊 livelock 斷鏈；docs/chunk-throughput-design-v1.md）----
         // resendTimedOutRequests 對超過 8000ms 未完成的請求設 flagsWs|=9 → loadReceivedChunks
         // 因 flagsWs&8 直接丟棄「已經送達、只是慢了一點」的整包資料並把 chunk 重新排隊，
         // 且不送 NotRequiredInZip 通知 server 取消 → server 繼續送作廢資料 → 供給更擠 →
         // 更多逾時。實測：pending 恆＝請求率×8s、每個卡住的 chunk 重發約 141 輪、
         // 18 分鐘燒掉約 105MB 全數丟棄、零 chunk 載入。
         // RequestZipList 與 SentChunkPacket 皆 reliability=2（RELIABLE，RakNet 保證送達），
-        // 故此逾時幾乎不是在救「真的遺失」，而是在懲罰「server 慢」——放寬到 30s 讓遲到的
-        // 資料被接受即可斷鏈。上界仍有限（server 真的不回時 30s 後照樣重試）。
+        // 故此逾時幾乎不是在救「真的遺失」，而是在懲罰「server 慢」——放寬到 15s 讓遲到的
+        // 資料被接受即可斷鏈。上界仍有限（server 真的不回時 15s 後照樣重試）。
         // 全 class 僅此一處 8000L（javap 實證），方法範圍鎖定。
         // 註：與 v2.1 的三個 ChunkStream 觀測 headCall 同屬一個 WorldStreamer ClassPatch，
         //     在下方 v2.1 區塊一併宣告（同一 class 只能有一個 ClassPatch）。
@@ -664,7 +707,7 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;)V");
         rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
         rnr.expectedHits = 1;
-        // W4-2（見本方法上方說明）：同一 ClassPatch 內追加逾時常數 8s→30s
+        // W4-2（見本方法上方說明）：同一 ClassPatch 內追加逾時常數 8s→15s
         Patcher.MethodOps resend = streamer.method("resendTimedOutRequests", "()V");
         resend.consts.add(new Patcher.ConstChange(8000L, 15000L));
         resend.expectedHits = 1;

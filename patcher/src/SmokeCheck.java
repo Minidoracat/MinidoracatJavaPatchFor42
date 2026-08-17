@@ -28,6 +28,7 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 /**
@@ -1188,6 +1189,106 @@ public final class SmokeCheck {
                 && countExactCalls(method(distJava, csiCls, "releaseChunk", "(L" + ccrRef + ";L" + chunkRef + ";)V"),
                         Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
 
+        // ---- 抑噪：GameServer.sendToxicBuilding 的 log 改道（只攔 log，封包段不得被動到）----
+        String gsCls = "zombie/network/GameServer";
+        String dlCls = "zombie/debug/DebugLog";
+        String dlTypeDesc = "(Lzombie/debug/DebugType;Ljava/lang/String;)V";
+        MethodNode vToxic = methodFromJar(jar, gsCls, "sendToxicBuilding", "(IIZ)V");
+        // vanilla 前提：方法內恰一個 DebugLog.log(DebugType,String)，且封包段確實存在
+        //（endPacket 是「真的在送封包」的錨——若 TIS 改寫成不送封包，抑噪的前提說明就過時了）
+        failed += check("抑噪 vanilla 前提：sendToxicBuilding 恰一個 DebugLog.log(DebugType,String)＋封包段存在",
+                countExactCalls(vToxic, Opcodes.INVOKESTATIC, dlCls, "log", dlTypeDesc) == 1
+                && countCalls(vToxic, "zombie/network/PacketTypes$PacketType", "send") == 1);
+        MethodNode pToxic = method(distJava, gsCls, "sendToxicBuilding", "(IIZ)V");
+        failed += check("抑噪手術後：log 改道 x1、原 DebugLog.log 歸零、封包段逐項未變",
+                countExactCalls(pToxic, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "logType", dlTypeDesc) == 1
+                && countExactCalls(pToxic, Opcodes.INVOKESTATIC, dlCls, "log", dlTypeDesc) == 0
+                && countCalls(pToxic, "zombie/network/PacketTypes$PacketType", "send")
+                        == countCalls(vToxic, "zombie/network/PacketTypes$PacketType", "send")
+                && countCalls(pToxic, "zombie/network/PacketTypes$PacketType", "doPacket")
+                        == countCalls(vToxic, "zombie/network/PacketTypes$PacketType", "doPacket")
+                && countCalls(pToxic, "zombie/core/network/ByteBufferWriter", "putInt")
+                        == countCalls(vToxic, "zombie/core/network/ByteBufferWriter", "putInt")
+                && countCalls(pToxic, "zombie/core/network/ByteBufferWriter", "putBoolean")
+                        == countCalls(vToxic, "zombie/core/network/ByteBufferWriter", "putBoolean")
+                && realInsnCount(pToxic) == realInsnCount(vToxic));
+        // 負對照：GameServer 全 class 的其他 DebugLog.log(DebugType,String) 一律保持 vanilla。
+        // 全 class 有 21 個同 descriptor 呼叫點，class-wide 誤改會誤攔另外 20 個。
+        ClassNode vGs = classNodeFromJar(jar, gsCls);
+        ClassNode pGs = classNode(distJava, gsCls);
+        int vGsLog = classWideCalls(vGs, Opcodes.INVOKESTATIC, dlCls, "log", dlTypeDesc);
+        failed += check("抑噪負對照：GameServer 其餘 DebugLog.log(DebugType,String) 全數保持 vanilla（21→20）",
+                vGsLog == 21
+                && classWideCalls(pGs, Opcodes.INVOKESTATIC, dlCls, "log", dlTypeDesc) == vGsLog - 1
+                && classWideCalls(pGs, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "logType", dlTypeDesc) == 1);
+
+        // ---- 食材重量記憶化：InventoryItem.getExtraItemsWeight 的 CreateItem 改道 ----
+        String iiCls = "zombie/inventory/InventoryItem";
+        String iifCls = "zombie/inventory/InventoryItemFactory";
+        String memoCls = "zombie/mdc/ItemWeightMemo";
+        String createDesc = "(Ljava/lang/String;)L" + iiCls + ";";
+        MethodNode vExtra = methodFromJar(jar, iiCls, "getExtraItemsWeight", "()F");
+        // vanilla 語境指紋——這才是「共用實例安全」論證的實際錨點：factory 結果存進
+        // 區域變數後，只被 IFNULL 與兩次 getActualWeight() 讀取，從不逃逸。
+        // PZ 若改寫此方法（例如把結果放進 list），全序不符即建置失敗，而非讓共用實例外洩。
+        failed += check("記憶化 vanilla 前提：getExtraItemsWeight 恰一個 CreateItem(String)＋兩個 getActualWeight()＋零逃逸",
+                countExactCalls(vExtra, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 1
+                && countExactCalls(vExtra, Opcodes.INVOKEVIRTUAL, iiCls, "getActualWeight", "()F") == 2
+                && extraWeightNoEscape(vExtra, iifCls, createDesc, iiCls));
+        MethodNode pExtra = method(distJava, iiCls, "getExtraItemsWeight", "()F");
+        failed += check("記憶化手術後：改道 x1、原 CreateItem 歸零、指令總數未變（1:1 替換）",
+                countExactCalls(pExtra, Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 1
+                && countExactCalls(pExtra, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 0
+                && realInsnCount(pExtra) == realInsnCount(vExtra));
+        // 負對照：InventoryItem 另外四個 CreateItem(String) 必須維持原版。
+        // createCloneItem 尤其致命——回傳共用實例會讓所有 clone 指向同一物件。
+        ClassNode vIi = classNodeFromJar(jar, iiCls);
+        ClassNode pIi = classNode(distJava, iiCls);
+        int vIiCreate = classWideCalls(vIi, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc);
+        boolean cloneClean = countExactCalls(method(distJava, iiCls, "createCloneItem", "()L" + iiCls + ";"),
+                Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 1
+                && countExactCalls(method(distJava, iiCls, "createCloneItem", "()L" + iiCls + ";"),
+                        Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 0;
+        failed += check("記憶化負對照：全 class CreateItem(String) 5→4 保持 vanilla，createCloneItem 未被動到",
+                vIiCreate == 5
+                && classWideCalls(pIi, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == vIiCreate - 1
+                && classWideCalls(pIi, Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 1
+                && cloneClean);
+        // helper 契約三條：
+        //  (1) factory 委派恰 2 處（off 純轉發＋phase 2），沒有第三處＝不存在 fail-open 重試；
+        //  (2) 那兩處**都不在任何 try-catch 的保護範圍內**——這才是「factory 例外原樣外傳」的
+        //      精準結構鎖。三份 review 同時定罪的缺陷正是「跨越 factory 的 catch 觸發重試」，
+        //      而行為測試無法在無 ScriptManager 的環境讓 factory 拋例外，只有這條擋得住回歸；
+        //  (3) 四道門的三個 script 判定各恰一次，且 MOVEABLE 那道門讀的真的是
+        //      ItemType.MOVEABLE（只數 isItemType 次數的話，改成任何 enum 都會通過）。
+        MethodNode memoCreate = method(distJava, memoCls, "createItem", "(Ljava/lang/String;)L" + iiCls + ";");
+        failed += check("記憶化 helper 契約：factory 委派恰 2 處（off 純轉發＋phase 2），無第三處重試路徑",
+                countExactCalls(memoCreate, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 2);
+        failed += check("記憶化 helper 契約：兩個 factory 委派都不在 try-catch 範圍內（例外必須原樣外傳）",
+                callsInsideTryRange(memoCreate, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 0);
+        // (4) 正式路徑的兩條契約——測試環境的 ScriptManager 沒有任何 item，factory 恆回 null，
+        //     所以「回傳的是 factory 結果」與「on 的 miss 真的會 store」無法用行為測試鎖住
+        //     （codex 第二輪 Major 2）。這裡用結構鎖補：
+        //     a. createItem 內恰一個 store 呼叫——刪掉 phase 3 的 store 就紅；
+        //     b. createItem 內恰一個 noteObserved 呼叫——observe 記帳被拔掉就紅；
+        //     c. 沒有任何 ACONST_NULL 緊接 ARETURN——把 `return fresh` 改成 `return null` 就紅。
+        String storeDesc = "(Ljava/lang/String;L" + iiCls + ";)V";
+        failed += check("記憶化 helper 契約：createItem 內 store 恰 1 次、noteObserved 恰 1 次",
+                countExactCalls(memoCreate, Opcodes.INVOKESTATIC, memoCls, "store", storeDesc) == 1
+                && countExactCalls(memoCreate, Opcodes.INVOKESTATIC, memoCls, "noteObserved",
+                        "(Ljava/lang/String;L" + iiCls + ";Z)V") == 1);
+        failed += check("記憶化 helper 契約：createItem 沒有 return null（回傳值必須來自 factory 或快取）",
+                !hasNullReturn(memoCreate));
+        MethodNode memoGate = method(distJava, memoCls, "cacheable", "(L" + iiCls + ";)Z");
+        failed += check("記憶化五道門：scriptItem／getLuaCreate／getItemConfig／isItemType(MOVEABLE)／hasComponents 各恰一次",
+                countExactCalls(memoGate, Opcodes.INVOKEVIRTUAL, iiCls, "getScriptItem",
+                        "()Lzombie/scripting/objects/Item;") == 1
+                && countCalls(memoGate, "zombie/scripting/objects/Item", "getLuaCreate") == 1
+                && countCalls(memoGate, "zombie/scripting/objects/Item", "getItemConfig") == 1
+                && countCalls(memoGate, "zombie/scripting/objects/Item", "isItemType") == 1
+                && countCalls(memoGate, "zombie/scripting/objects/Item", "hasComponents") == 1
+                && countFieldReads(memoGate, "zombie/scripting/objects/ItemType", "MOVEABLE") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -2024,6 +2125,120 @@ public final class SmokeCheck {
             }
         }
         return out;
+    }
+
+    /** 方法內「真指令」總數（1:1 替換的手術後必須與 vanilla 相同）。 */
+    static int realInsnCount(MethodNode m) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() >= 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 指定呼叫落在任何 try-catch 保護範圍內的次數。
+     * 用於鎖住「原版 factory 的例外必須原樣外傳」——helper 若把 factory 包進 try，
+     * 就有機會在 catch 裡重試或替換結果，而那是三份 review 同時定罪的缺陷形狀。
+     * 行為測試在無 ScriptManager 的環境無法讓 factory 拋例外，只有這條結構鎖擋得住回歸。
+     */
+    static int callsInsideTryRange(MethodNode m, int opcode, String owner, String name, String desc) {
+        if (m.tryCatchBlocks == null || m.tryCatchBlocks.isEmpty()) {
+            return 0;
+        }
+        int inside = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (!(in instanceof MethodInsnNode call) || call.getOpcode() != opcode
+                    || !call.owner.equals(owner) || !call.name.equals(name) || !call.desc.equals(desc)) {
+                continue;
+            }
+            int at = m.instructions.indexOf(in);
+            for (TryCatchBlockNode tcb : m.tryCatchBlocks) {
+                if (at >= m.instructions.indexOf(tcb.start) && at < m.instructions.indexOf(tcb.end)) {
+                    inside++;
+                    break;
+                }
+            }
+        }
+        return inside;
+    }
+
+    /**
+     * 方法內是否存在「{@code ACONST_NULL} 緊接 {@code ARETURN}」。
+     * 用於鎖住「回傳值必須來自原版 factory 或快取」——把 {@code return fresh} 改成
+     * {@code return null} 這種 mutation，在 factory 恆回 null 的測試環境完全測不出來
+     * （codex 第二輪 Major 2），只有結構鎖擋得住。
+     */
+    static boolean hasNullReturn(MethodNode m) {
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() != Opcodes.ACONST_NULL) {
+                continue;
+            }
+            AbstractInsnNode next = in.getNext();
+            while (next != null && next.getOpcode() < 0) {
+                next = next.getNext();
+            }
+            if (next != null && next.getOpcode() == Opcodes.ARETURN) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 記憶化的共用實例安全性指紋：{@code getExtraItemsWeight} 內 factory 的結果必須
+     * 立刻存進區域變數（ASTORE），且該 slot <b>只</b>被 ALOAD 讀出來做 IFNULL 或
+     * {@code getActualWeight()}——沒有 PUTFIELD／ARETURN／任何其他呼叫的引數位置。
+     * 這正是「共用實例不逃逸」論證的實際錨；PZ 若改寫成把結果放進 list 或存成欄位，
+     * 這條會失敗而不是讓共用實例外洩。
+     */
+    static boolean extraWeightNoEscape(MethodNode m, String factoryOwner, String factoryDesc,
+                                       String itemOwner) {
+        MethodInsnNode factory = findExactCall(m, Opcodes.INVOKESTATIC, factoryOwner, "CreateItem", factoryDesc);
+        if (factory == null) {
+            return false;
+        }
+        AbstractInsnNode next = factory.getNext();
+        while (next != null && next.getOpcode() < 0) {
+            next = next.getNext();
+        }
+        if (!(next instanceof VarInsnNode store) || store.getOpcode() != Opcodes.ASTORE) {
+            return false;
+        }
+        int slot = store.var;
+        // 分開計數：只算「三次 ALOAD」不足以鎖住語境——三次 IFNULL 加上別處兩個 weight call
+        // 也會通過。要求 1 個寫入、1 個 null 檢查、2 個「對受測 class 自己」的 getActualWeight。
+        int stores = 0;
+        int nullChecks = 0;
+        int weightReads = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (!(in instanceof VarInsnNode v) || v.var != slot) {
+                continue;
+            }
+            if (v.getOpcode() == Opcodes.ASTORE) {
+                stores++;
+                continue;
+            }
+            if (v.getOpcode() != Opcodes.ALOAD) {
+                return false;           // 該 slot 被當成別的型別使用
+            }
+            AbstractInsnNode use = v.getNext();
+            while (use != null && use.getOpcode() < 0) {
+                use = use.getNext();
+            }
+            if (use != null && use.getOpcode() == Opcodes.IFNULL) {
+                nullChecks++;
+            } else if (use instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
+                    && "getActualWeight".equals(mi.name) && "()F".equals(mi.desc)
+                    && mi.owner.equals(itemOwner)) {
+                weightReads++;
+            } else {
+                return false;           // 逃逸：被存欄位、回傳、或當成別的呼叫的引數
+            }
+        }
+        return stores == 1 && nullChecks == 1 && weightReads == 2;
     }
 
     private SmokeCheck() {}

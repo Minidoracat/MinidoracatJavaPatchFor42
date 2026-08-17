@@ -73,6 +73,7 @@ $helperEntries = @(
     'zombie/mdc/ForwardVectorGuard.class',
     'zombie/mdc/ChunkWriteGuard.class',
     'zombie/mdc/ChunkSaveIsolation.class',
+    'zombie/mdc/ItemWeightMemo.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -154,6 +155,17 @@ Write-Host "[9d/10] 存檔管線隔離（W9）kill switch off 路徑行為驗證
 # 測試自驗 property 到位——名稱打錯會炸在測試裡，不會默默跑 enabled 版假綠
 java "-Dmdc.chunkSaveIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkSaveIsolationTest
 Assert-Ok "ChunkSaveIsolationTest（chunkSaveIsolation=0 kill switch）"
+
+Write-Host "[9e/10] 食材重量記憶化三模式行為驗證（獨立 JVM；模式是 static final）..."
+# 三個模式都必須真的跑過：observe 是預設出貨模式（行為須與原版逐位元相同）、
+# on 是確認收益後才會啟用的目標模式、off 是緊急降級。測試自驗 argv 與實際 mode 相符，
+# property 名稱打錯會炸在測試裡，不會默默把 observe 版跑三遍假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest observe
+Assert-Ok "ItemWeightMemoTest（observe，預設出貨模式）"
+java "-Dmdc.itemWeightMemo=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest on
+Assert-Ok "ItemWeightMemoTest（on）"
+java "-Dmdc.itemWeightMemo=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest off
+Assert-Ok "ItemWeightMemoTest（off kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
