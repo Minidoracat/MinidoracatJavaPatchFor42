@@ -1,14 +1,22 @@
 # build-client.ps1 — 建置 PZ client loose-class patch（invisible-entities 觀測＋門檻修復）
 # 與 server build（build.ps1）完全隔離：獨立 work\out-client 與 dist-client\，不進 server manifest。
-# client 與 server 的 projectzomboid.jar 逐版 class 內容相同，共用 work\projectzomboid.jar
-#（42.20.2 起兩側整檔 SHA 可能因重新打包而異，install 閘以 build 當下的 work jar SHA 注入）。
+# client 與 server 的 projectzomboid.jar 逐版 class 內容相同（42.20.3 實測連整檔 SHA 都同），
+# install 閘以 build 當下的 work jar SHA 注入。
+# 用法：.\build-client.ps1 [-Variant standard|lowmem]
+#   standard＝觀測＋根治＋門檻 50MB→4GB（高 RAM 受害 client）
+#   lowmem  ＝觀測＋根治、不動門檻（≤8GB RAM 機器；redirect 指向 LowMem 入口，
+#             effective 門檻烘進 helper——Patcher/LoadCheck/SmokeCheck 全走顯式
+#             client-lowmem mode，忘傳＝建置失敗而非默默出錯包）
+param([ValidateSet('standard', 'lowmem')][string]$Variant = 'standard')
 $ErrorActionPreference = 'Stop'
 # patch 版本（出包檔名用）：v1=256MB、v1.1=1GB+floor 觀測、v1.2=4GB、v2.0=洩漏根治第一波、
 # v2.1=chunk 串流觀測（黑邊鑑識）、v2.2=W4-2 逾時 8s→15s（42.20.3 隨 vanilla 刪除該方法而撤刀）、
-# v3.0=42.20.3 重建：觀測擴充第 4 headCall（ChunkNotReady 新協定）＋texture 線原樣沿用
-$PATCH_VERSION = 'v3.0'
+# v3.0=42.20.3 重建：觀測擴充第 4 headCall（ChunkNotReady 新協定）＋lowmem 變體
+$PATCH_VERSION = if ($Variant -eq 'lowmem') { 'v3.0-lowmem' } else { 'v3.0' }
+$CLIENT_MODE = if ($Variant -eq 'lowmem') { 'client-lowmem' } else { 'client' }
 # 支援的遊戲版本（出包檔名與 install.bat 訊息；整 jar SHA 閘由 work jar 自動注入）
 $GAME_VERSION = '42.20.3'
+$DIST = if ($Variant -eq 'lowmem') { "$PSScriptRoot\dist-client-lowmem" } else { "$PSScriptRoot\dist-client" }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $R = $PSScriptRoot
 
@@ -25,8 +33,8 @@ if (-not (Test-Path "$R\work\projectzomboid.jar")) {
     throw "缺 work\projectzomboid.jar —— 可從本機 client 安裝複製（SHA 與伺服器相同）"
 }
 
-Remove-Item -Recurse -Force "$R\work\out-client", "$R\work\gen-client", "$R\dist-client" -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$R\work\out-client", "$R\work\gen-client", "$R\dist-client\java" | Out-Null
+Remove-Item -Recurse -Force "$R\work\out-client", "$R\work\gen-client", "$DIST" -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$R\work\out-client", "$R\work\gen-client", "$DIST\java" | Out-Null
 
 # 版本指紋（與出包 zip 檔名同源，杜絕手寫漂移）
 $gitSha = (& git rev-parse --short HEAD 2>$null)
@@ -45,17 +53,17 @@ Assert-Ok "javac patcher"
 Write-Host "[2/8] 生成 PatchInfo（版本指紋）＋編譯 client helper（對遊戲 jar）..."
 java -cp "$R\work\out-client" PatchInfoGen "$R\work\gen-client" 'client' "$PATCH_VERSION($gitSha)" $builtAt $jarSha8
 Assert-Ok "PatchInfoGen"
-javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist-client\java" `
+javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$DIST\java" `
     ((Get-ChildItem "$R\patcher\game-client" -Recurse -Filter *.java).FullName + (Get-ChildItem "$R\work\gen-client" -Recurse -Filter *.java).FullName)
 Assert-Ok "javac client helper"
 
 Write-Host "[3/8] 編譯 client 行為測試..."
-javac -encoding UTF-8 -cp "$R\dist-client\java;$R\work\projectzomboid.jar" -d "$R\work\out-client" `
+javac -encoding UTF-8 -cp "$DIST\java;$R\work\projectzomboid.jar" -d "$R\work\out-client" `
     (Get-ChildItem "$R\patcher\tests-client" -Recurse -Filter *.java).FullName
 Assert-Ok "javac client tests"
 
 Write-Host "[4/8] 執行 bytecode 手術（client 集合）..."
-java -cp "$R\work\out-client;$ASM_CP" Patcher "$R\work\projectzomboid.jar" "$R\dist-client\java" "$R\dist-client\manifest.txt" client
+java -cp "$R\work\out-client;$ASM_CP" Patcher "$R\work\projectzomboid.jar" "$DIST\java" "$DIST\manifest.txt" $CLIENT_MODE
 Assert-Ok "Patcher client"
 
 # helper 條目前置（origSha=- 表無 jar 原版）；部署順序＝先 helper、再 patched caller
@@ -66,47 +74,47 @@ $helperEntries = @(
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
-    $helperSha = (Get-FileHash -Algorithm SHA256 "$R\dist-client\java\$entry").Hash.ToLower()
+    $helperSha = (Get-FileHash -Algorithm SHA256 "$DIST\java\$entry").Hash.ToLower()
     "$entry`t-`t$helperSha`t0hits"
 }
-$manifestLines += Get-Content "$R\dist-client\manifest.txt"
+$manifestLines += Get-Content "$DIST\manifest.txt"
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText(
-    "$R\dist-client\manifest.txt",
+    "$DIST\manifest.txt",
     [string]::Join("`n", $manifestLines) + "`n",
     $utf8NoBom)
-Write-Host "client manifest -> $R\dist-client\manifest.txt（$($manifestLines.Count) classes）"
+Write-Host "client manifest -> $DIST\manifest.txt（$($manifestLines.Count) classes）"
 
 Write-Host "[5/8] 連結驗證（-Xverify:all，client 模式）..."
-java -Xverify:all -cp "$R\work\out-client" LoadCheck "$R\dist-client\java" "$R\work\projectzomboid.jar" "$R\dist-client\manifest.txt" client
+java -Xverify:all -cp "$R\work\out-client" LoadCheck "$DIST\java" "$R\work\projectzomboid.jar" "$DIST\manifest.txt" $CLIENT_MODE
 Assert-Ok "LoadCheck client"
 
 Write-Host "[6/8] JVMS 資料流驗證（CheckClassAdapter）..."
-java -cp "$R\work\out-client;$ASM_CP" BytecodeVerify "$R\dist-client\java" "$R\work\projectzomboid.jar" "$R\dist-client\manifest.txt"
+java -cp "$R\work\out-client;$ASM_CP" BytecodeVerify "$DIST\java" "$R\work\projectzomboid.jar" "$DIST\manifest.txt"
 Assert-Ok "BytecodeVerify client"
 
 Write-Host "[7/8] 守衛語意驗證（client 模式）＋行為測試..."
-java -cp "$R\work\out-client;$ASM_CP" SmokeCheck "$R\dist-client\java" "$R\work\projectzomboid.jar" client
+java -cp "$R\work\out-client;$ASM_CP" SmokeCheck "$DIST\java" "$R\work\projectzomboid.jar" $CLIENT_MODE
 Assert-Ok "SmokeCheck client"
-java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.mdc.TexturePipelineGuardBehaviorTest
+java -cp "$R\work\out-client;$DIST\java;$R\work\projectzomboid.jar" zombie.mdc.TexturePipelineGuardBehaviorTest
 Assert-Ok "TexturePipelineGuardBehaviorTest"
-java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest
+java -cp "$R\work\out-client;$DIST\java;$R\work\projectzomboid.jar" zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest
 Assert-Ok "MinidoracatTextureLeakGuardBehaviorTest"
-java -cp "$R\work\out-client;$R\dist-client\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkStreamObserverBehaviorTest
+java -cp "$R\work\out-client;$DIST\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkStreamObserverBehaviorTest
 Assert-Ok "ChunkStreamObserverBehaviorTest"
 
 Write-Host "[8/8] 打包玩家安裝 zip（SHA 閘門注入 install/uninstall.bat）..."
-$pkg = "$R\dist-client\pkg"
+$pkg = "$DIST\pkg"
 Remove-Item -Recurse -Force $pkg -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$pkg\patch-files" | Out-Null
 # payload 放 patch-files\ 暫存區：install.bat 先驗 jar SHA／衝突，通過才複製到遊戲目錄並回驗
-Copy-Item -Recurse "$R\dist-client\java\zombie" "$pkg\patch-files\zombie"
+Copy-Item -Recurse "$DIST\java\zombie" "$pkg\patch-files\zombie"
 
 $jarSha = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower()
 # payload 逐檔生成 install 的衝突/回驗段與 uninstall 的 removeone 段（線性 goto、唯一標籤）
-$payload = Get-ChildItem "$R\dist-client\java" -Recurse -Filter *.class | ForEach-Object {
+$payload = Get-ChildItem "$DIST\java" -Recurse -Filter *.class | ForEach-Object {
     [pscustomobject]@{
-        Rel = $_.FullName.Substring("$R\dist-client\java\".Length)
+        Rel = $_.FullName.Substring("$DIST\java\".Length)
         Sha = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
     }
 }
@@ -147,14 +155,14 @@ foreach ($bat in @('install', 'uninstall')) {
 }
 # 檔名一律 ASCII：Compress-Archive 對非 ASCII 檔名會寫出 OEM 亂碼 entry（實測）
 Copy-Item "$R\deploy-client\README-INSTALL.txt" $pkg -Force
-$zip = "$R\dist-client\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION.zip"
-Get-ChildItem "$R\dist-client\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
+$zip = "$DIST\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION.zip"
+Get-ChildItem "$DIST\MinidoracatClientPatch-*.zip" -ErrorAction SilentlyContinue | Remove-Item
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
 
 # 發布到 output\（gitignore）：zip＋未壓縮目錄一站式，舊版自動清掉避免混發
 $out = "$R\output"
 New-Item -ItemType Directory -Force $out | Out-Null
-Get-ChildItem "$out\MinidoracatClientPatch-*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+Get-ChildItem "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 Copy-Item $zip $out
 Copy-Item -Recurse $pkg "$out\MinidoracatClientPatch-TexPipeline-$GAME_VERSION-$PATCH_VERSION"
 Write-Host "完成：$zip"

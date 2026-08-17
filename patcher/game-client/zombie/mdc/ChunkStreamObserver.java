@@ -59,6 +59,7 @@ public final class ChunkStreamObserver {
     // ---- 網路執行緒可觸碰的狀態（lock-free；絕不做 I/O/反射/鎖）----
     private static final AtomicLong partsReceived = new AtomicLong();
     private static final AtomicLong notRequiredReceived = new AtomicLong();
+    private static volatile long lastNotReadyNs;     // 0＝本生命週期尚無 NotReady 回覆（42.20.3 新協定）
     private static final AtomicLong notReadyReceived = new AtomicLong();
     private static final AtomicLong anomalies = new AtomicLong();
     private static volatile long lastReceiveNs;      // 0＝尚無基準（主執行緒首心跳初始化）
@@ -120,7 +121,7 @@ public final class ChunkStreamObserver {
                 reqNum = fReqNum.getInt(ws);
             }
             String line = decide(now, partsReceived.get(), notRequiredReceived.get(),
-                    notReadyReceived.get(), anomalies.get(), lastReceiveNs,
+                    notReadyReceived.get(), anomalies.get(), lastReceiveNs, lastNotReadyNs,
                     pending, pending1, reqQ0, reqQ1, sent, largeArea, largeDl, reqNum);
             if (line != null) {
                 DebugLog.log(line);
@@ -144,14 +145,18 @@ public final class ChunkStreamObserver {
     }
 
     /**
-     * receiveChunkNotReady 頭部掛點（UdpEngine 網路執行緒）：lock-free 計數，不拋不鎖。
-     * 42.20.3 新協定——server 對「chunk 尚未生成/超限」的主動回覆（收到後 vanilla 把
-     * sentRequests 全數搬回 pendingRequests 重排隊）。不計入 lastReceiveNs 之外的狀態，
-     * 但必須更新 lastReceiveNs：server 有回應＝非斷流，否則 STALL 會把重排隊誤判成黑邊。
+     * receiveChunkNotReady 頭部掛點（UdpEngine 網路執行緒）：lock-free 計數＋獨立時戳，不拋不鎖。
+     * 42.20.3 新協定——server 對「chunk 尚未生成／pending 超限」的主動回覆。vanilla 完整語意
+     * （javap 實證）：先把 sentRequests 全數 drain 回 pendingRequests，再掃 pendingRequests——
+     * flagsWs&1 的 entry 移除＋flagsUdp|=16、requestNumber 相符的那筆移除＋flagsUdp|=24；
+     * 即「server 說沒好」的請求被**移出追蹤**（pending 水位下降），不是留隊重排。
+     * 基準分離（三 lane 對抗審查定案）：本 hook 只更新 lastNotReadyNs，**不碰 lastReceiveNs**
+     * ——STALL 維持「30 秒無 payload」語意（生成瓶頸不被靜音），STALL 行以 notReadyAgoMs
+     * 分型：小值＝server 活著但一直說沒好（生成端瓶頸）、大值/-1＝連 NotReady 都沒有（全斷流）。
      */
     public static void onReceiveChunkNotReady(WorldStreamer ws) {
         notReadyReceived.incrementAndGet();
-        lastReceiveNs = System.nanoTime();
+        lastNotReadyNs = System.nanoTime();
     }
 
     /**
@@ -162,6 +167,7 @@ public final class ChunkStreamObserver {
     private static void noteGap(long nowNs) {
         if (lastUpdateNs == 0L || nowNs - lastUpdateNs > STALL_AFTER_NS) {
             lastReceiveNs = nowNs;
+            lastNotReadyNs = 0L;          // 舊生命週期的 NotReady 時戳不跨 relog/重連殘留
             outstandingSinceNs = 0L;
             lastStallLogNs = 0L;
         }
@@ -171,11 +177,13 @@ public final class ChunkStreamObserver {
     /**
      * 訊息決策（僅主執行緒；純函式於注入參數＋節流/邊沿內部狀態；只組字串不做 I/O）。
      * 優先序：STALL ＞ periodic。佇列值 -1＝反射停用（僅計數模式，STALL 不判定以免誤報）。
-     * STALL 雙基準：outstanding 連續存在 ≥30 秒 **且** 最後接收距今 ≥30 秒。
+     * STALL 雙基準：outstanding 連續存在 ≥30 秒 **且** 最後 payload 接收距今 ≥30 秒
+     * （payload＝parts/notReq；NotReady 走獨立基準 lastNotReadyNs，只用於 STALL 行分型：
+     * notReadyAgoMs 小＝server 活著但一直說沒好＝生成端瓶頸；大/-1＝全斷流）。
      */
     static String decide(long nowNs, long parts, long notReq, long notReady, long anomaliesV,
-            long lastRxNs, int pending, int pending1, int reqQ0, int reqQ1, int sent,
-            boolean largeArea, int largeDl, int reqNum) {
+            long lastRxNs, long lastNotReadyNsV, int pending, int pending1, int reqQ0, int reqQ1,
+            int sent, boolean largeArea, int largeDl, int reqNum) {
         boolean outstanding = pending > 0 || pending1 > 0 || reqQ1 > 0 || reqQ0 > 0;
         if (!outstanding) {
             outstandingSinceNs = 0L;
@@ -194,8 +202,11 @@ public final class ChunkStreamObserver {
                 && noReceiveNs >= STALL_AFTER_NS) {
             if (nowNs - lastStallLogNs >= STALL_INTERVAL_NS) {
                 lastStallLogNs = nowNs;
+                long notReadyAgoMs = lastNotReadyNsV == 0L ? -1L
+                        : (nowNs - lastNotReadyNsV) / 1_000_000L;
                 return "[MinidoracatJavaPatch][ChunkStream] STALL noReceiveMs="
                         + noReceiveNs / 1_000_000L
+                        + " notReadyAgoMs=" + notReadyAgoMs
                         + " outstandingMs=" + (nowNs - outstandingSinceNs) / 1_000_000L + state;
             }
             return null;
@@ -262,6 +273,7 @@ public final class ChunkStreamObserver {
         notReadyReceived.set(0);
         anomalies.set(0);
         lastReceiveNs = 0;
+        lastNotReadyNs = 0;
         lastUpdateNs = 0;
         lastReadNs = 0;
         lastStallLogNs = 0;
@@ -290,6 +302,14 @@ public final class ChunkStreamObserver {
     static void primeForTest(long nowNs) {
         lastReceiveNs = nowNs;
         lastPeriodicLogNs = nowNs;
+    }
+
+    static void primeNotReadyForTest(long nowNs) {
+        lastNotReadyNs = nowNs;
+    }
+
+    static long lastNotReadyForTest() {
+        return lastNotReadyNs;
     }
 
     static void noteGapForTest(long nowNs) {

@@ -159,7 +159,8 @@
   <strong><span class="badge b-keep">v3.0 已重建</span>　<code>output/MinidoracatClientPatch-TexPipeline-42.20.3-v3.0.zip</code></strong>
   <ul>
     <li>W4-2（逾時 <code>8000L</code>→<code>15000L</code>）<strong>撤刀</strong>：vanilla 整個刪除 <code>resendTimedOutRequests</code>，盲等重發由 ChunkNotReady 主動通知根治。</li>
-    <li>串流觀測線錨點重驗健在＋<strong>擴充第 4 headCall</strong> <code>receiveChunkNotReady</code>——計數新協定回覆並更新接收基準，避免 STALL 把重排隊誤判成斷流。</li>
+    <li>串流觀測線錨點重驗健在＋<strong>擴充第 4 headCall</strong> <code>receiveChunkNotReady</code>——獨立基準 <code>lastNotReadyNs</code>：STALL 維持「30 秒無 payload」語意、行帶 <code>notReadyAgoMs</code> 分型（小值＝生成端瓶頸、-1＝全斷流）。</li>
+    <li><strong>lowmem 變體 <code>…-v3.0-lowmem.zip</code></strong>：≤8GB RAM 機器（隱形實證玩家 8101MB＋Xmx3G）不做 4GB constChange、redirect 指向 <code>bytesAllocatedObservedLowMem</code>（effective 門檻 50MB 烘進 helper），觀測＋洩漏根治線全保留。</li>
     <li>texture 線原樣沿用：三 class 42.20.3 逐指令相同（50MB 門檻與洩漏官方沒修）。</li>
     <li>42.20.3 client/server jar 整檔 SHA 實測相同（<code>bda809fb…</code>），install 同源閘直接有效。</li>
   </ul>

@@ -43,7 +43,7 @@ public final class TexturePipelineGuard {
 
     /** 原版 waitFileTask 門檻（觀測分類用；SmokeCheck 與 jar 內 ldc2_w 前提對帳）。 */
     public static final long VANILLA_LIMIT_BYTES = 52428800L;
-    /** constChange 後的實際門檻（SmokeCheck 與 patched class 的 ldc2_w 連動對帳）。 */
+    /** 標準包 constChange 後門檻（SmokeCheck 與 patched class 的 ldc2_w 連動對帳）。 */
     public static final long PATCHED_LIMIT_BYTES = 4294967296L;
 
     private static final long LOG_INTERVAL_NS = 5_000_000_000L;
@@ -62,18 +62,31 @@ public final class TexturePipelineGuard {
 
     private TexturePipelineGuard() {}
 
-    /** waitFileTask 的 getBytesAllocated() 改道點：passthrough＋觀測，簽名同形 ()J。 */
+    /** 標準包改道點（effective 門檻＝4GB constChange）：passthrough＋觀測，簽名同形 ()J。 */
     public static long bytesAllocatedObserved() {
+        return observedWithLimit(PATCHED_LIMIT_BYTES);
+    }
+
+    /**
+     * lowmem 變體改道點（≤8GB RAM 機器；bytecode 不做 constChange，effective 門檻＝vanilla
+     * 50MB）。門檻烘進入口而非靠版本字串補救——橫幅與 stall 分類都以實際生效值計，
+     * 事故 log 不說謊（三 lane＋advisory 對抗審查定案）。
+     */
+    public static long bytesAllocatedObservedLowMem() {
+        return observedWithLimit(VANILLA_LIMIT_BYTES);
+    }
+
+    private static long observedWithLimit(long effectiveLimit) {
         long bytes = DirectBufferAllocator.getBytesAllocated();
         try {
             if (!announced) {
                 PatchInfo.announceOnce();     // 版本橫幅（冪等；單機也會經過此路徑）
                 DebugLog.log("[MinidoracatJavaPatch][TexPipelineGuard] active vanillaLimitBytes="
-                        + VANILLA_LIMIT_BYTES + " patchedLimitBytes=" + PATCHED_LIMIT_BYTES);
+                        + VANILLA_LIMIT_BYTES + " effectiveLimitBytes=" + effectiveLimit);
                 // log 成功才設旗標：DebugLog 未就緒（例外被下方吞掉）時下次取樣重試
                 announced = true;
             }
-            String line = observe(bytes);
+            String line = observe(bytes, effectiveLimit);
             if (line != null) {
                 DebugLog.log(line);
             }
@@ -91,7 +104,7 @@ public final class TexturePipelineGuard {
      * 只組字串不做 I/O，log 由呼叫端在鎖外送出。每次至多回傳一行
      * （優先序：stall ＞ hwm ＞ periodic）。
      */
-    private static synchronized String observe(long bytes) {
+    private static synchronized String observe(long bytes, long effectiveLimit) {
         long now = System.nanoTime();
         String line = null;
         if (bytes < floorWindowBytes) {
@@ -109,7 +122,7 @@ public final class TexturePipelineGuard {
                 aboveVanillaSinceNs = now;
             }
             vanillaStallSamples++;
-            if (bytes > PATCHED_LIMIT_BYTES) {
+            if (bytes > effectiveLimit) {
                 patchedStallSamples++;
             }
             if (now - lastStallLogNs >= LOG_INTERVAL_NS) {

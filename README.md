@@ -16,7 +16,9 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 > HashMap）。三組已光榮退役，詳見 docs/optimization-summary.md 第四節。
 >
 > **42.20.3（2026-08-17）**：TIS 重構 chunk 供給管線（pending＋ChunkNotReady、重試機制刪除）；
-> 29 刀逐指令重驗全數存續、僅 SmokeCheck retriesCount 斷言退場，client v2.2 包全面失效。
+> 29 刀逐指令重驗全數存續、僅 SmokeCheck retriesCount 斷言退場。client 包 **v3.0 重建**
+> （W4-2 撤刀＝目標方法被 vanilla 刪除；觀測擴充第 4 headCall 計數 ChunkNotReady，獨立基準
+> 分型生成瓶頸/全斷流；**v3.0-lowmem** 供 ≤8GB RAM 機器——不做 4GB constChange）。
 > 見 docs/report/pz-42.20.3-update-analysis.md。
 >
 > **2026-08-08**：受精蛋清除豁免（`IsoGridSquare`）退役——server 端運作正常，但 client 沒有

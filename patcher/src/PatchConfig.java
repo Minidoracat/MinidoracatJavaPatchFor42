@@ -620,35 +620,36 @@ public final class PatchConfig {
      * javap 證據：waitFileTask()V ＝ invokestatic DirectBufferAllocator.getBytesAllocated()J
      * → ldc2_w 52428800L → lcmp/ifle → sleep(20) 迴圈（方法內兩者各恰一處）。
      */
-    public static List<Patcher.ClassPatch> client() {
+    public static List<Patcher.ClassPatch> client(boolean lowmem) {
         List<Patcher.ClassPatch> patches = new ArrayList<>();
 
         // 兩刀都在 waitFileTask 方法範圍內：redirect＝passthrough 觀測（水位/hwm/floor/stall，
-        // 節流 log 到 console.txt）；constChange＝門檻 50MB→1GB（v1.1）。實測（Tester-A 兩場 log）
-        // 證明水位地板因 ImageData 解碼例外洩漏單調上升，v1 的 256MB 天花板 ~35 分鐘被追上
-        // →天花板只買時間，1GB 依實測斜率約 2–2.5 小時被追上（≈v1 跑道 ×4，無時間保證）；
-        // 根治＝ImageData dispose 修補（另行實作）。
-        // 高 RAM 受害 client 實驗值，≤8GB RAM 機器不適用。
+        // 節流 log 到 console.txt）；constChange＝門檻 50MB→4GB（v1.2 起；v1.1=1GB）。實測
+        // （Tester-A 兩場 log）證明水位地板因 ImageData 解碼例外洩漏單調上升，天花板只買時間；
+        // v2.0 起洩漏根治線（下方 MinidoracatTextureLeakGuard 五 hook）落地，天花板轉為
+        // 罕見峰值上限。**lowmem 變體（Patcher 顯式 mode `client-lowmem`，出包 v3.0-lowmem）**：
+        // ≤8GB RAM 機器（42.20.3 隱形實證玩家：8101MB＋Xmx3G）不適用 4GB native 天花板
+        // ——commit charge 預算超載；lowmem 保留觀測與根治線、不做 constChange（根治後水位
+        // 有回收，50MB sleep 恢復「短暫等待」的 vanilla 設計語意），且 redirect 指向
+        // bytesAllocatedObservedLowMem＝effective 門檻 50MB 烘進 helper（橫幅與 stall 分類
+        // 都以實際生效值計，事故 log 不說謊——三 lane＋advisory 對抗審查定案）。
         Patcher.ClassPatch tex = new Patcher.ClassPatch("zombie/core/textures/TextureIDAssetManager");
         Patcher.MethodOps wait = tex.method("waitFileTask", "()V");
         wait.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/core/utils/DirectBufferAllocator",
-                "getBytesAllocated", "()J", "zombie/mdc/TexturePipelineGuard", "bytesAllocatedObserved"));
-        wait.consts.add(new Patcher.ConstChange(52428800L, 4294967296L));
-        wait.expectedHits = 2;
+                "getBytesAllocated", "()J", "zombie/mdc/TexturePipelineGuard",
+                lowmem ? "bytesAllocatedObservedLowMem" : "bytesAllocatedObserved"));
+        if (!lowmem) {
+            wait.consts.add(new Patcher.ConstChange(52428800L, 4294967296L));
+        }
+        wait.expectedHits = lowmem ? 1 : 2;
         patches.add(tex);
 
-        // ---- W4-2 chunk 請求逾時 8s→15s（黑邊 livelock 斷鏈；docs/chunk-throughput-design-v1.md）----
-        // resendTimedOutRequests 對超過 8000ms 未完成的請求設 flagsWs|=9 → loadReceivedChunks
-        // 因 flagsWs&8 直接丟棄「已經送達、只是慢了一點」的整包資料並把 chunk 重新排隊，
-        // 且不送 NotRequiredInZip 通知 server 取消 → server 繼續送作廢資料 → 供給更擠 →
-        // 更多逾時。實測：pending 恆＝請求率×8s、每個卡住的 chunk 重發約 141 輪、
-        // 18 分鐘燒掉約 105MB 全數丟棄、零 chunk 載入。
-        // RequestZipList 與 SentChunkPacket 皆 reliability=2（RELIABLE，RakNet 保證送達），
-        // 故此逾時幾乎不是在救「真的遺失」，而是在懲罰「server 慢」——放寬到 15s 讓遲到的
-        // 資料被接受即可斷鏈。上界仍有限（server 真的不回時 15s 後照樣重試）。
-        // 全 class 僅此一處 8000L（javap 實證），方法範圍鎖定。
-        // 註：與 v2.1 的三個 ChunkStream 觀測 headCall 同屬一個 WorldStreamer ClassPatch，
-        //     在下方 v2.1 區塊一併宣告（同一 class 只能有一個 ClassPatch）。
+        // ---- W4-2 chunk 請求逾時 8s→15s（42.20.2 歷史，42.20.3 已撤刀）----
+        // 當時根因：resendTimedOutRequests 對超過 8000ms 未完成的請求設 flagsWs|=9 →
+        // loadReceivedChunks 丟棄已送達整包並重排隊、不通知 server 取消＝livelock
+        // （實測 pending 恆＝請求率×8s、141 輪重發、18 分鐘 105MB 全丟棄）。
+        // 42.20.3 起 vanilla **整個刪除該方法**（盲等逾時重發由 ChunkNotReady 主動通知
+        // 根治）——手術目標不存在，本刀撤除；此段僅留歷史脈絡，無對應 MethodOps。
 
         // ---- v2.0 貼圖洩漏根治第一波（四路 retention trace＋對抗評審定罪；docs/patches.md 2j）----
         // 主犯 1（40-60%）：ImageData.dispose() 只釋放 data＋mipMaps、完全不碰 frames——
@@ -689,11 +690,12 @@ public final class PatchConfig {
         avatarM.expectedHits = 1;
         patches.add(texId);
 
-        // ---- v2.1 chunk 串流觀測（黑邊事件鑑識，2026-08-11 兩起實案；純觀測不改行為）----
-        // 三個 headCall 全部 receiver-only：updateMain=心跳＋節流讀態＋STALL 判定，
-        // receiveChunkPart/receiveNotRequired=接收計數（黑邊期間凍結＝斷流證據）。
-        // 42.20.3：官方修「Loading Map forever」（pending＋ChunkNotReady）並自承黑邊
-        // additional causes 仍在調查——本觀測線正是抓殘餘原因的工具，錨點逐一重驗健在。
+        // ---- v3.0 chunk 串流觀測（黑邊事件鑑識；v2.1 三 headCall → 42.20.3 擴充為四）----
+        // 四個 headCall 全部 receiver-only：updateMain=心跳＋節流讀態＋STALL 判定，
+        // receiveChunkPart/receiveNotRequired=payload 接收計數（更新 lastReceiveNs），
+        // receiveChunkNotReady=42.20.3 新協定計數（獨立基準 lastNotReadyNs，不算 payload）。
+        // 官方修「Loading Map forever」（pending＋ChunkNotReady）並自承黑邊 additional
+        // causes 仍在調查——本觀測線正是抓殘餘原因的工具，錨點逐一重驗健在。
         // 假說 (b)（server 3 次重試放棄）已隨重試機制刪除而失效；(a) largeArea 停送 gate 待驗。
         String cso = "zombie/mdc/ChunkStreamObserver";
         String csoDesc = "(Lzombie/iso/WorldStreamer;)V";
@@ -709,9 +711,11 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;)V");
         rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
         rnr.expectedHits = 1;
-        // 42.20.3 新協定：receiveChunkNotReady(I)V——server 對未生成/超限 chunk 的主動
-        // 回覆（vanilla 收到後把 sentRequests 全搬回 pendingRequests 重排隊）。必須觀測：
-        // 它更新接收基準，否則 STALL 會把重排隊回覆誤判成斷流黑邊。
+        // 42.20.3 新協定：receiveChunkNotReady(I)V——server 對未生成/超限 chunk 的主動回覆
+        // （vanilla 完整語意：drain sentRequests→pendingRequests，再把 flagsWs&1 與相符
+        // requestNumber 的 entry 移出 pendingRequests 並標 flagsUdp|=16/24＝移出追蹤）。
+        // 只更新獨立基準 lastNotReadyNs——STALL 維持「30 秒無 payload」語意（生成瓶頸不被
+        // 靜音），STALL 行以 notReadyAgoMs 分型（小＝生成端瓶頸、大/-1＝全斷流）。
         Patcher.MethodOps rnrd = streamer.method("receiveChunkNotReady", "(I)V");
         rnrd.headCall = new Patcher.HeadCall(cso, "onReceiveChunkNotReady", csoDesc);
         rnrd.expectedHits = 1;
