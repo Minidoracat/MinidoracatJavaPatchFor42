@@ -1443,7 +1443,7 @@ public final class SmokeCheck {
                 == countExactCalls(vDispose, Opcodes.INVOKEVIRTUAL,
                         "zombie/core/textures/MipMapLevel", "dispose", "()V"));
 
-        // ---- v2.1 chunk 串流觀測（WorldStreamer 三 headCall）----
+        // ---- v3.0 chunk 串流觀測（WorldStreamer 四 headCall；42.20.3 起含 ChunkNotReady）----
         String wsCls = "zombie/iso/WorldStreamer";
         String csoCls = "zombie/mdc/ChunkStreamObserver";
         String csoDesc = "(Lzombie/iso/WorldStreamer;)V";
@@ -1455,19 +1455,18 @@ public final class SmokeCheck {
         MethodNode pUm = method(distJava, wsCls, "updateMain", "()V");
         MethodNode pRcp = method(distJava, wsCls, "receiveChunkPart", bbrDesc);
         MethodNode pRnr = method(distJava, wsCls, "receiveNotRequired", bbrDesc);
-        failed += check("ChunkStream 三個 head-call 全序（aload_0→helper 恰一次）",
+        MethodNode pRnrd = method(distJava, wsCls, "receiveChunkNotReady", "(I)V");
+        failed += check("ChunkStream 四個 head-call 全序（aload_0→helper 恰一次）",
                 headCallOk(pUm, csoCls, "onUpdateMain", csoDesc)
                 && headCallOk(pRcp, csoCls, "onReceiveChunkPart", csoDesc)
-                && headCallOk(pRnr, csoCls, "onReceiveNotRequired", csoDesc));
+                && headCallOk(pRnr, csoCls, "onReceiveNotRequired", csoDesc)
+                && headCallOk(pRnrd, csoCls, "onReceiveChunkNotReady", csoDesc));
+        MethodNode vRnrd = methodFromJar(jar, wsCls, "receiveChunkNotReady", "(I)V");
+        failed += check("vanilla 前提：receiveChunkNotReady 存在（42.20.3 新協定）且無既存 observer 呼叫",
+                vRnrd != null
+                && countExactCalls(vRnrd, Opcodes.INVOKESTATIC, csoCls, "onReceiveChunkNotReady", csoDesc) == 0);
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（client）",
                 patchInfoOk(distJava, "client"));
-        // W4-2 chunk 請求逾時 8s→15s（全 class 僅一處 8000L）
-        MethodNode vResend = methodFromJar(jar, wsCls, "resendTimedOutRequests", "()V");
-        failed += check("vanilla 前提：resendTimedOutRequests 恰一個 8000L、零個 15000L",
-                countLongConst(vResend, 8000L) == 1 && countLongConst(vResend, 15000L) == 0);
-        MethodNode pResend = method(distJava, wsCls, "resendTimedOutRequests", "()V");
-        failed += check("W4-2 逾時常數已換（8000L 歸零、15000L 恰一個）",
-                countLongConst(pResend, 8000L) == 0 && countLongConst(pResend, 15000L) == 1);
         MethodNode vRcp = methodFromJar(jar, wsCls, "receiveChunkPart", bbrDesc);
         failed += check("receiveChunkPart 原體保留（sentRequests 觸碰數未變＝head-call 未破壞原邏輯）",
                 countFieldTouches(pRcp, wsCls, "sentRequests")

@@ -759,7 +759,7 @@ offset 589 的 `aload 13` 是整條清除鏈上**唯一一個 `worldItem` 在堆
 **全程零 anomalies**——沒有最後這條，期望 `false` 的斷言在「helper 全程吞例外」時也會綠燈）。
 逐項 javap 證據見 `docs/specs/zombie_iso_IsoGridSquare.json`。
 
-## 2o. Client chunk 串流觀測（v2.1，黑邊事件鑑識）
+## 2o. Client chunk 串流觀測（v2.1→v3.0，黑邊事件鑑識）
 
 **動機**：2026-08-11 同一玩家兩起「黑邊」實案（凌晨 3 點卡死 10 分鐘不可恢復需重開遊戲、
 早上 7 點卡 5 分鐘自癒）。server 端同時段實測全綠（tick 正常、該 client 持續收到 Toxic
@@ -809,6 +809,13 @@ Inflater＝改變行為；斷檔法同治 relog／in-place 重連／凍結三情
 - `STALL` 但 parts 持續增加 → 接收活著、載入端（DoChunk/refs）卡住，另闢分析。
 - 無 `STALL` 行但玩家見黑邊 → 卡點在 WorldStreamer 之外（IsoChunkMap/渲染層）。
 
+**v3.0（42.20.3 重建，2026-08-17）**：三 headCall 錨點與八個反射欄位逐一重驗健在；
+**擴充第 4 headCall `receiveChunkNotReady(I)V`**——42.20.3 新協定中 server 對未生成/超限
+chunk 的主動回覆（vanilla 收到把 sentRequests 全搬回 pendingRequests 重排隊），計數
+`notReady=` 並更新接收基準，否則 STALL 會把重排隊回覆誤判成斷流。四 headCall 全序鎖＋
+新協定方法存在性 census 進 SmokeCheck；行為測試補 ChunkNotReady 接收基準案例。
+判讀更新：`STALL … notReady` 持續增加＝server 一直說「沒生成好」＝生成端瓶頸而非斷流。
+
 ## 2p. chunk 供給併包（W4-1，server）＋請求逾時 8s→15s（W4-2，client）
 
 **根因**（八路鑑識＋對抗驗證；完整設計見 `docs/chunk-throughput-design-v1.md`）：
@@ -839,9 +846,11 @@ vanilla 去重之前。
 預設 **120**，皆可用 `-Dmdc.chunkPacker.batch` / `-Dmdc.chunkPacker.windowBudget` 調整
 （後者設 0 即整刀停用，等同 vanilla，**緊急降級不需重新部署**）。
 
-**W4-2 手術**：`WorldStreamer.resendTimedOutRequests()V` 的 `8000L`→`15000L`
+**W4-2 手術（42.20.3 已撤刀）**：`WorldStreamer.resendTimedOutRequests()V` 的 `8000L`→`15000L`
 （方法內常數替換，全 class 僅此一處）。`RequestZipList` 與 `SentChunkPacket` 皆
 `reliability=2`（RELIABLE），故此逾時幾乎不是在救真的遺失，而是在懲罰 server 慢。
+**42.20.3 起 vanilla 整個刪除該方法**（盲等逾時重發由 `ChunkNotReady` 主動通知根治）——
+手術目標不存在，撤刀；SmokeCheck 的 W4-2 雙向常數斷言同步移除。
 
 **驗證**：SmokeCheck——vanilla 前提（`update` 恰 3 個同簽名 `List.remove(I)`＋1 個 dedupe
 呼叫；`resendTimedOutRequests` 恰 1 個 8000L）、**掛點在 ready 閘內**（dedupe 頭部全序 ＋
@@ -856,9 +865,12 @@ pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 
 （掛點互斥前提更寬鬆，掛點不動）。`update()` 呼叫序變為 ready 閘 → `updatePendingChunks()`
 → dedupe（掛點）；pending 回填的 ccr 是普通 non-largeArea ccr，被併包安全。**吞吐瓶頸未修**
 （`RequestZipListPacket` 逐位元相同、每 tick 仍一個 ccr）＝W4-1 存續；官方 changelog 自承
-黑邊「additional causes 仍在調查」。W4-2 所在的 client `WorldStreamer` 被實質重構，
-client 包（`dist-client/…-v2.2.zip`，內含 v2.1 串流觀測＋v1.1 texture pipeline 兩線 patch）
-全部失效、W4-2 必要性待重評。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
+黑邊「additional causes 仍在調查」。client 側：`WorldStreamer` 被實質重構——**W4-2 撤刀**
+（目標方法 `resendTimedOutRequests` 已刪除）；v2.2 包全面失效，**已以 v3.0 重建**
+（觀測線三 headCall 錨點重驗健在＋擴充第 4 headCall `receiveChunkNotReady(I)V` 計數新協定
+並更新接收基準——否則 STALL 會把 server 的重排隊回覆誤判成斷流；texture 線三 class 逐指令
+相同原樣沿用；42.20.3 client/server jar 整檔 SHA 實測相同 `bda809fb…`，install 同源閘直接
+有效）。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
 完整分析：docs/report/pz-42.20.3-update-analysis.md。
 
 

@@ -692,7 +692,9 @@ public final class PatchConfig {
         // ---- v2.1 chunk 串流觀測（黑邊事件鑑識，2026-08-11 兩起實案；純觀測不改行為）----
         // 三個 headCall 全部 receiver-only：updateMain=心跳＋節流讀態＋STALL 判定，
         // receiveChunkPart/receiveNotRequired=接收計數（黑邊期間凍結＝斷流證據）。
-        // 假說待驗：largeArea 停送 gate（pendingRequests1>20）×server 端 3 次重試放棄。
+        // 42.20.3：官方修「Loading Map forever」（pending＋ChunkNotReady）並自承黑邊
+        // additional causes 仍在調查——本觀測線正是抓殘餘原因的工具，錨點逐一重驗健在。
+        // 假說 (b)（server 3 次重試放棄）已隨重試機制刪除而失效；(a) largeArea 停送 gate 待驗。
         String cso = "zombie/mdc/ChunkStreamObserver";
         String csoDesc = "(Lzombie/iso/WorldStreamer;)V";
         Patcher.ClassPatch streamer = new Patcher.ClassPatch("zombie/iso/WorldStreamer");
@@ -707,10 +709,14 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;)V");
         rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
         rnr.expectedHits = 1;
-        // W4-2（見本方法上方說明）：同一 ClassPatch 內追加逾時常數 8s→15s
-        Patcher.MethodOps resend = streamer.method("resendTimedOutRequests", "()V");
-        resend.consts.add(new Patcher.ConstChange(8000L, 15000L));
-        resend.expectedHits = 1;
+        // 42.20.3 新協定：receiveChunkNotReady(I)V——server 對未生成/超限 chunk 的主動
+        // 回覆（vanilla 收到後把 sentRequests 全搬回 pendingRequests 重排隊）。必須觀測：
+        // 它更新接收基準，否則 STALL 會把重排隊回覆誤判成斷流黑邊。
+        Patcher.MethodOps rnrd = streamer.method("receiveChunkNotReady", "(I)V");
+        rnrd.headCall = new Patcher.HeadCall(cso, "onReceiveChunkNotReady", csoDesc);
+        rnrd.expectedHits = 1;
+        // W4-2（逾時 8s→15s）已於 42.20.3 撤刀：vanilla 整個刪除 resendTimedOutRequests
+        // （盲等逾時重發由 ChunkNotReady 主動通知根治），手術目標方法不存在。
         patches.add(streamer);
 
         return patches;

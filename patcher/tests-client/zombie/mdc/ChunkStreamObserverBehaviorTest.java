@@ -18,18 +18,46 @@ public final class ChunkStreamObserverBehaviorTest {
         periodicCadence();
         heartbeatGapResetsBaselines();
         reflectionOffCountersOnly();
-        System.out.println("chunk-stream OK  STALL 雙基準/節流、periodic、閒置不假報、斷檔重置全數通過");
+        notReadyCountsAsReceive();
+        System.out.println("chunk-stream OK  STALL 雙基準/節流、periodic、閒置不假報、斷檔重置、"
+                + "ChunkNotReady 接收基準全數通過");
     }
 
     private static String decide(long nowNs, int pending, int pending1, int reqQ1, boolean largeArea) {
         return ChunkStreamObserver.decide(nowNs,
-                ChunkStreamObserver.partsForTest(), 0, 0, ChunkStreamObserver.lastReceiveForTest(),
+                ChunkStreamObserver.partsForTest(), 0, ChunkStreamObserver.notReadyForTest(), 0,
+                ChunkStreamObserver.lastReceiveForTest(),
                 pending, pending1, 0, reqQ1, 0, largeArea, 0, 0);
     }
 
     private static String decideReflectionOff(long nowNs) {
-        return ChunkStreamObserver.decide(nowNs, 1, 0, 0, ChunkStreamObserver.lastReceiveForTest(),
+        return ChunkStreamObserver.decide(nowNs, 1, 0, 0, 0,
+                ChunkStreamObserver.lastReceiveForTest(),
                 -1, -1, -1, -1, -1, false, -1, -1);
+    }
+
+    /**
+     * 42.20.3 新協定：ChunkNotReady 是 server 的主動回覆（重排隊指示），不是斷流。
+     * onReceiveChunkNotReady 必須更新接收基準讓 STALL 解除，且計數出現在輸出行。
+     */
+    private static void notReadyCountsAsReceive() {
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);
+        require(decide(1 * S, 3, 1, 0, false) == null, "上升沿起算");
+        require(decide(40 * S, 3, 1, 0, false) != null, "無任何接收 → 先進入 STALL");
+        long before = ChunkStreamObserver.lastReceiveForTest();
+        ChunkStreamObserver.onReceiveChunkNotReady(null);
+        require(ChunkStreamObserver.notReadyForTest() == 1, "notReady 計數 +1");
+        require(ChunkStreamObserver.lastReceiveForTest() != before, "接收基準已更新（真 nanoTime）");
+        // 注入時間軸驗語意：基準推進到 45s 後，50s 不得再 STALL（server 有回應＝非斷流）
+        ChunkStreamObserver.primeForTest(45 * S);
+        String line = decide(50 * S, 3, 1, 0, false);
+        require(line == null || !line.contains("STALL"), "ChunkNotReady 後 STALL 解除：" + line);
+        // 106s：noReceive 再度超標 → STALL 行照出，且 state 段帶 notReady 計數
+        String line2 = decide(106 * S, 3, 1, 0, false);
+        require(line2 != null && line2.contains(" notReady=1"),
+                "輸出行帶 notReady 計數：" + line2);
     }
 
     /** 完全無活動（主選單/單機）：永不出行。 */
