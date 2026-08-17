@@ -1,4 +1,4 @@
-# 優化項目與原理詳解（42.20.0）
+# 優化項目與原理詳解（42.20.3）
 
 > 本文檔是給維運者看的完整說明：每一項優化「為什麼做、動了什麼、為什麼安全、怎麼驗證」。
 > bytecode 層的逐項原始證據（javap 反組譯摘錄）在 [specs/](specs/) JSON。
@@ -844,6 +844,17 @@ per-UdpConnection daemon thread，故只有該玩家卡、server 全域指標全
 欄位契約、`isChunksFilled` 的 `bipush 20` 綁定（TIS 調小而我們沒跟＝超發）、W4-2 常數雙向
 斷言。行為測試 8 案：守恆／批次上限／去重保留／largeArea 雙向／順序／退化輸入／
 上限不超過 vanilla／視窗預算封頂。
+**42.20.3 遷移記錄（2026-08-17）**：TIS 同戰場重構（修「Loading Map forever」）——
+pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 `ChunkNotReady`）、
+**server 重試機制整個刪除**（`Chunk.retriesCount`、`MAX_CHUNK_SEND_TRIES`、`getRetryChunk`
+移除）、worker 回填改 `queuedByWorker` concurrent queue＝WorkerThread 不再寫 `ccrWaiting`
+（掛點互斥前提更寬鬆，掛點不動）。`update()` 呼叫序變為 ready 閘 → `updatePendingChunks()`
+→ dedupe（掛點）；pending 回填的 ccr 是普通 non-largeArea ccr，被併包安全。**吞吐瓶頸未修**
+（`RequestZipListPacket` 逐位元相同、每 tick 仍一個 ccr）＝W4-1 存續；官方 changelog 自承
+黑邊「additional causes 仍在調查」。W4-2 所在的 client `WorldStreamer` 被實質重構，
+v2.1 client 包全部失效、必要性待重評。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
+完整分析：docs/report/pz-42.20.3-update-analysis.md。
+
 
 ## 2q. 容器環防崩潰守衛（W5，server）
 

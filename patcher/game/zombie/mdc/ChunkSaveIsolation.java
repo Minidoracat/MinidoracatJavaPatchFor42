@@ -109,7 +109,8 @@ public final class ChunkSaveIsolation {
 
     /**
      * INVOKEVIRTUAL ClientChunkRequest.getChunk 改道目標（receiver 僅 off 路徑使用）。
-     * 殼永遠是新的（欄位預設值即 vanilla getChunk 的重置後狀態：retriesCount=0、bb=null）。
+     * 殼永遠是新的（欄位預設值即 vanilla getChunk 的重置後狀態：bb=null；
+     * 42.20.3 起 vanilla 已刪除 retriesCount 欄位與整個重試機制）。
      */
     public static ClientChunkRequest.Chunk getChunk(ClientChunkRequest ccr) {
         if (!ENABLED) {
