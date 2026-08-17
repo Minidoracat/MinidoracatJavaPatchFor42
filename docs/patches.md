@@ -1517,7 +1517,7 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
 ---
 
-## 2w. 食材重量記憶化（**預設 observe，尚未啟用 on**）
+## 2w. 食材重量記憶化（**實測後決定不啟用 `on`，維持 observe**）
 
 **浪費**：`InventoryItem.getExtraItemsWeight ()F` 對 `extraItems` 内每個 fullType 字串完整建構
 一個 InventoryItem，只為讀 `getActualWeight()` 就丟棄。單次建構含 `ScriptManager.FindItem`（兩次
@@ -1581,6 +1581,33 @@ component 建立／連接。
 ／手術後（改道 ×1、原呼叫歸零、真指令總數與 vanilla 相同 = 1:1 替換）／負對照（全 class 5→4 保持 vanilla、
 `createCloneItem` 未被動到、helper 恰 1）／helper 契約（factory 委派恰 2 處 = off 純轉發＋phase 2，無第三處
 重試路徑）／五道門各恰一次。已用 mutation test（把 21／5／3 改成錯值）確認這些斷言真的會紅。
+
+**實測結論（2026-08-17，14 小時 observe 數據）——不啟用 `on`，收益不足以承擔風險。**
+observe 期跨 4 個 session 的週期行給出兩個關鍵量：
+
+- **命中率**：`hits/(hits+misses)` = 99.997%（如 `attempts=4194304 hits=4194250 misses=54 types=54`），
+  `uncacheable=0`、`nullResults=0`、`overflow=0`、`anomalies=0`。五道門在真實流量下沒擋掉任何東西，
+  型別集合只有 25–54 個。
+- **呼叫速率**：由相鄰週期行的 `Δattempts / Δt` 算得 **328–732 calls/s**（中位約 520/s）。
+- **原版單次建構**：`vanillaNsAvg` 隨樣本增加收斂到約 **2.1 µs**（首次取樣 2521 ns 偏高，
+  後續 1980–2239）。
+
+於是收益上限 = `520 × 2.1 µs` ≈ **1.09 ms/s**，相對主迴圈單核預算（10 fps ⇒ 1000 ms/s）
+約 **0.11%**，換算約 **0.011 fps**；樂觀取 `732 × 2.5 µs` 也僅 0.18% ≈ 0.018 fps。
+而 `on` 的代價是上面「已知行為差異」整段（全域 RNG 序列位移）＋**首次真正執行共用實例路徑**
+——observe **不走** memo 命中分支（`MODE == MODE_ON` 才查 `CACHE`；observe 只做一次
+`SEEN.containsKey` 後照常呼叫 factory），所以 `anomalies=0` **完全沒有演練過共用實例**。
+風險遠大於 0.11%，維持 observe／或轉 `off`。
+
+**方法教訓（值得記）**：命中率是比例、不是收益。99.997% 支撐「快取會命中」，
+不支撐「值得啟用」——絕對收益必須是「命中率 × 呼叫速率 × 單次成本」，缺了速率這一項
+就會把一把 0.1% 的刀當成主要優化機會。與 W3-2 ECS memo 同構（審查全綠、實測淨劣化而撤刀）：
+**只有量測證明有收益**。
+
+**`on` 期無法自帶對照組**（設計限制，先記下）：`vanillaNs` 只在 cache miss 走 factory 那條路累加，
+而 `on` 模式下 miss ≈ 型別數（數十次）且還須同時撞上 `(attempts & TIMING_MASK)==0` 才取樣，
+故 `vanillaSamples` 幾乎必為 0、`~vanillaNsAvg` 會印 0。日後若真要驗證 `on`，對照基準只能用
+observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同一份 log 自帶兩側數據。
 
 ---
 

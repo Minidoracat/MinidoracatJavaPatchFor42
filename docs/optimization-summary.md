@@ -20,7 +20,7 @@
 | 效能 | W3-3 動物 spotted 距離預篩 | `IsoAnimal`（updateLOS） | 2 | AnimalSpottedPrefilter | 遠距（>max(12,視距+2)）呼叫重放前綴後跳過，攔截率 99.94% |
 | 效能 | W3-4 車輛 couldSee 死工消除 | `BaseVehicle`（update） | 1 | VehicleCouldSeeGate | server 端結果進 vanilla no-op，直接短路 |
 | 效能 | W4-1 chunk 供給併包 | `PlayerDownloadServer`（removeOlderDuplicateRequests） | 1 | ChunkRequestPacker | 供給只跑到設計值 15% 造成黑邊 livelock，佇列前段併包到批次上限 |
-| 效能 | 食材重量記憶化（**預設 observe**） | `InventoryItem`（getExtraItemsWeight） | 1 | ItemWeightMemo | Moodle HEAVY_LOAD 每 tick 遞迴走訪整棵背包樹，每個 extraItem 都完整建構一個 InventoryItem 只為讀重量就丟棄；per-item-type 記憶化，第一版只量測不改行為 |
+| 效能 | 食材重量記憶化（**實測後決定不啟用 on**） | `InventoryItem`（getExtraItemsWeight） | 1 | ItemWeightMemo | Moodle HEAVY_LOAD 每 tick 遞迴走訪整棵背包樹，每個 extraItem 都完整建構一個 InventoryItem 只為讀重量就丟棄。14h observe 實測：命中率 99.997% 但呼叫速率僅 328–732/s、單次 2.1µs ⇒ 收益上限 0.11% 主迴圈（≈0.011 fps），不足以承擔 RNG 序列位移與共用實例風險；維持 observe |
 | 行為 | 動物壓力三調 | `IsoAnimal`（3 常數） | 3 | — | 閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半 |
 | 修復 | 玻璃假死保險絲 | `IsoWindow` | 1 | GlassAttachmentGuard | removeGlassAttachments 無限迴圈改跳過＋定位 log |
 | 修復 | 容器刷新修復 | `LootRespawn` | 2 | （LogFilter 兼任） | 自訂地圖無 TownZone 的原生固定容器恢復刷新 |
