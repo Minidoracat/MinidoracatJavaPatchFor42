@@ -61,6 +61,14 @@ public final class LogFilter {
         "ItemPickInfo -> cannot get ID for ",                                            // ItemPickInfo（debug 診斷前綴不同、照常轉發）
     };
 
+    /**
+     * DebugLog.log(DebugType, String) 呼叫點——訊息由 invokedynamic makeConcatWithConstants
+     * 組成（座標與 boolean 都是變數），只能用 startsWith。
+     */
+    private static final String[] LOG_TYPE_PREFIX = {
+        "Send Toxic Building at [ ",                                                      // GameServer.sendToxicBuilding
+    };
+
     public static void warnFmt(DebugType type, String format, Object[] args) {
         if (format != null) {
             for (String p : FMT_EXACT) {
@@ -101,6 +109,17 @@ public final class LogFilter {
             }
         }
         DebugLog.log(message);
+    }
+
+    public static void logType(DebugType type, String message) {
+        if (message != null) {
+            for (String p : LOG_TYPE_PREFIX) {
+                if (message.startsWith(p)) {
+                    return;
+                }
+            }
+        }
+        DebugLog.log(type, message);
     }
 
     /**

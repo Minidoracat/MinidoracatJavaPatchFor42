@@ -1,11 +1,14 @@
 # 全 Patch 優化原理與效果總結
 
-> 最後更新：2026-08-08（受精蛋豁免退役後）。本文是**面向營運的總覽**——每項只講三件事：
-> 浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
+> 最後更新：2026-08-16（W5–W9 全數上線、PSR v1.72 確認修好我方回報的回歸後）。本文是**面向營運的總覽**——
+> 每項只講三件事：浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
 > [patches.md](patches.md)，各波設計定稿見 `docs/*-design-*.md` 與 [specs/](specs/)。
-> 現況：**22 個 patched class、32 個 runtime class、33 處手術、43 個命中點**（42.20.2）。
+> 現況（以 `PatchConfig.all()` 實數為準）：**29 個 patched class、37 個 patched method、
+> 64 個命中點、17 個 runtime helper class 檔**（16 個手寫＋建置期生成的 `zombie.mdc.PatchInfo`）。
 > 42.20.2 里程碑：官方收編 P5／popman 隔離／512→256 三組（見第四節），我方對應退役。
 > 2026-08-08：受精蛋清除豁免退役（patch 有效但 client 端無對應改道，見 patches.md 2n）。
+> 2026-08-13～14 的四起事故（容器環假死、地圖格載入活鎖 114 分鐘、雞舍 chunk 被抹除、
+> CRC-blam 家族 43 筆資料損失）催生 W5–W9 五刀，全部是 vanilla 缺陷而非本專案所致。
 
 ## 全 Patch 清單（42.20.2 現役）
 
@@ -16,15 +19,24 @@
 | 效能 | W3-1 殭屍 ownership 錯峰 | `NetworkZombiePacker` | 1 | ZombieAuthThrottle | owner 穩定殭屍每 3 pass 才重選舉（原每 tick 全額 O(C×P)） |
 | 效能 | W3-3 動物 spotted 距離預篩 | `IsoAnimal`（updateLOS） | 2 | AnimalSpottedPrefilter | 遠距（>max(12,視距+2)）呼叫重放前綴後跳過，攔截率 99.94% |
 | 效能 | W3-4 車輛 couldSee 死工消除 | `BaseVehicle`（update） | 1 | VehicleCouldSeeGate | server 端結果進 vanilla no-op，直接短路 |
+| 效能 | W4-1 chunk 供給併包 | `PlayerDownloadServer`（removeOlderDuplicateRequests） | 1 | ChunkRequestPacker | 供給只跑到設計值 15% 造成黑邊 livelock，佇列前段併包到批次上限 |
+| 效能 | 食材重量記憶化（**預設 observe**） | `InventoryItem`（getExtraItemsWeight） | 1 | ItemWeightMemo | Moodle HEAVY_LOAD 每 tick 遞迴走訪整棵背包樹，每個 extraItem 都完整建構一個 InventoryItem 只為讀重量就丟棄；per-item-type 記憶化，第一版只量測不改行為 |
 | 行為 | 動物壓力三調 | `IsoAnimal`（3 常數） | 3 | — | 閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半 |
 | 修復 | 玻璃假死保險絲 | `IsoWindow` | 1 | GlassAttachmentGuard | removeGlassAttachments 無限迴圈改跳過＋定位 log |
 | 修復 | 容器刷新修復 | `LootRespawn` | 2 | （LogFilter 兼任） | 自訂地圖無 TownZone 的原生固定容器恢復刷新 |
 | 防崩潰 | null 頭部守衛 ×2 | `hit/Zombie`＋`hit/Fall` | 1+1 | — | 損壞封包 NPE 崩潰的 guard-before-super |
-| 抑噪 | 已知噪音樣式過濾 ×7 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager` | 1+1+1+9+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出 |
+| 防崩潰 | W5 容器環守衛 ×2 | `ItemContainer`（getCharacter／isInCharacterInventory） | 1+1 | ContainerCycleGuard | 容器互裝成環的 StackOverflow 假死，identity 路徑偵測環＋深度保險絲切斷 |
+| 防凍結 | W6 地圖格載入捕手 | `IsoChunk`（doLoadGridsquare） | 2 | ChunkLoadGuard | 「Entity is already registered」每 0.1 秒重撞的活鎖，記座標＋sprite 後跳過該物件 |
+| 防資損 | W7 朝向暫存執行緒隔離 | `IsoGameCharacter` | 2 | ForwardVectorGuard | 共用 static `tempVector2_2` 競態致 chunk 載入失敗被 Blam 抹除，換執行緒私有替身 |
+| 防資損 | W8 chunk 寫入閘 | `IsoChunk`（Save）＋`ServerChunkLoader$SaveLoadedTask`（save） | 2+1 | ChunkWriteGuard | 寫入前快照驗 len/CRC，損毀就擋下（磁碟保留上一版）＋蒐證＋checksum 歸零重試 |
+| 防資損 | W9 存檔管線隔離 | `ServerChunkLoader$SaveChunkThread`（addLoadedJob）＋`$SaveLoadedTask`（save／release） | 4+4+1 | ChunkSaveIsolation | 共用 CRC32 與全域 chunk 池的存檔競態根治（CRC-blam 家族根因） |
+| 抑噪 | 已知噪音樣式過濾 ×8 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding） | 1+1+1+9+1+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條佔 console 34.4%（PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
 | 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
 
-合計：22 個 patched class、43 個命中點、10 個 runtime helper（32 classes）。
+合計：**29 個 patched class、37 個 patched method、64 個命中點、17 個 runtime helper class 檔**
+（16 個手寫＋建置期生成的 `zombie.mdc.PatchInfo`；部署的 `.class` 檔另含 `$State` 等內嵌類別）。
+數字以 `patcher/src/PatchConfig.java` 的 `all()` 逐項 `expectedHits` 為準——文件與程式碼衝突以程式碼為準。
 另有 **client 端獨立包**（貼圖管線門檻＋洩漏根治，發佈於 `output\`，玩家自選安裝，不在 server manifest）。
 
 ### 退役／停用／否決（歷史記錄，詳見第四節）
@@ -147,14 +159,36 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 安全屋 room/building 綁定修復（2d） | B42.19 自訂大地圖的 binding 遺失 | 從 authoritative roomList 補回 roomId 再走完整原版驗證 | **2026-07-29 停用**——正式服已回歸原版地圖，觸發條件消失；座標已驗 42.20 仍有效，可隨時解註解恢復 |
 | Client 貼圖管線（2j，獨立 client 包） | 50MB DirectBuffer 硬門檻讓載入執行緒無限 sleep → 實體隱形；另有四處洩漏根因（S1/S2/S4/S6） | 門檻觀測＋洩漏根治第一波 | v2.0 出貨於 output\（玩家自選安裝） |
 
+### W4–W9：2026-08-13～14 事故修復六刀（全部是 vanilla 缺陷，非本專案所致）
+
+這六刀的共同性質與前三波效能刀不同：**不是省工，是止血**。每一刀都有正式服實案、
+都附「非本專案所致」的 javap／指令級實證，且都留旋鈕可不重新部署即降級回 vanilla。
+
+| 項 | 問題 | 修法 | 效果/狀態 |
+|---|---|---|---|
+| W4-1 chunk 供給併包（`PlayerDownloadServer`，2p） | vanilla 供給只跑到設計值 15%（每 worker 週期只處理一個 ccr＝約 30 chunk/s，預算 200 chunk/s 浪費 85%）；積壓越過 client 8 秒逾時後 client 丟棄已送達資料並重發且不通知取消 → 自我維持 livelock＝永久黑邊（實測 pending 恆 240、18 分鐘燒 105MB 全丟棄、零 chunk 載入） | headCall 掛在 `removeOlderDuplicateRequests`（**必須在 `workerThread.ready` 閘內**，掛 `update()` offset 0 會與 worker 同改一個 plain ArrayList＝跨玩家池汙染），把佇列前段併包到批次上限；不新增 chunk、不改順序、不碰 largeArea | 生效中。批次上限 8（vanilla 20 的 40%）、每 100ms 額外搬移預算 120，`-Dmdc.chunkPacker.windowBudget=0` 即整刀停用 |
+| W4-2 請求逾時 8s→15s（client 端獨立包，2p） | `RequestZipList`／`SentChunkPacket` 皆 `reliability=2`（RELIABLE），8 秒逾時幾乎不是在救真的遺失，而是在懲罰 server 慢並觸發上面那條 livelock | `WorldStreamer.resendTimedOutRequests` 的 `8000L`→`15000L`（方法內常數替換，全 class 僅此一處） | 隨 client 包出貨（玩家自選安裝，不在 server manifest） |
+| W5 容器環防崩潰守衛（`ItemContainer`，2q） | 2026-08-13 21:31 主迴圈死於 `StackOverflowError`，1024 層全是 `ItemContainer.getCharacter` 自我遞迴——假死 13 分鐘、graceful `quit` 收不進去、看門狗強制重啟。vanilla 沿「容器→物品→容器」爬升找擁有者且**零迴圈偵測**，`AddItem` 只擋同 ID 重複、不阻止把容器放進自己的子孫，MP 封包驅動搬移即可造環 | 改道兩處唯一自身遞迴（`getCharacter` 回 `null`、`isInCharacterInventory` 回 `false`，皆與 vanilla 同值）；ThreadLocal identity 爬升路徑偵測真環（通常 2-3 層命中）＋`MAX_DEPTH`（預設 64，硬上限 256）保險絲；切斷時印環上 containerId／itemId／fullType 與閉合點 | 生效中，同型假死零復發。**但這是止血＋捕手，不是根治**：環上容器 `getCharacter()` 回 null 且 `getParent()` 為 null 時 `GameServer` 五個庫存廣播的第三條分支是空的＝封包不送不 log（玩家體感東西憑空消失）。根因刀 W5-2（`AddItem` 加入前拒絕成環）未落地前不可認定此類假死已排除 |
+| W6 地圖格載入捕手（`IsoChunk.doLoadGridsquare`，2r） | 2026-08-14 01:34 frame 永久停在 `f:46186`，**凍結 114 分鐘**，靠排程 mod 更新重啟才結束（沒人是為了救它而重啟）。`IllegalArgumentException: Entity is already registered` 由 `IsoObject.addToWorld` 拋出，`GameServer.main` 的攔截點在迴圈最上方 → 這一圈剩下的工作（更新世界、處理封包、推進 frame）全跳過，而該地圖格還在待載入佇列，每 0.1 秒重撞一次。**活鎖非崩潰，「進程掛掉就重啟」救不了**；8/07 18:05 有逐行相同的前例 | 改道 `doLoadGridsquare` 內兩處通往同一 throw 點的 `addToWorld`（`IsoObject` ×1、`IsoMovingObject` ×1），catch 後記座標＋sprite 名跳過該物件。降級極小：throw 點在 offset 0，後續 container／items／generator 步驟本來就沒執行，且會拋出正代表先前成功那次已做過 | 生效中。`BaseVehicle.addToWorld` 那處**刻意留 vanilla**（自帶早退守衛、方法體另含 parts/engine 掛載，包住等於吞更大範圍）——有意識取捨，SmokeCheck 把它的呼叫數釘在 1，出現第四處即建置失敗 |
+| W7 朝向暫存執行緒隔離（`IsoGameCharacter`，2s） | 2026-08-13 19:55 玩家 Player-A 的雞舍連水桶整組消失：chunk 1160,968 載入失敗被 vanilla `Blam + LoadBrandNew` 抹除重生，46,142 → 8,549 bytes（雞舍＋32 隻家禽的完整基因組全滅，只剩草地）。根因是 `setForwardDirectionFromIsoDirection` 用全域共用 `tempVector2_2` 當暫存，而 `getVectorFromDirection` 開頭無條件歸零再填值——主執行緒與 `LoaderThread` 同時走這段就讀到 (0,0)，`normalize()` 長度 0 → `IllegalStateException` | 方法內兩處 `getstatic tempVector2_2` 各接一個 `invokestatic` 到 helper，回傳執行緒私有替身（3 bytes、堆疊 1→1，形狀最單純的一類手術；vanilla 方法體只有 8 條指令、無分支無 frame） | 生效中。**範圍界定**：只治「毀存檔」那條路徑；全 log 保留期 67 次同一例外中另 66 次走 `IsoDirections.TEMP` → `createRealZombieAlways` 的**獨立**競態（落在主執行緒、被 `IngameState.UpdateStuff` 吞掉、每次只帶掉一個 tick、無資料損失）。`IsoDirections` 是全遊戲高流量核心 enum，爆炸半徑不同級，另案評估 |
+| W8 chunk 寫入閘（`IsoChunk.Save`＋`SaveLoadedTask.save`，2t） | 累計 **43 個 chunk** 因 `SANITY CHECK FAIL` 被 Blam 抹除重生，損失約 143KB 玩家建造資料且持續發生。鑑識定案：43/43 筆 log 值與磁碟檔逐位元組相符＝**載入側無辜、檔案寫入時就壞了**（A 組 16 筆 crc=0＋body 自洽＝被捕捉在回填 len 與 crc 兩行之間；B 組 27 筆 header 屬於別份 body＝寫檔與重填撕裂） | 閘門**刻意不依賴根因**：全 jar 恰 5 個 `SafeWrite` 呼叫點（SmokeCheck census 釘死），伺服器實際可達的 3 個全改道到「快照→驗 len/CRC→放行或擋下」的 helper。擋下＝跳過寫入（磁碟保留上一版）＋stack 蒐證＋checksum 歸零自癒重試。掛點必須在**進入 `SafeWrite` 之前**（它的 `new FileOutputStream` 建構當下就 truncate 舊檔） | 生效中，預設 enforce（`-Dmdc.chunkWriteGuard=0` 停用／`=2` observe）。首晚攔下 8 筆損毀寫入、零資料損失，且 BLOCKED stack 直接指認寫入路徑——這 8 筆現行犯就是 W9 定罪的證據 |
+| W9 存檔管線隔離（`SaveChunkThread`＋`SaveLoadedTask`，2u） | **CRC-blam 家族根治刀**。W8 首晚 8 筆 BLOCKED 全走 `SaveLoadedTask` 路徑、簽名全為「len 正確＋crc 0/垃圾」——唯一相容機制是 header 指紋競態：`addLoadedJob` 用的 `SaveChunkThread.crc32` 是單一共用實例，而 `addLoadedJob` 可在主迴圈（`ServerCell.update`→`saveChunk`）與 `GameServer$1`（shutdown hook 的 `QueuedSaveAll`）並行；對方 `reset()` 插在我 update 與 getValue 之間 → 指紋 0（A 組），update 交錯 → 垃圾（B 組）。另 `SaveLoadedTask.save` 四連讀外層 `ServerChunkLoader.crcSave` 共用實例，可在 `SaveChunkThread` 與 `LoaderThread` 並行 | 三刀：(1) `crc32` GETFIELD → 執行緒私有（根絕 header 指紋競態）；(2) `crcSave` 四個 GETFIELD 同形替換為執行緒私有（去重誤判＝陳舊跳寫、客戶端校驗錯亂＝重送）；(3) `getChunk`／`getByteBuffer`／`releaseChunk` 改道私有池，讓存檔管線退出與 N 條發送 WorkerThread 共用的 `ClientChunkRequest` 全域 static 池，恢復單一所有權鏈 | 生效中（`-Dmdc.chunkSaveIsolation=0` 停用）。**驗證閉環＝W8 的 `flagged` 計數器應歸零**；不歸零代表機制另有分支，用 BLOCKED stack 續查。W8 閘不拆，永久保險絲 |
+
 ## 三、防崩潰與抑噪
 
 - **null 頭部守衛 2 項**（`hit/Zombie`、`hit/Fall`）：惡意/損壞封包導致的 NPE 崩潰，
   guard-before-super 擋下。負對照實測：原版必拋 NPE、修補版安靜返回。
-- **抑噪 7 項**（AnimationSet／SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／
-  PacketsCache／INetworkPacket／NetworkZombieManager）：只攔已知噪音樣式，未知警告與
-  **反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的訊號源——後續所有
-  低谷/凍結/實體消失的診斷都建立在這之上。
+- **遞迴／活鎖／資損守衛 5 項**（W5 `ItemContainer`、W6 `IsoChunk.doLoadGridsquare`、
+  W7 `IsoGameCharacter`、W8 `IsoChunk.Save`＋`SaveLoadedTask.save`、W9 存檔管線）：
+  全部帶計數器＋不需重新部署的旋鈕，明細與已知降級見第二節「W4–W9」小節。
+- **抑噪 8 項**（AnimationSet／SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／
+  PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding）：只攔
+  已知噪音樣式，未知警告與**反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的
+  訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的第 8 項是
+  最大單一噪音源：`Send Toxic Building at [ … ]` 佔 console **34.4%**（9512/27682 行／57 分鐘），
+  來源是 PSR 的 `PBSystem.suppressToxic` 掛 `Events.EveryOneMinute`（Day Length=1h → 每 2.5
+  真實秒）逐 powerbank 無條件 `setToxic`，而 `IsoBuilding.setToxic` 的 putfield 沒有變更比對。
+  **只攔 log、不動封包**——封包本身是 client 端 toxic 狀態的來源，攔它會把玩家鎖在毒氣室。
 - **觀測 2 項**（LoginMetrics／JoinMetrics）：登入三個同步 DB 寫入與 join 四段重活
   的 elapsedNs 量測，不改任何順序與例外邊界。成果：把「join 造成主迴圈停頓
   5.8/6.6/11.1 秒」從猜測變成實測數字，驅動了 PingLimit 決策。
@@ -189,6 +223,10 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 8/4 尖峰（P5 生效） | 低谷 4-6、觸發 3 次、卸載主題 0、22:00 後 41 分鐘安靜 |
 | 8/5（W3 上線） | 三刀計數器全綠：動物攔截 99.94%（4h45m 攔 37.6 億次）、車輛 8500 萬次短路、ownership 節流生效 |
 | 8/6（42.20.2） | 官方收編 P5／popman／512→256 三組（changelog 明寫修復 high-pop server 的 chunk unloading lag——與我方 8/3 診斷同源）；全 patch 覆核後 23 class 續用，34 classes 重新部署 |
+| 8/13（W4 上線＋版本指紋＋兩起事故） | 黑邊根因修復上線：W4-1 chunk 供給併包（server）＋W4-2 請求逾時 8s→15s（client），供給從約 30 chunk/s 解放、livelock 的自我維持條件被拆掉；同日 patch 版本指紋（建置期生成 `zombie.mdc.PatchInfo`，log 印側別/版本/建置時間/jar 同源指紋）落地。事故：19:55 Player-A 雞舍所在 chunk 因 `tempVector2_2` 競態載入失敗被 Blam 抹除（46,142 → 8,549 bytes）；21:31 容器環 `StackOverflowError` 全服假死 13 分鐘（graceful `quit` 收不進去、看門狗強制重啟）→ W5 容器環守衛當晚落地 |
+| 8/14（一起事故＋四刀） | 01:34 `Entity is already registered` 活鎖 **凍結 114 分鐘**（frame 停在 f:46186，靠排程 mod 更新重啟才結束）→ W6 捕手；同日 CRC-blam 家族鑑識定案（43 筆、~143KB 損失，證明寫入側有罪）→ W7 朝向暫存隔離＋W8 寫入閘上線，W8 首晚攔下 8 筆損毀寫入、零資料損失；這 8 筆現行犯把根因從「嫌疑」推進到「定罪」（共用 `CRC32` 指紋競態）→ 同日 W9 三刀根治，CRC-blam 家族收口 |
+| 8/15（PSR 回歸回報） | 回報 PSR v1.71 的 CPU 回歸（`docs/report/psr-1.71-server-fps-report.md`）：23 人時 8.8→6.4 fps 且持續下滑、`coverage REMOVE` 1103 行/2.5h（`complete=true` 僅 11/1067）、`Server is too busy` 12 次、12 份 jstack 指向 87,035 squares 的 per-square `RecalcAllWithNeighbours`；我方以 `ChargeFreq=2` 暫時止血 |
+| 8/16（巡檢實測＋第 8 把抑噪刀） | 約 **63 人在線**、主迴圈 **9.36–10.10 fps**、**所有 patch 計數器 anomalies=0**。PSR 作者已在 **v1.72** 修掉我方回報的回歸（刪除 `psrSweepRect` 內的 per-square `RecalcAllWithNeighbours`，並在註解引用我方數據）：`coverage REMOVE` **1103 行/2.5h → 20 行/46min**（`complete=true` 從 11/1067 變成 5/8）、`Server is too busy` **12 次 → 0 次**。同日巡檢另抓到最大單一噪音源——`Send Toxic Building at [ … ]` 佔 console **34.4%**（9512/27682 行／57 分鐘）→ 新增 `GameServer.sendToxicBuilding` 抑噪（第 8 項，只攔 log 不動封包）。`ChargeFreq=2` 尚未回復為 1；PSR 殘留三項（連鎖 ADD sweep、同 pass 重複消耗重試額度、`suppressToxic` 缺 per-building 去重）待回報 |
 
 誠實邊界：主迴圈是單執行緒，Amdahl 定律決定了沒有銀彈——每一波都是「低谷變淺、
 變稀」而非平均 FPS 飆升；80+ 人的瀰漫負載（LOS thread 飽和、join chunk 同步、
