@@ -76,6 +76,16 @@ public final class ChunkStreamObserverBehaviorTest {
         String dead = decide(45 * S, 2, 0, 0, false);
         require(dead != null && dead.contains("STALL") && dead.contains("notReadyAgoMs=-1"),
                 "全斷流（零 NotReady）→ notReadyAgoMs=-1：" + dead);
+        // lock-free 時序邊界：nowNs 取樣後網路緒才寫入時戳（lastNotReadyNs > nowNs）
+        // → clamp 0（「就在剛剛」），不得輸出負值破壞分型
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);
+        decide(1 * S, 2, 0, 0, false);
+        ChunkStreamObserver.primeNotReadyForTest(41 * S);   // 未來時戳（跨緒競態形狀）
+        String future = decide(40 * S, 2, 0, 0, false);
+        require(future != null && future.contains("STALL") && future.contains("notReadyAgoMs=0"),
+                "未來時戳 clamp 0（不得為負）：" + future);
     }
 
     /** periodic 活動閘的 notReady 項（殺「刪 + notReady 仍全綠」的突變體）：僅 NotReady 活動也要出行。 */

@@ -217,8 +217,11 @@ public final class ChunkStreamObserver {
                 && noReceiveNs >= STALL_AFTER_NS) {
             if (nowNs - lastStallLogNs >= STALL_INTERVAL_NS) {
                 lastStallLogNs = nowNs;
+                // clamp 0：onUpdateMain 取 nowNs 之後、讀 volatile 之前，網路緒可能剛寫入
+                // 更新的時戳（lastNotReadyNsV > nowNs）——負值會破壞分型，0＝「就在剛剛」。
+                // -1 sentinel（本生命週期無 NotReady）分支保留。
                 long notReadyAgoMs = lastNotReadyNsV == 0L ? -1L
-                        : (nowNs - lastNotReadyNsV) / 1_000_000L;
+                        : Math.max(0L, nowNs - lastNotReadyNsV) / 1_000_000L;
                 return "[MinidoracatJavaPatch][ChunkStream] STALL noReceiveMs="
                         + noReceiveNs / 1_000_000L
                         + " notReadyAgoMs=" + notReadyAgoMs
