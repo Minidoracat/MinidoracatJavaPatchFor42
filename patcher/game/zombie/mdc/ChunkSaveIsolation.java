@@ -109,8 +109,10 @@ public final class ChunkSaveIsolation {
 
     /**
      * INVOKEVIRTUAL ClientChunkRequest.getChunk 改道目標（receiver 僅 off 路徑使用）。
-     * 殼永遠是新的（欄位預設值即 vanilla getChunk 的重置後狀態：bb=null；
-     * 42.20.3 起 vanilla 已刪除 retriesCount 欄位與整個重試機制）。
+     * 殼永遠是新的。安全依據＝消費端先寫後讀（addLoadedJob 使用前寫 wx/wy、getByteBuffer
+     * 指派 bb；存檔路徑只讀 wx/wy/bb），非欄位重置——42.20.3 起 vanilla getChunk 不重置
+     * 任何欄位（回收殼帶舊值出租；retriesCount 與重試機制已整個刪除），42.20.2 也僅重置
+     * retriesCount。先寫後讀由 SmokeCheck 的 addLoadedJob PUTFIELD census 釘死。
      */
     public static ClientChunkRequest.Chunk getChunk(ClientChunkRequest ccr) {
         if (!ENABLED) {

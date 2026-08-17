@@ -773,6 +773,9 @@ loadReceivedChunks 完成。**待驗假說**：(a) `requestingLargeArea` 期間 
 時 sendRequests 頭部 gate 完全停送新請求；(b) server 端 `ClientChunkRequest.getRetryChunk`
 重試 ≥3 次回 null＝永久放棄該 requestNumber——兩者疊加＝pending 永遠清不掉、新請求全面
 停擺＝黑邊永不恢復。開大地圖觸發 largeArea 模式，與「黑邊時大地圖也打不開」的症狀吻合。
+**42.20.3 起假說 (b) 失效**：重試機制（`getRetryChunk`／`retriesCount`／
+`MAX_CHUNK_SEND_TRIES`）整個刪除，未生成 chunk 改由 pending 機制＋`ChunkNotReady` 封包
+主動告知 client（見 2p 遷移記錄）——重評 W4-2 時勿再以 (b) 推理。
 
 **手術**（三處 headCall，全部 receiver-only `(Lzombie/iso/WorldStreamer;)V`，
 helper `zombie.mdc.ChunkStreamObserver`）：
@@ -821,11 +824,13 @@ per-UdpConnection daemon thread，故只有該玩家卡、server 全域指標全
 
 **W4-1 手術**：`PlayerDownloadServer.removeOlderDuplicateRequests()V` 頭部 headCall →
 `zombie.mdc.ChunkRequestPacker.packQueue`，把佇列前段併包到批次上限。
-**掛點不是 `update()V`**（審查抓到的 blocking）：`update()` 對 `ccrWaiting` 的存取全包在
-`if (workerThread.ready)` 內，那是與 WorkerThread（`sendArray` 會 add `ccrForRetries` 並持續
-`chunks.add`）互斥的唯一機制；插在 offset 0 會落在閘外，最壞情況是同一 `Chunk` 實例雙重
-`releaseChunk` 進 **static** `freeChunks` 池＝跨玩家汙染。`removeOlderDuplicateRequests`
-全 class 僅被 `update()` 呼叫一次（javap 實證）且就在閘內、vanilla 去重之前。
+**掛點不是 `update()V`**（審查抓到的 blocking；以下為 42.20.2 當時的分析，42.20.3 現況見
+下方遷移記錄）：`update()` 對 `ccrWaiting` 的存取全包在 `if (workerThread.ready)` 內，那是
+與 WorkerThread（42.20.2 的 `sendArray` 會 add `ccrForRetries` 並持續 `chunks.add`；42.20.3
+起 worker 已不寫 `ccrWaiting`）互斥的唯一機制；插在 offset 0 會落在閘外，最壞情況是同一
+`Chunk` 實例雙重 `releaseChunk` 進 **static** `freeChunks` 池＝跨玩家汙染。
+`removeOlderDuplicateRequests` 全 class 僅被 `update()` 呼叫一次（javap 實證）且就在閘內、
+vanilla 去重之前。
 
 去重語意保留：vanilla 只偵測跨 ccr 重複，故隊首已含同 `(wx,wy)` 者跳過不搬，留給 vanilla
 去重原樣處理。搬空的 ccr 由同一方法後段的 vanilla 本體移除並回收進物件池。largeArea 不介入。
@@ -852,7 +857,8 @@ pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 
 → dedupe（掛點）；pending 回填的 ccr 是普通 non-largeArea ccr，被併包安全。**吞吐瓶頸未修**
 （`RequestZipListPacket` 逐位元相同、每 tick 仍一個 ccr）＝W4-1 存續；官方 changelog 自承
 黑邊「additional causes 仍在調查」。W4-2 所在的 client `WorldStreamer` 被實質重構，
-v2.1 client 包全部失效、必要性待重評。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
+client 包（`dist-client/…-v2.2.zip`，內含 v2.1 串流觀測＋v1.1 texture pipeline 兩線 patch）
+全部失效、W4-2 必要性待重評。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
 完整分析：docs/report/pz-42.20.3-update-analysis.md。
 
 

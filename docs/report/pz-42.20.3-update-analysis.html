@@ -64,7 +64,8 @@
     （<code>bda809fb…</code>，buildid <span class="num">24775771</span>，version <code>42.20.3 70207f62e0</code>）<br>
     方法：全 jar entry CRC 對帳 → 32 個相關 class 逐指令 javap 正規化 diff → 變更方法逐條語意比對 →
     反編譯快照 <code>42.20.3-20260817</code>（12,999 檔）語意對照 ・
-    <a href="https://store.steampowered.com/news/app/108600/view/715661584899246561">官方 changelog</a>
+    <a href="https://store.steampowered.com/news/app/108600/view/715661584899246561">官方 changelog</a><br>
+    <strong>本頁為同名 .md 報告的排版摘要版；判定內容以 .md 為準。</strong>
   </div>
 </header>
 
@@ -132,7 +133,7 @@
   <tr><td>W5 容器環守衛（ItemContainer）</td><td>class 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
   <tr><td>W6 地圖格載入捕手（IsoChunk.doLoadGridsquare）</td><td>方法逐指令相同；<code>IsoObject.addToWorld</code> 逐指令相同；<code>GameServer.main</code> 例外攔截點結構不變</td><td><span class="badge b-keep">保留</span></td></tr>
   <tr><td>W7 朝向暫存隔離（IsoGameCharacter）</td><td>class 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
-  <tr><td>W8 chunk 寫入閘（IsoChunk.Save＋SaveLoadedTask.save）</td><td>兩方法逐指令相同；SafeWrite「恰 5 呼叫點」census 照過</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W8 chunk 寫入閘（IsoChunk.Save＋SaveLoadedTask.save）</td><td>兩方法逐指令相同；SafeWrite「恰 5 呼叫點」census 照過</td><td><span class="badge b-keep">保留（永久保險絲）</span></td></tr>
   <tr><td>W9 存檔管線隔離（SaveChunkThread／SaveLoadedTask／私有池）</td><td><code>releaseChunk</code>/<code>getByteBuffer</code>/<code>releaseBuffer</code> 逐指令相同；<code>getChunk</code> 僅刪 retriesCount 重置（fresh-shell 等價維持）；<code>LoaderThread.run</code> 僅 chunkStore 改型</td><td><span class="badge b-keep">保留</span></td></tr>
   <tr><td>W4-1 chunk 供給併包（PlayerDownloadServer）</td><td>掛點方法結構不變（僅簽名重構）；ready 閘仍在、掛點仍在閘內；<strong>吞吐瓶頸未修＝存續</strong>；worker 不再寫 ccrWaiting＝互斥前提更寬鬆</td><td><span class="badge b-watch">保留＋觀測</span></td></tr>
   <tr><td>觀測 LoginMetrics（LoginPacket ×3）</td><td>唯一語意變更＝版本不符提前 return（TIS bug fix），wrapper 錨點無涉</td><td><span class="badge b-keep">保留</span></td></tr>
@@ -147,7 +148,7 @@
   pending 回填會改變佇列形狀 → <code>packed</code> 比例下降屬預期；<code>anomalies</code> 必須恆 0；官方 ChunkNotReady 上線後 42.20.2 那種「pending≈240 周期重發」形狀會消失，屬官方修復效果，勿誤判為 W4-1 失效。
 </div>
 
-<h2>3. Client patch（dist-client v2.1）</h2>
+<h2>3. Client patch（dist-client <code>…-42.20.2-v2.2.zip</code>）</h2>
 <div class="callout red">
   <strong><span class="badge b-invalid">全部失效</span>　裝了的玩家必須先移除。</strong>
   <ul>
