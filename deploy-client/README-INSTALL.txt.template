@@ -38,7 +38,8 @@ __LIMIT_SECTION__
 log 裡「vanillaStallSamples=」的數字代表「原版遊戲在那個時刻會開始卡住等待」
 的取樣次數；「aboveVanillaMs=」代表連續超標持續的毫秒數——這些就是問題
 真的發生過的證據。「ChunkStream」開頭的行是黑邊鑑識數據（STALL 行的
-notReadyAgoMs：有數字＝伺服器活著但地圖還沒生成好、-1＝完全斷流）。
+notReadyAgoMs：秒級小值＝伺服器最近仍在回「地圖還沒生成好」＝生成端瓶頸；
+-1 或很大的值＝連這種回覆都沒有＝斷流候選）。
 回報時請把 console.txt 一起提供。
 
 移除方式
