@@ -1138,12 +1138,13 @@ public final class SmokeCheck {
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
         // 零值新殼安全的機械依據（42.20.3 起 vanilla getChunk 不再重置任何欄位）：
-        // addLoadedJob 對租出殼「先寫後讀」——wx/wy 各恰一次 PUTFIELD，且首個 PUTFIELD
+        // addLoadedJob 對租出殼「先寫後讀」——wx/wy 各恰一次 PUTFIELD，且兩者都
         // 位於 getByteBuffer 呼叫之前。PZ 若讓存檔路徑讀取未寫欄位或改寫此順序，
         // 這條會失敗強制重新分析，而不是讓私有池新殼與 vanilla 回收殼靜默分歧。
         int wxWrites = 0;
         int wyWrites = 0;
-        int firstPutIdx = -1;
+        int wxPutIdx = -1;
+        int wyPutIdx = -1;
         int gbCallIdx = -1;
         int addIdx = 0;
         for (AbstractInsnNode in : vAdd.instructions) {
@@ -1151,11 +1152,14 @@ public final class SmokeCheck {
                     && chunkRef.equals(f.owner)) {
                 if ("wx".equals(f.name)) {
                     wxWrites++;
+                    if (wxPutIdx < 0) {
+                        wxPutIdx = addIdx;
+                    }
                 } else if ("wy".equals(f.name)) {
                     wyWrites++;
-                }
-                if (("wx".equals(f.name) || "wy".equals(f.name)) && firstPutIdx < 0) {
-                    firstPutIdx = addIdx;
+                    if (wyPutIdx < 0) {
+                        wyPutIdx = addIdx;
+                    }
                 }
             } else if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
                     && ccrRef.equals(mi.owner) && "getByteBuffer".equals(mi.name)
@@ -1164,9 +1168,10 @@ public final class SmokeCheck {
             }
             addIdx++;
         }
-        failed += check("W9 vanilla 前提：addLoadedJob 先寫後讀（Chunk.wx/wy PUTFIELD 各 x1、首個早於 getByteBuffer）",
+        failed += check("W9 vanilla 前提：addLoadedJob 先寫後讀（Chunk.wx/wy PUTFIELD 各 x1、兩者皆早於 getByteBuffer）",
                 wxWrites == 1 && wyWrites == 1
-                && firstPutIdx >= 0 && gbCallIdx >= 0 && firstPutIdx < gbCallIdx);
+                && wxPutIdx >= 0 && wyPutIdx >= 0 && gbCallIdx >= 0
+                && wxPutIdx < gbCallIdx && wyPutIdx < gbCallIdx);
         failed += check("W9 vanilla 前提：SaveLoadedTask.save 內 crcSave 讀 x4（reset/update/getValue×2 四連讀）",
                 countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4);
         MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");
