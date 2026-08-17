@@ -712,8 +712,10 @@ public final class PatchConfig {
         rnr.headCall = new Patcher.HeadCall(cso, "onReceiveNotRequired", csoDesc);
         rnr.expectedHits = 1;
         // 42.20.3 新協定：receiveChunkNotReady(I)V——server 對未生成/超限 chunk 的主動回覆
-        // （vanilla 完整語意：drain sentRequests→pendingRequests，再把 flagsWs&1 與相符
-        // requestNumber 的 entry 移出 pendingRequests 並標 flagsUdp|=16/24＝移出追蹤）。
+        // （vanilla 完整生命週期：drain sentRequests→pendingRequests，把 flagsWs&1 與相符
+        // requestNumber 的 entry 移出網路緒 pendingRequests 並標 flagsUdp|=16/24；同一物件
+        // 仍在 streamer 緒 pendingRequests1，loadReceivedChunks 依 flags 收尾——chunk 仍被
+        // 引用時重新入列 chunkRequests1＝延後重排，不需要時歸還池）。
         // 只更新獨立基準 lastNotReadyNs——STALL 維持「30 秒無 payload」語意（生成瓶頸不被
         // 靜音），STALL 行以 notReadyAgoMs 分型（小＝生成端瓶頸、大/-1＝全斷流）。
         Patcher.MethodOps rnrd = streamer.method("receiveChunkNotReady", "(I)V");

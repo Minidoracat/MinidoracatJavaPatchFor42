@@ -814,14 +814,18 @@ Inflater＝改變行為；斷檔法同治 relog／in-place 重連／凍結三情
   另收集 largeDl 序列驗證；假說 (b)（server 重試放棄）42.20.3 起不存在，勿再引用。
 - `STALL` 但 parts 持續增加 → 接收活著、載入端（DoChunk/refs）卡住，另闢分析。
 - 無 `STALL` 行但玩家見黑邊 → payload 仍在到達：卡點在 WorldStreamer 之外
-  （IsoChunkMap/渲染層），或 chunk 被 NotReady 移出追蹤後 client 遲未重請求
-  （對照 periodic 的 `notReady=` 與 `sent=` 變化）。
+  （IsoChunkMap/渲染層），或 NotReady 的延後重排循環過長——對照 periodic 的
+  `notReady=`、`sent=` 變化與 vanilla 警告
+  `the server did not generate the chunk %d,%d in time, requesting it again`。
 
 **v3.0（42.20.3 重建＋三 lane 對抗審查修正，2026-08-17）**：三 headCall 錨點與八個反射
 欄位逐一重驗健在；**擴充第 4 headCall `receiveChunkNotReady(I)V`**——42.20.3 新協定中
-server 對未生成/超限 chunk 的主動回覆。vanilla 完整語意（javap 實證）：drain
-sentRequests→pendingRequests 後，把 flagsWs&1 與相符 requestNumber 的 entry **移出
-pendingRequests**（flagsUdp|=16/24）＝該請求移出追蹤、pending 水位下降，不是留隊重排。
+server 對未生成/超限 chunk 的主動回覆。vanilla 完整生命週期（javap＋反編譯實證）：drain
+sentRequests→pendingRequests 後，把 flagsWs&1 與相符 requestNumber 的 entry 移出**網路緒**
+pendingRequests 並標 flagsUdp|=16/24；同一請求物件仍在 streamer 緒的 pendingRequests1，
+由 loadReceivedChunks 依 flags 收尾——chunk 仍被引用時重新入列 chunkRequests1（**延後重排**，
+vanilla 同時印 `the server did not generate the chunk %d,%d in time, requesting it again`），
+不再需要時歸還 chunkStore 池。
 **獨立基準設計**：hook 只更新 lastNotReadyNs、不碰 payload 基準（lastReceiveNs）——
 STALL 維持「30 秒無 payload」語意，生成瓶頸（server 短週期持續回 NotReady）不被靜音；
 STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會讓新協定最可能的黑邊

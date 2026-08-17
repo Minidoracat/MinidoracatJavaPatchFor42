@@ -157,13 +157,17 @@ public final class ChunkStreamObserver {
 
     /**
      * receiveChunkNotReady 頭部掛點（UdpEngine 網路執行緒）：lock-free 計數＋獨立時戳，不拋不鎖。
-     * 42.20.3 新協定——server 對「chunk 尚未生成／pending 超限」的主動回覆。vanilla 完整語意
-     * （javap 實證）：先把 sentRequests 全數 drain 回 pendingRequests，再掃 pendingRequests——
-     * flagsWs&1 的 entry 移除＋flagsUdp|=16、requestNumber 相符的那筆移除＋flagsUdp|=24；
-     * 即「server 說沒好」的請求被**移出追蹤**（pending 水位下降），不是留隊重排。
+     * 42.20.3 新協定——server 對「chunk 尚未生成／pending 超限」的主動回覆。vanilla 完整
+     * 生命週期（javap＋反編譯實證）：drain sentRequests→pendingRequests 後，把 flagsWs&1
+     * 與相符 requestNumber 的 entry 移出**網路緒** pendingRequests 並標 flagsUdp|=16/24；
+     * 同一請求物件仍在 streamer 緒的 pendingRequests1，由 loadReceivedChunks 依 flags 收尾
+     * ——chunk 仍被引用時重新入列 chunkRequests1（延後重排，vanilla 同時印
+     * "the server did not generate the chunk %d,%d in time, requesting it again"），
+     * 不再需要時歸還 chunkStore 池。
      * 基準分離（三 lane 對抗審查定案）：本 hook 只更新 lastNotReadyNs，**不碰 lastReceiveNs**
      * ——STALL 維持「30 秒無 payload」語意（生成瓶頸不被靜音），STALL 行以 notReadyAgoMs
-     * 分型：小值＝server 活著但一直說沒好（生成端瓶頸）、大值/-1＝連 NotReady 都沒有（全斷流）。
+     * 分型：秒級小值＝server 活著但一直說沒好（生成端瓶頸）、-1／大值＝連 NotReady 都
+     * 沒有（斷流候選）。
      */
     public static void onReceiveChunkNotReady(WorldStreamer ws) {
         notReadyReceived.incrementAndGet();
