@@ -120,9 +120,8 @@ public final class ChunkStreamObserver {
                 largeDl = fLargeDl.getInt(ws);
                 reqNum = fReqNum.getInt(ws);
             }
-            String line = decide(now, partsReceived.get(), notRequiredReceived.get(),
-                    notReadyReceived.get(), anomalies.get(), lastReceiveNs, lastNotReadyNs,
-                    pending, pending1, reqQ0, reqQ1, sent, largeArea, largeDl, reqNum);
+            String line = dispatchDecide(now, pending, pending1, reqQ0, reqQ1, sent,
+                    largeArea, largeDl, reqNum);
             if (line != null) {
                 DebugLog.log(line);
             }
@@ -130,6 +129,18 @@ public final class ChunkStreamObserver {
             rethrowFatal(t);
             anomalies.incrementAndGet();
         }
+    }
+
+    /**
+     * production 傳參接線（counters 與兩條基準集中於此；package-private 供行為測試
+     * 直接覆蓋參數順序——外部 codex post-fix review：測試自組 decide 參數蓋不住
+     * 「交換 lastReceiveNs/lastNotReadyNs」的接線突變體）。
+     */
+    static String dispatchDecide(long nowNs, int pending, int pending1, int reqQ0, int reqQ1,
+            int sent, boolean largeArea, int largeDl, int reqNum) {
+        return decide(nowNs, partsReceived.get(), notRequiredReceived.get(),
+                notReadyReceived.get(), anomalies.get(), lastReceiveNs, lastNotReadyNs,
+                pending, pending1, reqQ0, reqQ1, sent, largeArea, largeDl, reqNum);
     }
 
     /** receiveChunkPart 頭部掛點（UdpEngine 網路執行緒）：lock-free 計數，不拋不鎖。 */
