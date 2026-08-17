@@ -243,8 +243,10 @@ public final class SmokeCheck {
             long anchorGarbage = anchor.getValue();
             failed += check("W9 機制錨：共用 CRC32 遭外部 reset→0（A 組簽名）、遭疊 update→垃圾（B 組簽名）",
                     anchorZero == 0L && anchorGarbage != anchorCorrect && anchorCorrect != 0L);
-            // 私有池行為：租→還→再租重用同殼同 buffer、歸還後 bb=null、retriesCount 重置，
-            // 且全程不動 ClientChunkRequest 全域池（隔離的定義本身）
+            // 私有池行為：租→還→再租重用同殼同 buffer、歸還後 bb=null，
+            // 且全程不動 ClientChunkRequest 全域池（隔離的定義本身）。
+            // 42.20.3 起 vanilla 刪除重試機制（Chunk.retriesCount／MAX_CHUNK_SEND_TRIES／
+            // getRetryChunk 全移除），fresh shell 的欄位預設值等價命題只剩 bb=null。
             Class<?> ccrClsR = Class.forName("zombie.network.ClientChunkRequest", true, patched);
             Class<?> chunkClsR = Class.forName("zombie.network.ClientChunkRequest$Chunk", true, patched);
             Method gcM = csi.getMethod("getChunk", ccrClsR);
@@ -259,18 +261,16 @@ public final class SmokeCheck {
             Object pc1 = gcM.invoke(null, new Object[]{null});
             gbM.invoke(null, new Object[]{null, pc1});
             java.lang.reflect.Field bbField = chunkClsR.getField("bb");
-            java.lang.reflect.Field retriesField = chunkClsR.getField("retriesCount");
             Object pb1 = bbField.get(pc1);
-            retriesField.setInt(pc1, 7);
             rcM.invoke(null, new Object[]{null, pc1});
             boolean bbNulled = bbField.get(pc1) == null;
             Object pc2 = gcM.invoke(null, new Object[]{null});
             gbM.invoke(null, new Object[]{null, pc2});
             // codex 對抗審查修正：殼不入池（fresh shell）——vanilla update() 的無同步
             // savedChunks 可雙重 release，入池殼會被二次出租；buffer 則重用
-            failed += check("W9 私有池：殼每次全新（不入池）、buffer 重用、歸還 null bb、新殼 retriesCount=0",
+            failed += check("W9 私有池：殼每次全新（不入池）、buffer 重用、歸還 null bb",
                     pb1 != null && bbNulled && pc2 != pc1
-                    && bbField.get(pc2) == pb1 && retriesField.getInt(pc2) == 0);
+                    && bbField.get(pc2) == pb1);
             failed += check("W9 隔離定義：私有池全程往返後 ClientChunkRequest 全域池計數不變",
                     ((java.util.Collection<?>) fcField.get(null)).size() == fcBefore
                     && ((java.util.Collection<?>) fbField.get(null)).size() == fbBefore);
