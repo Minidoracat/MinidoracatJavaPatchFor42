@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PZ 42.20.3 更新分析與 patch 存續判定（2026-08-17）</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330;
+    --fg:#d5dce4; --fg-dim:#8b96a5; --border:#2b3444;
+    --accent:#58a6ff; --amber:#d29922; --green:#3fb950; --red:#f85149; --purple:#bc8cff;
+    --mono:ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.75 system-ui,-apple-system,'Segoe UI','Noto Sans TC','Microsoft JhengHei',sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:920px;margin:0 auto;padding:48px 28px 80px}
+  header{border-bottom:1px solid var(--border);padding-bottom:24px;margin-bottom:36px}
+  h1{font-size:26px;line-height:1.4;margin:0 0 10px;color:#e8eef5}
+  .sub{color:var(--fg-dim);font-size:14px}
+  .sub code{color:var(--accent)}
+  h2{font-size:20px;margin:48px 0 16px;padding-left:12px;border-left:4px solid var(--accent);color:#e8eef5}
+  h3{font-size:16px;margin:28px 0 10px;color:#cdd9e5}
+  p{margin:10px 0}
+  code{font-family:var(--mono);font-size:.86em;background:var(--bg3);border:1px solid var(--border);
+       border-radius:5px;padding:1px 6px;color:#9ecbff;word-break:break-all}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th{background:var(--bg3);color:#cdd9e5;text-align:left;font-weight:600}
+  th,td{border:1px solid var(--border);padding:9px 12px;vertical-align:top}
+  td{word-break:break-word}
+  tr:nth-child(even) td{background:var(--bg2)}
+  ul,ol{padding-left:26px;margin:10px 0}
+  li{margin:6px 0}
+  .badge{display:inline-block;font-size:12.5px;font-weight:700;border-radius:20px;
+         padding:1px 11px;white-space:nowrap;letter-spacing:.5px}
+  .b-keep{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.45)}
+  .b-watch{background:rgba(210,153,34,.15);color:var(--amber);border:1px solid rgba(210,153,34,.45)}
+  .b-exit{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.45)}
+  .b-invalid{background:rgba(188,140,255,.13);color:var(--purple);border:1px solid rgba(188,140,255,.4)}
+  .b-info{background:rgba(88,166,255,.13);color:var(--accent);border:1px solid rgba(88,166,255,.4)}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:14px 0}
+  .card h3{margin-top:2px}
+  .callout{border-left:4px solid var(--amber);background:rgba(210,153,34,.07);
+           border-radius:0 8px 8px 0;padding:12px 18px;margin:18px 0}
+  .callout.red{border-left-color:var(--red);background:rgba(248,81,73,.07)}
+  .callout.green{border-left-color:var(--green);background:rgba(63,185,80,.07)}
+  .kv{color:var(--fg-dim)}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .num{font-family:var(--mono);color:#9ecbff}
+  footer{margin-top:56px;border-top:1px solid var(--border);padding-top:16px;
+         color:var(--fg-dim);font-size:13px}
+</style>
+</head>
+<body><div class="wrap">
+
+<header>
+  <h1>PZ 42.20.3 更新分析與 patch 存續判定</h1>
+  <div class="sub">
+    2026-08-17 ・ MinidoracatJavaPatchFor42 ・ 基準 <code>42.20.2</code> → <code>42.20.3</code>
+    （<code>bda809fb…</code>，buildid <span class="num">24775771</span>，version <code>42.20.3 70207f62e0</code>）<br>
+    方法：全 jar entry CRC 對帳 → 32 個相關 class 逐指令 javap 正規化 diff → 變更方法逐條語意比對 →
+    反編譯快照 <code>42.20.3-20260817</code>（12,999 檔）語意對照 ・
+    <a href="https://store.steampowered.com/news/app/108600/view/715661584899246561">官方 changelog</a>
+  </div>
+</header>
+
+<h2>0. 事件時間軸</h2>
+<table>
+  <tr><th style="width:150px">時刻（伺服器）</th><th>事件</th></tr>
+  <tr><td class="num">20:32</td><td>cron <code>pzserver update</code> 自動換上 42.20.3 jar，48 個舊 loose class 殘留</td></tr>
+  <tr><td class="num">~20:33 起</td><td>反覆啟動失敗：<code>NoSuchFieldError: IsoChunk … loadGridSquare</code>（舊 patched IsoChunk 遮蔽新 jar；42.20.3 把該欄位改型 <code>CappedConcurrentQueue</code>）。爆點在 <code>IsoWorld.init</code>＝<strong>未觸碰存檔，fail-fast 安全</strong></td></tr>
+  <tr><td class="num">20:53</td><td>uninstall 48 class＋強殺重啟 → 原版 42.20.3 恢復運行（f:5 進主迴圈、零 linkage error）</td></tr>
+  <tr><td class="num">21:0x–21:56</td><td>javap 全面重驗 → 42.20.3 基準重建 → 三道閘裝回 → commit <code>f93ba66</code> 乾淨指紋對齊，<strong>等下次重啟生效</strong></td></tr>
+</table>
+
+<h2>1. 官方 42.20.3 動了什麼（changelog × bytecode 實證）</h2>
+<p>全 jar <span class="num">23,735 → 23,740</span> class：<strong>新增 6、移除 1、變更 143</strong>。</p>
+
+<div class="card">
+  <h3>A. MP 玩家上限 254＋滿員時管理員可進</h3>
+  <ul>
+    <li><code>GameServer</code>：新增 delayed-disconnect 機制（<code>MainLoopDelayedDisconnectQ</code> 家族）、<code>getFreeSlot</code> 收 private、<code>receiveClientConnect</code> 重構；<code>UdpConnection</code>／<code>UdpEngine</code>／<code>QueuePacket</code> 配合。</li>
+    <li><code>LoginPacket.processServer</code>：client 版本不符時<strong>提前 return</strong>（舊版 log＋踢人後竟繼續跑完登入流程＝bug）。</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>B. 修 client 卡「Loading Map」forever —— 與我方 W4-1 同戰場</h3>
+  <ul>
+    <li><code>PlayerDownloadServer</code>（<span class="num">+6,335 bytes</span>，9→16 方法）新增 pending 機制：新內部類 <code>QueuedRequest</code>／<code>PendingChunk</code>／<code>OutOfRangeRequest</code>＋新封包 <code>ChunkNotReadyPacket</code>。</li>
+    <li>Worker 遇未生成 chunk → <code>queueUntilGenerated</code> 入 concurrent queue；主緒消費：無效回 <code>sendNotRequired</code>、超範圍入佇列（上限 <span class="num">1024</span>）、有效掛起（上限 <span class="num">4096</span>，超限／生成逾時 30s 回 <code>ChunkNotReady</code> 主動告知 client）。</li>
+    <li><strong>整個 server 端重試機制刪除</strong>：<code>Chunk.retriesCount</code>、<code>MAX_CHUNK_SEND_TRIES</code>、<code>getRetryChunk()</code> 全移除。</li>
+    <li><strong>WorkerThread 從此不再寫 <code>ccrWaiting</code></strong>（回填一律走 concurrent queue）。</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>C. 記憶體洩漏多因修復＋記憶體優化</h3>
+  <ul>
+    <li>新增 <code>PoolCaps</code>（主迴圈每 tick <code>updateServerCaps()</code>）與 <code>CappedConcurrentQueue</code>（有上限池佇列）。</li>
+    <li><code>IsoChunkMap.chunkStore</code> 與 <code>IsoChunk.loadGridSquare</code> 改型 <code>CappedConcurrentQueue</code> ——<strong>這就是舊 loose class 起不來的直接原因</strong>。</li>
+    <li><code>ObjectPool</code>／<code>Pool</code>／<code>ReferencedObjectPool</code> 重構；IsoChunk pool 家族（<code>unlinkSquares</code>、<code>resetForStore</code> 等）；<code>IsoObject</code> highlight/renderInfo 陣列改懶初始化。</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>D. 快速移動時黑邊/灰塊減少（官方自承「additional causes 仍在調查」）</h3>
+  <p>即 B 的效果面。<strong>官方沒修的 additional cause 正是我方 W4-1 定罪的吞吐瓶頸</strong>：<code>RequestZipListPacket</code> 逐位元相同（每包仍 new ccr）、<code>update()</code> 每 tick 仍只處理一個 ccr。</p>
+</div>
+
+<div class="card">
+  <h3>其他</h3>
+  <ul>
+    <li>lighting 錯誤修復（<code>LightingJNI</code> +270）。</li>
+    <li><code>WorldMapVisited</code> 家族重構＋<code>PlayerVisitedPacket</code> 移除（rejoin 掉圖主題——玩家回報 42.20.3 後<strong>仍存在</strong>）。</li>
+    <li>動物管理層（<code>AnimalCell</code> +971 等）、<code>ServerMap.preupdate</code> 精簡、kahlua <code>StringLib</code> 微調。</li>
+  </ul>
+</div>
+
+<h2>2. 我方 29 個 patched class 存續判定</h2>
+<p>javap 正規化 diff：<strong>26/32 相關 class 逐指令相同</strong>；6 個有變更的逐方法判定如下。</p>
+<table>
+  <tr><th style="width:34%">刀</th><th>42.20.3 對手術方法的影響</th><th style="width:110px">判定</th></tr>
+  <tr><td>抑噪 8（AnimationSet／SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／NetworkZombieManager／PacketsCache／INetworkPacket／sendToxicBuilding）</td>
+      <td>全部逐指令相同（GameServer 變更不在 <code>sendToxicBuilding</code>；21 個 <code>DebugLog.log</code> census 照過）</td>
+      <td><span class="badge b-keep">全數保留</span></td></tr>
+  <tr><td>IsoAnimal 三常數＋updateLOS 預篩</td><td>class 逐指令相同（官方動的是 AnimalCell 等管理層）</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W5 容器環守衛（ItemContainer）</td><td>class 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W6 地圖格載入捕手（IsoChunk.doLoadGridsquare）</td><td>方法逐指令相同；<code>IsoObject.addToWorld</code> 逐指令相同；<code>GameServer.main</code> 例外攔截點結構不變</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W7 朝向暫存隔離（IsoGameCharacter）</td><td>class 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W8 chunk 寫入閘（IsoChunk.Save＋SaveLoadedTask.save）</td><td>兩方法逐指令相同；SafeWrite「恰 5 呼叫點」census 照過</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W9 存檔管線隔離（SaveChunkThread／SaveLoadedTask／私有池）</td><td><code>releaseChunk</code>/<code>getByteBuffer</code>/<code>releaseBuffer</code> 逐指令相同；<code>getChunk</code> 僅刪 retriesCount 重置（fresh-shell 等價維持）；<code>LoaderThread.run</code> 僅 chunkStore 改型</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>W4-1 chunk 供給併包（PlayerDownloadServer）</td><td>掛點方法結構不變（僅簽名重構）；ready 閘仍在、掛點仍在閘內；<strong>吞吐瓶頸未修＝存續</strong>；worker 不再寫 ccrWaiting＝互斥前提更寬鬆</td><td><span class="badge b-watch">保留＋觀測</span></td></tr>
+  <tr><td>觀測 LoginMetrics（LoginPacket ×3）</td><td>唯一語意變更＝版本不符提前 return（TIS bug fix），wrapper 錨點無涉</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>觀測 JoinMetrics（ConnectPacket／ConnectCoopPacket／receivePlayerConnect）</td><td><code>receivePlayerConnect</code> 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>效能群（EngineEntityManager／EntityBucket／IsoZombie 預篩／BaseVehicle couldSee／NetworkZombiePacker stagger／Zombie・Fall headGuard／IsoWindow／LootRespawn／CreatePlayerPacket）</td><td>全部 class 逐指令相同</td><td><span class="badge b-keep">保留</span></td></tr>
+  <tr><td>ItemWeightMemo（InventoryItem，observe）</td><td>class 逐指令相同</td><td><span class="badge b-keep">保留（不啟 on）</span></td></tr>
+  <tr><td>SmokeCheck 的 retriesCount 斷言</td><td>vanilla 欄位連同重試機制刪除，斷言目標消失——改為只驗 <code>bb</code></td><td><span class="badge b-exit">退場</span></td></tr>
+</table>
+
+<div class="callout">
+  <strong>W4-1 生效後觀測要點</strong>：TIS pending 機制解決「<em>未生成</em> chunk 佔管線」；W4-1 解決「<em>已生成</em> chunk 吞吐只有設計值 15%」——兩者正交、掛點相容（逐指令驗證）。
+  pending 回填會改變佇列形狀 → <code>packed</code> 比例下降屬預期；<code>anomalies</code> 必須恆 0；官方 ChunkNotReady 上線後 42.20.2 那種「pending≈240 周期重發」形狀會消失，屬官方修復效果，勿誤判為 W4-1 失效。
+</div>
+
+<h2>3. Client patch（dist-client v2.1）</h2>
+<div class="callout red">
+  <strong><span class="badge b-invalid">全部失效</span>　裝了的玩家必須先移除。</strong>
+  <ul>
+    <li><code>WorldStreamer</code> 被 TIS 實質重構（ChunkNotReady 新協定）：舊 loose class 遮蔽新版 → 與 server 端同款 linkage 錯誤或行為錯亂。</li>
+    <li><code>TextureIDAssetManager</code>／<code>ImageData</code>／<code>TextureID</code> 三個 class 42.20.3 逐指令相同（50MB 門檻與洩漏都還在，官方沒碰 texture pipeline）。</li>
+    <li>W4-2（逾時 <code>8000L</code>→<code>15000L</code>）<strong>必要性待重評</strong>：官方 ChunkNotReady 主動告知取代 client 盲等；重建前逐錨點重跑 javap。</li>
+  </ul>
+</div>
+
+<h2>4. 部署狀態（2026-08-17 21:56 定稿）</h2>
+<div class="callout green">
+  <ul>
+    <li>伺服器已裝回 <strong>commit <code>f93ba66</code> 乾淨指紋</strong>的 48 class（三道閘全過：payload SHA ✓、29 個原版 class 與 42.20.3 jar 同源 ✓、無衝突 ✓；<code>PatchInfo.class</code> SHA <code>41232c30…</code> 與 manifest 對帳一致），<strong>下次重啟生效</strong>（排程 0/6/12/18 或 MOD 更新觸發）。換裝不影響運行中的原版伺服器。</li>
+    <li>本地：<code>work/projectzomboid.jar</code>＝42.20.3 基準（舊檔留存 <code>projectzomboid-42.20.2.jar</code>）；反編譯快照 <code>snapshots/42.20.3-20260817</code>（12,999 檔）已建。</li>
+    <li>build 10/10 全綠：64 命中點、LoadCheck、BytecodeVerify、SmokeCheck 全部 census 與語境指紋、行為測試（W5／W4-1／W6／W9-off／記憶化三模式）、install-roundtrip 兩輪。clean rebuild 與前一版逐位元比對：47/48 相同，唯一差異＝PatchInfo 版本標籤。</li>
+  </ul>
+</div>
+
+<h2>5. 生效後驗證清單</h2>
+<ol>
+  <li>console 零 <code>VerifyError</code>／<code>NoSuchFieldError</code>／<code>NoClassDefFoundError</code>。</li>
+  <li><code>PatchInfo</code> 開機橫幅：side=server、jar 指紋=<code>bda809fb</code>、build 時間對得上。</li>
+  <li>抑噪生效：SkinningBoneHierarchy 等 WARN 消失、<code>Send Toxic Building</code> 為 0。</li>
+  <li><code>ChunkPacker</code>／<code>ChunkWriteGuard</code>（<code>flagged=0</code>）／<code>AnimalSpotted</code> 週期 log 正常、全 patch <code>anomalies=0</code>。</li>
+  <li>主迴圈 fps ~10、玩家 join 正常。</li>
+</ol>
+
+<footer>
+  來源：<code>docs/report/pz-42.20.3-update-analysis.md</code>（commit f93ba66 系列）・
+  逐項 javap 證據 <code>docs/specs/*.json</code>・詳解 <code>docs/patches.md</code>
+</footer>
+
+</div></body>
+</html>
