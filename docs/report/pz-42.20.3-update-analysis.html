@@ -158,12 +158,12 @@
   </ul>
 </div>
 
-<h2>4. 部署狀態（2026-08-17 21:56 定稿）</h2>
+<h2>4. 部署狀態（2026-08-17 最終 review 後定稿）</h2>
 <div class="callout green">
   <ul>
-    <li>伺服器已裝回 <strong>commit <code>f93ba66</code> 乾淨指紋</strong>的 48 class（三道閘全過：payload SHA ✓、29 個原版 class 與 42.20.3 jar 同源 ✓、無衝突 ✓；<code>PatchInfo.class</code> SHA <code>41232c30…</code> 與 manifest 對帳一致），<strong>下次重啟生效</strong>（排程 0/6/12/18 或 MOD 更新觸發）。換裝不影響運行中的原版伺服器。</li>
+    <li>伺服器已裝回 <strong>review-plus 三 lane 修正後的 clean build</strong> 共 48 class（三道閘全過：payload SHA ✓、29 個原版 class 與 42.20.3 jar 同源 ✓、無衝突 ✓；伺服器端 <code>PatchInfo.class</code>／<code>ChunkSaveIsolation.class</code> SHA 與該 build manifest 對帳一致），<strong>下次重啟生效</strong>（排程 0/6/12/18 或 MOD 更新觸發）。實際版本以開機 PatchInfo 橫幅與部署目錄 manifest 為準，避免報告 commit 造成自我過期。</li>
     <li>本地：<code>work/projectzomboid.jar</code>＝42.20.3 基準（舊檔留存 <code>projectzomboid-42.20.2.jar</code>）；反編譯快照 <code>snapshots/42.20.3-20260817</code>（12,999 檔）已建。</li>
-    <li>build 10/10 全綠：64 命中點、LoadCheck、BytecodeVerify、SmokeCheck 全部 census 與語境指紋、行為測試（W5／W4-1／W6／W9-off／記憶化三模式）、install-roundtrip 兩輪。clean rebuild 與前一版逐位元比對：47/48 相同，唯一差異＝PatchInfo 版本標籤。</li>
+    <li>build 10/10 全綠：64 命中點、LoadCheck、BytecodeVerify、SmokeCheck 全部 census 與語境指紋、行為測試（W5／W4-1／W6／W9-off／記憶化三模式）、install-roundtrip 兩輪；review 新增的 fresh-shell <code>bb=null</code> 探針與 addLoadedJob 先寫後讀 census 均通過。</li>
   </ul>
 </div>
 
