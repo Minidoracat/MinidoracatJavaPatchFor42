@@ -18,46 +18,74 @@ public final class ChunkStreamObserverBehaviorTest {
         periodicCadence();
         heartbeatGapResetsBaselines();
         reflectionOffCountersOnly();
-        notReadyCountsAsReceive();
+        notReadyIndependentBaseline();
+        notReadyOnlyPeriodicActivity();
         System.out.println("chunk-stream OK  STALL 雙基準/節流、periodic、閒置不假報、斷檔重置、"
-                + "ChunkNotReady 接收基準全數通過");
+                + "ChunkNotReady 獨立基準/分型、notReady-only periodic 全數通過");
     }
 
     private static String decide(long nowNs, int pending, int pending1, int reqQ1, boolean largeArea) {
         return ChunkStreamObserver.decide(nowNs,
                 ChunkStreamObserver.partsForTest(), 0, ChunkStreamObserver.notReadyForTest(), 0,
-                ChunkStreamObserver.lastReceiveForTest(),
+                ChunkStreamObserver.lastReceiveForTest(), ChunkStreamObserver.lastNotReadyForTest(),
                 pending, pending1, 0, reqQ1, 0, largeArea, 0, 0);
     }
 
     private static String decideReflectionOff(long nowNs) {
         return ChunkStreamObserver.decide(nowNs, 1, 0, 0, 0,
-                ChunkStreamObserver.lastReceiveForTest(),
+                ChunkStreamObserver.lastReceiveForTest(), 0,
                 -1, -1, -1, -1, -1, false, -1, -1);
     }
 
     /**
-     * 42.20.3 新協定：ChunkNotReady 是 server 的主動回覆（重排隊指示），不是斷流。
-     * onReceiveChunkNotReady 必須更新接收基準讓 STALL 解除，且計數出現在輸出行。
+     * 42.20.3 新協定契約（三 lane 對抗審查定案）：NotReady 走獨立基準——
+     * (1) hook 更新 lastNotReadyNs（真 nanoTime，夾範圍驗值）且不碰 payload 基準；
+     * (2) STALL 維持「30 秒無 payload」＝生成瓶頸（server 持續回 NotReady）不被靜音；
+     * (3) STALL 行帶 notReadyAgoMs 分型（近期有 NotReady＝生成端瓶頸、-1＝全斷流）。
      */
-    private static void notReadyCountsAsReceive() {
+    private static void notReadyIndependentBaseline() {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        require(decide(1 * S, 3, 1, 0, false) == null, "上升沿起算");
-        require(decide(40 * S, 3, 1, 0, false) != null, "無任何接收 → 先進入 STALL");
-        long before = ChunkStreamObserver.lastReceiveForTest();
+        // (1) hook：計數 +1、寫 lastNotReadyNs 真值（夾範圍）、payload 基準不動
+        long payloadBefore = ChunkStreamObserver.lastReceiveForTest();
+        long lo = System.nanoTime();
         ChunkStreamObserver.onReceiveChunkNotReady(null);
+        long hi = System.nanoTime();
+        long stamp = ChunkStreamObserver.lastNotReadyForTest();
         require(ChunkStreamObserver.notReadyForTest() == 1, "notReady 計數 +1");
-        require(ChunkStreamObserver.lastReceiveForTest() != before, "接收基準已更新（真 nanoTime）");
-        // 注入時間軸驗語意：基準推進到 45s 後，50s 不得再 STALL（server 有回應＝非斷流）
-        ChunkStreamObserver.primeForTest(45 * S);
-        String line = decide(50 * S, 3, 1, 0, false);
-        require(line == null || !line.contains("STALL"), "ChunkNotReady 後 STALL 解除：" + line);
-        // 106s：noReceive 再度超標 → STALL 行照出，且 state 段帶 notReady 計數
-        String line2 = decide(106 * S, 3, 1, 0, false);
-        require(line2 != null && line2.contains(" notReady=1"),
-                "輸出行帶 notReady 計數：" + line2);
+        require(stamp >= lo && stamp <= hi, "lastNotReadyNs＝hook 當下的真 nanoTime（夾範圍）");
+        require(ChunkStreamObserver.lastReceiveForTest() == payloadBefore,
+                "payload 基準不受 NotReady 影響（獨立基準）");
+        // (2)(3) 注入時間軸：先建立 outstanding 上升沿，payload 凍結 40s、NotReady 39s
+        // 才來過 → STALL 照出且分型正確
+        require(decide(1 * S, 3, 1, 0, false) == null, "上升沿起算");
+        ChunkStreamObserver.primeNotReadyForTest(39 * S);
+        String line = decide(40 * S, 3, 1, 0, false);
+        require(line != null && line.contains("STALL"),
+                "server 持續回 NotReady 仍無 payload → STALL 不被靜音：" + line);
+        require(line.contains("noReceiveMs=40000") && line.contains("notReadyAgoMs=1000")
+                        && line.contains(" notReady=1"),
+                "STALL 行帶 payload 基準與 notReadyAgo 分型：" + line);
+        // 全斷流形狀：本生命週期沒收過 NotReady → notReadyAgoMs=-1
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);
+        decide(1 * S, 2, 0, 0, false);
+        String dead = decide(45 * S, 2, 0, 0, false);
+        require(dead != null && dead.contains("STALL") && dead.contains("notReadyAgoMs=-1"),
+                "全斷流（零 NotReady）→ notReadyAgoMs=-1：" + dead);
+    }
+
+    /** periodic 活動閘的 notReady 項（殺「刪 + notReady 仍全綠」的突變體）：僅 NotReady 活動也要出行。 */
+    private static void notReadyOnlyPeriodicActivity() {
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.onReceiveChunkNotReady(null);   // parts=0、notReq=0、notReady=1
+        ChunkStreamObserver.primeNotReadyForTest(1 * S);    // 時戳改注入值（隔離真 nanoTime）
+        String line = decide(61 * S, 0, 0, 0, false);       // 無 outstanding、僅 notReady 活動
+        require(line != null && line.contains("periodic") && line.contains(" notReady=1"),
+                "notReady-only 活動仍出 periodic 行：" + line);
     }
 
     /** 完全無活動（主選單/單機）：永不出行。 */

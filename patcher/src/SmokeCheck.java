@@ -44,8 +44,8 @@ public final class SmokeCheck {
         Path distJava = Path.of(args[0]);
         Path jar = Path.of(args[1]);
 
-        if (args.length > 2 && args[2].equals("client")) {
-            if (clientChecks(distJava, jar) > 0) {
+        if (args.length > 2 && (args[2].equals("client") || args[2].equals("client-lowmem"))) {
+            if (clientChecks(distJava, jar, args[2].equals("client-lowmem")) > 0) {
                 System.exit(1);
             }
             System.out.println("client 守衛語意驗證全數通過");
@@ -1343,11 +1343,16 @@ public final class SmokeCheck {
      * 時建置失敗而非默默錯位）、patched 全序鎖、helper 常數與 bytecode 常數連動、
      * 以及 helper passthrough 對真實 DirectBufferAllocator 水位的行為 smoke。
      */
-    static int clientChecks(Path distJava, Path jar) throws Exception {
+    static int clientChecks(Path distJava, Path jar, boolean lowmem) throws Exception {
         int failed = 0;
         String texCls = "zombie/core/textures/TextureIDAssetManager";
         String guardCls = "zombie/mdc/TexturePipelineGuard";
         String dba = "zombie/core/utils/DirectBufferAllocator";
+        // variant 分流（顯式 mode，與 Patcher 的 client/client-lowmem 同源）：
+        // lowmem＝不做 constChange（門檻維持 vanilla 50MB）＋redirect 指向 LowMem 入口
+        // （effective 門檻烘進 helper，橫幅/stall 分類以實際生效值計）。
+        String observedName = lowmem ? "bytesAllocatedObservedLowMem" : "bytesAllocatedObserved";
+        long effectiveConst = lowmem ? 52428800L : 4294967296L;
 
         MethodNode vanillaWait = methodFromJar(jar, texCls, "waitFileTask", "()V");
         failed += check("vanilla 前提：waitFileTask 恰一個 getBytesAllocated 與 52428800L",
@@ -1356,19 +1361,20 @@ public final class SmokeCheck {
                 && countLongConst(vanillaWait, 4294967296L) == 0);
 
         MethodNode wait = method(distJava, texCls, "waitFileTask", "()V");
-        failed += check("觀測改道恰一次且原 getBytesAllocated 歸零",
-                countExactCalls(wait, Opcodes.INVOKESTATIC, guardCls, "bytesAllocatedObserved", "()J") == 1
+        failed += check("觀測改道恰一次（" + observedName + "）且原 getBytesAllocated 歸零",
+                countExactCalls(wait, Opcodes.INVOKESTATIC, guardCls, observedName, "()J") == 1
                 && countExactCalls(wait, Opcodes.INVOKESTATIC, dba, "getBytesAllocated", "()J") == 0);
-        failed += check("門檻常數已改 4GB 且 50MB 歸零",
-                countLongConst(wait, 4294967296L) == 1 && countLongConst(wait, 52428800L) == 0);
+        failed += check(lowmem ? "lowmem：門檻維持 50MB 且無 4GB" : "門檻常數已改 4GB 且 50MB 歸零",
+                countLongConst(wait, effectiveConst) == 1
+                && countLongConst(wait, lowmem ? 4294967296L : 52428800L) == 0);
 
         AbstractInsnNode[] w = firstReal(wait, 4);
         boolean seq = w[0] instanceof MethodInsnNode m0 && m0.getOpcode() == Opcodes.INVOKESTATIC
-                && m0.owner.equals(guardCls) && m0.name.equals("bytesAllocatedObserved") && m0.desc.equals("()J")
-                && w[1] instanceof LdcInsnNode l1 && l1.cst instanceof Long lv && lv == 4294967296L
+                && m0.owner.equals(guardCls) && m0.name.equals(observedName) && m0.desc.equals("()J")
+                && w[1] instanceof LdcInsnNode l1 && l1.cst instanceof Long lv && lv == effectiveConst
                 && w[2] != null && w[2].getOpcode() == Opcodes.LCMP
                 && w[3] != null && w[3].getOpcode() == Opcodes.IFLE;
-        failed += check("waitFileTask 全序鎖（observed→4GB→lcmp→ifle）", seq);
+        failed += check("waitFileTask 全序鎖（observed→effective 門檻→lcmp→ifle）", seq);
         failed += check("sleep(20) 迴圈保留",
                 countExactCalls(wait, Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V") == 1
                 && countLongConst(wait, 20L) == 1);

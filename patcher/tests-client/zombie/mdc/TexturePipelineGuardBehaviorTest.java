@@ -81,9 +81,21 @@ public final class TexturePipelineGuardBehaviorTest {
                 && readLong("floorWindowBytes") == 60L * MB);
 
         obs(5L * 1024L * MB);
-        failed += check("合成越過 4GB：vanilla 與 patched 計數都遞增",
+        failed += check("合成越過 4GB：vanilla 與 patched（標準 effective 門檻）計數都遞增",
                 readLong("vanillaStallSamples") == 3L
                 && readLong("patchedStallSamples") == 1L);
+
+        // ---- lowmem 對照：同一水位、effective 門檻＝50MB → patched 計數也遞增 ----
+        // （effective 門檻烘進入口而非版本字串——lowmem 包的 stall 分類不說謊）
+        setLong("lastStallLogNs", System.nanoTime());
+        obsLow(60L * MB);
+        failed += check("lowmem 入口：50MB<bytes<4GB 也計 patched（effective=50MB）",
+                readLong("vanillaStallSamples") == 4L
+                && readLong("patchedStallSamples") == 2L);
+        long std = TexturePipelineGuard.bytesAllocatedObserved();
+        long low = TexturePipelineGuard.bytesAllocatedObservedLowMem();
+        failed += check("兩入口 passthrough 一致（真實水位 0）", std == 0L && low == 0L
+                && readLong("aboveVanillaSinceNs") == 0L);
 
         obs(0L);
         failed += check("合成回到門檻下後超標區間重置", readLong("aboveVanillaSinceNs") == 0L);
@@ -95,9 +107,17 @@ public final class TexturePipelineGuardBehaviorTest {
     }
 
     static String obs(long bytes) throws Exception {
-        Method m = TexturePipelineGuard.class.getDeclaredMethod("observe", long.class);
+        return obsWith(bytes, TexturePipelineGuard.PATCHED_LIMIT_BYTES);
+    }
+
+    static String obsLow(long bytes) throws Exception {
+        return obsWith(bytes, TexturePipelineGuard.VANILLA_LIMIT_BYTES);
+    }
+
+    static String obsWith(long bytes, long effectiveLimit) throws Exception {
+        Method m = TexturePipelineGuard.class.getDeclaredMethod("observe", long.class, long.class);
         m.setAccessible(true);
-        return (String)m.invoke(null, bytes);
+        return (String)m.invoke(null, bytes, effectiveLimit);
     }
 
     static long readLong(String field) throws Exception {

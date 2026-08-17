@@ -20,10 +20,15 @@ public final class LoadCheck {
                 System.out.println("load OK  " + cls);
             }
 
-            if (args.length == 4 && args[3].equals("client")) {
-                // client 模式：只驗 client helper 簽名（server helpers 不在 dist-client）
+            boolean clientMode = args.length == 4
+                    && (args[3].equals("client") || args[3].equals("client-lowmem"));
+            if (clientMode) {
+                // client 模式：只驗 client helper 簽名（server helpers 不在 dist-client）。
+                // 兩個改道入口（標準 4GB／lowmem 50MB effective 門檻）簽名都必須在——
+                // 出包 variant 由 PatchConfig 選 site 目標，helper 恆備兩入口。
                 Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", false, cl);
-                var observed = guard.getDeclaredMethod("bytesAllocatedObserved");
+                var observed = guard.getDeclaredMethod(args[3].equals("client-lowmem")
+                        ? "bytesAllocatedObservedLowMem" : "bytesAllocatedObserved");
                 int guardModifiers = java.lang.reflect.Modifier.PUBLIC
                         | java.lang.reflect.Modifier.STATIC;
                 if (observed.getReturnType() != long.class

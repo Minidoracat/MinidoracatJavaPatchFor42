@@ -787,7 +787,7 @@ helper `zombie.mdc.ChunkStreamObserver`）：
 
 **安全論證**（codex 對抗審查修正兩處後定稿）：headCall 於方法首指令前插入
 `aload_0; invokestatic`（進入點堆疊為空，參數與 locals 不動）；helper 非 fatal 例外
-一律吞（fatal 照拋）。**執行緒模型**：receive 兩掛點由 UdpEngine 網路執行緒呼叫
+一律吞（fatal 照拋）。**執行緒模型**：receive 三掛點由 UdpEngine 網路執行緒呼叫
 （經 GameClient.addIncoming）——與主執行緒**零共用鎖**（審查抓到初版共用 class
 monitor 會讓封包處理被主執行緒的反射/組字串卡住＝改變行為），receive 路徑只做
 AtomicLong 遞增＋volatile 時戳，決策狀態全部主執行緒單獨持有。**STALL 雙基準**：
@@ -796,25 +796,41 @@ outstanding 上升沿與最後接收都 ≥30 秒才報（審查抓到單基準�
 不持有 WorldStreamer 參考——static 強參考會釘住退役實例的 IsoChunk 串列＋native
 Inflater＝改變行為；斷檔法同治 relog／in-place 重連／凍結三情境）。反射欄位漂移→
 一次性 disabled 宣告後永久降級僅計數。SmokeCheck：vanilla 錨定（updateMain 觸碰
-`GameClient.connection`＋零既存 observer 呼叫）＋三 headCall 全序鎖＋receiveChunkPart
+`GameClient.connection`＋零既存 observer 呼叫）＋四 headCall 全序鎖＋receiveChunkPart
 原體保留（sentRequests 觸碰數不變）＋**八個反射欄位的名稱/型別契約守門**（漂移＝
 建置失敗而非默默降級）。行為測試全時間注入：STALL 雙基準/節流、閒置後新請求不假報、
 實例更換重置、靜默抑制、復原。
 
-**判讀指南**（下次發作的 log；注意 `reqQ0` 計的是 chunk **串列頭**數——每個元素是
-`chunk.next` 串起的整條清單，`reqQ0=1` 可能代表 1 也可能代表 200 個 chunk，
-展平後才進 `reqQ1`）：
-- `STALL … pending1=20 largeArea=true`＋parts 凍結 → 假說 (a)+(b) 成立，
-  下一步做 server 端 retry 上限／largeArea gate 的修復刀。
+**判讀指南（42.20.3／v3.0 版；舊版 (a)+(b) 假說判讀已隨重試機制刪除失效）**
+（注意 `reqQ0` 計的是 chunk **串列頭**數——每個元素是 `chunk.next` 串起的整條清單，
+`reqQ0=1` 可能代表 1 也可能代表 200 個 chunk，展平後才進 `reqQ1`）：
+- `STALL … notReadyAgoMs=` 小值（秒級）且 periodic 的 `notReady=` 持續上升 →
+  server 活著但一直回「沒生成好」＝**生成端瓶頸**（42.20.3 pending 機制的 30s 生成
+  逾時／4096 超限路徑），去 server 端查 `the chunk %d,%d was not generated` 警告與
+  世界生成負載；不是斷流。
+- `STALL … notReadyAgoMs=-1`（或大值）＋parts 凍結 → 連 NotReady 都沒有＝**全斷流**
+  （網路層/連線問題），比對 server 端該連線的發送狀態。
+- `STALL … pending1=20 largeArea=true` → 假說 (a)（largeArea 停送 gate）候選，
+  另收集 largeDl 序列驗證；假說 (b)（server 重試放棄）42.20.3 起不存在，勿再引用。
 - `STALL` 但 parts 持續增加 → 接收活著、載入端（DoChunk/refs）卡住，另闢分析。
-- 無 `STALL` 行但玩家見黑邊 → 卡點在 WorldStreamer 之外（IsoChunkMap/渲染層）。
+- 無 `STALL` 行但玩家見黑邊 → payload 仍在到達：卡點在 WorldStreamer 之外
+  （IsoChunkMap/渲染層），或 chunk 被 NotReady 移出追蹤後 client 遲未重請求
+  （對照 periodic 的 `notReady=` 與 `sent=` 變化）。
 
-**v3.0（42.20.3 重建，2026-08-17）**：三 headCall 錨點與八個反射欄位逐一重驗健在；
-**擴充第 4 headCall `receiveChunkNotReady(I)V`**——42.20.3 新協定中 server 對未生成/超限
-chunk 的主動回覆（vanilla 收到把 sentRequests 全搬回 pendingRequests 重排隊），計數
-`notReady=` 並更新接收基準，否則 STALL 會把重排隊回覆誤判成斷流。四 headCall 全序鎖＋
-新協定方法存在性 census 進 SmokeCheck；行為測試補 ChunkNotReady 接收基準案例。
-判讀更新：`STALL … notReady` 持續增加＝server 一直說「沒生成好」＝生成端瓶頸而非斷流。
+**v3.0（42.20.3 重建＋三 lane 對抗審查修正，2026-08-17）**：三 headCall 錨點與八個反射
+欄位逐一重驗健在；**擴充第 4 headCall `receiveChunkNotReady(I)V`**——42.20.3 新協定中
+server 對未生成/超限 chunk 的主動回覆。vanilla 完整語意（javap 實證）：drain
+sentRequests→pendingRequests 後，把 flagsWs&1 與相符 requestNumber 的 entry **移出
+pendingRequests**（flagsUdp|=16/24）＝該請求移出追蹤、pending 水位下降，不是留隊重排。
+**獨立基準設計**：hook 只更新 lastNotReadyNs、不碰 payload 基準（lastReceiveNs）——
+STALL 維持「30 秒無 payload」語意，生成瓶頸（server 短週期持續回 NotReady）不被靜音；
+STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會讓新協定最可能的黑邊
+形態永遠不觸發 STALL，Claude lane 抓到後改為雙基準）。四 headCall 全序鎖＋新協定方法
+存在性 census 進 SmokeCheck；行為測試補獨立基準/分型與 notReady-only periodic 案例。
+**lowmem 變體（v3.0-lowmem）**：≤8GB RAM 機器（42.20.3 隱形實證玩家 8101MB＋Xmx3G）
+不適用 4GB native 天花板——Patcher 顯式 `client-lowmem` mode：不做 constChange、redirect
+指向 `bytesAllocatedObservedLowMem`（effective 門檻 50MB 烘進 helper，橫幅與 stall 分類
+以實際生效值計），觀測與洩漏根治線全保留。
 
 ## 2p. chunk 供給併包（W4-1，server）＋請求逾時 8s→15s（W4-2，client）
 
@@ -867,8 +883,8 @@ pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 
 （`RequestZipListPacket` 逐位元相同、每 tick 仍一個 ccr）＝W4-1 存續；官方 changelog 自承
 黑邊「additional causes 仍在調查」。client 側：`WorldStreamer` 被實質重構——**W4-2 撤刀**
 （目標方法 `resendTimedOutRequests` 已刪除）；v2.2 包全面失效，**已以 v3.0 重建**
-（觀測線三 headCall 錨點重驗健在＋擴充第 4 headCall `receiveChunkNotReady(I)V` 計數新協定
-並更新接收基準——否則 STALL 會把 server 的重排隊回覆誤判成斷流；texture 線三 class 逐指令
+（觀測線重驗健在＋擴充第 4 headCall `receiveChunkNotReady(I)V`——獨立基準 lastNotReadyNs
+計數新協定回覆、STALL 維持無 payload 語意並以 notReadyAgoMs 分型；texture 線三 class 逐指令
 相同原樣沿用；42.20.3 client/server jar 整檔 SHA 實測相同 `bda809fb…`，install 同源閘直接
 有效）。SmokeCheck 的 retriesCount 斷言隨 vanilla 刪除。
 完整分析：docs/report/pz-42.20.3-update-analysis.md。

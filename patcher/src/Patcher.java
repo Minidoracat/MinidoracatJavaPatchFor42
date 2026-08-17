@@ -323,15 +323,19 @@ public final class Patcher {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 3 && !(args.length == 4 && args[3].equals("client"))) {
-            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest 輸出路徑> [client]");
+        boolean clientMode = args.length == 4
+                && (args[3].equals("client") || args[3].equals("client-lowmem"));
+        if (args.length != 3 && !clientMode) {
+            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest 輸出路徑> [client|client-lowmem]");
             System.exit(2);
         }
         Path jarPath = Path.of(args[0]);
         Path outDir = Path.of(args[1]);
         Path manifestPath = Path.of(args[2]);
 
-        List<ClassPatch> patches = args.length == 4 ? PatchConfig.client() : PatchConfig.all();
+        List<ClassPatch> patches = clientMode
+                ? PatchConfig.client(args[3].equals("client-lowmem"))
+                : PatchConfig.all();
         List<String> manifest = new ArrayList<>();
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
 
