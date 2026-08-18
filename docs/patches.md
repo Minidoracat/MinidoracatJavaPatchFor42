@@ -832,7 +832,8 @@ STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會
 形態永遠不觸發 STALL，Claude lane 抓到後改為雙基準）。四 headCall 全序鎖＋新協定方法
 存在性 census 進 SmokeCheck；行為測試補獨立基準/分型與 notReady-only periodic 案例。
 **lowmem 變體（v3.0-lowmem）**：≤8GB RAM 機器（42.20.3 隱形實證玩家 8101MB＋Xmx3G）
-不適用 4GB native 天花板——Patcher 顯式 `client-lowmem` mode：不做 constChange、redirect
+不適用 4GB 等待門檻（gate 為配置前水位檢查、非硬上限——多 worker 可同秒通過、單筆配置
+不受限，native 最壞用量高於 4GB）——Patcher 顯式 `client-lowmem` mode：不做 constChange、redirect
 指向 `bytesAllocatedObservedLowMem`（effective 門檻 50MB 烘進 helper，橫幅與 stall 分類
 以實際生效值計），觀測與洩漏根治線全保留。
 
