@@ -39,7 +39,7 @@ part of a tick and prints a full stack to the console.
 **Suggested fix:** null-check the item lookup in `SyncItemFieldsPacket.parse` and drop
 (or log-once) the packet instead of throwing into the main loop.
 
-## Bug 2: invalid `%l` conversion in `GameEntityManager.checkEntityIDChange` — the error it tries to report is replaced by a formatter crash
+## Bug 2: C-style `%ld` in `GameEntityManager.checkEntityIDChange` format strings — the error it tries to report is replaced by a formatter crash
 
 **Frequency:** 10 occurrences in the same session, all during bulk chunk unload after a
 mass disconnect (~23 players hit simultaneous RakNet connection-lost within the same
@@ -66,18 +66,23 @@ java.util.UnknownFormatConversionException: Conversion = 'l'
   zombie.network.GameServer.main(GameServer.java:1105)
 ```
 
-The format string passed to `DebugType.error` in `checkEntityIDChange` (line 400) contains
-a C-style `%l` conversion, which `java.util.Formatter` rejects. Two consequences:
+`checkEntityIDChange` calls `DebugType.error` with C-style format strings in its two
+map-consistency checks — both message templates are of the form
+`"idToEntityMap(%ld)=%s, expected …"`, and the second call also supplies one trailing
+argument with no matching conversion (silently ignored today).
 
-1. The diagnostic the method wants to emit — an entity net-ID change detected during
-   unregister, which is exactly the kind of anomaly you want visibility into — is
+`java.util.Formatter` rejects `%ld` (it stops at the `l`, hence `Conversion = 'l'` in the
+exception). Two consequences:
+
+1. The diagnostic the method wants to emit — an entity net-ID map inconsistency detected
+   during unregister, exactly the kind of anomaly you want visibility into — is
    **never printed**; it is replaced by the formatter exception.
 2. The exception propagates out of the logging call through the `removeFromWorld` chain
    and kills the rest of that frame's `ServerMap.postupdate`, so remaining cell unloads
    are retried on later frames.
 
-**Suggested fix:** replace `%l` with `%d` (or `%s`) in the format string at
-`GameEntityManager.java:400`. One-character fix; restores the intended diagnostic and
-stops the postupdate abort.
+**Suggested fix:** replace `%ld` with `%d` in both format strings (Java's `%d` handles
+`long`), and give the trailing argument of the second call its own `%s` while touching
+the line. Restores the intended diagnostic and stops the postupdate abort.
 
 — [server name], [contact]
