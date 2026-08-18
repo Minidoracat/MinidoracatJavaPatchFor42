@@ -628,9 +628,10 @@ public final class PatchConfig {
         // （Tester-A 兩場 log）證明水位地板因 ImageData 解碼例外洩漏單調上升，天花板只買時間；
         // v2.0 起洩漏根治線（下方 MinidoracatTextureLeakGuard 五 hook）落地，天花板轉為
         // 罕見峰值上限。**lowmem 變體（Patcher 顯式 mode `client-lowmem`，出包 v3.0-lowmem）**：
-        // ≤8GB RAM 機器（42.20.3 隱形實證玩家：8101MB＋Xmx3G）不適用 4GB native 天花板
-        // ——commit charge 預算超載；lowmem 保留觀測與根治線、不做 constChange（根治後水位
-        // 有回收，50MB sleep 恢復「短暫等待」的 vanilla 設計語意），且 redirect 指向
+        // ≤8GB RAM 機器（42.20.3 隱形實證玩家：8101MB＋Xmx3G）不適用 4GB 等待門檻（gate 是
+        // 配置**前**的水位檢查、非硬上限：多 worker 可同秒通過、單筆配置不受限，native 最壞
+        // 用量高於 4GB）——commit charge 預算超載；lowmem 保留觀測與根治線、不做 constChange
+        // （根治後水位有回收，50MB sleep 恢復「短暫等待」的 vanilla 設計語意），且 redirect 指向
         // bytesAllocatedObservedLowMem＝effective 門檻 50MB 烘進 helper（橫幅與 stall 分類
         // 都以實際生效值計，事故 log 不說謊——三 lane＋advisory 對抗審查定案）。
         Patcher.ClassPatch tex = new Patcher.ClassPatch("zombie/core/textures/TextureIDAssetManager");
