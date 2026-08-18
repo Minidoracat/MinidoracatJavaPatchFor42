@@ -14,7 +14,7 @@
 
 Both observed on a dedicated Linux server (30–40 concurrent players, ~100 workshop mods) during the first 11-hour session on 42.20.3. All stack frames below are vanilla classes — no mod code appears in either trace.
 
-## Bug 1: `SyncItemFieldsPacket.parse` NPEs when the item id no longer exists server-side
+## Bug 1: `SyncItemFieldsPacket.parse` NPEs when the item lookup returns null
 
 **Frequency:** 201 occurrences in 11 hours (~18/hour).
 
@@ -28,16 +28,16 @@ java.lang.NullPointerException: Cannot invoke "zombie.inventory.InventoryItem.ha
   zombie.network.GameServer.main(GameServer.java:909)
 ```
 
-The item referenced by the packet has evidently been removed server-side by the time the
-sync packet arrives (dropped/consumed race — routine on a busy server), and `parse`
-dereferences it without a null check. The exception escapes to the `GameServer.main`
-catch, so the remainder of that main-loop iteration's `mainLoopDealWithNetData` work is
-skipped — self-recovering, but each occurrence wastes part of a tick and prints a full
-stack to the console.
+The item lookup inside `parse` returns null and line 383 dereferences it without a null
+check. Why the lookup misses is undetermined from our side — a stale id (item removed
+between client send and server processing), packet ordering, or a mod-originated id are
+all possible; the stack itself is pure vanilla. The exception escapes to the
+`GameServer.main` catch, so the remainder of that main-loop iteration's
+`mainLoopDealWithNetData` work is skipped — self-recovering, but each occurrence wastes
+part of a tick and prints a full stack to the console.
 
-**Suggested fix:** null-check the item lookup in `SyncItemFieldsPacket.parse` and drop the
-packet (it syncs fields of an item that no longer exists — discarding is the correct
-outcome).
+**Suggested fix:** null-check the item lookup in `SyncItemFieldsPacket.parse` and drop
+(or log-once) the packet instead of throwing into the main loop.
 
 ## Bug 2: invalid `%l` conversion in `GameEntityManager.checkEntityIDChange` — the error it tries to report is replaced by a formatter crash
 
