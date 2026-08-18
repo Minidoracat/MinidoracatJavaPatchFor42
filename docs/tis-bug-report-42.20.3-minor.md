@@ -42,8 +42,9 @@ outcome).
 ## Bug 2: invalid `%l` conversion in `GameEntityManager.checkEntityIDChange` — the error it tries to report is replaced by a formatter crash
 
 **Frequency:** 10 occurrences in the same session, all during bulk chunk unload after a
-mass disconnect (~23 players dropped by their ISP/route at the same second; chunk unload
-cascade followed).
+mass disconnect (~23 players hit simultaneous RakNet connection-lost within the same
+second; underlying network cause undetermined — the server main loop was running normally
+at ~10 fps throughout. The chunk unload cascade followed the disconnects).
 
 ```
 java.util.UnknownFormatConversionException: Conversion = 'l'
