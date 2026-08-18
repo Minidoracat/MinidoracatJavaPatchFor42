@@ -1,13 +1,17 @@
 # TIS 官方回報草稿 — 貼圖管線 native 記憶體洩漏（隱形實體根因）
 
 > 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42），或提交給官方支援信箱。
-> 下方英文本文可直接複製貼上；附件建議附上玩家 console.txt（修前 console (12)、修後 console (17)）。
-> 數據來源：42.20.0–42.20.2 反編譯核實＋正式服（30–40 人、100+ mods）受影響玩家遙測。
-> 撰於 2026-08-11。發文前請把文末 placeholder（伺服器名/聯絡方式）補上。
+> 下方英文本文可直接複製貼上；附件建議附上玩家 console.txt（修前 console (12)、修後 console (17)、
+> 42.20.3 未裝 patch 的補充症狀回報 console (21)(22)(23)——注意這三份是重模組 client，
+> (21)(22) 進服初期透明可能混入 SafeSpawn Ghost 30 秒、(23) 另有 MirageWardrobe Lua IOBE，
+> 只能當補充症狀、不承載因果）。
+> 數據來源：42.20.0–42.20.2 反編譯核實＋正式服（30–40 人、100+ mods）受影響玩家遙測；
+> 2026-08-17 以 42.20.3 復驗（三個相關 class 逐指令與 42.20.2 相同）。
+> 撰於 2026-08-11、42.20.3 更新於 2026-08-18。發文前請把文末 placeholder（伺服器名/聯絡方式）補上。
 
 ---
 
-**Title:** [42.20.2] [MP] Native DirectBuffer leak in the texture pipeline permanently starves texture loading — players/zombies/vehicles become invisible (models gone, shadows + nametags remain)
+**Title:** [42.20.3] [MP] Native DirectBuffer leak in the texture pipeline permanently starves texture loading — players/zombies/vehicles become invisible (models gone, shadows + nametags remain). Still present in 42.20.3 despite its memory-leak fixes
 
 ## Summary
 
@@ -15,9 +19,11 @@ On modded MP servers, `DirectBufferAllocator` allocated bytes ratchet upward and
 
 We root-caused this from decompiled 42.20.2 bytecode, then verified the diagnosis in the field: an experimental client-side fix for the leak (details below) took an affected player's DirectBuffer floor from a monotonic 110 MB → 1,096 MB ratchet down to a flat **0 bytes** across whole sessions, and the invisibility never recurred.
 
+**42.20.3 status:** the 42.20.3 hotfix notes say "Addressed multiple causes of a memory leak" and "Implemented several memory optimisations" — but the three classes at the heart of this report (`ImageData`, `TextureID`, `TextureIDAssetManager`) are **instruction-for-instruction identical** between the 42.20.2 and 42.20.3 jars (we diffed every method after constant-pool normalization), so none of those fixes touched this pipeline. Supplemental symptom reports from our (heavily modded) server on 42.20.3, without our experimental client fix installed: two further players — 64 GB Ryzen 9800X3D and 8 GB Ryzen 3 3300X — reproduced the familiar fingerprint (own character renders; zombies/vehicles/other players invisible; wheels losing textures first on one machine). These are symptom-level corroboration only; the causal claims in this report rest on the decompiled bytecode and the before/after telemetry below.
+
 ## Environment
 
-- Version: 42.20.2 (verified identical Java to 42.20.0 — all 23,735 classes byte-identical between the two jars)
+- Version: 42.20.2 (verified identical Java to 42.20.0 — all 23,735 classes byte-identical between the two jars); the three classes above **re-verified unchanged in 42.20.3**
 - Dedicated Linux server, 30–40 concurrent players, ~100 workshop mods
 - Affected clients include i9-13900K / RTX 4090 / 32 GB and Ryzen 9800X3D / 64 GB — hardware, drivers (Intel Arc / AMD / NVIDIA all reported in community threads), reinstalls and DDU were all ruled out
 - Matches long-standing community reports, e.g. Steam discussion "[B42 Multiplayer] models missing" (60-player server, 2–3 players affected, worsens above ~20 players)
