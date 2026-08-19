@@ -16,17 +16,33 @@
         "expectedCount": 1
       },
       "filter": {
-        "matchMode": "contains",
+        "matchMode": "equals",
         "patterns": [
           "Invalid SpriteConfig object! scripted object = MetalBigWireFence",
           "Invalid SpriteConfig object! scripted object = WoodFloorLvl3",
-          "Invalid SpriteConfig object! scripted object = Wooden_Windows"
+          "Invalid SpriteConfig object! scripted object = Wooden_Windows",
+          "Invalid SpriteConfig object! scripted object = DoubleWireGate",
+          "Invalid SpriteConfig object! scripted object = BrickWallLvl2",
+          "Invalid SpriteConfig object! scripted object = MetalSmallWireFence",
+          "Invalid SpriteConfig object! scripted object = BrickWindowFrameLvl2",
+          "Invalid SpriteConfig object! scripted object = Piano",
+          "Invalid SpriteConfig object! scripted object = WoodenWallLvl3",
+          "Invalid SpriteConfig object! scripted object = SandFloor",
+          "Invalid SpriteConfig object! scripted object = WoodenDarkWallLvl3",
+          "Invalid SpriteConfig object! scripted object = GravelFloor",
+          "Invalid SpriteConfig object! scripted object = Floor_SpringGrass",
+          "Invalid SpriteConfig object! scripted object = DoubleDoor",
+          "Invalid SpriteConfig object! scripted object = WoodenWindowFrameLvl3",
+          "Invalid SpriteConfig object! scripted object = WoodFloorLvl2",
+          "Invalid SpriteConfig object! scripted object = Wood_DoubleDoorDark",
+          "Invalid SpriteConfig object! scripted object = WoodDoorFrameLvl3",
+          "Invalid SpriteConfig object! scripted object = Fences_MetalFarmGate"
         ]
       },
-      "rationale": "initObjectInfo 在 isValid() 為 false 時對 DebugType.General 發 warn，載入含特定物件（MetalBigWireFence / WoodFloorLvl3 / Wooden_Windows 三個已知 SpriteConfig script 名）的區塊時大量刷 log。訊息由 invokedynamic makeConcatWithConstants 以 recipe 'Invalid SpriteConfig object! scripted object = \\u0001' 組出完整 String 後才呼叫 warn，故 helper 收到的第二參數（Object）在此呼叫點恆為完整訊息字串，helper 以 String.valueOf(msg) 後 contains 比對即可。三條 pattern 各含完整前綴＋確切物件名，其他名稱（含 objectInfo==null 時的 'scripted object = null'）不命中任何 pattern，照常轉發原 warn。注入 helper 簽名 (Lzombie/debug/DebugType;Ljava/lang/Object;)V（receiver 變第一參數），堆疊形狀與原 INVOKEVIRTUAL 完全一致。",
+      "rationale": "initObjectInfo 在 isValid() 為 false 時對 DebugType.General 發 warn，載入含特定物件的區塊時大量刷 log。訊息由 invokedynamic makeConcatWithConstants 以 recipe 'Invalid SpriteConfig object! scripted object = \\u0001' 組出完整 String 後才呼叫 warn，故 helper 收到的第二參數（Object）在此呼叫點恆為完整訊息字串，helper 以 String.valueOf(msg) 後對 OBJ_EXACT 逐條 equals 比對（LogFilter.suppressesObj）。名單三代：初版 3 名（42.19）＋42.20 六名（5.5h 實測 1183 筆）＋42.20.3 十名（26h 實測 23,517 筆）；入列門檻 ≥4 筆/h（AGENTS.md 手術鐵則），低量名刻意不收以保留破損訊號。其他名稱（含 objectInfo==null 時的 'scripted object = null'）不命中任何 pattern，照常轉發原 warn。注入 helper 簽名 (Lzombie/debug/DebugType;Ljava/lang/Object;)V（receiver 變第一參數），堆疊形狀與原 INVOKEVIRTUAL 完全一致。",
       "evidence": "initObjectInfo: 103: invokevirtual #82 // Method isValid:()Z | 106: ifne 143 | 109: getstatic #86 // Field zombie/debug/DebugType.General:Lzombie/debug/DebugType; | 113: getfield #48 // Field objectInfo | 116: ifnull 129 | 123: invokevirtual #92 // Method SpriteConfigManager$ObjectInfo.getName:()Ljava/lang/String; | 129: ldc #93 // String null | 131: invokedynamic #95 // makeConcatWithConstants:(Ljava/lang/String;)Ljava/lang/String; | 136: invokevirtual #99 // Method zombie/debug/DebugType.warn:(Ljava/lang/Object;)V ；BootstrapMethods: #370 String 'Invalid SpriteConfig object! scripted object = \\u0001'"
     }
   ],
-  "behaviorNotes": "純 log 抑制：warn 被丟棄時，後續 141: invokevirtual resetObjectInfo() 照常執行（redirect 只換 log 呼叫指令本身，不動控制流），元件對無效 SpriteConfig 的清理行為與原版完全相同。全 class 僅此一處 DebugType.warn:(Ljava/lang/Object;)V（expectedCount=1 可驗 patch 完整性）；load() 內另有兩處 DebugType.error:(Ljava/lang/Object;)V（'Sprite config has no script saved.' / 'Could not load script for sprite config.'），name/desc 皆不同，site 匹配不會誤觸，也不得抑制。已知邊界：物件名位於訊息尾端，contains 比對下若存在名稱恰為三者之一的「延伸名」（如假想的 MetalBigWireFenceX）會被連帶壓掉；42.19.0 已知 SpriteConfig 名單無此情形，若 patcher 支援 equals/exact matchMode 可改用全訊息精確比對進一步收緊。",
-  "verification": "部署後載入含這三種物件的地圖區塊（MetalBigWireFence 常見於軍事圍欄、WoodFloorLvl3 / Wooden_Windows 見於部分地圖 MOD 建物），console.txt 不應再出現 'Invalid SpriteConfig object! scripted object = MetalBigWireFence|WoodFloorLvl3|Wooden_Windows' 行；同時用其他無效 SpriteConfig 物件（或觀察既有 log 中其他名稱、含 'scripted object = null'）確認未列名的警告仍正常輸出。"
+  "behaviorNotes": "純 log 抑制：warn 被丟棄時，後續 141: invokevirtual resetObjectInfo() 照常執行（redirect 只換 log 呼叫指令本身，不動控制流），元件對無效 SpriteConfig 的清理行為與原版完全相同。全 class 僅此一處 DebugType.warn:(Ljava/lang/Object;)V（expectedCount=1 可驗 patch 完整性）；load() 內另有兩處 DebugType.error:(Ljava/lang/Object;)V（'Sprite config has no script saved.' / 'Could not load script for sprite config.'），name/desc 皆不同，site 匹配不會誤觸，也不得抑制。比對自初版起已為完整訊息 equals（歷史版本此檔誤標 contains，2026-08-19 對齊程式碼現實）：延伸名（如假想的 SandFloorX）不會被連帶壓掉，equals 紀律由 LogFilterNoiseTest 鎖。",
+  "verification": "部署後載入含名單物件的地圖區塊，console.txt 不應再出現名單內 19 名的 'Invalid SpriteConfig object!' 行；同時確認未列名（含 'scripted object = null' 與 42.20.3 刻意不收的低量名如 BrickDoorFrameLvl2／ComposterShoddy）的警告仍正常輸出。"
 }
