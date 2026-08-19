@@ -25,9 +25,9 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 > 對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋。改回原版行為（蛋照清），
 > 受精蛋請養在雞舍孵化。
 
-- **抑噪 6 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（選擇性）／ItemPickInfo／
-  PacketsCache／INetworkPacket.logInconsistentPacket，外加 NetworkZombieManager——只攔已知噪音樣式，
-  未知警告與反作弊警告照常輸出。
+- **抑噪 8 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（exact 白名單 19 名）／
+  ItemPickInfo／NetworkZombieManager／PacketsCache／INetworkPacket.logInconsistentPacket／
+  GameServer.sendToxicBuilding——只攔已知噪音樣式，未知警告與反作弊警告照常輸出。
 - **防崩潰守衛 2 項**：hit/Zombie（guard-before-super）與 hit/Fall（縱深防禦）的 null 頭部守衛。
 - **行為 1 項**：IsoAnimal（動物壓力三調：閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半，
   clamp 與行為路徑不動）。

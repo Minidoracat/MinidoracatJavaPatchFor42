@@ -49,7 +49,7 @@ public final class LogFilter {
         "Invalid SpriteConfig object! scripted object = Piano",
         "Invalid SpriteConfig object! scripted object = WoodenWallLvl3",
         // 42.20.3 新增噪音（2026-08-19 正式服實測 8 session／約 26h 聚合；行尾＝該名筆數）。
-        // 入列門檻：聚合 ≥4 筆/h（本窗 ≥100 筆）才收——低量名寧可留在 log 裡當破損訊號，
+        // 入列門檻：聚合 ≥4 筆/h（本窗 26h ⇒ ≥104 筆）才收——低量名寧可留在 log 裡當破損訊號，
         // 勿為近零收益永久吞掉該物件唯一的診斷線（本輪 17 個 ≤86 筆的名字因此不收）。
         "Invalid SpriteConfig object! scripted object = SandFloor",                      // 6237
         "Invalid SpriteConfig object! scripted object = WoodenDarkWallLvl3",             // 5501
@@ -93,7 +93,10 @@ public final class LogFilter {
         type.warn(format, args);
     }
 
-    /** OBJ_EXACT／OBJ_PREFIX 的攔截判定——抽成 pure function 供 LogFilterNoiseTest 鎖行為。 */
+    /**
+     * OBJ_EXACT／OBJ_PREFIX 的攔截判定——抽成 pure function 供 LogFilterNoiseTest 鎖行為。
+     * 前置條件：{@code s} 非 null（唯一呼叫端 warnObj 以 String.valueOf 保證；新增呼叫端須自行保證）。
+     */
     static boolean suppressesObj(String s) {
         for (String p : OBJ_EXACT) {
             if (s.equals(p)) {
@@ -106,6 +109,11 @@ public final class LogFilter {
             }
         }
         return false;
+    }
+
+    /** 名單規模（供 LogFilterNoiseTest 擋整段誤刪／誤增；非 runtime 路徑）。 */
+    static int objExactCountForTest() {
+        return OBJ_EXACT.length;
     }
 
     public static void warnObj(DebugType type, Object message) {
