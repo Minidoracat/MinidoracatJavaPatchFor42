@@ -48,35 +48,19 @@ public final class LogFilter {
         "Invalid SpriteConfig object! scripted object = BrickWindowFrameLvl2",
         "Invalid SpriteConfig object! scripted object = Piano",
         "Invalid SpriteConfig object! scripted object = WoodenWallLvl3",
-        // 42.20.3 新增噪音（2026-08-19 正式服實測 8 session 聚合 24,000+ 筆，全為原版物件必刷；
-        // 依量排序：6237/5501/3342/2636/2204/1441/1233/476/297/150/86/80/49/24/22/21/20/19/16/8/8/7/6/4/4/4/2）
-        "Invalid SpriteConfig object! scripted object = SandFloor",
-        "Invalid SpriteConfig object! scripted object = WoodenDarkWallLvl3",
-        "Invalid SpriteConfig object! scripted object = GravelFloor",
-        "Invalid SpriteConfig object! scripted object = Floor_SpringGrass",
-        "Invalid SpriteConfig object! scripted object = DoubleDoor",
-        "Invalid SpriteConfig object! scripted object = WoodenWindowFrameLvl3",
-        "Invalid SpriteConfig object! scripted object = WoodFloorLvl2",
-        "Invalid SpriteConfig object! scripted object = Wood_DoubleDoorDark",
-        "Invalid SpriteConfig object! scripted object = WoodDoorFrameLvl3",
-        "Invalid SpriteConfig object! scripted object = Fences_MetalFarmGate",
-        "Invalid SpriteConfig object! scripted object = BrickDoorFrameLvl2",
-        "Invalid SpriteConfig object! scripted object = ComposterShoddy",
-        "Invalid SpriteConfig object! scripted object = Composter",
-        "Invalid SpriteConfig object! scripted object = MetalFloorLvl1",
-        "Invalid SpriteConfig object! scripted object = LogGate",
-        "Invalid SpriteConfig object! scripted object = BrickFloorLvl1",
-        "Invalid SpriteConfig object! scripted object = Wood_FancyBookCase",
-        "Invalid SpriteConfig object! scripted object = WoodenDarkDoorFrameLvl3",
-        "Invalid SpriteConfig object! scripted object = Wood_Crate_Lvl2",
-        "Invalid SpriteConfig object! scripted object = Commercial_GridGlassRedWall",
-        "Invalid SpriteConfig object! scripted object = Commercial_FullGlassBlackWall",
-        "Invalid SpriteConfig object! scripted object = WoodenPole",
-        "Invalid SpriteConfig object! scripted object = Commercial_HalfGlassBlackWall",
-        "Invalid SpriteConfig object! scripted object = Commercial_HalfGlassRedWall",
-        "Invalid SpriteConfig object! scripted object = Commercial_GridGlassBlackWall",
-        "Invalid SpriteConfig object! scripted object = Commercial_FullGlassRedWall",
-        "Invalid SpriteConfig object! scripted object = Campfire",
+        // 42.20.3 新增噪音（2026-08-19 正式服實測 8 session／約 26h 聚合；行尾＝該名筆數）。
+        // 入列門檻：聚合 ≥4 筆/h（本窗 ≥100 筆）才收——低量名寧可留在 log 裡當破損訊號，
+        // 勿為近零收益永久吞掉該物件唯一的診斷線（本輪 17 個 ≤86 筆的名字因此不收）。
+        "Invalid SpriteConfig object! scripted object = SandFloor",                      // 6237
+        "Invalid SpriteConfig object! scripted object = WoodenDarkWallLvl3",             // 5501
+        "Invalid SpriteConfig object! scripted object = GravelFloor",                    // 3342
+        "Invalid SpriteConfig object! scripted object = Floor_SpringGrass",              // 2636
+        "Invalid SpriteConfig object! scripted object = DoubleDoor",                     // 2204
+        "Invalid SpriteConfig object! scripted object = WoodenWindowFrameLvl3",          // 1441
+        "Invalid SpriteConfig object! scripted object = WoodFloorLvl2",                  // 1233
+        "Invalid SpriteConfig object! scripted object = Wood_DoubleDoorDark",            // 476
+        "Invalid SpriteConfig object! scripted object = WoodDoorFrameLvl3",              // 297
+        "Invalid SpriteConfig object! scripted object = Fences_MetalFarmGate",           // 150
     };
     private static final String[] OBJ_PREFIX = {
         "No packet handler for type:",                                                   // PacketsCache <init>
@@ -109,17 +93,24 @@ public final class LogFilter {
         type.warn(format, args);
     }
 
-    public static void warnObj(DebugType type, Object message) {
-        String s = String.valueOf(message);
+    /** OBJ_EXACT／OBJ_PREFIX 的攔截判定——抽成 pure function 供 LogFilterNoiseTest 鎖行為。 */
+    static boolean suppressesObj(String s) {
         for (String p : OBJ_EXACT) {
             if (s.equals(p)) {
-                return;
+                return true;
             }
         }
         for (String p : OBJ_PREFIX) {
             if (s.startsWith(p)) {
-                return;
+                return true;
             }
+        }
+        return false;
+    }
+
+    public static void warnObj(DebugType type, Object message) {
+        if (suppressesObj(String.valueOf(message))) {
+            return;
         }
         type.warn(message);
     }

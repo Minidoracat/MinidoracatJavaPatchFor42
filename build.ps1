@@ -167,6 +167,10 @@ Assert-Ok "ItemWeightMemoTest（on）"
 java "-Dmdc.itemWeightMemo=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest off
 Assert-Ok "ItemWeightMemoTest（off kill switch）"
 
+Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不收名／反作弊放行）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
+Assert-Ok "LogFilterNoiseTest"
+
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
 Assert-Ok "FastIdentityArrayRemovalBenchmark"
