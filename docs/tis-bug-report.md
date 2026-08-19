@@ -66,7 +66,7 @@ Why only some players, and why relog doesn't cure it: the leak lives in process-
 
 Note the 92 MB *transient* peak with the leak fixed: even a leak-free modded client legitimately exceeds the 50 MB constant during load bursts (our telemetry counted 111 would-stall samples in a half-hour tail), so the threshold itself is also worth revisiting.
 
-**42.20.3 verification (2026-08-19):** one of the two players who reproduced the invisibility on unpatched 42.20.3 (64 GB Ryzen 9800X3D) then installed the leak fix on 42.20.3. Same server, same mods, next session: floor flat at 3.25 MB for the whole session (no ratchet), load-burst hwm 1.14 **GB** — i.e. more than 20× the 50 MB constant during legitimate loading (728 would-stall samples at the vanilla threshold, all during initial load) — and the invisibility did not recur ("everything renders normally now"). The fix keeps holding on 42.20.3, and the 1.14 GB legitimate burst is further evidence that the 50 MB constant is undersized for modded MP.
+**42.20.3 verification (2026-08-19):** one of the two players who reproduced the invisibility on unpatched 42.20.3 (64 GB Ryzen 9800X3D) then installed the leak fix on 42.20.3. Same server, same mods, next session: the floor repeatedly drained back to **0 bytes** during play and settled at ~3.25 MiB late-session — no ratchet; load-burst hwm reached **1,199,623,924 bytes (~1.12 GiB)** — over 20× the 50 MB constant during legitimate loading (728 would-stall samples at the vanilla threshold, all during initial load) — and the invisibility did not recur ("everything renders normally now"). The fix keeps holding on 42.20.3, and the ~1.1 GiB legitimate burst is further evidence that the 50 MB constant is undersized for modded MP.
 
 ## Suggested fixes
 
