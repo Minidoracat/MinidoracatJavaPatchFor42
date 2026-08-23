@@ -1825,7 +1825,66 @@ helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會�
 `protectedCall` 未攔 `RuntimeException` ＋ `processServer` 對錯物件設 state，四者疊起來就是
 「client 無限等待」。附 `ItemTransactionPacket` 作為同 codebase 的正確對照即可。
 
+## 2y. 動物聲音排序活鎖捕手（W11，server）
+
+**事故**：2026-08-23 19:25:45 起（W10 部署後第一晚，與 W10 無關——stack 全程不經
+NetTimedAction 或任何 mdc helper），`IngameState.updateInternal` 拋
+`IllegalArgumentException: Comparison method violates its general contract!`（TimSort），
+stack：`BaseAnimalSoundManager.update:45` ← `CollisionManager.resolveContactsInternal:367`
+← `IsoWorld.updateWorld:3340` ← `IngameState.updateInternal:1508`。19:25–21:47 斷續
+1411 次後**惡化為每幀必炸**：A 段（封包處理）活著（聊天正常、連得上），B 段每幀中斷
+→ `updateManagers()`（`ActionManager`／`TransactionManager`）永久跳過 → **全服卡讀條、
+撿不起物品、「時間停止」**。frame 照推進（frameNo++ 在炸點前）所以看門狗不救；
+唯一止血是重啟（graceful 收得進去——console 指令執行在 `:957-971`，炸點 `:1508` 之後）。
+
+**vanilla 缺陷（兩層疊乘）**：
+
+1. **比較器違反契約**：`compare` 每次呼叫都現場重算
+   `FMODParameterUtils.getClosestListenerDistanceSquared`，且用 `>`／`<` 手寫三態——
+   NaN 與任何值比較皆 false → 回 0（「相等」），違反遞移性（NaN「等於」所有人，
+   但其他人彼此有大小）。TimSort 偵測到不變量被破壞即拋 IAE。無 listener 時回
+   `Float.MAX_VALUE` 是一致的，所以**唯一能炸的輸入就是 NaN 座標**。
+2. **炸後活鎖自我強化**：`update()` 的 `characters.clear()` 在 sort **之後**
+   （javap：sort offset 19、clear offset 116+）。sort 一拋 clear 即跳過，
+   清單永不清空，stale／已 despawn 動物參照永久滯留 → 之後每幀重炸。
+   這解釋了正式服「19:25 偶發 → 21:47 每幀」的惡化曲線。
+
+**觸發背景（非缺陷方）**：圈養農場 50–80+ 隻動物（11134,6875 老鼠場、6320,5518 兔場）
+高密度碰撞＋Cleaner 舊版每分鐘批次 `animal:remove()`×20（時間對齊：19:25:03 最後一批
+清除 → 19:25:45 首炸，間隔 42 秒）。但 `remove()` 是合法公開 API，vanilla 自己的
+despawn 走同一路徑——**修 Cleaner 只能降頻，缺陷本體在 vanilla**。
+NaN 的精確生成點（動物側 vs listener 側）尚未定罪，由本刀的診斷 log 蒐證。
+
+**手術**：`update()V` 內唯一 `ArrayList.sort(Comparator)V` callsite（offset 19）redirect →
+`AnimalSortGuard.sort`（3B→3B、堆疊 2 進 0 出不變）。helper 語意：
+
+- 正常路徑直接委派（逐指令等價）
+- TimSort 拋 IAE → 吞下、計數、掃清單記 NaN 座標動物、**不排序直接返回**——
+  聲音優先級退化一幀（清單每幀重建，無害），`update()` 走完 → `clear()` 執行 →
+  **活鎖鏈條斷開**
+- **只攔 IAE**（TimSort 契約違反的精確型別）；其他 RuntimeException 與 Error 穿透
+  維持 vanilla（與 W6/W10 同紀律）
+- 診斷：`nanAnimals=0` 但仍炸 ＝ NaN 在 listener（玩家）側——後續根因的黃金判別
+- 部分排序狀態不回滾：TimSort 就地排序拋出時清單半排，該清單僅供「取前 N 近發聲」，
+  無持久影響
+
+**刻意不做**：不重刻排序語意（快照 key 排序）——那要假設比較器意圖，TIS 改語意時會
+默默錯位；捕手對任何比較器實作都成立。
+
+**守門**：SmokeCheck 六條——vanilla 前提（update 內 sort 恰 1）、**順序錨**（sort 先於
+clear；TIS 把 clear 移進 finally 或 sort 前時此條紅，提醒重估本刀）、手術後 1:1、
+catch 型別鎖 IAE、委派恰 2 處（off 直通＋on）、class-wide 差值負對照。
+行為測試兩模式（on/off）：等價／IAE 攔下／非 IAE 穿透／Error 穿透。
+
+**kill switch**：`-Dmdc.animalSortGuard=0`。
+
+**驗證閉環**：事故複現條件下（農場動物回升＋Cleaner 清除）console 應出現
+`[MinidoracatJavaPatch][AnimalSort] contract violation caught size=... nanAnimals=...`
+而**不再**出現 `IngameState.updateInternal> Exception thrown`（該 stack）；
+全服不卡讀條、不需重啟。`anomalies` 恆 0。
+
 ---
+
 
 ## 3. 部署後驗證清單
 

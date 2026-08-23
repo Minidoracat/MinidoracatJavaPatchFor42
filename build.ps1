@@ -75,6 +75,7 @@ $helperEntries = @(
     'zombie/mdc/ChunkSaveIsolation.class',
     'zombie/mdc/ItemWeightMemo.class',
     'zombie/mdc/NetTimedActionGuard.class',
+    'zombie/mdc/AnimalSortGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -181,6 +182,12 @@ java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\project
 Assert-Ok "NetTimedActionGuardTest（netTimedActionGuard=0 kill switch）"
 java "-Dmdc.netTimedActionState=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest state-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionState=0 kill switch）"
+
+Write-Host "[9h/10] 動物排序活鎖捕手（W11）行為驗證＋kill switch（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest
+Assert-Ok "AnimalSortGuardTest（on，出貨組態）"
+java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest off
+Assert-Ok "AnimalSortGuardTest（animalSortGuard=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

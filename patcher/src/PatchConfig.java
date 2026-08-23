@@ -649,6 +649,25 @@ public final class PatchConfig {
         ntaProcess.expectedHits = 2;   // accept 與 reject 分支各一；helper 只在 action==null 時介入
         patches.add(ntaPkt);
 
+        // ---- W11 動物聲音排序活鎖捕手（2026-08-23 晚間事故；docs/patches.md 2y）----
+        // BaseAnimalSoundManager 的比較器每次 compare 現場重算 listener 距離，且手寫 >/< 三態
+        // ——NaN 一律回 0（違反遞移性）→ TimSort 拋 IllegalArgumentException。而 update() 的
+        // characters.clear() 在 sort 之後（javap：sort offset 19、clear offset 116+）——
+        // 一炸 clear 即跳過，stale 動物參照永存清單 → 每幀重炸（正式服 19:23 偶發 →
+        // 21:47 每幀，1411 次），B 段中斷 → updateManagers 永久跳過 → 全服卡讀條＋時間停止。
+        // 捕手：只攔 IAE（其他例外穿透）、不排序直接返回，讓 clear() 執行、活鎖鏈斷開；
+        // 攔截時掃清單記 NaN 座標動物（nanAnimals=0 但炸 ＝ NaN 在 listener 側，黃金診斷）。
+        // 觸發背景：圈養農場 50-80+ 動物高密度碰撞＋Cleaner 每分鐘批次 remove()×20（合法 API，
+        // vanilla despawn 走同一路徑——修 Cleaner 只能降頻，缺陷本體在 vanilla）。
+        // kill switch：-Dmdc.animalSortGuard=0。
+        Patcher.ClassPatch animalSound = new Patcher.ClassPatch("zombie/characters/BaseAnimalSoundManager");
+        Patcher.MethodOps animalSoundUpdate = animalSound.method("update", "()V");
+        animalSoundUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "sort", "(Ljava/util/Comparator;)V",
+                "zombie/mdc/AnimalSortGuard", "sort"));
+        animalSoundUpdate.expectedHits = 1;   // update()V 內唯一 sort callsite（offset 19）
+        patches.add(animalSound);
+
         return patches;
     }
 

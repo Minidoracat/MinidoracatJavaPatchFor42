@@ -1442,6 +1442,42 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKESTATIC, ntaGuardCls,
                         "write", writeHelperDesc) == 2);
 
+        // ---- W11 動物聲音排序活鎖捕手 ----
+        String basCls = "zombie/characters/BaseAnimalSoundManager";
+        String asgCls = "zombie/mdc/AnimalSortGuard";
+        String sortDesc = "(Ljava/util/Comparator;)V";
+        String sortHelperDesc = "(Ljava/util/ArrayList;Ljava/util/Comparator;)V";
+        // vanilla 前提 1：update()V 內恰 1 個 ArrayList.sort callsite
+        MethodNode vBasUpdate = methodFromJar(jar, basCls, "update", "()V");
+        failed += check("W11 vanilla 前提：update()V 內 ArrayList.sort 恰 1 處",
+                countExactCalls(vBasUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "sort", sortDesc) == 1);
+        // vanilla 前提 2（活鎖機制的錨）：sort 在 clear 之前——TIS 若把 clear 移進 finally
+        // 或移到 sort 前，活鎖機制消失，本刀該重新評估（此條會紅提醒）。
+        failed += check("W11 vanilla 前提：sort 先於 characters.clear()（活鎖機制的順序錨）",
+                firstCallIndex(vBasUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "sort", sortDesc)
+                        < firstCallIndex(vBasUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "clear", "()V"));
+        // 手術後：改道 x1、原 sort 歸零、真指令數不變（1:1 同形替換）
+        MethodNode pBasUpdate = method(distJava, basCls, "update", "()V");
+        failed += check("W11 手術後：update 改道 x1、原 sort 歸零、真指令數不變",
+                countExactCalls(pBasUpdate, Opcodes.INVOKESTATIC, asgCls, "sort", sortHelperDesc) == 1
+                && countExactCalls(pBasUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "sort", sortDesc) == 0
+                && realInsnCount(pBasUpdate) == realInsnCount(vBasUpdate));
+        // helper 契約：catch 恰 1 個且型別鎖 IllegalArgumentException（其他 RuntimeException
+        // 與 Error 必須穿透——放寬成 RuntimeException 會把未知錯誤降級成安靜的順序退化）
+        MethodNode guardSort = method(distJava, asgCls, "sort", sortHelperDesc);
+        failed += check("W11 helper 契約：catch 恰 1 個且型別為 IllegalArgumentException",
+                guardSort.tryCatchBlocks != null && guardSort.tryCatchBlocks.size() == 1
+                && "java/lang/IllegalArgumentException".equals(guardSort.tryCatchBlocks.get(0).type));
+        // helper 契約：委派原 sort 恰 2 處（kill switch 直通＋try 內正常路徑）
+        failed += check("W11 helper 契約：sort 委派恰 2 處（off 直通＋on 正常路徑）",
+                countExactCalls(guardSort, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "sort", sortDesc) == 2);
+        // 負對照：全 class 只少這一個 sort callsite
+        failed += check("W11 負對照：BaseAnimalSoundManager 全 class ArrayList.sort 恰少 1、改道恰 1",
+                classWideCalls(classNode(distJava, basCls), Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "sort", sortDesc)
+                        == classWideCalls(classNodeFromJar(jar, basCls), Opcodes.INVOKEVIRTUAL, "java/util/ArrayList",
+                                "sort", sortDesc) - 1
+                && classWideCalls(classNode(distJava, basCls), Opcodes.INVOKESTATIC, asgCls, "sort", sortHelperDesc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
