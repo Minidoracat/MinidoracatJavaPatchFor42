@@ -74,6 +74,7 @@ $helperEntries = @(
     'zombie/mdc/ChunkWriteGuard.class',
     'zombie/mdc/ChunkSaveIsolation.class',
     'zombie/mdc/ItemWeightMemo.class',
+    'zombie/mdc/NetTimedActionGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -170,6 +171,16 @@ Assert-Ok "ItemWeightMemoTest（off kill switch）"
 Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不收名／反作弊放行）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
+
+Write-Host "[9g/10] 卡讀條根治（W10）行為驗證＋兩個 kill switch（獨立 JVM；旗標是 static final）..."
+# 三個模式都必須真的跑過：both 是出貨組態，兩個 off 各自是緊急降級路徑——
+# 事故當下才第一次跑降級路徑是不可接受的。測試自驗 argv 與實際旗標相符。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest
+Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
+java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest guard-off
+Assert-Ok "NetTimedActionGuardTest（netTimedActionGuard=0 kill switch）"
+java "-Dmdc.netTimedActionState=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest state-off
+Assert-Ok "NetTimedActionGuardTest（netTimedActionState=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
