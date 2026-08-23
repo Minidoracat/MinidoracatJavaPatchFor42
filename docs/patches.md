@@ -1675,6 +1675,158 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
 
 ---
 
+## 2x. 卡讀條根治（W10，server）
+
+**症狀**：MP 玩家的進度條走到 100% 後停住，動作動畫繼續 loop（「小人不停操弄手部」），
+成品不產出，被消耗的 input item 維持綠色 job 標記；且該玩家**後續所有排隊動作一起堵死**
+（`ISTimedActionQueue` 是單頭序列，head 不彈出則全塞）。玩家長期回報三種情境：製作、
+搬移家具後無法製作、以及「吃／閱讀／製作隨機發生」。社群普遍的處置是重開遊戲。
+
+**正式服實證**（2026-08-23，單一 session 的 `server-console.txt`）：
+
+| Lua 建構子 | 該行程式碼 | 命中 | 對應玩家回報 |
+|---|---|---|---|
+| `ISMoveablesAction.lua:308` | `item:getWorldSprite()`（`mode == "place"`） | 6 | 「鐵桶搬移後無法製作」 |
+| `ISReadABook.lua:492` | `SkillBook[item:getSkillTrained()]` | 3 | 「閱讀」 |
+| `ISEatFoodAction.lua:298` | `item:getContainer() or ...` | 3 | 「吃」 |
+
+三者的例外訊息都是 `attempted index: <getter> of non-table: null`，stack 一致：
+
+```
+se.krka.kahlua.vm.KahluaThread.tableget:1430
+Lua(Vanilla).new(ISReadABook.lua:492)
+se.krka.kahlua.integration.LuaCaller.protectedCall:109
+zombie.core.NetTimedAction.parse                    ← 中斷在這裡
+zombie.network.packets.INetworkPacket.parseServer:55
+zombie.network.PacketTypes$PacketType.onServerPacket:967
+zombie.network.GameServer.mainLoopDealWithNetData:1611   ← 被 catch 吞掉
+zombie.network.GameServer.main:909
+```
+
+同 session 另有 21 筆 `SyncItemFieldsPacket.parse:383` 的
+`NullPointerException: InventoryItem.hasSharpness() because "item" is null`——同源不同封包
+（不造成卡讀條，但會讓物品狀態不同步）。
+
+### 根因：兩個 vanilla 缺陷疊乘
+
+**缺陷 1——靜默的 null 穿到 Lua**。`InventoryItem` 在封包中以「容器 ID＋item ID」傳輸：
+
+```java
+// PZNetKahluaTableImpl.java:473-477
+private InventoryItem loadInventoryItem(ByteBufferReader input, IConnection connection) {
+   ContainerID container = new ContainerID();
+   container.parse(input, connection);
+   int itemId = input.getInt();
+   return container.getContainer() != null ? container.getContainer().getItemWithID(itemId) : null;
+}
+```
+
+容器找不到、或容器內沒有那個 itemId → **回 null，不 log、不拒絕**。該 null 成為
+`NetTimedAction.parse` 組出的 `arguments[]` 的一員，餵進 Lua 的 `<Type>.new(...)`，而那些
+建構子第一件事就是索引它 → Kahlua 拋 `RuntimeException` → **穿過名為 protected 的
+`protectedCall`** → `parse` 中斷 → `processServer` 從未執行 → server 既不回 Accept 也不回
+Reject。諷刺的是 vanilla 本來就寫好了失敗處理，只是例外繞過了它：
+
+```java
+// NetTimedAction.java:161-165（vanilla）
+LuaReturn result = LuaManager.caller.protectedCall(LuaManager.thread, functionObject, arguments);
+if (!result.isSuccess() || result.getFirst() == null) {
+   this.action = null;
+   return;                  // ← 這條路徑存在，但例外讓它到不了
+}
+```
+
+**缺陷 2——回覆封包帶錯 state**。`javap` 對真實 jar（`NetTimedActionPacket.processServer`）：
+
+```
+ 51: aload_0 / 52: getAction / 55: astore_3      ← act 存進 slot 3
+ 60: aload_3 / 61: getstatic Accept / 64: setState   ← act.setState(Accept)   設在 act
+ 81: aload_0                                     ← this  ✘
+ 84: invokevirtual NetTimedActionPacket.write
+142: aload_0                                     ← Reject 分支同病  ✘
+145: invokevirtual NetTimedActionPacket.write
+```
+
+`this.state` 自 parse 起恆為 `Request`，所以該方法送出的初始 Accept／Reject 回覆實際上都是
+Request。結果是 **initial Request rejection 無法讓 client 的 `ActionManager.isRejected` 成立**。
+已接受 action 在 `ActionManager.update` 中因 `perform()==false` 產生的後續 Reject 是從正確的
+action 物件序列化，不受此缺陷影響。同 codebase 的 `ItemTransactionPacket.processServer` 也是
+寫對的對照（offset 25/59 直接 `this.setState`，44/78 再 `this.write`）。
+
+### 為什麼 client 端一道自癒都沒有
+
+| 機制 | 位置 | 為何失效 |
+|---|---|---|
+| `finished()` | `BaseAction.java:175` | 要求 `!waitForFinished`，而 `LuaTimedActionNew.start:129` 在 MP 一律設 true → 完成訊號只能來自 server |
+| `hasStalled()` | `BaseAction.java:76` | 要求 `lastTime < 0` 或 `currentTime < 0`；卡住時 time 停在 `maxTime`（正值）→ 恆 false |
+| 30 分鐘 timeout | `ActionManager.java:117` | 只把項目移出清單、**不設 Done/Reject**；而 `isDone:136`／`isRejected:128` 都有 `!actions.isEmpty()` 前綴 → 清單清空後兩者同時 false ＝從「等 30 分鐘」升級為「永久」 |
+| `isUsingTimeout` | `ISReadABook:22`／`ISResearchRecipe:25` | 回 false → 連移出清單都不會發生 |
+
+對照組：`TransactionManager.isDone:381`／`isRejected:377` **沒有**那個 `!isEmpty()` 前綴，
+空 stream 的 `allMatch` 回 true ⇒ 撿東西那條約 20 秒後會自動 `forceComplete`。
+`ActionManager` 就差這一個前綴。
+
+### 手術（兩刀，皆 redirect；純 server 端路徑）
+
+| 刀 | 掛點 | 改道 | 效果 |
+|---|---|---|---|
+| B | `NetTimedAction.parse` 內唯一的 `LuaCaller.protectedCall`（javap offset 167） | → `NetTimedActionGuard.protectedCall` | 攔下 `RuntimeException`，回一個 `isSuccess()==false` 的 `LuaReturn`（`LuaReturn.createReturn(new Object[]{FALSE, msg})` → `LuaFail`），讓 vanilla 既有的 `action = null; return;` 真正被走到 |
+| A | `NetTimedActionPacket.processServer` 的兩處 `write`（offset 84／145） | → `NetTimedActionGuard.write` | `action == null`（即 vanilla reject 分支的判別條件）時把 state 補成 `Reject` 再送出 → client `isRejected` 成立 → `forceStop()` → queue 解除堵塞 |
+
+**兩刀是「與」關係**：只有 B → Reject 送出去仍是 Request state；只有 A → `parse` 已中斷、
+`processServer` 根本沒被呼叫。缺一刀對玩家實測的症狀都是零效果。
+
+**為什麼 client 不需要任何 patch**：`LuaTimedActionNew.update:93-98` 已經有完整的
+`isDone → forceComplete` / `isRejected → forceStop` 邏輯，只是從來沒被觸發過。我們只要讓
+server 把正確的封包送出去，client 就會自己解除。
+
+### 語意邊界（刻意不做的事）
+
+1. **不猜、不代找那個 null 的 `InventoryItem`**。猜錯會消耗錯誤材料或憑空產出成品。本刀的
+   語意是「把靜默的永久卡死變成有聲的失敗」——玩家看到動作中斷可重試，而非無限讀條。
+   item 為何是 null（容器不同步／被前一步消耗）屬上游問題，由 helper 的診斷 log 蒐證後另案處理。
+2. **不介入 accept 分支**。`Action.write` 在 `state == Accept` 時**不寫 playerId**，而 client 的
+   `ActionManager.setStateFromPacket:244` 要靠 playerId 比對認領封包（`IDShort.id` 預設 0，
+   對不上真實 onlineID）→ 補正 Accept 的 state 只會改變線路內容、拿不到任何好處。修它需要
+   改 `Action.write`／`parse` 的線路格式，而該類 **client 與 server 共用**，單邊修改會讓對側
+   讀錯位元組。副作用是 `maxTime == -1` 的動作進度條仍為 `POSITIVE_INFINITY`（體感問題），
+   但 A+B 之後它不會再永久卡（Done 或 Reject 必有一個到達）。
+3. **不介入 `!isConsistent` 那條 reject 路徑**。該路徑的 `getAction()` → `Action.copyFrom` 會對
+   null player 呼叫 `PlayerID.set` 而先行 NPE，是獨立的既有問題，維持 vanilla 行為。
+
+### 守門
+
+SmokeCheck 十條，其中兩條是「本刀該不該存在」的結構事實：
+
+- **A 刀存在理由**：vanilla 的 `processServer` 中 write 兩處 receiver 皆 `this`、setState 兩處
+  皆非 `this`。**TIS 修好這個 bug 時該條會紅**——提醒撤刀，而不是讓兩份修正疊加。
+- **B 刀著力點**：vanilla 的 `parse` 內存在 `ACONST_NULL → PUTFIELD action` 序列（本刀不新增
+  失敗語意，只是讓既有路徑可達）。
+- catch 型別鎖定 `RuntimeException`（`Error` 必須穿透，與 W6 同紀律）、helper 的 `write` 委派
+  恰 1 次且**不在 try 範圍內**（診斷失敗不得改變線路行為）、兩處改道後真指令數與 vanilla
+  相同（1:1 同形替換）、以及相對 vanilla 的 class-wide 差值負對照（`NetTimedAction` 只少一個
+  `protectedCall`、`NetTimedActionPacket` 只少兩個 `write`）。
+
+行為測試 `NetTimedActionGuardTest` 跑三個模式（出貨組態＋兩個 kill switch），自驗 argv 與
+helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會默默把 enabled 版跑三遍假綠。
+
+**kill switch**（分離以便二分定位）：`-Dmdc.netTimedActionGuard=0`（B）／
+`-Dmdc.netTimedActionState=0`（A）。
+
+### 驗證閉環
+
+部署後 server log 應從「`Lua(Vanilla).new(...)` 例外 ＋ 玩家卡讀條」轉為
+「`[MinidoracatJavaPatch][NetTimedAction] lua ctor failed type=<Type> nullArgs=<i/j>` ＋
+`reject sent` ＋ 玩家看到動作中斷可重試」。`anomalies` 必須恆 0。
+`nullArgs` 是「某個建構子參數已反序列化為 null」的直接指紋；它能定位 action type 與參數位置，
+但**不能區分**是 container 解析失敗或 itemId miss。要區分兩者仍須在 `loadInventoryItem` 加觀測。
+
+**建議回報 TIS**：`loadInventoryItem` 靜默回 null ＋ Lua 建構子無 null 守衛 ＋
+`protectedCall` 未攔 `RuntimeException` ＋ `processServer` 對錯物件設 state，四者疊起來就是
+「client 無限等待」。附 `ItemTransactionPacket` 作為同 codebase 的正確對照即可。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -1706,8 +1858,9 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
    與 `.../zombie/mdc/FertilizedEggGuard.class` 皆應「No such file」。**只殘留改道版
    `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
    最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
-   (b) 新 `patch-manifest.txt` 共 32 筆，`grep -c . patch-manifest.txt` = 32，且
-   `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
+   (b) 新 `patch-manifest.txt` 共 **51 筆**，`grep -c . patch-manifest.txt` = 51；其中
+   `NetTimedActionGuard.class`、`NetTimedAction.class`、`NetTimedActionPacket.class` 各恰一筆，
+   且 `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
    (c) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`（此路徑跑在
    `ServerChunkLoader` 執行緒上，出現即立刻 uninstall）。
    (d) log 不再出現 `[MinidoracatJavaPatch][EggGuard]` 任何一行（重啟後全新 log 起算）。

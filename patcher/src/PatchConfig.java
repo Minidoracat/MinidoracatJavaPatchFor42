@@ -608,6 +608,47 @@ public final class PatchConfig {
         sctAddM.expectedHits = 4;   // crc32 同形替換 ×1 ＋ 租用/配 buffer/例外歸還改道 ×3
         patches.add(sctIso);
 
+        // ---- W10 卡讀條根治（2026-08-23；玩家實測「讀條走滿卻不完成」；docs/patches.md 2x）----
+        // 兩個 vanilla 缺陷疊乘，皆位於 server-only 路徑（client 端 vanilla 已有完整處理，
+        // 故玩家不需安裝任何東西）：
+        // (1) NetTimedAction.parse 以 protectedCall 重建 Lua action，而參數中的 InventoryItem
+        //     由 PZNetKahluaTableImpl.loadInventoryItem 在「容器或 item 查不到」時靜默回 null。
+        //     該 null 直接成為 Lua 建構子參數，建構子首行就索引它（ISEatFoodAction.lua:298
+        //     item:getContainer()／ISReadABook.lua:492 item:getSkillTrained()／
+        //     ISMoveablesAction.lua:308 item:getWorldSprite()）→ Kahlua 拋 RuntimeException，
+        //     穿過名為 protected 的 protectedCall，一路到 GameServer.mainLoopDealWithNetData
+        //     被 catch 吞掉 → processServer 從未執行 → 既不回 Accept 也不回 Reject。
+        //     vanilla 本來就寫好了失敗處理（!result.isSuccess() → action=null; return），
+        //     只是例外繞過了它——B 刀就是讓那條既有路徑真正被走到。
+        // (2) processServer 對中間物件 act 設 state 卻用 this.write 送出（javap：offset
+        //     81／142 皆 aload_0），this.state 恆為 Request → 該方法的 initial Request
+        //     rejection 無法讓 client 的 ActionManager.isRejected 成立。已接受 action 在
+        //     ActionManager.update 中因 perform()==false 產生的後續 Reject 從正確 action
+        //     物件序列化，不受影響；ItemTransactionPacket.processServer 也是寫對的對照。
+        // 兩刀是「與」關係：只有 B → Reject 送出去仍是 Request state；只有 A → parse 就
+        // 已中斷、processServer 根本沒被呼叫。kill switch 分離以便二分定位：
+        // -Dmdc.netTimedActionGuard=0（B）／-Dmdc.netTimedActionState=0（A）。
+        String ntaGuard = "zombie/mdc/NetTimedActionGuard";
+        Patcher.ClassPatch nta = new Patcher.ClassPatch("zombie/core/NetTimedAction");
+        Patcher.MethodOps ntaParse = nta.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        ntaParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "se/krka/kahlua/integration/LuaCaller", "protectedCall",
+                "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
+                        + "Lse/krka/kahlua/integration/LuaReturn;",
+                ntaGuard, "protectedCall"));
+        ntaParse.expectedHits = 1;   // parse 內唯一（getDuration/start/stop/perform 的同名呼叫不在此方法）
+        patches.add(nta);
+
+        Patcher.ClassPatch ntaPkt = new Patcher.ClassPatch("zombie/network/packets/NetTimedActionPacket");
+        Patcher.MethodOps ntaProcess = ntaPkt.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/packets/NetTimedActionPacket", "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V", ntaGuard, "write"));
+        ntaProcess.expectedHits = 2;   // accept 與 reject 分支各一；helper 只在 action==null 時介入
+        patches.add(ntaPkt);
+
         return patches;
     }
 

@@ -1331,6 +1331,117 @@ public final class SmokeCheck {
                 && countCalls(memoGate, "zombie/scripting/objects/Item", "hasComponents") == 1
                 && countFieldReads(memoGate, "zombie/scripting/objects/ItemType", "MOVEABLE") == 1);
 
+        // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截 ＋ processServer 回覆 state 補正）----
+        String ntaCls = "zombie/core/NetTimedAction";
+        String ntaPktCls = "zombie/network/packets/NetTimedActionPacket";
+        String ntaGuardCls = "zombie/mdc/NetTimedActionGuard";
+        String luaCaller = "se/krka/kahlua/integration/LuaCaller";
+        String pcDesc = "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
+                + "Lse/krka/kahlua/integration/LuaReturn;";
+        String pcHelperDesc = "(L" + luaCaller + ";Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;"
+                + "[Ljava/lang/Object;)Lse/krka/kahlua/integration/LuaReturn;";
+        String ntaParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String bbwDesc = "(Lzombie/core/network/ByteBufferWriter;)V";
+        String writeHelperDesc = "(L" + ntaPktCls + ";Lzombie/core/network/ByteBufferWriter;)V";
+        String psDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        String tsCls = "Lzombie/core/Transaction$TransactionState;";
+
+        // B 刀的錨：parse 內恰一個 protectedCall（其餘同名呼叫在 getDuration/start/stop/perform，
+        // 不在本方法；method-scope 鎖定＋下面的 class-wide 差值負對照一起堵住外洩）
+        MethodNode vNtaParse = methodFromJar(jar, ntaCls, "parse", ntaParseDesc);
+        failed += check("W10 vanilla 前提：NetTimedAction.parse 內 LuaCaller.protectedCall 恰 1 處",
+                countExactCalls(vNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 1);
+        // B 刀不新增失敗語意——它讓 vanilla 既有的 `action = null; return;` 真正被走到。
+        // 那條路徑必須存在（ACONST_NULL → PUTFIELD action），否則本刀的前提就沒了。
+        boolean vanillaNullsAction = false;
+        for (AbstractInsnNode in = vNtaParse.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (in.getOpcode() == Opcodes.ACONST_NULL && nextReal(in) instanceof FieldInsnNode fi
+                    && fi.getOpcode() == Opcodes.PUTFIELD && ntaCls.equals(fi.owner) && "action".equals(fi.name)) {
+                vanillaNullsAction = true;
+                break;
+            }
+        }
+        failed += check("W10 vanilla 前提：parse 內存在 action=null 失敗路徑（B 刀的著力點，非新增語意）",
+                vanillaNullsAction);
+
+        // A 刀的存在理由，釘成結構事實：processServer 對 act（slot 3）設 state，卻用 this（slot 0）
+        // 送出。TIS 修好這個 bug（receiver 換成 act）時本條會紅——提醒撤刀，而不是讓兩份修正疊加。
+        MethodNode vNtaProcess = methodFromJar(jar, ntaPktCls, "processServer", psDesc);
+        int writeOnThis = 0;
+        int writeTotal = 0;
+        for (AbstractInsnNode in = vNtaProcess.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (!(in instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKEVIRTUAL
+                    || !ntaPktCls.equals(mi.owner) || !"write".equals(mi.name) || !bbwDesc.equals(mi.desc)) {
+                continue;
+            }
+            writeTotal++;
+            AbstractInsnNode receiver = prevReal(prevReal(in));   // receiver, bbw, write
+            if (receiver instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0) {
+                writeOnThis++;
+            }
+        }
+        int setStateOnAct = 0;
+        for (AbstractInsnNode in = vNtaProcess.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (!(in instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKEVIRTUAL
+                    || !ntaCls.equals(mi.owner) || !"setState".equals(mi.name) || !("(" + tsCls + ")V").equals(mi.desc)) {
+                continue;
+            }
+            AbstractInsnNode receiver = prevReal(prevReal(in));   // receiver, getstatic state, setState
+            if (receiver instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var != 0) {
+                setStateOnAct++;
+            }
+        }
+        failed += check("W10 vanilla 前提（A 刀存在理由）：processServer 的 write 兩處 receiver 皆 this，"
+                + "而 setState 兩處 receiver 皆非 this ＝ 該方法的初始回覆必帶 Request state",
+                writeTotal == 2 && writeOnThis == 2 && setStateOnAct == 2);
+
+        // 手術後：兩處改道、原呼叫歸零、真指令數不變（1:1 同形替換）
+        MethodNode pNtaParse = method(distJava, ntaCls, "parse", ntaParseDesc);
+        failed += check("W10 手術後：parse 改道 x1、原 protectedCall 歸零、真指令數不變",
+                countExactCalls(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "protectedCall", pcHelperDesc) == 1
+                && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 0
+                && realInsnCount(pNtaParse) == realInsnCount(vNtaParse));
+        MethodNode pNtaProcess = method(distJava, ntaPktCls, "processServer", psDesc);
+        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數不變",
+                countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, ntaGuardCls, "write", writeHelperDesc) == 2
+                && countExactCalls(pNtaProcess, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0
+                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess));
+
+        // helper 契約 1：catch 型別鎖定 RuntimeException——Error（SOE／OOM）必須穿透，
+        // 與 W6 同紀律。放寬成 Throwable 會把致命錯誤變成「靜默 reject」。
+        MethodNode guardCall = method(distJava, ntaGuardCls, "protectedCall", pcHelperDesc);
+        failed += check("W10 helper 契約：protectedCall 的 catch 恰一個且型別為 RuntimeException（Error 穿透）",
+                guardCall.tryCatchBlocks != null && guardCall.tryCatchBlocks.size() == 1
+                && "java/lang/RuntimeException".equals(guardCall.tryCatchBlocks.get(0).type));
+        // helper 契約 2：委派回原方法恰 2 處（kill switch 直通＋try 內正常路徑），且 caller 只被呼叫這兩次
+        failed += check("W10 helper 契約：protectedCall 委派原呼叫恰 2 處（off 直通＋on 正常路徑）",
+                countExactCalls(guardCall, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 2);
+        // helper 契約 3：state 補正與線路寫入都不得被診斷邏輯吞掉——兩者恰一次且在 try 外
+        MethodNode guardWrite = method(distJava, ntaGuardCls, "write", writeHelperDesc);
+        String setStateDesc = "(Lzombie/core/Transaction$TransactionState;)V";
+        failed += check("W10 helper 契約：setState／write 各恰 1 次且不在 try 範圍內（A 刀 fail-fast）",
+                countExactCalls(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "setState", setStateDesc) == 1
+                && callsInsideTryRange(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls,
+                        "setState", setStateDesc) == 0
+                && countExactCalls(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 1
+                && callsInsideTryRange(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0);
+
+        // 負對照（相對 vanilla 差值，避免絕對零在 PZ 新增同名呼叫時誤報）：
+        // NetTimedAction 只少一個 protectedCall（getDuration/start/stop/perform 逐一未動），
+        // NetTimedActionPacket 只少兩個 write。
+        failed += check("W10 負對照：NetTimedAction 全 class protectedCall 恰少 1（其餘方法未動）",
+                classWideCalls(classNode(distJava, ntaCls), Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc)
+                        == classWideCalls(classNodeFromJar(jar, ntaCls), Opcodes.INVOKEVIRTUAL, luaCaller,
+                                "protectedCall", pcDesc) - 1
+                && classWideCalls(classNode(distJava, ntaCls), Opcodes.INVOKESTATIC, ntaGuardCls,
+                        "protectedCall", pcHelperDesc) == 1);
+        failed += check("W10 負對照：NetTimedActionPacket 全 class write 恰少 2、改道恰 2",
+                classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc)
+                        == classWideCalls(classNodeFromJar(jar, ntaPktCls), Opcodes.INVOKEVIRTUAL, ntaPktCls,
+                                "write", bbwDesc) - 2
+                && classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKESTATIC, ntaGuardCls,
+                        "write", writeHelperDesc) == 2);
+
         if (failed > 0) {
             System.exit(1);
         }
