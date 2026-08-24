@@ -2096,6 +2096,143 @@ streaming 空窗或 connectArea 載入窗；不得歸因於 `<8 squares` under-s
 ---
 
 
+## 2ab. 動物 requested 冷卻＋範圍閘（W14，server）
+
+**動機（實測）**：W13 上線後跨 transport 重量測（60 秒穩態、s2c entry coverage 100%、
+兩條獨立 decoder 逐值一致）：步行／direct 族群的 request→full 閉環已消失（0 request），
+但殘留 598 份 full 之中 **96.2% 落在 vanilla 環帶、98.5% 來自單一「全程在載具內」的連線**
+——正是 W13 刻意 passthrough 回 vanilla 的分支。172/181 tuple 在收到 full 後 ≥1 秒仍再要、
+間隔鎖在 800/1000 ms timer。載具情境下 server 半徑天生算不準（client chunk 中心沿行進
+方向前移），所以第二刀不再依賴幾何：**「同一連線同一動物，冷卻窗內只回一次完整快照」**。
+完整量測見 MinidoracatServerAnalyze `reports/ops/2026-08-24-animal-fullgenome-network.md` §7。
+
+**手術（兩個 redirect，都在 `AnimalSynchronizationManager.sendUpdateToClient`，與 W13 同一
+MethodOps，expectedHits 1→6）**：
+
+| # | 改道位置 | 原呼叫 | 用途 |
+|---|---|---|---|
+| 1 | offset 12、31 | `UdpConnection.getPacket(PacketTypes$PacketType)` invokevirtual 恰 2 處 | ThreadLocal 捕獲 connection，供範圍閘用。`sendRequestToServer` 是 invokeinterface `IConnection.getPacket`，(opcode, owner) 不同，redirect 按 (opcode, owner, name, desc) 精確匹配，不會誤中 client 路徑。 |
+| 2 | offset 83、370、419 | `HashMap.get(Object)` invokevirtual 恰 3 處 | offset 83 是 `requests.get(guid)`（requested 過濾目標）；offset 370/419 是 `timerUpdateAnimal.get(Short)`。三處同簽名無法在 bytecode 層分開，runtime 用 `key instanceof Long` 完美分流：guid map 的 key 是 Long、timer map 的 key 是 Short；timer 路徑零配置直通（熱路徑）。 |
+
+**為什麼在 `requests.get` 過濾是 wire-safe**：vanilla 對回傳集合只做 iterate（填進
+`packet.requested`），不 mutate；send 後的清除走另一次 `computeIfAbsent`（offset 541-547），
+清的是原 map entry，不是回傳值。`AnimalUpdatePacket.write` 的 requested 區把「實際寫入數」
+回填進 requestedCount（對 animal==null 直接跳過；SmokeCheck 把「write 內
+`AnimalInstanceManager.get` 恰 2」釘成結構前提），所以少放幾個 ID 不改任何線上格式。
+濾到全空且 updated/deleted 也空時該 tick 不送包、原 map entry 不被清。**不卡死的真正理由是
+server 保留 map、下一 tick 重新過濾**——不是「client 會重送」：client 的 `sendRequestToServer`
+只在它**收到** AnimalUpdate 包之後才跑（`parse` → `processClient` 尾端），我們不送包它就不會
+重送。因此**絕對不可以**在濾空時順手清掉 map entry：那會把索取直接丟掉，直到下一份 inbound
+包才有機會恢復，動物就延遲出現或永不出現。
+
+**冷卻語意**：
+
+- **第一次一定放行**——動物「永遠不出現」的風險只存在於「丟棄且不回應」的設計，這裡
+  不存在：首發照 answer，只有冷卻窗內的**重複**索取被暫時擋下。
+- **標記時機＝過濾放行時**。放行後同 tick 內必然序列化（同執行緒、無讓出點；動物在
+  filter 與 write 之間不會消失——`AnimalInstanceManager` 只在同一主執行緒變動）。
+  **本 filter 的輸出上限就是 vanilla 自己的 150**，故 vanilla 的填充迴圈不會再截掉任何
+  已 mark 的 ID——mark 與實際送出對齊。已知殘留例外：`write` 的 requested 區若中途拋
+  `IOException`，vanilla 把 count 回填 0，但該批已 mark，於是要多等一個冷卻窗才重送
+  （罕見故障路徑，刻意接受）。
+- **observe 也標記**：observe 不擋任何東西，「放行」＝「實際送出」，標記是正確的實態
+  記錄；日後切 enforce 帶著熱狀態，不會出現切換瞬間的重送尖峰。
+
+**範圍閘（abuse 面，獨立開關）**：已登入 client 可對任意 onlineID 索取完整
+`IsoAnimal.save()`（vanilla 無任何 relevancy 檢查，每包上限 150）。以 vanilla 自己的半徑
+公式 `(getRelevantRange()-2)*10` 加 `+48` squares 寬裕邊界拒絕明顯超遠的索取。+48 覆蓋
+載具 look-ahead（駕駛前移 speedKmH/5：48 格＝240 km/h；乘客上限 20 格）——被拒的 ID
+距離之遠，連 vanilla 的 updated 路徑都不會對該連線宣告它，「看不到」本來就是正確行為；
+玩家回到範圍內後 updated 恢復、索取即被回應。ThreadLocal 捕獲缺失（理論上不可能：同方法
+內 getPacket 先於 requests.get）時跳過範圍檢查、只做冷卻——fail-open 到較保守的那一側。
+
+**放大面上界**：`requestedCount` 是 client 端未設限的 int（`AnimalUpdatePacket.parse` 直接照
+數字讀、`setRequested` 全量複製進 server map），vanilla 只靠 send 迴圈的
+`animalsCount >= 150 → break` 把每 tick 工作量壓在 150。故本 filter 的迴圈**也以 150 為上界**
+——否則一包 65,536 個 ID 就能把每 tick 成本從 O(150) 放大到 O(65,536)。另：不存在的 onlineID
+一律**不 mark**（但保留在輸出，讓 vanilla 照原樣送包並清 map），否則可用大量假 ID 灌爆 bucket
+觸發淘汰、藉此清掉真動物的冷卻。
+
+**狀態與回收**：`guid → (onlineID → lastSentMs)`，Trove primitive map（無 boxing）。三道
+自癒界線：(1) 逾 cooldownMs 的條目天然失效（只比時間差，不需刪除）；(2) 每 30 秒掃一次、
+回收 120 秒未觸碰的整個 guid bucket（斷線連線由此回收，不需要 hook disconnect）；
+(3) 單 bucket 超過 2048 條目即整桶清空（`bucketResets` 計數）——最壞後果是該連線幾隻
+動物提早重送一次，不會 OOM。所有狀態變動都在 server 動物同步執行緒上（`update()` 單執行緒
+逐連線呼叫，遞迴 pending 亦同執行緒）；AtomicLong 計數器只為跨執行緒讀 heartbeat 的正確性。
+
+**ThreadLocal 清除不變式**：`filterRequests` 的**每一條 Long-key 路徑**都必須經過
+`finally { CURRENT.remove(); }`，包含兩把 kill switch 都 off 的組態——否則 `getPacket`
+每次 `set` 都沒人清，ThreadLocal 會長期釘住最後一個 `UdpConnection`（含其 1 MB buffer），
+正是 `getPacket` javadoc 宣稱要避免的事。故 both-off 的 early return 刻意放在 `try` **內**
+（該路徑每連線每 tick 只到一次，進 try 成本可忽略）；非 Long key 的 timer map 熱路徑
+（每動物每 tick 兩次）刻意留在 try 外、也不碰 ThreadLocal——它在 bytecode 上晚於
+`requests.get`，到那時同 tick 的捕獲已被清掉。
+
+**三態（兩把獨立 kill switch，不需重新部署）**：`-Dmdc.animalRequestCooldown`＝`1`／未設
+enforce、`2` observe（只計數不過濾）、`0` off；`-Dmdc.animalRequestCooldownMs` 冷卻毫秒
+（預設 6000，夾在 [1000, 30000]）。`-Dmdc.animalRequestRange` 同三態、獨立於冷卻。兩者皆
+off 時 `filterRequests` 純委派 `map.get(key)`。
+
+**守門／測試**：
+
+- 與 W13 共用 MethodOps：`expectedHits = 6`（1 W13 RelevantTo offset 242 ＋ 2 getPacket ＋
+  3 HashMap.get）。
+- SmokeCheck **9 條**：vanilla 前提 3（`sendUpdateToClient` 內 HashMap.get 恰 3、getPacket
+  恰 2；`sendRequestToServer` 走 invokeinterface ← redirect 不會誤中 client 路徑的結構事實；
+  `write` 內 `AnimalInstanceManager.get` 恰 2 ← wire-safe 依據）、手術後 2（改道 x2/x3、
+  原呼叫歸零、真指令數不變；`write` 與 `sendRequestToServer` 未被改動）、helper 契約 3
+  （filterRequests 原 `HashMap.get` 委派恰 1＝fail-open 回 raw；範圍閘讀
+  `AnimalInstanceManager.get`／`RelevantTo`／`getRelevantRange` 各恰 1；捕獲恰 1 次
+  `ThreadLocal.set`＋恰 1 次原委派）、負對照 1（全 class 差額全部落在 `sendUpdateToClient`）。
+- 行為測試五模式各跑一次獨立 JVM（模式是 static final）：`enforce`／`observe`／`off`／
+  `cooldown-only`（range=0）／`range-only`（cooldown=0），自驗 argv 與實際模式相符。
+  覆蓋：Long/Short key 判別式、空集合 fast path、冷卻生命週期（首發放行→窗內擋→
+  skew+6001 再放行）、guid 隔離、範圍幾何三點釘（距 150 在 +48 帶內必在場、距 188
+  cutoff 上仍在場、距 189/200 依模式分流）、被範圍擋下的 ID 不被 mark、connection null
+  範圍跳過而冷卻照做、動物不存在放行、非 Short 元素防禦保留、cap 2049 整桶清空、
+  sweep 回收、COOLDOWN off 整場零 bucket 不變式。真 `IsoAnimal` 直接注入
+  `AnimalInstanceManager`（**坑**：其 `<clinit>` 走 `IsoObjectID` → `Rand.Next`，測試 JVM
+  必須先 `RandStandard.INSTANCE.init()` 播種，否則 NPE→`ExceptionInInitializerError`；
+  注入用 `getAnimals().put(id, animal)` 繞過 `add()` 的 DebugType noise）。
+- 變異驗證（實測，完整 build gate；原檔還原後 baseline 一律 **0**）：
+
+  | 變異 | 結果 |
+  |---|---|
+  | 冷卻判定永不命中 | 4 個 `arq FAIL` |
+  | 判別式 `instanceof Long`→`Number` | 2 個（含 anomalies 連動） |
+  | 範圍邊界 48→0 | 4 個（距 150／188 釘子全紅） |
+  | 移除 150 迴圈上界 | 1 個（放大面上界） |
+  | cap 改回「整桶清空」 | 1 個（既有冷卻被清＝bypass 回歸） |
+  | 不存在動物也 mark | 1 個（cap bypass 前置） |
+  | both-off early return 移回 `try` 外 | 1 個（ThreadLocal 清除不變式） |
+
+  **最後兩項都是 review 後補測試才咬住的，值得記下方法論**：
+
+  - 「不存在動物也 mark」首次變異 0 紅 ⇒ 「假 ID 不得 mark」這條 security property
+    完全沒被覆蓋。補 I3（灌 2048+ 個假 ID 後 `markRefused`／`accepted` 都不得動）。
+  - 「both-off early return 移回 `try` 外」首次也 0 紅，而且**第一版補的斷言仍然 0 紅**
+    ——因為它用了測試自己的 `filter(...)` 多載，那個多載會在呼叫前重新注入連線，
+    使斷言無論 `finally` 有沒有清都恆真。改成直接呼叫 `filterRequests` 才咬住。
+    **教訓：斷言必須避開會自行重置被測狀態的測試輔助方法，否則是恆真的假綠。**
+
+**生效後觀測**：heartbeat `[MinidoracatJavaPatch][AnimalRequestGate] cooldown=… range=…
+cooldownMs=… calls=… accepted=… cooldownSuppressed=… rangeSuppressed=… cooldownObserved=…
+rangeObserved=… bucketResets=… anomalies=…`（週期 2^14 次 Long-key filter 呼叫，量級遠低於
+W13 判定熱路徑）。`anomalies` 必須恆 0。
+
+**計數語意（別看錯）**：`accepted` 是放行的 ID 數；因為 filter 輸出上限＝vanilla 的 150，
+它與「實際進入 `packet.requested` 的 ID 數」一致（唯一例外是 `write` 期間 `IOException`
+把 count 回填 0 的故障路徑）。它與冷卻開關無關（range-only 模式放行也 +1）；`cooldownSuppressed/rangeSuppressed` 只在 enforce 遞增、
+`cooldownObserved/rangeObserved` 只在 observe 遞增。`accepted` 不是「新動物數」——同一
+動物冷卻窗過後重送也 +1。
+
+**部署後驗收**：重跑 MinidoracatServerAnalyze 的
+`evidence/.analysis/w13_compare_scientist.py`（雙 pcap 比較），觀察 repeat_5s 與載具連線的
+full/s 是否由 ~1/s/tuple 降為 ~1/冷卻窗；殘留不得歸因於首發。機制保證是「窗內重複由每秒
+一次降為每冷卻窗一次」，**不承諾** extra ratio 必達 <5%——那要靠部署後量測。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
