@@ -398,6 +398,22 @@ public final class PatchConfig {
         vehUpdate.expectedHits = 1;
         patches.add(baseVeh);
 
+        // W12 車輛 DB chunk 索引一致性：VehicleBuffer.set 原版把 wx/wy 取自
+        // vehicle.chunk、x/y 取自 physics。若 chunk 已 reset/reuse，會寫出
+        // (wx,wy)=(0,0)/任意值、x/y 正確的矛盾列，重啟後正確 chunk 永遠載不到車。
+        // 在原 y 欄位保存後以 x/y 推導值覆寫 wx/wy；原指令完整保留，kill switch
+        // 由 helper 回傳 vanilla chunk 值。全序掛點漂移＝expectedHits 0＝建置失敗。
+        Patcher.ClassPatch vehicleBuffer = new Patcher.ClassPatch(
+                "zombie/vehicles/VehiclesDB2$VehicleBuffer");
+        Patcher.MethodOps vehicleSet = vehicleBuffer.method("set",
+                "(Lzombie/vehicles/BaseVehicle;)V");
+        vehicleSet.vehicleChunkIndexRepair = new Patcher.VehicleChunkIndexRepair(
+                "zombie/vehicles/VehiclesDB2$VehicleBuffer",
+                "zombie/vehicles/BaseVehicle",
+                "zombie/mdc/VehicleChunkIndexGuard");
+        vehicleSet.expectedHits = 1;
+        patches.add(vehicleBuffer);
+
         // ---- W4-1 chunk 供給併包（黑邊根因修復；docs/chunk-throughput-design-v1.md）----
         // vanilla 供給只跑到設計值 15%：client 每幀送一包（約 3 chunk）→ parse 每包無條件
         // new 一個 ccr 入列 → update() 每 worker 週期只處理一個 ccr（10Hz）＝約 30 chunk/s，
