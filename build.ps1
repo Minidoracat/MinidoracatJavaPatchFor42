@@ -80,6 +80,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalRelevancyGate.class',
     'zombie/mdc/AnimalRequestGate.class',
     'zombie/mdc/AnimalRequestGate$Bucket.class',
+    'zombie/mdc/MainLoopWatchdog.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -224,6 +225,16 @@ java "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$R\work\projectz
 Assert-Ok "AnimalRequestGateTest（cooldown-only，range 獨立降級）"
 java "-Dmdc.animalRequestCooldown=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest range-only
 Assert-Ok "AnimalRequestGateTest（range-only，cooldown 獨立降級）"
+
+Write-Host "[9l/10] 主迴圈凍結看門狗（W15）行為驗證（獨立 JVM；時序依 POLL_MS=1000）..."
+# on＝clamp 下限＋凍結偵測＋快照＋恢復不重入＋再凍結重入；off＝kill switch 純早退
+# （零記錄零偵測零快照）；clamp＝門檻上限咬住。測試自驗 argv 與實際模式相符。
+java "-Dmdc.mainLoopWatchdogThresholdMs=500" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest on
+Assert-Ok "MainLoopWatchdogTest（on：clamp 下限＋凍結偵測＋恢復重入）"
+java "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest off
+Assert-Ok "MainLoopWatchdogTest（off kill switch：零記錄零偵測）"
+java "-Dmdc.mainLoopWatchdogThresholdMs=999999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest clamp
+Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

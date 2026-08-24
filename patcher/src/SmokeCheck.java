@@ -1654,6 +1654,34 @@ public final class SmokeCheck {
                         == classWideCalls(classNodeFromJar(jar, asmCls), Opcodes.INVOKEVIRTUAL, "java/util/HashMap",
                                 "get", mapGetDesc) - 3);
 
+        // ---- W15 主迴圈凍結看門狗 ----
+        String wdCls = "zombie/mdc/MainLoopWatchdog";
+        String smCls = "zombie/network/ServerMap";
+        String wdTickDesc = "(L" + smCls + ";)V";
+        // vanilla 前提：GameServer.main 主迴圈對 preupdate 恰 1 個 callsite——「幀齡」語意
+        // 建立在「每圈恰一次」上；TIS 改成多處呼叫或移除時建置紅、重選掛點而非默默失真。
+        MethodNode vGsMain = methodFromJar(jar, "zombie/network/GameServer", "main",
+                "([Ljava/lang/String;)V");
+        failed += check("W15 vanilla 前提：GameServer.main 內 ServerMap.preupdate 恰 1 處（每幀恰一次）",
+                countExactCalls(vGsMain, Opcodes.INVOKEVIRTUAL, smCls, "preupdate", "()V") == 1);
+        // 手術後：preupdate 頭部全序 aload_0→tick（helper 呼叫全方法恰一次），真指令數恰 +2
+        MethodNode pPreupdate = method(distJava, smCls, "preupdate", "()V");
+        MethodNode vPreupdate = methodFromJar(jar, smCls, "preupdate", "()V");
+        failed += check("W15 手術後：preupdate 頭部 headCall 全序、真指令數恰 +2（原體未動）",
+                headCallOk(pPreupdate, wdCls, "tick", wdTickDesc)
+                && realInsnCount(pPreupdate) == realInsnCount(vPreupdate) + 2);
+        // helper 契約：tick 熱路徑恰 1 次 nanoTime、零快照呼叫；快照走單執行緒 getStackTrace
+        // （恰 1 處、且全 class 零 getAllStackTraces——全執行緒快照貴一個量級，釘死不許誤用）。
+        MethodNode wdTick = method(distJava, wdCls, "tick", wdTickDesc);
+        failed += check("W15 helper 契約：tick 恰 1 次 nanoTime、快照只用單執行緒 getStackTrace",
+                countExactCalls(wdTick, Opcodes.INVOKESTATIC, "java/lang/System", "nanoTime", "()J") == 1
+                && countExactCalls(wdTick, Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
+                        "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 0
+                && classWideCalls(classNode(distJava, wdCls), Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
+                        "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1
+                && classWideCalls(classNode(distJava, wdCls), Opcodes.INVOKESTATIC, "java/lang/Thread",
+                        "getAllStackTraces", "()Ljava/util/Map;") == 0);
+
         if (failed > 0) {
             System.exit(1);
         }
