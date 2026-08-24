@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-"""以精確 anchor 修補正式服已知的 B42 Workshop 相容問題。"""
+"""以精確 anchor 修補正式服已知的 B42 Workshop 相容問題。
+
+路徑裡的 {version} 會依引擎 getModVersionDirName 規則，在 42.0 與遊戲版本之間
+選最高的 version 目錄（只比 major.minor）。遊戲版本：--game-version，否則從
+server-console.txt 的 `version=X.Y.Z` 讀。
+
+正式服每 5 分鐘由 cron
+呼叫 apply-workshop-compat-patches.sh --apply，再跑 fix-permissions.sh。
+
+2026-08-21 正式服稽核：Project Gurashi、Tikitown、Secretz 已停用；
+Tsarslib 的 AnimSets 大小寫 symlink 亦已退役，B42.20.3 會以
+ZomboidFileSystem.getCanonicalFile(File,String) 做不分大小寫的子路徑解析。
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import stat
 import sys
@@ -13,29 +26,17 @@ import tempfile
 from pathlib import Path
 
 
+VERSION_TOKEN = "{version}"
+VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+CONSOLE_VERSION_RE = re.compile(
+    r"version=(\d+\.\d+(?:\.\d+)?)\s+(?:\S+\s+)?demo=(?:true|false)\b"
+)
+DEFAULT_CONSOLE = Path("/home/pzserver/Zomboid/server-console.txt")
+MIN_MOD_VERSION_RANK = (42, 0)
+
 PATCHES = (
     {
-        "path": "3318210146/mods/Project Gurashi Megurigaoka/common/media/lua/server/ProjectGurashiGuaranteedItems.lua",
-        "known_versions": (
-            (
-                "adf92de5033d34f2e6f6f88bf150b04fca75ac8428bb0d4ee713673100be2e39",
-                "0ae0cf455a89a468ac71ed2d33fe12cc243860eccb662561a7b96178da78378b",
-            ),
-        ),
-        "replacements": (
-            (
-                """local function spawnItemsAtCoordinate(room, containerType, container)
-    -- container:getParent() returns the IsoObject the container belongs to,""",
-                """local function spawnItemsAtCoordinate(room, containerType, container)
-    if not instanceof(container, "ItemContainer") then return end
-
-    -- container:getParent() returns the IsoObject the container belongs to,""",
-                1,
-            ),
-        ),
-    },
-    {
-        "path": "3536052310/mods/Neat_Building/42.15/media/lua/server/BuildRecipeCode/NB_BuildRecipeCode.lua",
+        "path": "3536052310/mods/Neat_Building/{version}/media/lua/server/buildrecipecode/nb_buildrecipecode.lua",
         "known_versions": (
             (
                 "59b0fdcce77e4a61d5e37c9cf730eacc68c2de887818b6690e4f3d11615969e4",
@@ -58,33 +59,17 @@ function NB_BuildRecipeCode.WindowWall.OnCreate(params)""",
             (
                 """    thumpable:getSquare():transmitRemoveItemFromSquare(thumpable)
 
-\t--TODO:Corner miss""",
+	--TODO:Corner miss""",
                 """    thumpable:getSquare():transmitRemoveItemFromSquare(thumpable)
     return { replaceObject = true, object = window }
 
-\t--TODO:Corner miss""",
+	--TODO:Corner miss""",
                 1,
             ),
         ),
     },
     {
-        "path": "3037854728/mods/TikitownPowerPlant/42.13/media/scripts/TikitownPower_Items.txt",
-        "known_versions": (
-            (
-                "dba828875ece870fa45391d48f493dba8c27e99949942aed969619bec42e0252",
-                "40ec4af4de135cbe30f4d91d1365110a193e6db35b02272e2d29eebfb353c094",
-            ),
-        ),
-        "replacements": (
-            (
-                "OnCreate = SpecialLootSpawns.OnCreateRecipeMagazine,",
-                "OnCreate = ItemCodeOnCreate.onCreateRecipeMagazine,",
-                7,
-            ),
-        ),
-    },
-    {
-        "path": "3661164291/mods/MedievalZ/42.13/media/scripts/MedievalZRecipeBooks.txt",
+        "path": "3661164291/mods/MedievalZ/{version}/media/scripts/MedievalZRecipeBooks.txt",
         "known_versions": (
             (
                 "0a57fe44db783531dcc5f728915b8fb1c8da6d9f4cde4be822a8c10ac3d184be",
@@ -99,48 +84,66 @@ function NB_BuildRecipeCode.WindowWall.OnCreate(params)""",
             ),
         ),
     },
-    {
-        "path": "3494374578/mods/Secretz42/42.15/media/lua/server/SZDoors/SZCServer.lua",
-        "known_versions": (
-            (
-                "8cdc2c1dc0dfb191d1e4a46b0c4e76dec4816198e27a3e560e3c053485fb4838",
-                "a8f84aec59d3195444c075035691bfe5ea3f7a8cc50f7220ad0c16a0fe3b3894",
-            ),
-        ),
-        "replacements": (
-            (
-                """-- Register the command if running on the server
-if isServer() then
-    Commands["DespawnDoor"] = handleDespawnDoorCommand
-    print("Server command 'DespawnDoor' registered.")
-end""",
-                """-- B42 沒有全域 Commands registry；下方以 Events.OnClientCommand 註冊。""",
-                1,
-            ),
-            (
-                """        if door.timer <= 0 then
-            if isServer() then
-                --print("Timer expired, sending close command for door at square (" .. door.square:getX() .. ", " .. door.square:getY() .. ", " .. door.square:getZ() .. ")")
-                sendServerCommand("SZCServer", "DespawnDoor", {x = door.square:getX(), y = door.square:getY(), z = door.square:getZ(), spriteName = door.spriteName})
-            else
-                closeDoor(door.square, door.spriteName)
-            end
-            table.remove(SZCServer.openedDoors, i)
-        end""",
-                """        if door.timer <= 0 then
-            closeDoor(door.square, door.spriteName)
-            table.remove(SZCServer.openedDoors, i)
-        end""",
-                1,
-            ),
-        ),
-    },
 )
 
-SYMLINKS = (
-    ("3402491515/mods/tsarslib/common/media/animsets", "AnimSets"),
-    ("3402491515/mods/tsarslib/media/animsets", "AnimSets"),
-)
+
+def parse_mod_version(name: str) -> tuple[int, ...] | None:
+    if not VERSION_RE.fullmatch(name):
+        return None
+    return tuple(int(part) for part in name.split("."))
+
+
+def version_rank(parsed: tuple[int, ...]) -> tuple[int, int]:
+    minor = parsed[1] if len(parsed) > 1 else 0
+    return (parsed[0], minor)
+
+
+def pick_version_dir(parent: Path, game_version: str) -> str | None:
+    cap = parse_mod_version(game_version)
+    if cap is None:
+        raise RuntimeError(f"invalid game version: {game_version}")
+    cap_rank = version_rank(cap)
+    best_name = None
+    best_rank = MIN_MOD_VERSION_RANK
+    try:
+        names = [entry.name for entry in parent.iterdir() if entry.is_dir()]
+    except OSError as error:
+        raise RuntimeError(f"cannot list {parent}: {error}") from error
+    # 同 rank 時由後列舉者覆寫（engine getModVersionDirName），故為 >= 而非 >。
+    for name in names:
+        key = parse_mod_version(name)
+        if key is None:
+            continue
+        rank = version_rank(key)
+        if rank < MIN_MOD_VERSION_RANK or rank > cap_rank:
+            continue
+        if rank >= best_rank:
+            best_name, best_rank = name, rank
+    return best_name
+
+
+def resolve_patch_path(root: Path, template: str, game_version: str | None) -> Path:
+    if VERSION_TOKEN not in template:
+        return root / template
+    if not game_version:
+        raise RuntimeError(f"{template}: game version unknown; pass --game-version")
+    prefix, _, suffix = template.partition(VERSION_TOKEN)
+    parent = root / prefix.rstrip("/\\")
+    chosen = pick_version_dir(parent, game_version)
+    if chosen is None:
+        raise RuntimeError(
+            f"{template}: no version directory <= {game_version} under {parent}"
+        )
+    return parent / chosen / suffix.lstrip("/\\")
+
+
+def detect_game_version(console: Path) -> str | None:
+    if not console.is_file():
+        return None
+    with console.open("r", encoding="utf-8", errors="replace") as handle:
+        head = handle.read(65536)
+    match = CONSOLE_VERSION_RE.search(head)
+    return match.group(1) if match else None
 
 
 def anchor_bytes(text: str, newline: bytes) -> bytes:
@@ -172,8 +175,10 @@ def apply_replacements(original: bytes, patch: dict) -> bytes:
     return updated
 
 
-def analyze_file(root: Path, patch: dict) -> tuple[Path, bytes, bytes, bool]:
-    path = root / patch["path"]
+def analyze_file(
+    root: Path, patch: dict, game_version: str | None
+) -> tuple[Path, bytes, bytes, bool]:
+    path = resolve_patch_path(root, patch["path"], game_version)
     original = path.read_bytes()
     current_hash = sha256_bytes(original)
     known_sources = dict(patch["known_versions"])
@@ -185,35 +190,18 @@ def analyze_file(root: Path, patch: dict) -> tuple[Path, bytes, bytes, bool]:
     expected_patched_hash = known_sources.get(current_hash)
     if expected_patched_hash is None:
         raise RuntimeError(
-            f"{patch['path']}: unknown upstream sha256={current_hash}; skipped"
+            f"{path.relative_to(root)}: unknown upstream sha256={current_hash}; skipped"
         )
 
     updated = apply_replacements(original, patch)
     actual_patched_hash = sha256_bytes(updated)
     if actual_patched_hash != expected_patched_hash:
         raise RuntimeError(
-            f"{patch['path']}: patched sha256 mismatch "
+            f"{path.relative_to(root)}: patched sha256 mismatch "
             f"actual={actual_patched_hash}, expected={expected_patched_hash}"
         )
 
     return path, original, updated, True
-
-
-def analyze_symlink(
-    root: Path, relative: str, target: str
-) -> tuple[Path, bool, bool]:
-    path = root / relative
-    if not os.path.lexists(path):
-        return path, True, False
-    if path.is_symlink() and os.readlink(path) == target:
-        link_stat = path.lstat()
-        parent_stat = path.parent.stat()
-        needs_owner = (
-            link_stat.st_uid != parent_stat.st_uid
-            or link_stat.st_gid != parent_stat.st_gid
-        )
-        return path, False, needs_owner
-    raise RuntimeError(f"{relative}: expected absent path or symlink -> {target}")
 
 
 def backup_file(backup_root: Path, root: Path, path: Path, data: bytes) -> None:
@@ -244,50 +232,26 @@ def run(
     backup_root: Path,
     apply: bool,
     patches: tuple[dict, ...] = PATCHES,
-    symlinks: tuple[tuple[str, str], ...] = SYMLINKS,
+    game_version: str | None = None,
 ) -> int:
     needs_change = False
     warnings = 0
 
     for patch in patches:
         try:
-            path, original, updated, changed = analyze_file(root, patch)
+            path, original, updated, changed = analyze_file(root, patch, game_version)
             relative = path.relative_to(root)
             print(f"{'NEEDS_PATCH' if changed else 'OK'} file {relative}")
             needs_change = needs_change or changed
             if apply and changed:
                 backup_file(backup_root, root, path, original)
                 atomic_write(path, updated)
-                _, _, _, still_changed = analyze_file(root, patch)
+                _, _, _, still_changed = analyze_file(root, patch, game_version)
                 if still_changed:
-                    raise RuntimeError(f"post-verify failed: {patch['path']}")
-        except (OSError, RuntimeError) as error:
-            warnings += 1
-            print(f"WARNING file {patch['path']}: {error}", file=sys.stderr)
-
-    for relative, target in symlinks:
-        try:
-            path, needs_link, needs_owner = analyze_symlink(root, relative, target)
-            changed = needs_link or needs_owner
-            status = "NEEDS_LINK" if needs_link else "NEEDS_OWNER" if needs_owner else "OK"
-            print(f"{status} link {relative} -> {target}")
-            needs_change = needs_change or changed
-            if apply and changed:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if needs_link:
-                    os.symlink(target, path)
-                if not hasattr(os, "lchown"):
-                    raise RuntimeError("os.lchown is required to set symlink ownership")
-                parent_stat = path.parent.stat()
-                os.lchown(path, parent_stat.st_uid, parent_stat.st_gid)
-                _, still_needs_link, still_needs_owner = analyze_symlink(
-                    root, relative, target
-                )
-                if still_needs_link or still_needs_owner:
                     raise RuntimeError(f"post-verify failed: {relative}")
         except (OSError, RuntimeError) as error:
             warnings += 1
-            print(f"WARNING link {relative}: {error}", file=sys.stderr)
+            print(f"WARNING file {patch['path']}: {error}", file=sys.stderr)
 
     if warnings:
         print(f"COMPLETED_WITH_WARNINGS warnings={warnings}", file=sys.stderr)
@@ -306,6 +270,57 @@ def run(
 
 
 def self_test() -> None:
+    from unittest.mock import patch as mock_patch
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        parent = Path(temp_dir)
+        for name in ("common", "media", "42", "42.13", "42.14", "42.15", "42.21"):
+            (parent / name).mkdir()
+        assert pick_version_dir(parent, "42.20.3") == "42.15"
+        assert pick_version_dir(parent, "42.13") == "42.13"
+        assert pick_version_dir(parent, "42.0") == "42"
+        assert pick_version_dir(parent, "41.78") is None
+        assert parse_mod_version("common") is None
+        legacy_only = parent / "legacy-only"
+        legacy_only.mkdir()
+        (legacy_only / "41.78").mkdir()
+        assert pick_version_dir(legacy_only, "42.20.3") is None
+        (parent / "42.20.4").mkdir()
+        assert pick_version_dir(parent, "42.20.3") == "42.20.4"
+        same_rank = parent / "same-rank"
+        same_rank.mkdir()
+        same_rank_dirs = (same_rank / "42.20.3", same_rank / "42.20.4")
+        for directory in same_rank_dirs:
+            directory.mkdir()
+        with mock_patch.object(Path, "iterdir", return_value=iter(same_rank_dirs)):
+            assert pick_version_dir(same_rank, "42.20.3") == "42.20.4"
+
+        console = parent / "console.txt"
+        console.write_text(
+            "LOG  : General      f:0 st:1> version=42.20.3 70207f62e0 demo=false\n"
+            "modversion=42.13\n"
+            "os.version=17.0.9\n"
+            "version=1.2\n",
+            encoding="utf-8",
+        )
+        assert detect_game_version(console) == "42.20.3"
+        console.write_text(
+            "LOG  : General      f:0 st:1> version=42.20.3 demo=false\n"
+            "modversion=42.13\n",
+            encoding="utf-8",
+        )
+        assert detect_game_version(console) == "42.20.3"
+
+        root = parent / "workshop"
+        (root / "3536052310/mods/Neat_Building/42.15/media/lua").mkdir(parents=True)
+        resolved = resolve_patch_path(
+            root,
+            "3536052310/mods/Neat_Building/{version}/media/lua/x.lua",
+            "42.20.3",
+        )
+        assert resolved.name == "x.lua"
+        assert "42.15" in resolved.parts
+
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir) / "workshop"
         backup_root = Path(temp_dir) / "backups"
@@ -313,7 +328,8 @@ def self_test() -> None:
         fixtures = []
 
         for patch in PATCHES:
-            path = root / patch["path"]
+            rel = patch["path"].replace(VERSION_TOKEN, "42.15")
+            path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             parts = []
             for before, _, expected_count in patch["replacements"]:
@@ -321,16 +337,13 @@ def self_test() -> None:
             original = "\nfixture-separator\n".join(parts).encode("utf-8")
             updated = apply_replacements(original, patch)
             test_patch = dict(patch)
+            test_patch["path"] = rel
             test_patch["known_versions"] = (
                 (sha256_bytes(original), sha256_bytes(updated)),
             )
             test_patches.append(test_patch)
             fixtures.append((path, original, updated))
             path.write_bytes(original)
-
-        for relative, target in SYMLINKS:
-            path = root / relative
-            (path.parent / target).mkdir(parents=True, exist_ok=True)
 
         assert run(root, backup_root, apply=False, patches=tuple(test_patches)) == 2
 
@@ -360,6 +373,13 @@ def main() -> int:
         type=Path,
         default=Path("/home/pzserver/patches/workshop-compat-preimages"),
     )
+    parser.add_argument(
+        "--console",
+        type=Path,
+        default=DEFAULT_CONSOLE,
+        help="server-console.txt used to detect game version",
+    )
+    parser.add_argument("--game-version", help="override detected game version")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -367,7 +387,11 @@ def main() -> int:
     if args.self_test:
         self_test()
         return 0
-    return run(args.root, args.backup_root, args.apply)
+
+    game_version = args.game_version or detect_game_version(args.console)
+    if game_version:
+        print(f"GAME_VERSION {game_version}")
+    return run(args.root, args.backup_root, args.apply, game_version=game_version)
 
 
 if __name__ == "__main__":
