@@ -1884,6 +1884,60 @@ catch 型別鎖 IAE、委派恰 2 處（off 直通＋on）、class-wide 差值�
 全服不卡讀條、不需重啟。`anomalies` 恆 0。
 
 
+## 2z. 車輛 DB chunk 索引一致性守衛（W12，server）
+
+**事故**：2026-08-23～24 正式服連續三輛車在卡車／仍坐車斷線／21:58 crash 後不可見；
+`vehicles.db` 列與 blob 都仍在，但 header 的 `wx,wy` 與 `x,y` 自相矛盾：
+
+| id | script | x,y | 錯誤 wx,wy | 正確 wx,wy |
+|----|--------|-----|------------|-------------|
+| 152 | `84mercLWB4` | 9432.836,11207.054 | 1168,969 | 1179,1400 |
+| 64 | `92nissanGTR` | 10591.696,10335.673 | 0,0 | 1323,1291 |
+| 2518 | `90bmwE30m3` | 13793.331,3864.297 | 0,0 | 1724,483 |
+
+`VehiclesDB2` 載入只以 `WHERE wx=? AND wy=?` 查 row，所以車在正確地點永遠不會載入。
+三筆皆由停服施工窗修正，原 blob 不動。
+
+**vanilla 根因鏈（高置信，約 0.82；精確保存交錯約 0.60）**：
+
+1. 車輛 physics 先更新 x/y；只有 `current` 非 null 且 chunk 改變時才重綁
+   `vehicle.chunk`，`current` 又到 `postupdate()` 才刷新。
+2. `IsoChunk.resetForStore()` 清 `vehicles` 並把 pooled chunk 的 wx,wy 設成 0,0，
+   卻不反向清掉每台車仍持有的 `vehicle.chunk`；同一物件 checkout 後會改成任意新座標。
+3. 玩家仍在車內斷線時，`GameServer.disconnectPlayer()` 立即呼叫
+   `VehiclesDB2.updateVehicleAndTrailer()`。
+4. `VehiclesDB2$VehicleBuffer.set()` 從 `vehicle.chunk` 取 wx,wy、從 vehicle physics 取 x,y；
+   SQL 原樣 commit，無 invariant。故 reset 後寫出 0,0，reuse 後寫出任意錯格。
+
+**手術**：鎖定 private inner class
+`VehiclesDB2$VehicleBuffer.set(BaseVehicle)` 中唯一
+`aload0 → aload1 → BaseVehicle.getY()F → putfield y:F` 全序，在原 y 寫入後追加 16 條線性指令：
+從 `VehicleBuffer` **已捕捉**的 x/y 與原 wx/wy primitive 餵給
+`VehicleChunkIndexGuard.wx/wy(BaseVehicle,float,int)`，再覆寫對應 buffer 欄位。
+Helper 以 `PZMath.fastfloor(coordinate / 8.0F)` 推導；off／非 finite 回傳同一 snapshot 的原值。
+
+**範圍與風險**：
+
+- 一點涵蓋 add/update、斷線、cell unload、拖車與 SQL INSERT/UPDATE。
+- 不修改 physics、world membership 或 chunk lifecycle；只保護 persistence header。
+- 不能消除當輪 client 車輛 desync，也不自動修已損壞 row。
+- x/y 非 finite 時保留 vanilla chunk 值並記 anomaly，不用猜位置。
+- anomaly log 只印前 8 筆與每 64 筆，包含 sqlId、兩組 chunk、x/y 與 chunk identity。
+
+**守門／測試**：
+
+- method-scope `expectedHits=1`；全序任一步漂移即建置失敗。
+- SmokeCheck 鎖 vanilla chunk/wx/wy 讀取數、helper 各一次、全 class 無外洩、完整 operand/order、
+  wx／wy 寫回正確欄位、真指令只 +16。
+- 行為測試鎖正負座標邊界、實案 1168,969→1179,1400、NaN／Infinity fallback、
+  null chunk 不被 helper 解參考，以及 kill switch 回傳 captured vanilla 值。
+
+**kill switch**：`-Dmdc.vehicleChunkIndexGuard=0`。
+
+**官方回報**：見 `docs/report/2026-08-24-vehicle-chunk-index-corruption-tis.md`。
+
+---
+
 ## 2aa. 動物同步範圍對齊（W13，server）
 
 **現象**：正式服穩態出向流量中，帶動物完整快照特徵（`maxWeight`／`ageToGrow`／
@@ -2073,7 +2127,7 @@ streaming 空窗或 connectArea 載入窗；不得歸因於 `<8 squares` under-s
    與 `.../zombie/mdc/FertilizedEggGuard.class` 皆應「No such file」。**只殘留改道版
    `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
    最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
-   (b) 新 `patch-manifest.txt` 共 **51 筆**，`grep -c . patch-manifest.txt` = 51；其中
+   (b) 新 `patch-manifest.txt` 共 **55 筆**，`grep -c . patch-manifest.txt` = 55；其中
    `NetTimedActionGuard.class`、`NetTimedAction.class`、`NetTimedActionPacket.class` 各恰一筆，
    且 `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
    (c) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`（此路徑跑在

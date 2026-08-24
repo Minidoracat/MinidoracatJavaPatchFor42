@@ -76,6 +76,7 @@ $helperEntries = @(
     'zombie/mdc/ItemWeightMemo.class',
     'zombie/mdc/NetTimedActionGuard.class',
     'zombie/mdc/AnimalSortGuard.class',
+    'zombie/mdc/VehicleChunkIndexGuard.class',
     'zombie/mdc/AnimalRelevancyGate.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -189,6 +190,12 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.Animal
 Assert-Ok "AnimalSortGuardTest（on，出貨組態）"
 java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest off
 Assert-Ok "AnimalSortGuardTest（animalSortGuard=0 kill switch）"
+
+Write-Host "[9i/10] 車輛 DB chunk 索引守衛行為驗證＋kill switch（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleChunkIndexGuardTest
+Assert-Ok "VehicleChunkIndexGuardTest（on，出貨組態）"
+java "-Dmdc.vehicleChunkIndexGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleChunkIndexGuardTest off
+Assert-Ok "VehicleChunkIndexGuardTest（off，vanilla 路徑）"
 
 Write-Host "[9j/10] 動物同步範圍對齊（W13）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
 # 三個模式都必須真的跑過：enforce 是出貨組態、observe 只量測 `suppressed` 判定差集而

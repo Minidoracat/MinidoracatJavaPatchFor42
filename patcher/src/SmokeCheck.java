@@ -1004,6 +1004,36 @@ public final class SmokeCheck {
         failed += check("W3-4 no-op 鏈結：getTargetAlpha server→1.0F 指紋",
                 checkGetTargetAlphaGuard(methodFromJar(jar, "zombie/iso/IsoObject", "getTargetAlpha", "(I)F")));
 
+        // ---- W12 車輛 DB chunk 索引一致性（VehiclesDB2$VehicleBuffer.set）----
+        String vbCls = "zombie/vehicles/VehiclesDB2$VehicleBuffer";
+        String vciCls = "zombie/mdc/VehicleChunkIndexGuard";
+        String vbSetDesc = "(L" + vehCls + ";)V";
+        String vciCoordDesc = "(L" + vehCls + ";FI)I";
+        MethodNode vVbSet = methodFromJar(jar, vbCls, "set", vbSetDesc);
+        failed += check("W12 vanilla 前提：chunk/wx/wy 讀取各為 2/1/1，且零 guard 呼叫",
+                countInstanceFieldReads(vVbSet, vehCls, "chunk") == 2
+                && countInstanceFieldReads(vVbSet, "zombie/iso/IsoChunk", "wx") == 1
+                && countInstanceFieldReads(vVbSet, "zombie/iso/IsoChunk", "wy") == 1
+                && countExactCalls(vVbSet, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 0
+                && countExactCalls(vVbSet, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 0);
+        MethodNode pVbSet = method(distJava, vbCls, "set", vbSetDesc);
+        failed += check("W12 手術後：captured x/y＋vanilla wx/wy 餵 helper、各覆寫正確欄位、只追加 16 條真指令",
+                countExactCalls(pVbSet, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 1
+                && countExactCalls(pVbSet, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 1
+                && countInstanceFieldReads(pVbSet, vehCls, "chunk") == 2
+                && countInstanceFieldReads(pVbSet, "zombie/iso/IsoChunk", "wx") == 1
+                && countInstanceFieldReads(pVbSet, "zombie/iso/IsoChunk", "wy") == 1
+                && realInsnCount(pVbSet) == realInsnCount(vVbSet) + 16
+                && vehicleChunkRepairSequence(pVbSet, vbCls, vehCls, vciCls, vciCoordDesc));
+        ClassNode pVbNode = classNode(distJava, vbCls);
+        failed += check("W12 負對照：VehicleBuffer 全 class 僅 set() 的兩個 guard 呼叫",
+                classWideCalls(pVbNode, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 1
+                && classWideCalls(pVbNode, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 1);
+        MethodNode vciCoord = method(distJava, vciCls, "chunkCoord", "(F)I");
+        failed += check("W12 helper 契約：chunkCoord 唯一 floor sink＝PZMath.fastfloor(F)I",
+                countExactCalls(vciCoord, Opcodes.INVOKESTATIC,
+                        "zombie/core/math/PZMath", "fastfloor", "(F)I") == 1);
+
         // ---- W7 朝向暫存執行緒隔離（IsoGameCharacter.setForwardDirectionFromIsoDirection）----
         String igcCls = "zombie/characters/IsoGameCharacter";
         String fwdGuardCls = "zombie/mdc/ForwardVectorGuard";
@@ -2358,6 +2388,61 @@ public final class SmokeCheck {
             }
         }
         return count;
+    }
+
+    /** 鎖定 W12 在 captured y PUTFIELD 後的完整 operand/order，避免 helper 結果寫錯欄位。 */
+    static boolean vehicleChunkRepairSequence(MethodNode method, String bufferOwner,
+                                              String vehicleOwner, String helperOwner,
+                                              String helperDesc) {
+        int anchors = 0;
+        int matches = 0;
+        for (AbstractInsnNode in : method.instructions) {
+            if (!isField(in, Opcodes.PUTFIELD, bufferOwner, "y", "F")) {
+                continue;
+            }
+            anchors++;
+            AbstractInsnNode[] s = new AbstractInsnNode[16];
+            AbstractInsnNode cursor = in;
+            for (int i = 0; i < s.length; i++) {
+                cursor = nextReal(cursor);
+                s[i] = cursor;
+            }
+            boolean ok =
+                    isVar(s[0], Opcodes.ALOAD, 0)
+                    && isVar(s[1], Opcodes.ALOAD, 1)
+                    && isVar(s[2], Opcodes.ALOAD, 0)
+                    && isField(s[3], Opcodes.GETFIELD, bufferOwner, "x", "F")
+                    && isVar(s[4], Opcodes.ALOAD, 0)
+                    && isField(s[5], Opcodes.GETFIELD, bufferOwner, "wx", "I")
+                    && isCall(s[6], Opcodes.INVOKESTATIC, helperOwner, "wx", helperDesc)
+                    && isField(s[7], Opcodes.PUTFIELD, bufferOwner, "wx", "I")
+                    && isVar(s[8], Opcodes.ALOAD, 0)
+                    && isVar(s[9], Opcodes.ALOAD, 1)
+                    && isVar(s[10], Opcodes.ALOAD, 0)
+                    && isField(s[11], Opcodes.GETFIELD, bufferOwner, "y", "F")
+                    && isVar(s[12], Opcodes.ALOAD, 0)
+                    && isField(s[13], Opcodes.GETFIELD, bufferOwner, "wy", "I")
+                    && isCall(s[14], Opcodes.INVOKESTATIC, helperOwner, "wy", helperDesc)
+                    && isField(s[15], Opcodes.PUTFIELD, bufferOwner, "wy", "I");
+            if (ok) {
+                matches++;
+            }
+        }
+        return anchors == 1 && matches == 1;
+    }
+
+    static boolean isVar(AbstractInsnNode in, int opcode, int var) {
+        return in instanceof VarInsnNode v && v.getOpcode() == opcode && v.var == var;
+    }
+
+    static boolean isField(AbstractInsnNode in, int opcode, String owner, String name, String desc) {
+        return in instanceof FieldInsnNode f && f.getOpcode() == opcode
+                && f.owner.equals(owner) && f.name.equals(name) && f.desc.equals(desc);
+    }
+
+    static boolean isCall(AbstractInsnNode in, int opcode, String owner, String name, String desc) {
+        return in instanceof MethodInsnNode m && m.getOpcode() == opcode
+                && m.owner.equals(owner) && m.name.equals(name) && m.desc.equals(desc);
     }
 
     static AbstractInsnNode nextReal(AbstractInsnNode instruction) {
