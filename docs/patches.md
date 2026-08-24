@@ -1883,6 +1883,162 @@ catch 型別鎖 IAE、委派恰 2 處（off 直通＋on）、class-wide 差值�
 而**不再**出現 `IngameState.updateInternal> Exception thrown`（該 stack）；
 全服不卡讀條、不需重啟。`anomalies` 恆 0。
 
+
+## 2aa. 動物同步範圍對齊（W13，server）
+
+**現象**：正式服穩態出向流量中，帶動物完整快照特徵（`maxWeight`／`ageToGrow`／
+`fertility`／`meatRatio`／`eggSize` 等基因欄位名）的封包占 **38.3–39.8%**，是最大單項。
+不是事故——沒有 crash、沒有活鎖，只是持續吃掉近四成上傳。
+
+**鑑識**（雙向 pcap 解碼，自製 decoder：Ethernet/IPv4/UDP → RakNet connected datagram
+（reliability／split header）→ 以 `(src,dst,ports,splitId,splitCount)` 重組 → `0x86` ＋ BE
+short PacketType → `AnimalUpdatePacket` requested 區）：
+
+| 指標 | 實測（8.03 秒／25,000 datagrams） |
+|---|---:|
+| client→server requested IDs | 109 |
+| server→client full snapshots | 109 |
+| 相異 `(client endpoint, onlineID)` | **14** |
+| 5 秒內重複的 tuple | **14/14（100%）** |
+| 第一次以外的重複 snapshot | **95/109（87.2%）** |
+| 每 tuple 在窗內 full 次數 | **5–10** |
+| request→response 配對 | 109/109（43.9–94.2 ms，median 72.7） |
+| `dataSize` 平均 | 1,125.4 bytes |
+| 動物距該 client 玩家 | **70.4–91.5 squares** |
+| RakNet split groups／不完整 | 1,167／4 |
+| AnimalUpdate parse errors | 0 |
+
+重送節奏貼合 `UpdateLimit` 的 800/1000 ms；類型是野生 deer／mouse／rat，非單一牧場。
+
+**vanilla 根因（幾何不一致）**：握手時（`GameServer.receivePlayerConnect`，
+反編譯 GameServer.java:2771-2772,2788-2789），server 保存的是 clamp 後值：
+
+```
+range          = clamp(client 送來的 chunk grid width, 12, 20)
+relevantRange  = range/2 + 2
+chunkGridWidth = range
+```
+
+`ClientServerMap.loaded[]` 與 client chunk streaming 無關：它追蹤的是 64-square
+server-cell `isLoaded` 狀態，不是每個 8-square client chunk 是否已完成載入。
+
+對正常、未被 clamp 的奇數 width，client chunk 視窗在 streaming 完成後的共同安全半寬下界是
+`(range/2) chunks × 8` squares（**整數除法**）。但
+`AnimalSynchronizationManager.sendUpdateToClient` 判 relevancy 用的半徑是（javap offset 233-242）
+
+```
+(getRelevantRange() - 2) * 10  ==  (range/2) * 10
+```
+
+半徑是該安全下界的 **10/8 倍**，因此額外環帶會包含 client 尚無 GridSquare 的位置；
+pcap 沒有逐封包 loaded-set 證據，所以不能宣稱整個環帶每一格都未載入。
+
+**必須用整數除法算**：`IsoChunkMap.CalcChunkWidth` 強制正常 grid width 為**奇數**
+（自動計算上限 19；debug 選項 5/7/9/11/13），`GameServer` 只把值 clamp 到 12–20。
+寫成 `range*4`／`range*5` 對奇數 range 會算錯——range=13 是 48／60，不是 52／65，
+`range*4` 反而超出安全下界 4 squares。閉環：
+
+1. 環帶動物照收輕量 `AnimalPacket`；
+2. client 本地無 instance → 把 onlineID 放進 requested 並 `sendRequestToServer`；
+3. server 回 `IsoAnimal.save()` 全量（modData ＋ `fullGenome` 每個 `AnimalGene`／兩個
+   `AnimalAllele`，gene 名字串重複三次，約 1.1 KiB）；
+4. client 端 `AnimalPacket.isConsistent` ＝ `getCell().getGridSquare(...) != null`
+   （AnimalPacket.java:252-262）——格子沒載入就 **整段跳過**、不建 instance；
+5. 下一個 800/1000 ms 更新再送輕量包 → 回到 2。
+
+**手術**：改道 `sendUpdateToClient` 內唯一的 `UdpConnection.RelevantTo(FFF)Z`
+（invokevirtual → invokestatic，receiver 前置；淨堆疊與指令長度皆不變）到
+`AnimalRelevancyGate.relevantTo`，把半徑夾到 `(getChunkGridWidth()/2) * 8`。
+
+**為什麼不用 constChange**：`Patcher.ConstChange` 是**逐方法**的，所以「`bipush 10` 在本
+class 有兩處（另一處在 `isAnimalOnScreen`，語意是 800 vs 1000 ms 節拍選擇）」並不足以
+排除常數替換——method-scope 的 `10→8` 在 `sendUpdateToClient` 內數學上等價。真正的理由
+是：① 常數烘進 bytecode 就沒有 runtime kill switch，硬規則要求不重新部署即可降回 vanilla；
+② `chunkGridWidth` 是 server 可取得的最佳寬度輸入，但必須先排除 clamp 多解與偶數幾何，
+不能把它當 client 已完成 streaming 的 loaded set；③ 載具排除（見下）
+需要 helper 邏輯，常數手術做不到。
+
+**範圍與風險**：
+
+- 只縮不放：`aligned >= vanillaRadius` 時走 vanilla（`passthrough` 計數）。
+- **載具排除（必要，不是保守起見）**：`IsoChunkMap.ProcessChunkPos`（IsoChunkMap.java:868-878）
+  在玩家位於載具時把 chunk-map 中心沿行進方向前移 `currentSpeedKmHour / 5` squares
+  （乘客 `min(s*2, 20)`，駕駛無上限）。server 的 `releventPos` 是玩家實際座標、**不知道
+  這個前移**，所以載具情境下任何以玩家為中心的半徑都會同時前側擋掉已載入格（動物該出現
+  卻不出現）、後側放行未載入格（迴圈照舊）。故任一 player 在載具內即整段 passthrough
+  ——**本刀只對步行玩家生效**。
+- **殘留誤差（刻意接受）**：client 載入範圍是 **chunk 對齊矩形**，這裡夾的是**連續半徑**
+  （`RelevantTo` 是軸對齊方形，非圓形）。player 在 chunk 內的連續偏移
+  `p ∈ [0,8)` 使兩側可用寬度相差小於 8 squares；`(range/2)*8` 是所有 p 的共同安全下界。
+  - **over-send ＝ 0**只在完整前提成立：未被 clamp 的奇數
+    `stored ∈ {13,15,17,19}`、該 player 的 server/client center chunk 一致、相關 chunks
+    已 streaming 完成，且 `RelevantTo` 沒有先由 `connectArea` 命中而是走 radius 分支。
+    只對這條 radius 分支可說重送閉環**應該消失**而非「縮小」；其餘情境仍是保守 mitigation。
+    正式服若仍見重送，不要歸因於下列 `<8 squares` under-send。
+  - **under-send < 8 squares**：較寬側那些格子其實已載入、動物卻不同步 ⇒ 視野最外緣
+    不到一格 chunk 的動物可能晚出現。這是本刀付出的代價。
+  「範圍外沒格子所以零可見變化」是**過度宣稱**，不要這樣寫。
+- **中心與 streaming 是兩個獨立前提**：server 的 `releventPos` 只在
+  `PlayerPacket.processServer` 收包時更新（節拍最長約 600 ms ＋網路延遲），client 的
+  chunk 中心由本機座標即時決定。步行跨 chunk 或 teleport 會造成 center 暫時不同；
+  即使中心相同，`WorldStreamer` 也可能尚未完成相關 chunks。兩者都可能留下暫態，
+  所以**不能宣稱「步行一律安全」**。要完全消除得由 client 判斷 loaded set，或由 client
+  明確回報給 server——純 server 半徑做不到。
+- **clamp 邊界檢查**：`GameServer` 存進 connection 的是 `max(12, min(20, raw))`。
+  只在 `stored ∈ {13,15,17,19}` enforce（13–19 唯一解，但 14/16/18 因偶數 rectangle 不對稱仍 passthrough）。
+  `stored=12` ⟺ `raw ≤ 12`（可能是 debug 5/7/9/11）、`stored=20` ⟺ `raw ≥ 20`，兩者都
+  **無法還原** client 真實寬度；少這道檢查，raw=11 會被當成 12（實際共同半寬 40、卻算成 48）
+  ⇒ 保留 8 squares over-reach，迴圈照舊。
+- coop／split-screen：`RelevantTo` 先比對 `connectArea[n]`，命中即回 true 而不看 radius
+  （**miss 後仍會查 radius**）。靜態碼無法證明命中時區內每個 client chunk 都已完成
+  streaming，因此 `connectArea` 載入窗是殘留驗證項，不把它當精確 loaded set。
+- 不動 requested 端處理。針對「已登入 client 主動要求任意 onlineID」的放大面
+  （`setRequested` 無 relevancy／無冷卻，每包最多 150）另案評估——需要在 requested
+  端加 gate，手術形狀是線性插入，風險層級不同。
+- 不改 `IsoAnimal.save` 位元格式（那會動 wire schema，vanilla client 就 parse 不了、
+  必須雙端 patch）。本刀純 server 端，玩家不需安裝任何東西。
+
+**守門／測試**：
+
+- method-scope `expectedHits=1`。
+- SmokeCheck **10 條**：vanilla 前提（`sendUpdateToClient` 內 RelevantTo 恰 1；半徑源自
+  `getRelevantRange` 且**不讀** `getChunkGridWidth` ← 缺陷的結構事實，TIS 改用
+  chunkGridWidth 或對齊常數時本條會紅、提醒撤刀；`isAnimalOnScreen` 不呼叫 RelevantTo）、
+  手術後（改道 x1／原呼叫歸零／真指令數不變；`isAnimalOnScreen` 逐項未被碰）、
+  helper 契約（`alignedRadius` 讀 `getChunkGridWidth` 恰 1；入口 3 條 vanilla 委派＋
+  2 次夾過半徑判定；**載具排除讀 `getPlayerAt`／`getVehicle` 各恰 1**；**入口呼叫載具
+  排除恰 1 次**）、負對照（全 class 恰少 1、改道恰 1）。
+- 行為測試三模式各跑一次獨立 JVM（`MODE` 是 static final），自驗 argv 與 MODE 相符。
+  主幾何迴圈：可信奇數 **13·15·17·19**（vanilla 實際值），clamp 邊界 **12／20** 必須 passthrough，
+  偶數 **14·16·18** 因 rectangle 不對稱也驗證 passthrough；另有連續 offset
+  `p ∈ [0,8)` 的共同下界幾何自檢（由 chunk 邊界獨立推導、不呼叫 production 公式）、
+  原點 `Math.nextUp(floor)` 精確 float 門檻、±X／±Y 四方向、對角線與非零 index 測試：
+  載入下界內與 `dist == floor` 必送、原點 `Math.nextUp(floor)` 依模式分流、vanilla 半徑外不送；
+  **載具內 passthrough**／步行照常夾取／coop connectArea 不受影響／**遠距動物也計入 `rejected`**
+  （證明 `rejected` 不是環帶占比）。真實 `UdpConnection.RelevantTo` 直接參與
+  （連線與玩家實例用 `Unsafe.allocateInstance` 繞過建構子——vanilla `PacketsCache`
+  建構子會拉進 `PacketTypes`→`AntiCheat`／`ServerOptions` 整條靜態初始化鏈；
+  `players` 陣列必須補，否則載具檢查會 NPE 而全部退化成 passthrough）。
+- 變異驗證（實測）：移除 `stored % 2 == 0` parity guard → enforce **6 個 `arg FAIL`**；
+  半徑增加 1 ULP → 四個可信奇數各由原點 `Math.nextUp(floor)` 抓到，共 **4 個 `arg FAIL`**。
+  原檔還原後完整 build 必須回到 0。
+
+**三態**：`-Dmdc.animalRelevancy`＝`1`／未設 enforce、`2` observe（回 vanilla 結果、
+只統計 `suppressed` 判定差集）、`0` off（緊急降級，不需重新部署）。
+
+**生效後觀測**：heartbeat `[MinidoracatJavaPatch][AnimalRelevancy] mode=1 calls=… rejected=…
+suppressed=… passthrough=… anomalies=…`（週期 2^20 次判定）。`anomalies` 必須恆 0。
+
+**計數語意（別看錯）**：`rejected` 是「夾過半徑判定為 false」的次數，**包含 vanilla 本來
+也不會送的遠距動物**（`toSendList` 未經距離預篩），所以 `rejected/calls` **不是**環帶占比。
+`suppressed` 只是 observe 下「vanilla=true、夾後=false」的**判定差集**；其中包含較寬側
+已載入卻被夾掉的 under-send，因此同樣**不是**環帶占比或實際浪費率。真正浪費仍以 pcap
+重複快照指標為準。`passthrough` 會包含載具、12/20 clamp 邊界、14/16/18 偶數等情境。
+驗收重跑同一 pcap decoder：`repeat_5s` 與 extra snapshot ratio（基線 87.2%，目標 <5%）。
+殘留來源只可歸到載具／clamp／偶數 passthrough、requested 路徑、center 漂移、
+streaming 空窗或 connectArea 載入窗；不得歸因於 `<8 squares` under-send。
+**官方回報**：見 `docs/report/2026-08-24-animal-relevancy-resend-loop-tis.md`。
+
 ---
 
 

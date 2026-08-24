@@ -668,6 +668,24 @@ public final class PatchConfig {
         animalSoundUpdate.expectedHits = 1;   // update()V 內唯一 sort callsite（offset 19）
         patches.add(animalSound);
 
+        // ---- W13 動物同步範圍對齊（2026-08-24 封包鑑識）----
+        // vanilla 幾何不一致：動物 relevancy 半徑是 (getRelevantRange()-2)*10 == (range/2)*10
+        // （javap offset 233-242），而 client 載入矩形的共同半寬只有 (range/2)*8 ——半徑
+        // 固定超過正常奇數 grid 的安全下界。改道把半徑夾到 (getChunkGridWidth()/2)*8。
+        // 完整鑑識數據、clamp 範圍、載具排除、中心同步前提、殘留誤差理由及限定條件
+        // 一律見 docs/patches.md 2aa —— 這裡不複誦，避免兩份數字漂移。
+        // 用 redirect 而非 method-scope constChange 的理由：常數烘進 bytecode 就沒有
+        // runtime kill switch；半徑要釘 chunkGridWidth 而非 relevantRange 公式；且載具
+        // 排除與 clamp 邊界判定需要 helper 邏輯。三態 -Dmdc.animalRelevancy（1/2/0）。
+        Patcher.ClassPatch animalSync = new Patcher.ClassPatch("zombie/popman/animal/AnimalSynchronizationManager");
+        Patcher.MethodOps animalSyncSend = animalSync.method("sendUpdateToClient",
+                "(Lzombie/core/raknet/UdpConnection;ZLjava/util/HashSet;)V");
+        animalSyncSend.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/raknet/UdpConnection", "RelevantTo", "(FFF)Z",
+                "zombie/mdc/AnimalRelevancyGate", "relevantTo"));
+        animalSyncSend.expectedHits = 1;   // 全 class 唯一 RelevantTo callsite（offset 242）
+        patches.add(animalSync);
+
         return patches;
     }
 

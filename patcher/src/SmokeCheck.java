@@ -1478,6 +1478,75 @@ public final class SmokeCheck {
                                 "sort", sortDesc) - 1
                 && classWideCalls(classNode(distJava, basCls), Opcodes.INVOKESTATIC, asgCls, "sort", sortHelperDesc) == 1);
 
+        // ---- W13 動物同步範圍對齊 ----
+        String asmCls = "zombie/popman/animal/AnimalSynchronizationManager";
+        String argCls = "zombie/mdc/AnimalRelevancyGate";
+        String udpCls = "zombie/core/raknet/UdpConnection";
+        String sendDesc = "(L" + udpCls + ";ZLjava/util/HashSet;)V";
+        String relDesc = "(FFF)Z";
+        String relHelperDesc = "(L" + udpCls + ";FFF)Z";
+        MethodNode vSend = methodFromJar(jar, asmCls, "sendUpdateToClient", sendDesc);
+        MethodNode vOnScreen = methodFromJar(jar, asmCls, "isAnimalOnScreen",
+                "(L" + udpCls + ";Lzombie/characters/animals/IsoAnimal;)Z");
+        // vanilla 前提 1：sendUpdateToClient 內恰 1 個 RelevantTo callsite（offset 242）
+        failed += check("W13 vanilla 前提：sendUpdateToClient 內 RelevantTo 恰 1 處",
+                countExactCalls(vSend, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 1);
+        // vanilla 前提 2（缺陷的結構事實）：relevancy 半徑由 getRelevantRange 導出，
+        // 而 client 實際載入範圍是 chunkGridWidth ——vanilla 在這個方法裡從不讀後者。
+        // TIS 若改用 chunkGridWidth（或把常數對齊）本條會紅，提醒重估／撤刀。
+        failed += check("W13 vanilla 前提：半徑源自 getRelevantRange 恰 1、且不讀 getChunkGridWidth",
+                countExactCalls(vSend, Opcodes.INVOKEVIRTUAL, udpCls, "getRelevantRange", "()B") == 1
+                && countExactCalls(vSend, Opcodes.INVOKEVIRTUAL, udpCls, "getChunkGridWidth", "()I") == 0);
+        // vanilla 前提 3：isAnimalOnScreen 有同形的 (relevantRange-2)*10 幾何但不經 RelevantTo
+        // ——確認 redirect 不會誤改 800/1000ms 節拍判定（constChange 的取捨理由見 patches.md 2aa）。
+        failed += check("W13 vanilla 前提：isAnimalOnScreen 不呼叫 RelevantTo（redirect 不會誤改節拍）",
+                countExactCalls(vOnScreen, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 0
+                && countExactCalls(vOnScreen, Opcodes.INVOKEVIRTUAL, udpCls, "getRelevantRange", "()B") == 1);
+        // 手術後：改道 x1、原 RelevantTo 歸零、真指令數不變（1:1 同形替換）
+        MethodNode pSend = method(distJava, asmCls, "sendUpdateToClient", sendDesc);
+        failed += check("W13 手術後：sendUpdateToClient 改道 x1、原 RelevantTo 歸零、真指令數不變",
+                countExactCalls(pSend, Opcodes.INVOKESTATIC, argCls, "relevantTo", relHelperDesc) == 1
+                && countExactCalls(pSend, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 0
+                && realInsnCount(pSend) == realInsnCount(vSend));
+        // 手術後：節拍判定完全未被碰到（isAnimalOnScreen 逐指令與 vanilla 相同）
+        MethodNode pOnScreen = method(distJava, asmCls, "isAnimalOnScreen",
+                "(L" + udpCls + ";Lzombie/characters/animals/IsoAnimal;)Z");
+        failed += check("W13 手術後：isAnimalOnScreen 未被改動（真指令數與 getRelevantRange 皆同）",
+                realInsnCount(pOnScreen) == realInsnCount(vOnScreen)
+                && countExactCalls(pOnScreen, Opcodes.INVOKEVIRTUAL, udpCls, "getRelevantRange", "()B") == 1
+                && countExactCalls(pOnScreen, Opcodes.INVOKESTATIC, argCls, "relevantTo", relHelperDesc) == 0);
+        // helper 契約：半徑必須來自 server 保存的 client-reported chunk-grid width，
+        // 且三條 vanilla 委派路徑都在
+        MethodNode gateEntry = method(distJava, argCls, "relevantTo", relHelperDesc);
+        MethodNode gateAligned = method(distJava, argCls, "alignedRadius", "(L" + udpCls + ";)F");
+        MethodNode gateVanilla = method(distJava, argCls, "vanilla", "(L" + udpCls + ";FFF)Z");
+        failed += check("W13 helper 契約：對齊半徑讀 getChunkGridWidth 恰 1（幾何唯一來源）",
+                countExactCalls(gateAligned, Opcodes.INVOKEVIRTUAL, udpCls, "getChunkGridWidth", "()I") == 1);
+        failed += check("W13 helper 契約：入口 3 條 vanilla 委派＋2 次夾過半徑判定，vanilla() 內恰 1 次原呼叫",
+                countExactCalls(gateEntry, Opcodes.INVOKESTATIC, argCls, "vanilla", "(L" + udpCls + ";FFF)Z") == 3
+                && countExactCalls(gateEntry, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 2
+                && countExactCalls(gateVanilla, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 1);
+        // helper 契約：載具排除必須存在且真的走 vanilla（W13 blocking 修正的核心——
+        // IsoChunkMap.ProcessChunkPos 在載具內把 chunk 中心前移，server 無從得知，
+        // 任何以玩家為中心的半徑在載具情境都會同時誤擋前側、誤放後側）
+        MethodNode gateVehicle = method(distJava, argCls, "anyPlayerInVehicle", "(L" + udpCls + ";)Z");
+        failed += check("W13 helper 契約：載具排除讀 getPlayerAt 與 getVehicle 各恰 1",
+                countExactCalls(gateVehicle, Opcodes.INVOKEVIRTUAL, udpCls, "getPlayerAt",
+                        "(I)Lzombie/characters/IsoPlayer;") == 1
+                && countExactCalls(gateVehicle, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
+                        "getVehicle", "()Lzombie/vehicles/BaseVehicle;") == 1);
+        failed += check("W13 helper 契約：入口在夾取前呼叫載具排除恰 1 次",
+                countExactCalls(gateEntry, Opcodes.INVOKESTATIC, argCls, "anyPlayerInVehicle",
+                        "(L" + udpCls + ";)Z") == 1);
+
+        // 負對照：全 class 只少這一個 RelevantTo callsite
+        failed += check("W13 負對照：AnimalSynchronizationManager 全 class RelevantTo 恰少 1、改道恰 1",
+                classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc)
+                        == classWideCalls(classNodeFromJar(jar, asmCls), Opcodes.INVOKEVIRTUAL, udpCls,
+                                "RelevantTo", relDesc) - 1
+                && classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKESTATIC, argCls,
+                        "relevantTo", relHelperDesc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

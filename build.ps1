@@ -76,6 +76,7 @@ $helperEntries = @(
     'zombie/mdc/ItemWeightMemo.class',
     'zombie/mdc/NetTimedActionGuard.class',
     'zombie/mdc/AnimalSortGuard.class',
+    'zombie/mdc/AnimalRelevancyGate.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -188,6 +189,17 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.Animal
 Assert-Ok "AnimalSortGuardTest（on，出貨組態）"
 java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest off
 Assert-Ok "AnimalSortGuardTest（animalSortGuard=0 kill switch）"
+
+Write-Host "[9j/10] 動物同步範圍對齊（W13）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
+# 三個模式都必須真的跑過：enforce 是出貨組態、observe 只量測 `suppressed` 判定差集而
+# 不改行為、off 是緊急降級。測試自驗 argv 與實際 MODE 相符，property 名稱打錯
+# 會炸在測試裡，不會默默把 enforce 版跑三遍假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest enforce
+Assert-Ok "AnimalRelevancyGateTest（enforce，出貨組態）"
+java "-Dmdc.animalRelevancy=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest observe
+Assert-Ok "AnimalRelevancyGateTest（observe，只量測不改行為）"
+java "-Dmdc.animalRelevancy=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest off
+Assert-Ok "AnimalRelevancyGateTest（animalRelevancy=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
