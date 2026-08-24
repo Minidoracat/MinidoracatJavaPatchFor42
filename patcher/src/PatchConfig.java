@@ -699,7 +699,26 @@ public final class PatchConfig {
         animalSyncSend.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/core/raknet/UdpConnection", "RelevantTo", "(FFF)Z",
                 "zombie/mdc/AnimalRelevancyGate", "relevantTo"));
-        animalSyncSend.expectedHits = 1;   // 全 class 唯一 RelevantTo callsite（offset 242）
+        // ---- W14 動物 requested 冷卻＋範圍閘（2026-08-24 W13 上線後量測的第二刀）----
+        // W13 生效後殘留重送 96.2% 落在 vanilla 環帶、98.5% 來自載具 passthrough 連線
+        // （量測與理由見 docs/patches.md 2ab）。第二刀不依賴幾何：同連線同動物在冷卻窗內
+        // 只回一次完整快照，對載具族群同樣有效。兩個 redirect 都在 sendUpdateToClient：
+        // ① getPacket invokevirtual x2（reliable/unreliable 分支，offset 12/31）——
+        //    ThreadLocal 捕獲 connection 供範圍閘用；sendRequestToServer 是
+        //    invokeinterface IConnection.getPacket，(opcode,owner) 不同、不會誤中。
+        // ② HashMap.get invokevirtual x3（offset 83 requests.get(guid) ＝過濾目標；
+        //    offset 370/419 timerUpdateAnimal.get(Short) ＝ helper 以 key instanceof Long
+        //    在 runtime 完美分流、原樣直通）。
+        // 兩把獨立 kill switch：-Dmdc.animalRequestCooldown / -Dmdc.animalRequestRange。
+        animalSyncSend.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/raknet/UdpConnection", "getPacket",
+                "(Lzombie/network/PacketTypes$PacketType;)Lzombie/network/packets/INetworkPacket;",
+                "zombie/mdc/AnimalRequestGate", "getPacket"));
+        animalSyncSend.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
+                "zombie/mdc/AnimalRequestGate", "filterRequests"));
+        // 1 (W13 RelevantTo, offset 242) + 2 (W14 getPacket) + 3 (W14 HashMap.get)
+        animalSyncSend.expectedHits = 6;
         patches.add(animalSync);
 
         return patches;

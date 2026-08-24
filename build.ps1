@@ -78,6 +78,8 @@ $helperEntries = @(
     'zombie/mdc/AnimalSortGuard.class',
     'zombie/mdc/VehicleChunkIndexGuard.class',
     'zombie/mdc/AnimalRelevancyGate.class',
+    'zombie/mdc/AnimalRequestGate.class',
+    'zombie/mdc/AnimalRequestGate$Bucket.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -207,6 +209,21 @@ java "-Dmdc.animalRelevancy=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomb
 Assert-Ok "AnimalRelevancyGateTest（observe，只量測不改行為）"
 java "-Dmdc.animalRelevancy=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest off
 Assert-Ok "AnimalRelevancyGateTest（animalRelevancy=0 kill switch）"
+
+Write-Host "[9k/10] 動物 requested 冷卻＋範圍閘（W14）行為驗證（獨立 JVM；模式是 static final）..."
+# 兩把獨立 kill switch 的組合都必須真的跑過：both-enforce 是出貨組態；observe 只計數
+# 不過濾；off 純委派；cooldown-only / range-only 驗證兩刀可獨立降級。測試自驗 argv 與
+# 實際模式相符，property 名稱打錯會炸在測試裡，不會默默把 enforce 版跑五遍假綠。
+java "-Dmdc.animalRequestCooldownMs=6000" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest enforce
+Assert-Ok "AnimalRequestGateTest（both enforce，出貨組態）"
+java "-Dmdc.animalRequestCooldown=2" "-Dmdc.animalRequestRange=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest observe
+Assert-Ok "AnimalRequestGateTest（both observe，只計數不過濾）"
+java "-Dmdc.animalRequestCooldown=0" "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest off
+Assert-Ok "AnimalRequestGateTest（both off kill switch，純委派）"
+java "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest cooldown-only
+Assert-Ok "AnimalRequestGateTest（cooldown-only，range 獨立降級）"
+java "-Dmdc.animalRequestCooldown=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest range-only
+Assert-Ok "AnimalRequestGateTest（range-only，cooldown 獨立降級）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

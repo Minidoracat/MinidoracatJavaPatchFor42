@@ -1577,6 +1577,83 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKESTATIC, argCls,
                         "relevantTo", relHelperDesc) == 1);
 
+        // ---- W14 動物 requested 冷卻＋範圍閘 ----
+        String reqCls = "zombie/mdc/AnimalRequestGate";
+        String aupCls = "zombie/network/packets/character/AnimalUpdatePacket";
+        String aimCls = "zombie/popman/animal/AnimalInstanceManager";
+        String getPacketDesc = "(Lzombie/network/PacketTypes$PacketType;)Lzombie/network/packets/INetworkPacket;";
+        String getPacketHelperDesc = "(L" + udpCls + ";Lzombie/network/PacketTypes$PacketType;)Lzombie/network/packets/INetworkPacket;";
+        String mapGetDesc = "(Ljava/lang/Object;)Ljava/lang/Object;";
+        String filterDesc = "(Ljava/util/HashMap;Ljava/lang/Object;)Ljava/lang/Object;";
+        // vanilla 前提 1：sendUpdateToClient 內 HashMap.get 恰 3（offset 83 requests.get(Long guid)
+        // ＋ offset 370/419 timerUpdateAnimal.get(Short)）、UdpConnection.getPacket 恰 2
+        // （reliable/unreliable 分支）。任一數目漂移＝TIS 改了填充邏輯，runtime 分流假設要重估。
+        failed += check("W14 vanilla 前提：sendUpdateToClient 內 HashMap.get 恰 3、getPacket 恰 2",
+                countExactCalls(vSend, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "get", mapGetDesc) == 3
+                && countExactCalls(vSend, Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc) == 2);
+        // vanilla 前提 1b（ThreadLocal 捕獲的時序錨）：兩個 getPacket 分支都必須先於
+        // requests.get(Long)。若 TIS 保留呼叫數卻把 requested 填充移到 getPacket 之前，
+        // 捕獲就會缺失——本刀的設計是「缺失＝null＝跳過範圍檢查」（fail-open 到保守側），
+        // 但那等於範圍閘靜默失效，故釘成前提讓建置紅、而不是默默降級。
+        failed += check("W14 vanilla 前提：getPacket（兩分支最晚者）先於 requests.get(Long)（捕獲時序錨）",
+                lastCallIndex(vSend, Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc)
+                        < firstCallIndex(vSend, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "get", mapGetDesc));
+        // vanilla 前提 2：client 端 sendRequestToServer 走 invokeinterface IConnection.getPacket
+        // （不同 opcode＋owner）——這是「redirect 不會誤中 client 路徑」的結構事實。
+        MethodNode vSendReq = methodFromJar(jar, asmCls, "sendRequestToServer",
+                "(Lzombie/network/IConnection;)V");
+        failed += check("W14 vanilla 前提：sendRequestToServer 用 invokeinterface IConnection.getPacket（redirect 不會誤中）",
+                countExactCalls(vSendReq, Opcodes.INVOKEINTERFACE, "zombie/network/IConnection", "getPacket", getPacketDesc) == 1
+                && countExactCalls(vSendReq, Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc) == 0);
+        // vanilla 前提 3：AnimalUpdatePacket.write 的 requested 區對 animal==null 直接跳過、
+        // requestedCount 由實際寫入數回填（AnimalInstanceManager.get 恰 2：requested＋updated 迴圈）
+        // ——這是「過濾 requested 集合 wire-safe」的結構依據。
+        MethodNode vWrite = methodFromJar(jar, aupCls, "write", "(Lzombie/core/network/ByteBufferWriter;)V");
+        failed += check("W14 vanilla 前提：AnimalUpdatePacket.write 內 AnimalInstanceManager.get 恰 2（null 跳過＝wire-safe 依據）",
+                countExactCalls(vWrite, Opcodes.INVOKEVIRTUAL, aimCls, "get", "(S)Lzombie/characters/animals/IsoAnimal;") == 2);
+        // 手術後：getPacket 改道 x2、HashMap.get 改道 x3、原呼叫歸零、真指令數不變（1:1 x6 含 W13）
+        failed += check("W14 手術後：sendUpdateToClient getPacket 改道 x2、HashMap.get 改道 x3、原呼叫歸零、真指令數不變",
+                countExactCalls(pSend, Opcodes.INVOKESTATIC, reqCls, "getPacket", getPacketHelperDesc) == 2
+                && countExactCalls(pSend, Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc) == 0
+                && countExactCalls(pSend, Opcodes.INVOKESTATIC, reqCls, "filterRequests", filterDesc) == 3
+                && countExactCalls(pSend, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "get", mapGetDesc) == 0
+                && realInsnCount(pSend) == realInsnCount(vSend));
+        // 手術後：AnimalUpdatePacket 與 sendRequestToServer 逐項未被碰（wire 格式與 client 路徑零改動）
+        failed += check("W14 手術後：AnimalUpdatePacket.write 與 sendRequestToServer 未被改動",
+                realInsnCount(method(distJava, asmCls, "sendRequestToServer", "(Lzombie/network/IConnection;)V"))
+                        == realInsnCount(vSendReq)
+                && classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKESTATIC, reqCls, "getPacket", getPacketHelperDesc) == 2
+                && classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKESTATIC, reqCls, "filterRequests", filterDesc) == 3);
+        // helper 契約：filterRequests 恰 1 次原 HashMap.get 委派（timer 直通與 raw 讀共用同一次）
+        // ＋恰 1 次存在性查詢（`AnimalInstanceManager.get(S)`）——後者刻意與 RANGE_MODE 無關，
+        // 是「不存在的 ID 一律不 mark」的實作依據（堵大量假 ID 灌爆 bucket 清冷卻的路徑）；
+        // 範圍閘本身只做幾何（animal 由呼叫端解析），故 RelevantTo／getRelevantRange 各恰 1。
+        MethodNode gateFilter = method(distJava, reqCls, "filterRequests", filterDesc);
+        MethodNode gateRange = method(distJava, reqCls, "allowRange",
+                "(L" + udpCls + ";Lzombie/characters/animals/IsoAnimal;)Z");
+        failed += check("W14 helper 契約：filterRequests 內原 HashMap.get 委派恰 1、存在性查詢恰 1",
+                countExactCalls(gateFilter, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "get", mapGetDesc) == 1
+                && countExactCalls(gateFilter, Opcodes.INVOKEVIRTUAL, aimCls, "get",
+                        "(S)Lzombie/characters/animals/IsoAnimal;") == 1);
+        failed += check("W14 helper 契約：範圍閘只做幾何（RelevantTo／getRelevantRange 各恰 1、零存在性查詢）",
+                countExactCalls(gateRange, Opcodes.INVOKEVIRTUAL, udpCls, "RelevantTo", relDesc) == 1
+                && countExactCalls(gateRange, Opcodes.INVOKEVIRTUAL, udpCls, "getRelevantRange", "()B") == 1
+                && countExactCalls(gateRange, Opcodes.INVOKEVIRTUAL, aimCls, "get",
+                        "(S)Lzombie/characters/animals/IsoAnimal;") == 0);
+        // helper 契約：連線捕獲恰 1 次 ThreadLocal.set ＋ 恰 1 次原 getPacket 委派
+        MethodNode gateCapture = method(distJava, reqCls, "getPacket", getPacketHelperDesc);
+        failed += check("W14 helper 契約：getPacket 捕獲恰 1 次 ThreadLocal.set＋恰 1 次原委派",
+                countExactCalls(gateCapture, Opcodes.INVOKEVIRTUAL, "java/lang/ThreadLocal", "set", "(Ljava/lang/Object;)V") == 1
+                && countExactCalls(gateCapture, Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc) == 1);
+        // 負對照：全 class 的 getPacket/HashMap.get 差額全部落在 sendUpdateToClient
+        failed += check("W14 負對照：全 class getPacket 恰少 2、HashMap.get 恰少 3（其餘方法未動）",
+                classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKEVIRTUAL, udpCls, "getPacket", getPacketDesc)
+                        == classWideCalls(classNodeFromJar(jar, asmCls), Opcodes.INVOKEVIRTUAL, udpCls,
+                                "getPacket", getPacketDesc) - 2
+                && classWideCalls(classNode(distJava, asmCls), Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "get", mapGetDesc)
+                        == classWideCalls(classNodeFromJar(jar, asmCls), Opcodes.INVOKEVIRTUAL, "java/util/HashMap",
+                                "get", mapGetDesc) - 3);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -2021,6 +2098,26 @@ public final class SmokeCheck {
             }
         }
         return Integer.MAX_VALUE;
+    }
+
+    /**
+     * 真指令序中<b>最後</b>一個符合的呼叫位置（1 起算）；不存在＝MIN_VALUE。
+     * 用於「所有分支都必須先於 X」這類時序鎖（取最晚者比較才涵蓋每一條分支）。
+     */
+    static int lastCallIndex(MethodNode m, int opcode, String owner, String name, String desc) {
+        int i = 0;
+        int last = Integer.MIN_VALUE;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            i++;
+            if (in instanceof MethodInsnNode mi && mi.getOpcode() == opcode
+                    && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)) {
+                last = i;
+            }
+        }
+        return last;
     }
 
     /** 是否存在「GETSTATIC owner.name 之後緊接指定跳轉 opcode」的指令對（W8 hot-save 閘方向鎖）。 */
