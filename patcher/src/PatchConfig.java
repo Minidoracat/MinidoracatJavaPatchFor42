@@ -721,6 +721,26 @@ public final class PatchConfig {
         animalSyncSend.expectedHits = 6;
         patches.add(animalSync);
 
+        // ---- W15 主迴圈凍結看門狗（2026-08-24 兩波卡頓的觀測刀；docs/patches.md 2ac）----
+        // 21:27–21:31 主迴圈單幀凍結累計 ~216s（f:7115→7118 三幀），RakNet 同幀踢 9 條
+        // 在線連線＋12.5 分鐘 connection-null 封包風暴（75,143 行）＝黑邊。三個候選機制
+        // （動物路徑重活／ZGC 瞬時 allocation stall／glibc 損毀 heap 上的 malloc 停滯）
+        // 全部卡在同一個觀測缺口：凍結當下沒有主執行緒 stack。本刀把「下次凍結時抓
+        // jstack」自動化：headCall 掛 ServerMap.preupdate()V 頭部——GameServer.main
+        // 主迴圈每圈恰呼叫一次（javap：main 內 invokevirtual preupdate 全方法恰 1 處，
+        // SmokeCheck 釘死；W6 事故 stack 亦實證其在主迴圈上）。helper 記 volatile
+        // 時間戳；daemon 每秒輪詢，幀齡 ≥5s（可調）即對主執行緒 getStackTrace 快照
+        // （帶 Thread.getState 與 heap used/max 分流三假說），每 10s 補拍、單次凍結
+        // 上限 12 張，恢復時印總時長與期間 tick 推進數（0=完全凍結、>0=慢幀連發）。
+        // 純觀測、零行為改變、平時零輸出（不成為新噪音源）。
+        // kill switch：-Dmdc.mainLoopWatchdog=0；門檻 -Dmdc.mainLoopWatchdogThresholdMs。
+        Patcher.ClassPatch serverMap = new Patcher.ClassPatch("zombie/network/ServerMap");
+        Patcher.MethodOps preupdate = serverMap.method("preupdate", "()V");
+        preupdate.headCall = new Patcher.HeadCall("zombie/mdc/MainLoopWatchdog", "tick",
+                "(Lzombie/network/ServerMap;)V");
+        preupdate.expectedHits = 1;
+        patches.add(serverMap);
+
         return patches;
     }
 

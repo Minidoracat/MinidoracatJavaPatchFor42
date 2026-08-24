@@ -2217,7 +2217,7 @@ off 時 `filterRequests` 純委派 `map.get(key)`。
 
 **生效後觀測**：heartbeat `[MinidoracatJavaPatch][AnimalRequestGate] cooldown=… range=…
 cooldownMs=… calls=… accepted=… cooldownSuppressed=… rangeSuppressed=… cooldownObserved=…
-rangeObserved=… bucketResets=… anomalies=…`（週期 2^14 次 Long-key filter 呼叫，量級遠低於
+rangeObserved=… markRefused=… anomalies=…`（週期 2^14 次 Long-key filter 呼叫，量級遠低於
 W13 判定熱路徑）。`anomalies` 必須恆 0。
 
 **計數語意（別看錯）**：`accepted` 是放行的 ID 數；因為 filter 輸出上限＝vanilla 的 150，
@@ -2231,6 +2231,82 @@ W13 判定熱路徑）。`anomalies` 必須恆 0。
 full/s 是否由 ~1/s/tuple 降為 ~1/冷卻窗；殘留不得歸因於首發。機制保證是「窗內重複由每秒
 一次降為每冷卻窗一次」，**不承諾** extra ratio 必達 <5%——那要靠部署後量測。
 
+
+---
+
+## 2ac. 主迴圈凍結看門狗（W15，server，純觀測）
+
+### 背景（2026-08-24 兩波卡頓事件的觀測缺口）
+
+21:27–21:31 主迴圈近乎凍結累計約 216 秒（`f:7115→7118` 三幀、每幀 ~72s、console 靜默，
+只有 Steam callback 執行緒在印 initiating connection）→ RakNet 心跳逾時**同幀踢掉 9 條
+在線連線**（`Received packet type=X before Login, disconnecting` ×9 IP）→ 殘留封包以
+connection-null 轟 12.5 分鐘（75,143 行）＋ PacketsCache 超限 18,260 行 → 玩家重連
+chunk 重串流＝黑邊。事後鑑識收斂到三個互不排斥的候選機制，全部卡在同一個觀測缺口
+——**凍結當下沒有人拿到主執行緒的 stack**：
+
+1. 主迴圈在跑極貴的動物相關工作（updateLOS／pathfind／同步；當晚 Animals Instances
+   4174、loaded 770、AnimalRelevancy 判定 490k/s、「動物車」時間重疊）；
+2. ZGC 瞬時 allocation stall（GC log 的 usage 是 cycle 邊界快照，cycle 中的瞬時峰值
+   不被記錄，無法排除瞬間打滿 32G；basic `gc` tag 也不印 Allocation Stall 行）；
+3. glibc 損毀 heap 上的 malloc 停滯（同日 4 次 native abort/SIGSEGV：`__libc_free`／
+   `malloc_consolidate invalid chunk size`／`malloc invalid size (unsorted)`，
+   損毀 allocator 上的 malloc 可掛任意執行緒任意久）。
+
+已排除：swap（=0）、cgroup memory stall（PSI 累計 9.9s）、W12/W13/W14（下午對照組
+——不含 W13 的 clean 版 session 頓挫更嚴重；W14 當時未生效）。8 vCPU 下 GC worker
+搶核為共同放大器（cpu.pressure 累計 3.8h）。三假說的裁決手段一致：**下一次凍結時的
+主執行緒 stack**。本刀把它自動化。
+
+### 手術（headCall，與 W4-1 同機制）
+
+- 掛點：`ServerMap.preupdate()V` 頭部插入 `ALOAD 0; INVOKESTATIC
+  MainLoopWatchdog.tick(Lzombie/network/ServerMap;)V`（`expectedHits = 1`）。
+- 掛點證據（javap 對 42.20.3 jar）：`GameServer.main` 內 `invokevirtual
+  ServerMap.preupdate:()V` **全方法恰 1 處**（offset 3466，經 `ServerMap.instance`），
+  且位於主 while 迴圈內＝每幀恰一次；W6 事故 stack（`GameServer.main:972 →
+  ServerMap.preupdate`）為執行期佐證。頭部插入＝本刀在 vanilla 任何一行執行前先記
+  時間戳，凍結不論發生在 preupdate 內或主迴圈其他位置，都表現為時間戳停止推進。
+- helper `zombie/mdc/MainLoopWatchdog`：
+  - `tick()` 熱路徑＝一次 `System.nanoTime()` volatile write＋幀計數遞增＋一次
+    started 檢查（每幀一次、10Hz，可忽略；零配置）；首次 tick 在主執行緒上 lazy
+    啟動 daemon 輪詢執行緒並印首次生效 banner。
+  - daemon 每 1s 輪詢幀齡。幀齡 ≥ 門檻（預設 5000ms，`-Dmdc.mainLoopWatchdogThresholdMs`
+    clamp 1000..600000）→ 判定凍結：立刻對主執行緒 `getStackTrace()` 拍第一張快照，
+    之後每 10s 補拍、單次凍結上限 12 張（覆蓋 ~2 分鐘；216s 級事件拍好拍滿）。
+  - 快照行帶 `Thread.getState()` 與 heap used/max——三假說的分流指紋：RUNNABLE＋
+    動物/AI frame＝重活；RUNNABLE＋分配點 frame＝allocation stall；stack 淺/空或
+    native frame＝JNI/malloc 側；BLOCKED/WAITING＝鎖或 park。
+  - 恢復時印總時長、期間 tick 推進數（**0＝完全凍結；>0＝每幀超過門檻的慢幀連發**，
+    兩者機制不同）與累計 `stalls/dumps/maxStallMs/anomalies`。
+  - 正常運轉零輸出（不成為新噪音源，符合 log 入列門檻精神）。
+- 門檻取 5s 的理由：當天的慢性頓挫是 2–3 秒級且每 10–20 幀一次——門檻低於它會讓
+  快照自己變成頓挫風暴中的額外負擔；5s 起跳只抓「玩家一定有感」的事件。
+
+### 語意邊界（刻意不做的事）
+
+- **純觀測**：不中斷、不恢復、不 kill 任何東西——凍結的處置仍歸 vanilla／運維。
+- 只拍主執行緒（`getStackTrace()`），不用 `Thread.getAllStackTraces()`——全執行緒
+  快照貴一個量級，且主執行緒 stack 已足以裁決三假說；SmokeCheck 把這條釘死。
+- 不偵測 W6 型活鎖（主迴圈仍在轉、每圈拋例外跳過工作——tick 照常推進不觸發）；
+  那一族已由 ChunkLoadGuard 治本，且屬「tick 有推進」的另一種形狀。
+
+### 守門（SmokeCheck）
+
+1. vanilla 前提：`GameServer.main` 內 `ServerMap.preupdate` 恰 1 處——「幀齡」語意
+   建立在「每圈恰一次」上，TIS 改成多處呼叫或移除時建置紅、重選掛點而非默默失真。
+2. 手術後：preupdate 頭部 headCall 全序（`aload_0 → tick` 恰一次）＋真指令數恰 +2
+   （原體未動）。
+3. helper 契約：`tick` 恰 1 次 `nanoTime`、零快照呼叫；快照走單執行緒 `getStackTrace`
+   恰 1 處、全 class 零 `getAllStackTraces`。
+
+kill switch：`-Dmdc.mainLoopWatchdog=0`（tick 早退、執行緒不啟動）。
+
+**生效後觀測**：開機 banner `[MinidoracatJavaPatch][MainLoopWatchdog] 首次生效
+threshold=5000ms …`；凍結事件時 `主迴圈已凍結 <ms>（快照 n/12）ticks=… state=…
+heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticksDuringStall=…`。
+`anomalies` 必須恆 0。快照的 stack 直接餵回 216s 三假說裁決；若長期零凍結事件，
+本刀就是零成本保險絲，不撤。
 ---
 
 ## 3. 部署後驗證清單
