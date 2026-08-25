@@ -2499,24 +2499,42 @@ caller 側單 redirect：`IsoAnimal.updateInternal()V` 內唯一
 `invokestatic zombie/mdc/AnimalLosGate.updateLOS(IsoAnimal)V`（1:1 同形，expectedHits=1）。
 `updateLOS` 本體不動（Lua/mod 直呼路徑照舊；W3-3 的兩處 prefilter redirect 保留＝防禦深度）。
 
-enforce 幀輪轉：`floorMod((identityHashCode(animal)*0x9E3779B9 >>> 16) + (int)frame, N) == 0`
-才轉呼叫，幀源＝vanilla `MovingObjectUpdateScheduler.instance.getFrameCounter()`
-（`startFrame()` 每 tick +1；updateLOS 呼叫鏈正是從該 scheduler 的 bucket 出發＝同幀恆定、
-Δframe 恆 1）。**grok 對抗審查 BLOCKING 修正記錄**：v1 草案用 nanoTime 牆鐘窗口——單點
-抽樣在 tick=k×window 且 gcd(k,N)>1 時整個剩餘類永久 skip（fps5、N=4 ⇒ 半數動物視覺
-失明），恰在本刀要救的低 fps 情境發作；幀源 Δframe=1 恆互質，數學上免疫，且 CPU 砍幅
-恆 (N-1)/N 與 fps 無關。mix 防 `-XX:hashCode` 切換與低位聚集。
+enforce 幀輪轉：`floorMod((long)(identityHashCode(animal)*0x9E3779B9 >>> 16) + frame, N) == 0`
+才轉呼叫（`floorMod(long,int)` 全程 long 無截斷），幀源＝vanilla
+`MovingObjectUpdateScheduler.instance.getFrameCounter()`（`startFrame()` 每 tick +1）。
+**grok 對抗審查 BLOCKING 修正記錄**：v1 草案用 nanoTime 牆鐘窗口——單點抽樣在
+tick=k×window 且 gcd(k,N)>1 時整個剩餘類永久 skip（fps5、N=4 ⇒ 半數動物視覺失明），
+恰在本刀要救的低 fps 情境發作；改用幀源後 Δframe=1 ⇒ gcd(1,N)=1、CPU 砍幅恆 (N-1)/N。
+**但 Δframe=1 是條件性事實，不是數學免疫**（三 lane review B1）：它成立於
+「server ⇒ `getUpdateSchedulerSimulationLevelForObject` 恆回 FULL ⇒ frameMod=1 ⇒
+bucket 每 tick 全跑」這條 42.20.3 前提鏈——vanilla 的 bucket 本身就在做
+`buckets[frame % frameMod]` 幀輪轉（`getID() % frameMod` 分子桶），TIS 若在 server 開
+LOD 分級，動物被 update 的幀集合變 `frame ≡ getID() (mod frameMod)`，與 N 有公因數 ⇒
+剩餘類永久失明。防護雙保險：SmokeCheck 承重前提釘（建置紅）＋helper `gateApplies()`
+runtime fail-open（`getCurrentSimulationLevel().getFrameMod() != 1` 直接 forward、計
+`lodPassthrough`——寧可失去節流也不失明）。mix 防 `-XX:hashCode` 切換與低位聚集。
 
 行為代價（誠實語意——速率非單次延遲）：`spotted()` 是速率型副效應，skip ⇒ 速率 ×1/N。
 受影響：玩家/殭屍近距壓力累積、馴養 `playerAcceptanceList` 累加（dist<10 分支）、野生
-警戒與偷襲 XP 機會、`attackIfStressed` 起手機率、`lastAlerted` 衰減。首次偵測延遲
-≤(N-1) tick。**故預設 N=2 保守出貨**（速率減半、延遲 ≤1 tick），體感驗證後 property 上調。
-`fleeFromChr` 依賴的 `spottedChr` 在 skip 期間保留殘值＝逃跑黏性反而更高。skip 時
-`spottedList` 保持 `{this}`（動物版恆此值，零 server 消費者；Lua 讀取者看到與 vanilla
-重建後相同值）。聽覺 `respondToSound` 不經 LOS 不受影響。
+警戒與偷襲 XP 機會、`attackIfStressed` 起手機率、`lastAlerted` 衰減；另沿 W3-3 已接受
+結論承擔全域 Rand 序列位移（N 上調時重秤）。首次偵測延遲 ≤(N-1) tick。**故預設 N=2
+保守出貨**（速率減半、延遲 ≤1 tick），體感驗證後 property 上調。`fleeFromChr` 依賴的
+`spottedChr` 在 skip 期間保留殘值＝逃跑黏性反而更高。skip 時 `spottedList` 保持 `{this}`
+（動物版恆此值，零 server 消費者；Lua 讀取者看到與 vanilla 重建後相同值）。聽覺
+`respondToSound` 不經 LOS 不受影響。
 
-三態：`-Dmdc.animalLosGate=2` observe（預設，量 objectList.size 分布＋每 64 次 forward
-夾測單次耗時）／`1` enforce／`0` off；`-Dmdc.animalLosN`（clamp 1..16，預設 2）。
+例外語意：主 try 只 catch `RuntimeException`（簿記 fail-open、anomalies++ 後照常轉呼叫）；
+**`LinkageError` 一律外逃＝fail-fast**（新 jar＋舊 loose class 的二進位不相容必須炸得可見，
+比照 ChunkRequestPacker rethrow 與 8/17 NoSuchFieldError 事故處置；review B2——否則
+enforce 下 `getFrameCounter` 消失會變成每呼叫吞錯的完全靜默降級，heartbeat 在拋出點下游
+永遠印不出來）。vanilla 委派在 try 外原樣上拋；`maybeBeat()` 在簿記完成後執行、內部自包
+RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被記成 skip）。
+
+三態：`-Dmdc.animalLosGate=2|observe`（預設，量 objectList.size 分布＋每 64 次 forward
+夾測單次耗時；未知值落回 observe）／`1|enforce`／`0|off`——**parseMode() 文字別名比照
+家族四把三態刀**（review I2：數值 clamp 會把 `=off` 靜默變 observe、`=-1` 靜默變 off）；
+`-Dmdc.animalLosN`（clamp 1..16，預設 2）。heartbeat 每 4096 呼叫才讀時鐘、60s 節流
+（熱路徑不無條件讀 nanoTime，比照 AnimalRelevancyGate 慣例）。
 
 ### 守門與行為測試
 
@@ -2525,21 +2543,37 @@ enforce 幀輪轉：`floorMod((identityHashCode(animal)*0x9E3779B9 >>> 16) + (in
 - 完備性回歸釘（七呼叫點表 #2）：`IsoPlayer.updateInternal1` 的 isAnimal 短路仍在
   （isAnimal 恰 1＋`IsoLivingCharacter.update` 恰 2＋玩家版 updateLOS 恰 1）——TIS 拆分流
   ＝動物流入未節流的玩家版 updateLOS，紅則重估。
-- helper：委派恰 3（off/sample/一般）、`getFrameCounter` 恰 1（幀源存在性）、主方法熱路徑
-  零 NEW、全 class 零 Rand。
-- `AnimalLosGateTest` 三獨立 JVM：off 計數凍結／observe 對帳＋null-cell 安全＋預設 N=2
-  自驗／enforce（N=4）反射驅動 frameCounter 三軌斷言——逐 (animal,frame) 公式 oracle、
-  同幀重複結果一致（殺牆鐘回歸）、4N 幀內每動物恰 1/N forward 幀（輪轉硬保證＝無失明）。
-- mutation 5/5 全殺（恆 forward／判定反轉／`+`改`^`／改回牆鐘／拿掉 mix），殺因全部是
-  「逐幀公式不符」。
+- helper：委派恰 2（off 直通＋主路徑 try/finally 夾測合一）、`getFrameCounter` 恰 1（幀源
+  存在性）、`getCurrentSimulationLevel`/`getFrameMod` 各恰 1（fail-open 存在性）、主方法
+  熱路徑零 NEW、全 class 零 Rand、具名 exception handler 只允許 RuntimeException
+  （LinkageError 穿透；finally any-handler 允許）。
+- **承重前提釘（review B1，五支）**：server⇒FULL 短路（`GameServer.server` GETSTATIC 恰 1＋
+  FULL ≥2）、`getFrameMod` 真指令恰 5（`1<<idx` 全形狀）、`startFrame` LCONST_1/LADD 各恰 1、
+  `bucket.add` 的 `getID()` 恰 1＋IREM 恰 1、`MOUS.update()` 每幀全桶掃描形狀（bucket.update
+  恰 1＋simulationLevels/frameCounter GETFIELD 各恰 1——堵「隔幀呼叫 bucket 而 frameMod 仍 1」
+  的雙保險共同盲區）。任一紅＝TIS 動排程結構，重驗 gcd 面。
+- **client 支配釘（review I3）**：updateInternal 內 `GameClient.client` GETSTATIC 恰 1 且
+  位於 callsite 前（server-only enforce 的 desync 防線，2n 教訓）。
+- `AnimalLosGateTest` 七組態獨立 JVM（off 別名／observe／enforce N=4、N=2 出貨、clamp
+  0→1、999→16／未知值 bogus→observe；MODE 與 N 皆自驗）：off 計數凍結／observe 對帳＋
+  size 採樣兩分支
+  （反射注入 objectList 的非 null 成功路徑精確對帳＋null cell 安全跳過）＋錯誤契約（簿記
+  RuntimeException fail-open 恰一次委派、vanilla RuntimeException/Error sentinel 原樣
+  外逃不計 anomalies）／enforce 四軌斷言——逐 (animal,frame) 公式 oracle（mutation 主力
+  殺手）、同幀重複一致（輔助訊號）、4N 幀內每動物恰 1/N forward 幀（輪轉硬保證＝無失明）、
+  相位分散（mix 退化成常數 ⇒ 全體同幀 ⇒ 紅）＋LOD fail-open（frameMod>1 恆 forward 計
+  lodPassthrough、frameMod==1 照常輪轉）。
+- mutation 6/6 全殺：恆 forward／判定反轉／`+`改`^`／改回牆鐘／拿掉 mix 五隻殺因「逐幀
+  公式不符」＋拿掉 gateApplies fail-open 一隻由 LOD 段「N 幀內全 forward」殺。
 
 ### 部署與觀測
 
 - observe 先行一晚：`sizeAvg/sizeMin/sizeMax`（objectList 組成，決定要不要第二刀清單替換）、
   `losAvgUs×forwarded` 對帳 41.7% 採樣佔比。
-- 切 enforce（property 重啟）後驗收：晚峰 fps 對照（N=2 預期還回 ~20% 主執行緒）＋行為面
-  抽查（殭屍咬雞/逃跑、馴養靠近速度、偷襲 XP、高壓動物起手）；AnimalSpottedPrefilter
-  計數下降屬預期。
+- 切 enforce（property 重啟）後驗收：晚峰 fps 對照（N=2 預期還回 ~20% 主執行緒——推估值，
+  以 observe 實測回填）＋行為面抽查（殭屍咬雞/逃跑、馴養靠近速度、偷襲 XP、高壓動物
+  起手）；AnimalSpottedPrefilter 計數下降屬預期；**`lodPassthrough` 應恆 0**（非 0＝TIS
+  已開 LOD、fail-open 生效中、節流面縮小）。N 上調前重驗速率代價＋Rand 位移＋排程結構。
 - 前案銜接：AnimalLosScan（迴圈殼 bit-exact 優化，草案）同 callsite 互斥——enforce 後
   updateLOS 殘餘佔比仍 ≥8% 時以「Gate forward 時 delegate 給 Scan」疊加。
 ---
