@@ -2307,6 +2307,175 @@ threshold=5000ms …`；凍結事件時 `主迴圈已凍結 <ms>（快照 n/12�
 heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticksDuringStall=…`。
 `anomalies` 必須恆 0。快照的 stack 直接餵回 216s 三假說裁決；若長期零凍結事件，
 本刀就是零成本保險絲，不撤。
+
+## 2ad. 動物卸載接手守衛（W16，server，observe）
+
+### 立案（2026-08-24～25，全服流失定罪）
+
+正式服 39 小時全服 apop 統計：母雞 206→123（−40%）、火雞 20→7（−65%）；三個單點
+案例互相獨立：Player-H 雞舍全滅、Player-A 公牛＋15 雞＋2 小雞同窗消失、同牧區兔群
+16→3。8/23 06:09–13:13 故障窗每輪 world save 都正常結尾、無 crash；W13/W14 部署前
+已在發生——**100% vanilla 持久化缺陷，不是本專案造成**。完整時序與 apop 基線指令在
+MinidoracatServerAnalyze：
+
+- `reports/incidents/2026-08-24-Player-H-雞舍雞消失.md`
+- `reports/incidents/2026-08-25-全服放養動物流失-公牛兔群與鹿瞬移.md`
+
+兩個持久化域要分開：hutch 內動物寫 map chunk；世界動物寫 apop。世界動物平時只有
+`AnimalChunk.animals` 的虛擬群體常駐，實體動物只在 world save 瞬間由
+`AnimalManagerMain.saveRealAnimals` 掃 `IsoCell.objectList` 包成一次性 wrapper。chunk unload
+則靠 `IsoChunk.removeFromWorld` 先呼 `AnimalPopulationManager.removeChunkFromWorld` 接手，
+再進清場迴圈對 movingObjects 呼 `removeFromWorld`。正式服流失落在這條接手／落地鏈。
+
+### vanilla 靜默失敗點（javap 對 42.20.3 jar）
+
+1. **S1**：`AnimalManagerWorker.addAnimal` offset 15 的
+   `getCellFromSquarePos(II)` 回 null → offset 23 直接 return；整個 VirtualAnimal 靜默丟。
+2. **S1b**：同方法 cell 命中後，offset 44 的
+   `AnimalCell.getOrCreateChunkFromSquarePos(II)` 回 null → offset 52 第二個靜默 return。
+   `cellNullAdd==0` **不足以**排除 addAnimal 入口流失，兩點必須同時量
+   （review-lane-grok 審查抓到的觀測缺口）。
+3. **S2**：`AnimalPopulationManager.removeChunkFromWorld` 掃 loaded square 的
+   movingObjects；square null 或集合在前置步驟被變動 ⇒ 動物掃不到、沒有接手。
+4. **S3**：家畜 `virtualId` 恆 0.0；`addAnimal` 的防重合併分支對同 AnimalChunk 的 id=0
+   wrapper 做 `findAnimalById`，誤判時 `remove(j--)` 丟棄（只有 `DebugType.Animal.error`，
+   正式服 channel 未必開）。
+5. **S4**：`AnimalManagerWorker.removeFromWorld(IsoAnimal)` **零 addAnimal 呼叫**——只讀
+   lastCellSavedTo、載入該 cell、設 `dataChanged=true`，反而加速下一次 save 把已不存在
+   的動物從 apop 抹掉。SmokeCheck 把零呼叫釘成結構事實；TIS 若補接手，該條建置紅，提醒
+   **撤 W16**而非疊兩份修正。
+6. save 同族：`AnimalManagerWorker.saveRealAnimals` offset 39 的
+   `getCellFromSquarePos` 回 null → 逐隻 skip，本輪不落地且無 log。
+
+### 手術（本版只 observe；enforce 等數據選刀）
+
+`-Dmdc.animalPersistGuard` 三態：`2`／未設＝observe（預設）、`0`＝off（headCall 早退、
+redirect 純委派）、`1` 保留給階段二。**本版即使設 1 也只 observe**——沒有先猜著修；
+24–48h 數據回來按設計 `docs/animal-persistence-guard-design-v1.md` §2.2 決策表選刀。
+
+| # | 方法與 javap 錨 | 手術／觀測 |
+|---|---|---|
+| O1 | `AnimalPopulationManager.removeChunkFromWorld` 頭部 | headCall 開 ThreadLocal per-wave 帳、`unloads++`；不配置新 Wave（每執行緒重用） |
+| O1a | 同方法 `n_unloadChunk(II)` offset 25 | probe 委派成功後才 `nanoTime` 起點；scanNs 不含 native unload／heartbeat |
+| O1c | 同方法 `IsoAnimal.unloaded()` offset 133 | redirect：**委派前** `scanSeen++`，故 unloaded 拋錯不會假成 S2 |
+| O1d | 同方法 `n_addAnimal(IsoAnimal)` offset 139 | probe：委派成功返回後才 `handedOff++`；拋錯不假記成功 |
+| O1b | 同方法尾部 `TIntHashSet.remove(I)Z` offset 195 | redirect：委派前截 end、成功後標 scanCompleted 並結算 scanNs |
+| O2/O2b | `Worker.addAnimal` cell offset 15／chunk offset 44 | probe：`attempts/cellNullAdd/chunkNullAdd`（S1/S1b） |
+| O2c | 同方法兩個 `ArrayList.remove(int)` offset 132/174 | redirect 純委派＋`duplicateRemoved++`（S3 實際丟棄，不再只靠 debug channel） |
+| O4b/O4 | Worker.saveRealAnimals cell offset 39／Main.saveRealAnimals getObjectList offset 14 | `cellNullSave`＋world-save 實體動物分母 |
+| O3 | `IsoChunk.removeFromWorld` 清場 offset 332/507 | server＋IsoAnimal 才記 wave.cleared，最後原樣委派 |
+| O3b | 同方法唯一 RETURN 前 | 新 `TailCall`（純線性 `aload0; invokestatic`）分 wave 結帳 |
+| 來源帳 | APM.virtualizeAnimal／AnimalZones.spawnAnimalsOnZone／Worker.moveAnimal | 各 redirect package-private add 邊界，成功返回後記 `virtualized/zoneAdds/movedAdds` |
+
+package-private probe 留在 `zombie.characters.animals.MdcAnimalPersistProbe`，不走 reflection／
+MethodHandles。HeadCall/TailCall 各只加 2 條線性指令、無新 branch/frame；其餘全為 1:1 redirect。
+
+### 計數語意（部署判讀不可讀錯）
+
+接手後動物仍留在 movingObjects，故 `droppedAtClear` 本身是健康常態。**已廢止**
+`droppedAtClear-handedOff` 全域淨差：unloaded/n_add/清場例外會製造假正差、假零或負差，
+不同 wave 還會互相抵銷。現在只在 IsoChunk 真出口對**完整 wave**分類：
+
+- `s2Missed += max(cleared-scanSeen,0)`：清場看見、掃描沒看見；S2 直接證據；
+- `clearShortfall += max(scanSeen-cleared,0)`：掃描看見、清場未完成；不與 S2 抵銷；
+- `queueFailures += max(scanSeen-handedOff,0)`：掃描看見但 n_add 未正常返回；
+- `abortedWaves`：APM 掃描未到尾但 IsoChunk catch 後到達 tail；`unpairedWaves`：連 IsoChunk
+  tail 都沒到，下一個 enter 才發現舊帳；`skippedWaves`：前置子系統在 APM 前就失敗。
+
+`attempts` 是所有 Worker.addAnimal 入口。完整來源式：
+`sourceGap = attempts - handedOff - virtualized - zoneAdds - movedAdds`。SmokeCheck 三層 census：
+APM.n_add 只來自 remove/virtualize、Main.add 只來自 n_add/zone、Worker.add 只來自 Main/move，
+各 jar-wide 恰 2且分佈各 1+1；`sourceGap` 應恆 0。
+
+每 256 unload-end 或 world save-start 一行 heartbeat：
+`completed/aborted/unpaired/skipped/scanSeen/handedOff/droppedAtClear/s2Missed/
+clearShortfall/queueFailures/attempts/virtualized/zoneAdds/movedAdds/sourceGap/cellNullAdd/
+chunkNullAdd/duplicateRemoved/cellNullSave/lastSaveReal/scanAvgUs/scanMaxUs/anomalies/mode`。
+save-start 的 `cellNullSave` 是累積到上一個完成 save 的值，不作同一行單-wave 對帳。
+
+### 守門與行為測試
+
+- APM 全序 `n_unload < unloaded < n_add < remove`；IsoChunk 接手1／清場2／唯一 RETURN；
+  APM.remove jar-wide caller 恰1；S4 `Worker.removeFromWorld` 零 addAnimal。
+- 三層 source census＋分佈、S1/S1b/S3/O4b 逐方法恰 N。patched 原呼叫歸零；
+  redirect 真指令不變，HeadCall/TailCall各 +2。
+- probe 八 wrapper 各委派恰1；clearMoving 零 NEW／DebugLog。
+- `AnimalPersistGuardTest` 三獨立 JVM（observe、mode1 observe-alias、off）：正常 wave、
+  `clearShortfall` 負差緊接 `s2Missed` 正差（證明不互抵）、queueFailures、unpaired、aborted、
+  sourceGap=0、S3 remove、cell/chunk/save 正負 passthrough、O3 過濾、off 純委派。
+  變異刪 O3 instanceof 必紅。
+
+### 階段二決策（本版不做）
+
+- `cellNullAdd/chunkNullAdd` 分別處理 S1/S1b；不可混刀。
+- **完整 wave** `s2Missed>0` 才設計 O3 補接手；不得呼內含 delete 的 public
+  `virtualizeAnimal`。`droppedAtClear>0` 本身絕不是觸發條件。
+- `queueFailures/aborted/unpaired/sourceGap` 非零先查例外與上游來源，不得當 S2。
+- `duplicateRemoved>0`＝S3 已直接發生，按 animalID/virtualId 明細設計。
+- 全綠仍丟：S4 outcome、devirtualize fromWorker 或 apop 載入側。
+
+明確不做：鹿瞬移（`fromWorker` 對 id=0 setForceX/Y）、PathfindNativeThread native crash、
+阻止 chunk unload、任何序列化格式改動。W15 掛點與 property 零重疊。
+
+## 2ae. hutch 載入回傳守衛（W17，server，預設 enforce）
+
+### 缺陷（靜態已定罪）
+
+`IsoHutch.load(ByteBuffer,int,boolean)` 逐隻反序列化動物後，offset 526 呼
+`addAnimalInside(animal,false)`，下一條真指令 offset 529 是 `POP`——**完全忽略 boolean
+回傳**。`addAnimalInside` 的位置選擇：
+
+1. preferred=-1 時 `Rand.Next(0,getMaxAnimals())`；
+2. 槽被 animalInside／deadBodiesInside／nestBox 佔用就重骰，>100 次跳出；
+3. 最終落位 offset 148-151 **只查 animalInside**：佔用 → false；空 → put。
+
+false 時該動物已從 blob new/load 完、又 `removeFromSquare`，卻不進 hutch map、不進世界、
+無 log，最終由 GC 回收＝**載入即滅失**。接近滿舍（vanilla maxAnimals=20）或屍體/nestBox
+擠掉有效槽時最容易觸發；兔子爆量案例與此形完全一致。
+
+### 手術
+
+`IsoHutch.load` 內雙參 `addAnimalInside` callsite 恰 1（單參多載在 update，descriptor 不同）
+redirect → `HutchLoadGuard.addInside(hutch,animal,sendEvent)`：
+
+1. 先原樣委派 `hutch.addAnimalInside` 恰 1 次；成功或 mode=off 直接回原值。
+2. false 且 `animalInside.containsValue(animal)`：重複 add（vanilla 已 warn），不救，避免
+   雙槽同體。
+3. 零 Rand 順序掃 0..max−1：第一輪找 animalInside＋deadBodiesInside 都空的乾淨槽；
+   無則第二輪只找 animalInside 空槽。判空刻意用 `map.get(key)==null` 而非 containsKey：
+   public map 若有 `key→null`，vanilla 視為空槽，helper 亦同。private
+   `checkNestBoxPrefPosition` 無法直呼，但 vanilla 最終落位本來也不查。
+4. enforce 有槽：補齊 vanilla 成功狀態的六步不變式：
+   `animalInside.put(slot,animal)`、`animal.hutch=hutch`、
+   `setPreferredHutchPosition(slot)`、`setHutchPosition(slot)`、`setItemID(0)`、
+   `tryRemoveAnimalFromWorld(animal)`，回 true。preferred 不能漏：vanilla 成功時
+   preferred 就是最後落位 key；漏補會讓後續進出籠／重骰看到陳舊位置
+   （review-lane-grok 審查修正）。
+5. 真滿（兩輪無槽）：`CRITICAL` log 動物 type/id＋hutch 座標，回 false；至少把靜默
+   滅失變成可補償的有聲事件。helper 不創造第 21 個容量。
+6. observe 有槽：印 wouldForce、回 false（不改行為）；救援段自身 RuntimeException／
+   LinkageError → `anomalies++` 並退回 vanilla false。**原委派不包 try**，vanilla 拋什麼照拋。
+
+`tryRemoveAnimalFromWorld` javap body 是 client-only（`GameClient.client && animal!=null &&
+isExistInTheWorld` 才 remove）；server 上 no-op，照呼只是保持與 vanilla 成功路徑同構。
+load 的 `sendEvent=false` 本來就不走 sync 分支。
+
+三態：`-Dmdc.hutchLoadGuard=1`／未設 enforce（預設）、`2` observe（只記不救）、
+`0` off（純委派）。client 安全：worldVersion≥212 的 client load 在 offset 191-209 直接
+skip 動物 blob，迴圈不執行；且 loose class 只部署 server，無 server-only 判定 desync 面。
+
+### 守門與行為測試
+
+- vanilla load callsite 精確全序：`ALOAD0 → ALOAD7 → ICONST0 → addAnimalInside → POP`；
+  TIS 若開始消費回傳或把 sendEvent 改 true，建置即紅。
+- vanilla `addAnimalInside` 成功契約：42.20.3 恰 105 真指令；Rand×2、map put、hutch
+  PUTFIELD、preferred×2、hutchPosition、itemID、tryRemove 的數量與順序全鎖。
+- 手術後同一實參形狀只換 static helper、原 call 歸零、真指令不變、class-wide 差1。
+- helper 原委派恰1、全 class 零 Rand、forceInto 六步各恰1且 backlink 是精確 PUTFIELD。
+- `HutchLoadGuardTest` 三獨立 JVM，以 ZeroRandom 確定製造「有空 slot1 但 vanilla 101 次
+  全撞 slot0」；另驗 clean-slot 優先、dead-body fallback、key→null、duplicate、
+  20 隻全存活與第21隻 CRITICAL。變異拿掉 map put 必紅。
+
 ---
 
 ## 3. 部署後驗證清單

@@ -741,6 +741,112 @@ public final class PatchConfig {
         preupdate.expectedHits = 1;
         patches.add(serverMap);
 
+        // ---- W16 動物卸載接手守衛 observe（2026-08-24/25；docs/patches.md 2ad）----
+        // 純觀測、零行為改變。per-wave 帳由 APM.removeChunkFromWorld headCall 開、IsoChunk
+        // removeFromWorld 唯一 RETURN 前 TailCall 關；完整 wave 才分類 cleared-seen，
+        // 正差 s2Missed／負差 clearShortfall 永不跨 wave 抵銷。n_unload 成功後才開始 scanNs；
+        // unloaded 前記 scanSeen，n_addAnimal 成功返回後才記 handedOff。
+        String persistGuard = "zombie/mdc/AnimalPersistGuard";
+        String persistProbe = "zombie/characters/animals/MdcAnimalPersistProbe";
+        String apmOwner = "zombie/characters/animals/AnimalPopulationManager";
+        String amwOwner = "zombie/characters/animals/AnimalManagerWorker";
+        String ammOwner = "zombie/characters/animals/AnimalManagerMain";
+        String animalDesc = "(Lzombie/characters/animals/IsoAnimal;)V";
+        String virtualDesc = "(Lzombie/characters/animals/VirtualAnimal;)V";
+        String animalCellDesc = "(II)Lzombie/characters/animals/AnimalCell;";
+
+        Patcher.ClassPatch apm = new Patcher.ClassPatch(apmOwner);
+        Patcher.MethodOps apmRemove = apm.method("removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V");
+        apmRemove.headCall = new Patcher.HeadCall(persistGuard, "unloadEnter", "(L" + apmOwner + ";)V");
+        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                apmOwner, "n_unloadChunk", "(II)V", persistProbe, "unloadChunk"));
+        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "unloaded", "()V",
+                persistGuard, "scanAnimal"));
+        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                apmOwner, "n_addAnimal", animalDesc, persistProbe, "queueUnloadedAnimal"));
+        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "gnu/trove/set/hash/TIntHashSet", "remove", "(I)Z",
+                persistGuard, "unloadScanExit"));
+        apmRemove.expectedHits = 5;   // headCall + 四個 redirect，各恰 1
+        // public virtualizeAnimal 也是 n_addAnimal 來源，與 unload 分帳。
+        Patcher.MethodOps apmVirtualize = apm.method("virtualizeAnimal", animalDesc);
+        apmVirtualize.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                apmOwner, "n_addAnimal", animalDesc, persistProbe, "queueVirtualizedAnimal"));
+        apmVirtualize.expectedHits = 1;
+        patches.add(apm);
+
+        // Worker.addAnimal：S1 cell、S1b chunk，加上 S3 防重分支兩個實際 ArrayList.remove(int)。
+        Patcher.ClassPatch amw = new Patcher.ClassPatch(amwOwner);
+        Patcher.MethodOps amwAdd = amw.method("addAnimal", virtualDesc);
+        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                amwOwner, "getCellFromSquarePos", animalCellDesc, persistProbe, "cellForAdd"));
+        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/AnimalCell", "getOrCreateChunkFromSquarePos",
+                "(II)Lzombie/characters/animals/AnimalChunk;", persistProbe, "chunkForAdd"));
+        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;",
+                persistGuard, "removeDuplicate"));
+        amwAdd.expectedHits = 4;   // cell 1 + chunk 1 + S3 remove 2
+        Patcher.MethodOps amwSave = amw.method("saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        amwSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                amwOwner, "getCellFromSquarePos", animalCellDesc, persistProbe, "cellForSave"));
+        amwSave.expectedHits = 1;
+        // moveAnimal 是 Worker.addAnimal 的第二個直接 caller，成功返回後分來源計數。
+        Patcher.MethodOps amwMove = amw.method("moveAnimal",
+                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
+        amwMove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                amwOwner, "addAnimal", virtualDesc, persistProbe, "addMovedAnimal"));
+        amwMove.expectedHits = 1;
+        patches.add(amw);
+
+        // Main.saveRealAnimals：world-save 實體動物分母（O4）。
+        Patcher.ClassPatch amm = new Patcher.ClassPatch(ammOwner);
+        Patcher.MethodOps ammSave = amm.method("saveRealAnimals", "()V");
+        ammSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;",
+                persistGuard, "saveScan"));
+        ammSave.expectedHits = 1;
+        patches.add(amm);
+
+        // AnimalZones.spawnAnimalsOnZone 是 Main.addAnimal 的另一個直接來源。
+        Patcher.ClassPatch animalZones = new Patcher.ClassPatch("zombie/characters/animals/AnimalZones");
+        Patcher.MethodOps zoneSpawn = animalZones.method("spawnAnimalsOnZone",
+                "(Lzombie/characters/animals/AnimalZone;)V");
+        zoneSpawn.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                ammOwner, "addAnimal", virtualDesc, persistProbe, "addZoneAnimal"));
+        zoneSpawn.expectedHits = 1;
+        patches.add(animalZones);
+
+        // IsoChunk 清場兩處 redirect；TailCall 在唯一 RETURN 前分 wave 結帳。
+        Patcher.MethodOps chunkRemove = isoChunk.method("removeFromWorld", "()V");
+        chunkRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoMovingObject", "removeFromWorld", "()V",
+                persistGuard, "clearMoving"));
+        chunkRemove.tailCall = new Patcher.TailCall(persistGuard, "chunkUnloadExit",
+                "(Lzombie/iso/IsoChunk;)V");
+        chunkRemove.expectedHits = 3;   // clear redirect 2 + tailCall 1
+
+        // ---- W17 hutch 載入回傳檢查 enforce（靜態已定罪；docs/patches.md 2ae）----
+        // IsoHutch.load 逐隻 addAnimalInside(animal,false) 忽略 boolean 回傳（offset 526：
+        // invokevirtual; pop 恰 1）；addAnimalInside 骰位重試 >100 次跳出後最終落位只查
+        // animalInside（offset 148-151），佔用即 false ⇒ 該動物不進任何容器、隨 GC 消失＝
+        // 載入即滅失。接近滿舍（屍體/nestBox 佔位擠掉有效槽）時機率性觸發，兔群 16→3 正對
+        // 此形。helper 委派後對 false 強制入位（順序掃、零 Rand、map/backlink/preferred/
+        // hutchPosition/itemID/tryRemove 六步對齊 vanilla；tryRemove body 是 client-only，
+        // server 上 no-op，照呼維持同構）。
+        // client 端 load 在 wv≥212 skip 動物 blob（offset 191-209）＝redirect 死碼，且 loose
+        // class 只部署 server——無 2n 型 desync 面。
+        // kill switch：-Dmdc.hutchLoadGuard（1 enforce 預設／2 observe 只記不救／0 off 純委派）。
+        Patcher.ClassPatch hutch = new Patcher.ClassPatch("zombie/iso/objects/IsoHutch");
+        Patcher.MethodOps hutchLoad = hutch.method("load", "(Ljava/nio/ByteBuffer;IZ)V");
+        hutchLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/objects/IsoHutch", "addAnimalInside",
+                "(Lzombie/characters/animals/IsoAnimal;Z)Z",
+                "zombie/mdc/HutchLoadGuard", "addInside"));
+        hutchLoad.expectedHits = 1;
+        patches.add(hutch);
+
         return patches;
     }
 

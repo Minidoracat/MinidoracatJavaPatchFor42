@@ -1682,6 +1682,256 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, wdCls), Opcodes.INVOKESTATIC, "java/lang/Thread",
                         "getAllStackTraces", "()Ljava/util/Map;") == 0);
 
+        // ---- W16 動物卸載接手守衛 observe ----
+        String apgCls = "zombie/mdc/AnimalPersistGuard";
+        String probeCls = "zombie/characters/animals/MdcAnimalPersistProbe";
+        String apmCls = "zombie/characters/animals/AnimalPopulationManager";
+        String amwCls = "zombie/characters/animals/AnimalManagerWorker";
+        String ammCls = "zombie/characters/animals/AnimalManagerMain";
+        String zonesCls = "zombie/characters/animals/AnimalZones";
+        String isoAnimalCls = "zombie/characters/animals/IsoAnimal";
+        String movCls = "zombie/iso/IsoMovingObject";
+        String troveCls = "gnu/trove/set/hash/TIntHashSet";
+        String vaDesc = "(Lzombie/characters/animals/VirtualAnimal;)V";
+        String animalDesc = "(L" + isoAnimalCls + ";)V";
+        String cellPosDesc = "(II)Lzombie/characters/animals/AnimalCell;";
+        String chunkPosDesc = "(II)Lzombie/characters/animals/AnimalChunk;";
+        String w16ChunkCls = "zombie/iso/IsoChunk";
+
+        MethodNode vChunkRemove = methodFromJar(jar, w16ChunkCls, "removeFromWorld", "()V");
+        MethodNode vApmRemove = methodFromJar(jar, apmCls, "removeChunkFromWorld",
+                "(L" + w16ChunkCls + ";)V");
+        MethodNode vApmVirtualize = methodFromJar(jar, apmCls, "virtualizeAnimal", animalDesc);
+        MethodNode vAmwAdd = methodFromJar(jar, amwCls, "addAnimal", vaDesc);
+        MethodNode vAmwSave = methodFromJar(jar, amwCls, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        MethodNode vAmwMove = methodFromJar(jar, amwCls, "moveAnimal",
+                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
+        MethodNode vAmmAdd = methodFromJar(jar, ammCls, "addAnimal", vaDesc);
+        MethodNode vAmmSave = methodFromJar(jar, ammCls, "saveRealAnimals", "()V");
+        MethodNode vZoneSpawn = methodFromJar(jar, zonesCls, "spawnAnimalsOnZone",
+                "(Lzombie/characters/animals/AnimalZone;)V");
+
+        // vanilla 全序：n_unload < unloaded < n_add < tail remove；四者各恰 1。
+        int w16Unload = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls,
+                "n_unloadChunk", "(II)V");
+        int w16Unloaded = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls,
+                "unloaded", "()V");
+        int w16Add = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls,
+                "n_addAnimal", animalDesc);
+        int w16TailRemove = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, troveCls,
+                "remove", "(I)Z");
+        failed += check("W16 vanilla：APM remove 全序 n_unload<unloaded<n_add<remove，各恰 1",
+                countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 1
+                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 1
+                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
+                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, troveCls, "remove", "(I)Z") == 1
+                && w16Unload < w16Unloaded && w16Unloaded < w16Add && w16Add < w16TailRemove);
+        // IsoChunk 接手恰 1、清場恰 2、唯一 RETURN（TailCall 前提），且接手先於清場。
+        failed += check("W16 vanilla：IsoChunk 接手1＋清場2＋唯一RETURN，接手先於清場",
+                countExactCalls(vChunkRemove, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
+                        "(L" + w16ChunkCls + ";)V") == 1
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
+                        "(L" + w16ChunkCls + ";)V") == 1
+                && countExactCalls(vChunkRemove, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 2
+                && countOpcode(vChunkRemove, Opcodes.RETURN) == 1
+                && firstCallIndex(vChunkRemove, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
+                        "(L" + w16ChunkCls + ";)V")
+                        < firstCallIndex(vChunkRemove, Opcodes.INVOKEVIRTUAL, movCls,
+                                "removeFromWorld", "()V"));
+        // S4 釘死：Worker.removeFromWorld 不做 addAnimal。
+        MethodNode vAmwRfw = methodFromJar(jar, amwCls, "removeFromWorld", animalDesc);
+        failed += check("W16 S4：Worker.removeFromWorld 零 addAnimal",
+                countCalls(vAmwRfw, amwCls, "addAnimal") == 0);
+        // S1/S1b/S3/O4b 掛點。
+        failed += check("W16 vanilla：Worker add 的 cell1/chunk1/S3 remove2，save cell1",
+                countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL, amwCls,
+                        "getCellFromSquarePos", cellPosDesc) == 1
+                && countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/animals/AnimalCell", "getOrCreateChunkFromSquarePos",
+                        chunkPosDesc) == 1
+                && countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL,
+                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 2
+                && countExactCalls(vAmwSave, Opcodes.INVOKEVIRTUAL, amwCls,
+                        "getCellFromSquarePos", cellPosDesc) == 1);
+        // 完整來源 census：APM.n_add 只在 remove/virtualize；Main.add 只在 n_add/zone；
+        // Worker.add 只在 Main/move。這三層一起構成 sourceGap 可解讀性的 fail-closed 鎖。
+        MethodNode vApmNAdd = methodFromJar(jar, apmCls, "n_addAnimal", animalDesc);
+        failed += check("W16 source census：n_add/Main.add/Worker.add 各 jar-wide 恰2且分佈各1+1",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 2
+                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
+                && countExactCalls(vApmVirtualize, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 2
+                && countExactCalls(vApmNAdd, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
+                && countExactCalls(vZoneSpawn, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 2
+                && countExactCalls(vAmmAdd, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1
+                && countExactCalls(vAmwMove, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1);
+        failed += check("W16 vanilla：Main.saveRealAnimals 內 getObjectList 恰1",
+                countExactCalls(vAmmSave, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                        "getObjectList", "()Ljava/util/Set;") == 1);
+
+        // patched APM remove：head + 4 redirect，原呼叫歸零，只有 head 令真指令 +2。
+        MethodNode pApmRemove = method(distJava, apmCls, "removeChunkFromWorld",
+                "(L" + w16ChunkCls + ";)V");
+        failed += check("W16 patched APM remove：head＋四redirect，原呼叫歸零，真指令+2",
+                headCallOk(pApmRemove, apgCls, "unloadEnter", "(L" + apmCls + ";)V")
+                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, probeCls, "unloadChunk",
+                        "(L" + apmCls + ";II)V") == 1
+                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, apgCls, "scanAnimal",
+                        animalDesc) == 1
+                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, probeCls, "queueUnloadedAnimal",
+                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V") == 1
+                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, apgCls, "unloadScanExit",
+                        "(L" + troveCls + ";I)Z") == 1
+                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 0
+                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 0
+                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 0
+                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, troveCls, "remove", "(I)Z") == 0
+                && realInsnCount(pApmRemove) == realInsnCount(vApmRemove) + 2);
+        MethodNode pApmVirtualize = method(distJava, apmCls, "virtualizeAnimal", animalDesc);
+        failed += check("W16 patched virtualize：來源改道1、原n_add歸零、真指令不變",
+                countExactCalls(pApmVirtualize, Opcodes.INVOKESTATIC, probeCls,
+                        "queueVirtualizedAnimal", "(L" + apmCls + ";L" + isoAnimalCls + ";)V") == 1
+                && countExactCalls(pApmVirtualize, Opcodes.INVOKEVIRTUAL,
+                        apmCls, "n_addAnimal", animalDesc) == 0
+                && realInsnCount(pApmVirtualize) == realInsnCount(vApmVirtualize));
+
+        MethodNode pAmwAdd = method(distJava, amwCls, "addAnimal", vaDesc);
+        MethodNode pAmwSave = method(distJava, amwCls, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        MethodNode pAmwMove = method(distJava, amwCls, "moveAnimal",
+                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
+        String cellProbeDesc = "(L" + amwCls + ";II)Lzombie/characters/animals/AnimalCell;";
+        String chunkProbeDesc = "(Lzombie/characters/animals/AnimalCell;II)"
+                + "Lzombie/characters/animals/AnimalChunk;";
+        failed += check("W16 patched Worker：S1/S1b/S3/save/move 全改道，原呼叫歸零，真指令不變",
+                countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, probeCls, "cellForAdd", cellProbeDesc) == 1
+                && countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, probeCls, "chunkForAdd", chunkProbeDesc) == 1
+                && countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, apgCls, "removeDuplicate",
+                        "(Ljava/util/ArrayList;I)Ljava/lang/Object;") == 2
+                && countExactCalls(pAmwAdd, Opcodes.INVOKEVIRTUAL,
+                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 0
+                && countExactCalls(pAmwSave, Opcodes.INVOKESTATIC, probeCls, "cellForSave", cellProbeDesc) == 1
+                && countExactCalls(pAmwMove, Opcodes.INVOKESTATIC, probeCls, "addMovedAnimal",
+                        "(L" + amwCls + ";Lzombie/characters/animals/VirtualAnimal;)V") == 1
+                && countExactCalls(pAmwMove, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 0
+                && realInsnCount(pAmwAdd) == realInsnCount(vAmwAdd)
+                && realInsnCount(pAmwSave) == realInsnCount(vAmwSave)
+                && realInsnCount(pAmwMove) == realInsnCount(vAmwMove));
+        MethodNode pAmmSave = method(distJava, ammCls, "saveRealAnimals", "()V");
+        MethodNode pZoneSpawn = method(distJava, zonesCls, "spawnAnimalsOnZone",
+                "(Lzombie/characters/animals/AnimalZone;)V");
+        failed += check("W16 patched Main save＋zone source：改道各1、原呼叫歸零、真指令不變",
+                countExactCalls(pAmmSave, Opcodes.INVOKESTATIC, apgCls, "saveScan",
+                        "(Lzombie/iso/IsoCell;)Ljava/util/Set;") == 1
+                && countExactCalls(pZoneSpawn, Opcodes.INVOKESTATIC, probeCls, "addZoneAnimal",
+                        "(L" + ammCls + ";Lzombie/characters/animals/VirtualAnimal;)V") == 1
+                && countExactCalls(pZoneSpawn, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 0
+                && realInsnCount(pAmmSave) == realInsnCount(vAmmSave)
+                && realInsnCount(pZoneSpawn) == realInsnCount(vZoneSpawn));
+
+        // IsoChunk：clear 2 redirect＋TailCall，原呼叫歸零，只有 tail 令真指令 +2。
+        MethodNode pChunkRemove = method(distJava, w16ChunkCls, "removeFromWorld", "()V");
+        failed += check("W16 patched IsoChunk：clear改道2＋唯一RETURN前TailCall，真指令+2",
+                countExactCalls(pChunkRemove, Opcodes.INVOKESTATIC, apgCls, "clearMoving",
+                        "(L" + movCls + ";)V") == 2
+                && countExactCalls(pChunkRemove, Opcodes.INVOKESTATIC, apgCls, "chunkUnloadExit",
+                        "(L" + w16ChunkCls + ";)V") == 1
+                && callFollowedByOpcode(pChunkRemove, Opcodes.INVOKESTATIC, apgCls,
+                        "chunkUnloadExit", "(L" + w16ChunkCls + ";)V", Opcodes.RETURN)
+                && countExactCalls(pChunkRemove, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 0
+                && realInsnCount(pChunkRemove) == realInsnCount(vChunkRemove) + 2);
+
+        // helper 契約：每個 wrapper 恰一次原委派；熱 clear 零配置零 log；S3 純委派。
+        failed += check("W16 helper：probe 八 wrapper 各恰1原委派；scan/exit/clear/S3/save 契約",
+                countExactCalls(method(distJava, probeCls, "unloadChunk", "(L" + apmCls + ";II)V"),
+                        Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 1
+                && countExactCalls(method(distJava, probeCls, "queueUnloadedAnimal",
+                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V"),
+                        Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "queueVirtualizedAnimal",
+                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V"),
+                        Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "addZoneAnimal",
+                        "(L" + ammCls + ";Lzombie/characters/animals/VirtualAnimal;)V"),
+                        Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "addMovedAnimal",
+                        "(L" + amwCls + ";Lzombie/characters/animals/VirtualAnimal;)V"),
+                        Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "cellForAdd", cellProbeDesc),
+                        Opcodes.INVOKEVIRTUAL, amwCls, "getCellFromSquarePos", cellPosDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "chunkForAdd", chunkProbeDesc),
+                        Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/AnimalCell",
+                        "getOrCreateChunkFromSquarePos", chunkPosDesc) == 1
+                && countExactCalls(method(distJava, probeCls, "cellForSave", cellProbeDesc),
+                        Opcodes.INVOKEVIRTUAL, amwCls, "getCellFromSquarePos", cellPosDesc) == 1
+                && countExactCalls(method(distJava, apgCls, "scanAnimal", animalDesc),
+                        Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 1
+                && countExactCalls(method(distJava, apgCls, "unloadScanExit",
+                        "(L" + troveCls + ";I)Z"), Opcodes.INVOKEVIRTUAL,
+                        troveCls, "remove", "(I)Z") == 1
+                && countExactCalls(method(distJava, apgCls, "removeDuplicate",
+                        "(Ljava/util/ArrayList;I)Ljava/lang/Object;"), Opcodes.INVOKEVIRTUAL,
+                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 1
+                && countExactCalls(method(distJava, apgCls, "saveScan",
+                        "(Lzombie/iso/IsoCell;)Ljava/util/Set;"), Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;") == 1);
+        MethodNode gClear = method(distJava, apgCls, "clearMoving", "(L" + movCls + ";)V");
+        failed += check("W16 clearMoving：原委派1＋server讀1＋零NEW／零DebugLog",
+                countExactCalls(gClear, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 1
+                && countFieldReads(gClear, "zombie/network/GameServer", "server") == 1
+                && countOpcode(gClear, Opcodes.NEW) == 0
+                && countCallsToOwner(gClear, "zombie/debug/DebugLog") == 0);
+        // ---- W17 hutch 載入回傳檢查 ----
+        String hlgCls = "zombie/mdc/HutchLoadGuard";
+        String hutchCls = "zombie/iso/objects/IsoHutch";
+        String addInsideDesc = "(L" + isoAnimalCls + ";Z)Z";
+        String hlgDesc = "(L" + hutchCls + ";L" + isoAnimalCls + ";Z)Z";
+        // vanilla 前提：load 實參必須仍是 hutch(this), animal(slot7), false；下一條 POP
+        // 才是「忽略回傳」缺陷本體。成功路徑整體與六步順序亦 fail-closed 鎖住。
+        MethodNode vHutchLoad = methodFromJar(jar, hutchCls, "load", "(Ljava/nio/ByteBuffer;IZ)V");
+        MethodNode vAddInside = methodFromJar(jar, hutchCls, "addAnimalInside", addInsideDesc);
+        failed += check("W17 vanilla：load ALOAD0/ALOAD7/ICONST0/call/POP；成功路徑完整契約",
+                hutchLoadCallShape(vHutchLoad, Opcodes.INVOKEVIRTUAL,
+                        hutchCls, "addAnimalInside", addInsideDesc)
+                && hutchSuccessContract(vAddInside, hutchCls, isoAnimalCls));
+
+        // patched load 只把 call 1:1 換成 static helper；實參 false/POP/真指令數／class 差額不變。
+        MethodNode pHutchLoad = method(distJava, hutchCls, "load", "(Ljava/nio/ByteBuffer;IZ)V");
+        failed += check("W17 patched：同一實參形狀改道1、原call歸零、真指令不變、class差1",
+                hutchLoadCallShape(pHutchLoad, Opcodes.INVOKESTATIC,
+                        hlgCls, "addInside", hlgDesc)
+                && countExactCalls(pHutchLoad, Opcodes.INVOKEVIRTUAL,
+                        hutchCls, "addAnimalInside", addInsideDesc) == 0
+                && realInsnCount(pHutchLoad) == realInsnCount(vHutchLoad)
+                && classWideCalls(classNode(distJava, hutchCls), Opcodes.INVOKEVIRTUAL,
+                        hutchCls, "addAnimalInside", addInsideDesc)
+                        == classWideCalls(classNodeFromJar(jar, hutchCls), Opcodes.INVOKEVIRTUAL,
+                                hutchCls, "addAnimalInside", addInsideDesc) - 1);
+
+        // helper：委派1、全 class 零 Rand；forceInto 六步各1且 backlink 是精確 PUTFIELD。
+        MethodNode gAddInside = method(distJava, hlgCls, "addInside", hlgDesc);
+        MethodNode gForceInto = method(distJava, hlgCls, "forceInto",
+                "(L" + hutchCls + ";L" + isoAnimalCls + ";I)V");
+        failed += check("W17 helper：委派1、零Rand、forceInto六步各1",
+                countExactCalls(gAddInside, Opcodes.INVOKEVIRTUAL,
+                        hutchCls, "addAnimalInside", addInsideDesc) == 1
+                && classNode(distJava, hlgCls).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0
+                && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "put",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;") == 1
+                && countExactFields(gForceInto, Opcodes.PUTFIELD, isoAnimalCls,
+                        "hutch", "L" + hutchCls + ";") == 1
+                && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/animals/datas/AnimalData",
+                        "setPreferredHutchPosition", "(I)V") == 1
+                && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/animals/datas/AnimalData",
+                        "setHutchPosition", "(I)V") == 1
+                && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "setItemID", "(I)V") == 1
+                && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL, hutchCls,
+                        "tryRemoveAnimalFromWorld", "(L" + isoAnimalCls + ";)V") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -2305,6 +2555,17 @@ public final class SmokeCheck {
         return new String(bytes, StandardCharsets.ISO_8859_1).contains(value);
     }
 
+    /** 統計方法內指定 opcode 的出現次數（W16 clearMoving 熱路徑零配置＝零 NEW）。 */
+    static int countOpcode(MethodNode m, int opcode) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() == opcode) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     static boolean staticFieldsAreWeakOrPrimitive(ClassNode node) {
         for (var field : node.fields) {
             if ((field.access & Opcodes.ACC_STATIC) == 0) {
@@ -2449,6 +2710,106 @@ public final class SmokeCheck {
             }
         }
         return count;
+    }
+
+    /** 指定精確 callsite 的下一條真指令是否為 wantOpcode（W17「回傳緊接 POP」缺陷錨）。 */
+    static boolean callFollowedByOpcode(MethodNode method, int opcode, String owner, String name,
+                                        String desc, int wantOpcode) {
+        int found = 0;
+        for (AbstractInsnNode in : method.instructions) {
+            if (!isCall(in, opcode, owner, name, desc)) {
+                continue;
+            }
+            found++;
+            AbstractInsnNode next = nextReal(in);
+            if (next == null || next.getOpcode() != wantOpcode) {
+                return false;
+            }
+        }
+        return found == 1;
+    }
+
+    /** W17 load callsite 全序：ALOAD0, ALOAD7, ICONST0, 精確 call（恰 1）, POP。 */
+    static boolean hutchLoadCallShape(MethodNode method, int opcode, String owner,
+                                       String name, String desc) {
+        if (countExactCalls(method, opcode, owner, name, desc) != 1) {
+            return false;
+        }
+        MethodInsnNode target = findExactCall(method, opcode, owner, name, desc);
+        AbstractInsnNode boolArg = prevReal(target);
+        if (boolArg == null || boolArg.getOpcode() != Opcodes.ICONST_0) {
+            return false;
+        }
+        AbstractInsnNode animalArg = prevReal(boolArg);
+        if (!isVar(animalArg, Opcodes.ALOAD, 7)) {
+            return false;
+        }
+        AbstractInsnNode next = nextReal(target);
+        return isVar(prevReal(animalArg), Opcodes.ALOAD, 0)
+                && next != null && next.getOpcode() == Opcodes.POP;
+    }
+
+    /**
+     * W17 複製的 vanilla success contract。105 是 42.20.3 此方法的完整真指令數；
+     * TIS 新增／刪除必要副作用時先 fail-closed，再重驗而非讓 helper 靜默落後。
+     */
+    static boolean hutchSuccessContract(MethodNode method, String hutchOwner, String animalOwner) {
+        String dataOwner = "zombie/characters/animals/datas/AnimalData";
+        String putDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        String animalDesc = "(L" + animalOwner + ";)V";
+        int put = firstCallIndex(method, Opcodes.INVOKEVIRTUAL,
+                "java/util/HashMap", "put", putDesc);
+        int backlink = firstFieldIndex(method, Opcodes.PUTFIELD, animalOwner,
+                "hutch", "L" + hutchOwner + ";");
+        int hutchPosition = firstCallIndex(method, Opcodes.INVOKEVIRTUAL,
+                dataOwner, "setHutchPosition", "(I)V");
+        int itemId = firstCallIndex(method, Opcodes.INVOKEVIRTUAL,
+                animalOwner, "setItemID", "(I)V");
+        int tryRemove = firstCallIndex(method, Opcodes.INVOKEVIRTUAL,
+                hutchOwner, "tryRemoveAnimalFromWorld", animalDesc);
+        return realInsnCount(method) == 105
+                && countExactCalls(method, Opcodes.INVOKESTATIC,
+                        "zombie/core/random/Rand", "Next", "(II)I") == 2
+                && countExactCalls(method, Opcodes.INVOKEVIRTUAL,
+                        "java/util/HashMap", "put", putDesc) == 1
+                && countExactFields(method, Opcodes.PUTFIELD, animalOwner,
+                        "hutch", "L" + hutchOwner + ";") == 1
+                && countExactCalls(method, Opcodes.INVOKEVIRTUAL,
+                        dataOwner, "setPreferredHutchPosition", "(I)V") == 2
+                && countExactCalls(method, Opcodes.INVOKEVIRTUAL,
+                        dataOwner, "setHutchPosition", "(I)V") == 1
+                && countExactCalls(method, Opcodes.INVOKEVIRTUAL,
+                        animalOwner, "setItemID", "(I)V") == 1
+                && countExactCalls(method, Opcodes.INVOKEVIRTUAL,
+                        hutchOwner, "tryRemoveAnimalFromWorld", animalDesc) == 1
+                && lastCallIndex(method, Opcodes.INVOKEVIRTUAL,
+                        dataOwner, "setPreferredHutchPosition", "(I)V") < put
+                && put < backlink && backlink < hutchPosition
+                && hutchPosition < itemId && itemId < tryRemove;
+    }
+
+    static int countExactFields(MethodNode method, int opcode, String owner, String name, String desc) {
+        int count = 0;
+        for (AbstractInsnNode in : method.instructions) {
+            if (isField(in, opcode, owner, name, desc)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static int firstFieldIndex(MethodNode method, int opcode, String owner, String name, String desc) {
+        int index = 0;
+        for (AbstractInsnNode in : method.instructions) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            index++;
+            if (isField(in, opcode, owner, name, desc)) {
+                return index;
+            }
+        }
+        return Integer.MAX_VALUE;
     }
 
     /** 方法內對指定 owner 的呼叫總數（任何方法名／opcode；W9 負對照用）。 */
