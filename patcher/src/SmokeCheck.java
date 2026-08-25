@@ -1932,6 +1932,63 @@ public final class SmokeCheck {
                 && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL, hutchCls,
                         "tryRemoveAnimalFromWorld", "(L" + isoAnimalCls + ";)V") == 1);
 
+        // ---- W18 動物 LOS 節流閘 ----
+        String algCls = "zombie/mdc/AnimalLosGate";
+        // vanilla 前提：updateInternal 內 updateLOS 呼叫恰 1（掛點）；updateLOS 本體
+        // getObjectList():Set 恰 1（資料來源，TIS 改型別/來源時此條紅=撤刀重估）＋
+        // 零 lastSpotted 引用（動物版無玩家尾段——TIS 若下放玩家消費邏輯到動物版，
+        // skip 的 spottedList 陳舊語意不再零差，此條紅=撤刀重估）。
+        MethodNode vAniUpdInt = methodFromJar(jar, isoAnimalCls, "updateInternal", "()V");
+        MethodNode vAniLos = methodFromJar(jar, isoAnimalCls, "updateLOS", "()V");
+        failed += check("W18 vanilla：updateInternal 掛點1、updateLOS getObjectList(Set)1、零 lastSpotted",
+                countExactCalls(vAniUpdInt, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V") == 1
+                && countExactCalls(vAniLos, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                        "getObjectList", "()Ljava/util/Set;") == 1
+                && countFieldTouches(vAniLos, isoAnimalCls, "lastSpotted") == 0
+                && countFieldTouches(vAniLos, "zombie/characters/IsoPlayer", "lastSpotted") == 0);
+
+        // patched：updateInternal 原呼叫歸零、改道 1、真指令數不變、class 差恰 1
+        // （updateLOS 本體的 a4 spotted 改道與本刀不同方法，互不影響差額）。
+        MethodNode pAniUpdInt = method(distJava, isoAnimalCls, "updateInternal", "()V");
+        failed += check("W18 patched：改道1、原call歸零、真指令不變、class差1",
+                countExactCalls(pAniUpdInt, Opcodes.INVOKESTATIC, algCls, "updateLOS",
+                        "(L" + isoAnimalCls + ";)V") == 1
+                && countExactCalls(pAniUpdInt, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V") == 0
+                && realInsnCount(pAniUpdInt) == realInsnCount(vAniUpdInt)
+                && classWideCalls(classNode(distJava, isoAnimalCls), Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V")
+                        == classWideCalls(classNodeFromJar(jar, isoAnimalCls), Opcodes.INVOKEVIRTUAL,
+                                isoAnimalCls, "updateLOS", "()V") - 1);
+
+        // helper：轉呼叫恰 3（off 直通＋sample 夾測＋一般路徑）、幀源 getFrameCounter 恰 1
+        // （TIS 刪 scheduler 幀計數器時建置失敗）、主方法熱路徑零 NEW（banner/beat 拼接
+        // 都在獨立方法）、全 class 零 Rand。
+        MethodNode gAlgUpd = method(distJava, algCls, "updateLOS", "(L" + isoAnimalCls + ";)V");
+        failed += check("W18 helper：委派3、幀源1、熱路徑零NEW、零Rand",
+                countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V") == 3
+                && countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
+                        "zombie/MovingObjectUpdateScheduler", "getFrameCounter", "()J") == 1
+                && countOpcode(gAlgUpd, Opcodes.NEW) == 0
+                && classNode(distJava, algCls).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+
+        // 完備性回歸釘（前案 docs/isoanimal-updatelos-design-v1.md §2 七呼叫點表 #2）：
+        // IsoPlayer.updateInternal1 的 isAnimal 短路是「動物走不到玩家版 updateLOS」的結構
+        // 前提——isAnimal 恰 1、IsoLivingCharacter.update 恰 2（動物分支＋非動物分支）、
+        // IsoPlayer.updateLOS 恰 1（非動物側）。TIS 拆掉分流時此條紅＝W18 只剩半套，重估。
+        MethodNode vUpdInt1 = methodFromJar(jar, "zombie/characters/IsoPlayer",
+                "updateInternal1", "()V");
+        failed += check("W18 完備性：IsoPlayer.updateInternal1 isAnimal 短路仍在",
+                countExactCalls(vUpdInt1, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/IsoPlayer", "isAnimal", "()Z") == 1
+                && countExactCalls(vUpdInt1, Opcodes.INVOKESPECIAL,
+                        "zombie/characters/IsoLivingCharacter", "update", "()V") == 2
+                && countExactCalls(vUpdInt1, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/IsoPlayer", "updateLOS", "()V") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

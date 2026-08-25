@@ -85,6 +85,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalPersistGuard$Wave.class',
     'zombie/characters/animals/MdcAnimalPersistProbe.class',
     'zombie/mdc/HutchLoadGuard.class',
+    'zombie/mdc/AnimalLosGate.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -259,6 +260,16 @@ java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzombo
 Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
 java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest off
 Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
+
+Write-Host "[9o/10] 動物 LOS 節流閘（W18）三模式行為驗證（獨立 JVM）..."
+# observe＝預設出貨（自驗預設 N=2）；enforce 帶 N=4 反射驅動 frameCounter——逐幀公式
+# oracle＋同幀一致（殺牆鐘回歸）＋輪轉硬保證（無失明）；off＝純直通計數凍結。MODE 自驗。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
+Assert-Ok "AnimalLosGateTest（observe，預設出貨模式）"
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=4" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce
+Assert-Ok "AnimalLosGateTest（enforce，stagger 輪轉）"
+java "-Dmdc.animalLosGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest off
+Assert-Ok "AnimalLosGateTest（off，純直通 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

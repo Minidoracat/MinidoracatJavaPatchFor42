@@ -2476,6 +2476,72 @@ skip 動物 blob，迴圈不執行；且 loose class 只部署 server，無 serv
   全撞 slot0」；另驗 clean-slot 優先、dead-body fallback、key→null、duplicate、
   20 隻全存活與第21隻 CRITICAL。變異拿掉 map put 必紅。
 
+
+---
+
+## 2af. 動物 LOS 節流閘（W18，server，預設 observe）
+
+### 立案（2026-08-25 晚峰黑邊診斷的副產品）
+
+67 人破歷史峰值 → 主執行緒單核飽和（99.9%R）→ fps 9.8→5.0 → 吞吐型黑邊。60 張 jcmd
+stack（22:45-22:48、66 人）：**`IsoAnimal.updateLOS` 單一 leaf 25/60=41.7% 主執行緒**、
+LOS 家族合計 46.7%、無第二個 >5% 熱點；另一批 8/17 40 人層 18.3%
+（docs/isoanimal-updatelos-design-v1.md §1，該檔並有 server-only 七呼叫點表與 Lua 可達性
+分析，本刀直接引用）。結構（javap 對 42.20.3 jar）：每隻實體動物每 tick 掃
+`getCell().getObjectList()` 全表（`Set`），迴圈唯一有效輸出＝對 zombie/player 呼
+`behavior.spotted()`＋`spottedList={this}`；動物/載具/屍體/物理物件全被 instanceof 丟棄。
+放大係數 ~769 動物 × 全表數千項 × 10Hz。
+
+### 手術
+
+caller 側單 redirect：`IsoAnimal.updateInternal()V` 內唯一
+`invokevirtual updateLOS:()V`（offset 197）→
+`invokestatic zombie/mdc/AnimalLosGate.updateLOS(IsoAnimal)V`（1:1 同形，expectedHits=1）。
+`updateLOS` 本體不動（Lua/mod 直呼路徑照舊；W3-3 的兩處 prefilter redirect 保留＝防禦深度）。
+
+enforce 幀輪轉：`floorMod((identityHashCode(animal)*0x9E3779B9 >>> 16) + (int)frame, N) == 0`
+才轉呼叫，幀源＝vanilla `MovingObjectUpdateScheduler.instance.getFrameCounter()`
+（`startFrame()` 每 tick +1；updateLOS 呼叫鏈正是從該 scheduler 的 bucket 出發＝同幀恆定、
+Δframe 恆 1）。**grok 對抗審查 BLOCKING 修正記錄**：v1 草案用 nanoTime 牆鐘窗口——單點
+抽樣在 tick=k×window 且 gcd(k,N)>1 時整個剩餘類永久 skip（fps5、N=4 ⇒ 半數動物視覺
+失明），恰在本刀要救的低 fps 情境發作；幀源 Δframe=1 恆互質，數學上免疫，且 CPU 砍幅
+恆 (N-1)/N 與 fps 無關。mix 防 `-XX:hashCode` 切換與低位聚集。
+
+行為代價（誠實語意——速率非單次延遲）：`spotted()` 是速率型副效應，skip ⇒ 速率 ×1/N。
+受影響：玩家/殭屍近距壓力累積、馴養 `playerAcceptanceList` 累加（dist<10 分支）、野生
+警戒與偷襲 XP 機會、`attackIfStressed` 起手機率、`lastAlerted` 衰減。首次偵測延遲
+≤(N-1) tick。**故預設 N=2 保守出貨**（速率減半、延遲 ≤1 tick），體感驗證後 property 上調。
+`fleeFromChr` 依賴的 `spottedChr` 在 skip 期間保留殘值＝逃跑黏性反而更高。skip 時
+`spottedList` 保持 `{this}`（動物版恆此值，零 server 消費者；Lua 讀取者看到與 vanilla
+重建後相同值）。聽覺 `respondToSound` 不經 LOS 不受影響。
+
+三態：`-Dmdc.animalLosGate=2` observe（預設，量 objectList.size 分布＋每 64 次 forward
+夾測單次耗時）／`1` enforce／`0` off；`-Dmdc.animalLosN`（clamp 1..16，預設 2）。
+
+### 守門與行為測試
+
+- vanilla 前提：updateInternal 掛點恰 1、updateLOS 內 `getObjectList():Set` 恰 1＋零
+  `lastSpotted` 引用（TIS 下放玩家尾段＝skip 不再零差，紅則撤刀重估）。
+- 完備性回歸釘（七呼叫點表 #2）：`IsoPlayer.updateInternal1` 的 isAnimal 短路仍在
+  （isAnimal 恰 1＋`IsoLivingCharacter.update` 恰 2＋玩家版 updateLOS 恰 1）——TIS 拆分流
+  ＝動物流入未節流的玩家版 updateLOS，紅則重估。
+- helper：委派恰 3（off/sample/一般）、`getFrameCounter` 恰 1（幀源存在性）、主方法熱路徑
+  零 NEW、全 class 零 Rand。
+- `AnimalLosGateTest` 三獨立 JVM：off 計數凍結／observe 對帳＋null-cell 安全＋預設 N=2
+  自驗／enforce（N=4）反射驅動 frameCounter 三軌斷言——逐 (animal,frame) 公式 oracle、
+  同幀重複結果一致（殺牆鐘回歸）、4N 幀內每動物恰 1/N forward 幀（輪轉硬保證＝無失明）。
+- mutation 5/5 全殺（恆 forward／判定反轉／`+`改`^`／改回牆鐘／拿掉 mix），殺因全部是
+  「逐幀公式不符」。
+
+### 部署與觀測
+
+- observe 先行一晚：`sizeAvg/sizeMin/sizeMax`（objectList 組成，決定要不要第二刀清單替換）、
+  `losAvgUs×forwarded` 對帳 41.7% 採樣佔比。
+- 切 enforce（property 重啟）後驗收：晚峰 fps 對照（N=2 預期還回 ~20% 主執行緒）＋行為面
+  抽查（殭屍咬雞/逃跑、馴養靠近速度、偷襲 XP、高壓動物起手）；AnimalSpottedPrefilter
+  計數下降屬預期。
+- 前案銜接：AnimalLosScan（迴圈殼 bit-exact 優化，草案）同 callsite 互斥——enforce 後
+  updateLOS 殘餘佔比仍 ≥8% 時以「Gate forward 時 delegate 給 Scan」疊加。
 ---
 
 ## 3. 部署後驗證清單

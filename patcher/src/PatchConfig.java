@@ -275,6 +275,22 @@ public final class PatchConfig {
                 "(Lzombie/iso/IsoMovingObject;ZF)V",
                 "zombie/characters/animals/behavior/AnimalSpottedPrefilter", "spotted"));
         a4.expectedHits = 2;
+        // W18 動物 LOS 節流閘（2026-08-25，60 張 jcmd 採樣@66人晚峰：updateLOS 單一 leaf 41.7%
+        // 主執行緒；docs/patches.md 2af、docs/animal-los-gate-design-v1.md；前案佐證
+        // docs/isoanimal-updatelos-design-v1.md 40人層 18.3%＋server-only 七呼叫點表）：每動物
+        // 每 tick 掃 getCell().getObjectList() 全表（Set）只為找 zombie/player 呼叫 spotted()。
+        // caller 側 updateInternal 內唯一 updateLOS callsite（offset 197）改道 AnimalLosGate——
+        // observe 量化（size 分布＋耗時採樣）、enforce 以 vanilla frameCounter 輪轉每動物每
+        // N tick 掃一次（grok 審查修正：v1 草案 nanoTime 窗口在低 fps 有 gcd 剩餘類永久失明，
+        // 幀源 Δframe 恆 1 免疫）。行為代價=spotted 速率 ×1/N＋首偵延遲 ≤(N-1) tick，故預設
+        // N=2 保守出貨（-Dmdc.animalLosN 1..16 可調）。動物版 spottedList 恆 {this} 零 server
+        // 消費者（skip 零差）；聽覺 respondToSound 不經 LOS。三態 -Dmdc.animalLosGate
+        // （0/1/2，預設 2 observe）。
+        Patcher.MethodOps a5 = animal.method("updateInternal", "()V");
+        a5.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "updateLOS", "()V",
+                "zombie/mdc/AnimalLosGate", "updateLOS"));
+        a5.expectedHits = 1;
         patches.add(animal);
 
         // 42.20.2 官方收編，退役：popman buffer 隔離 v3（fieldGetSwap ×10＋count-clamp）。
