@@ -81,6 +81,10 @@ $helperEntries = @(
     'zombie/mdc/AnimalRequestGate.class',
     'zombie/mdc/AnimalRequestGate$Bucket.class',
     'zombie/mdc/MainLoopWatchdog.class',
+    'zombie/mdc/AnimalPersistGuard.class',
+    'zombie/mdc/AnimalPersistGuard$Wave.class',
+    'zombie/characters/animals/MdcAnimalPersistProbe.class',
+    'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -235,6 +239,26 @@ java "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzom
 Assert-Ok "MainLoopWatchdogTest（off kill switch：零記錄零偵測）"
 java "-Dmdc.mainLoopWatchdogThresholdMs=999999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest clamp
 Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
+
+Write-Host "[9m/10] 動物卸載接手守衛（W16 observe）三模式行為驗證（獨立 JVM）..."
+# observe＝預設；1 是尚未實作 enforce 的 observe-alias；off＝純委派。三個 static-final
+# 組態都真跑並自驗 MODE，property 拼錯不得假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest observe
+Assert-Ok "AnimalPersistGuardTest（observe，預設出貨模式）"
+java "-Dmdc.animalPersistGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest enforce
+Assert-Ok "AnimalPersistGuardTest（mode=1，本版 observe-alias）"
+java "-Dmdc.animalPersistGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest off
+Assert-Ok "AnimalPersistGuardTest（off，純委派 kill switch）"
+
+Write-Host "[9n/10] hutch 載入回傳守衛（W17）三模式行為驗證（獨立 JVM）..."
+# ZeroRandom 確定性製造「有空槽但 vanilla 101 次全撞同槽」；enforce force-put、
+# observe 只記不救、off 純委派三路徑都必須真跑，並驗滿舍20隻/第21隻CRITICAL。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest enforce
+Assert-Ok "HutchLoadGuardTest（enforce，預設出貨模式）"
+java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest observe
+Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
+java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest off
+Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
