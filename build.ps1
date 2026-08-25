@@ -261,15 +261,26 @@ Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
 java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest off
 Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
 
-Write-Host "[9o/10] 動物 LOS 節流閘（W18）三模式行為驗證（獨立 JVM）..."
-# observe＝預設出貨（自驗預設 N=2）；enforce 帶 N=4 反射驅動 frameCounter——逐幀公式
-# oracle＋同幀一致（殺牆鐘回歸）＋輪轉硬保證（無失明）；off＝純直通計數凍結。MODE 自驗。
+Write-Host "[9o/10] 動物 LOS 節流閘（W18）七組態行為驗證（獨立 JVM）..."
+# observe＝預設出貨（自驗預設 N=2、size 採樣兩分支、錯誤契約：簿記 fail-open 恰一次委派＋
+# vanilla RuntimeException/Error 原樣外逃）；enforce 反射驅動 frameCounter——逐幀公式 oracle
+# ＋同幀一致＋輪轉硬保證（無失明）＋相位分散＋LOD fail-open（frameMod>1 恆 forward）；
+# N=4 主測、出貨組態 N=2、clamp 兩端（0→1 等效全跑、999→16）；off＝純直通計數凍結。
+# MODE 與 N 都自驗防 property 假綠；文字別名（off/enforce/observe）由 parseMode 支援。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
-Assert-Ok "AnimalLosGateTest（observe，預設出貨模式）"
-java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=4" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce
-Assert-Ok "AnimalLosGateTest（enforce，stagger 輪轉）"
-java "-Dmdc.animalLosGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest off
-Assert-Ok "AnimalLosGateTest（off，純直通 kill switch）"
+Assert-Ok "AnimalLosGateTest（observe，預設出貨模式＋錯誤契約）"
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=4" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 4
+Assert-Ok "AnimalLosGateTest（enforce N=4，幀輪轉主測）"
+java "-Dmdc.animalLosGate=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 2
+Assert-Ok "AnimalLosGateTest（enforce N=2，出貨組態＋文字別名）"
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 1
+Assert-Ok "AnimalLosGateTest（enforce clamp 下限 0→1，等效全跑）"
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 16
+Assert-Ok "AnimalLosGateTest（enforce clamp 上限 999→16）"
+java "-Dmdc.animalLosGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest off
+Assert-Ok "AnimalLosGateTest（off 文字別名，純直通 kill switch）"
+java "-Dmdc.animalLosGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
+Assert-Ok "AnimalLosGateTest（未知值 bogus 落回 observe——parseMode 安全預設方向）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

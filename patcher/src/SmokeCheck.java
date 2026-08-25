@@ -1962,18 +1962,96 @@ public final class SmokeCheck {
                         == classWideCalls(classNodeFromJar(jar, isoAnimalCls), Opcodes.INVOKEVIRTUAL,
                                 isoAnimalCls, "updateLOS", "()V") - 1);
 
-        // helper：轉呼叫恰 3（off 直通＋sample 夾測＋一般路徑）、幀源 getFrameCounter 恰 1
-        // （TIS 刪 scheduler 幀計數器時建置失敗）、主方法熱路徑零 NEW（banner/beat 拼接
-        // 都在獨立方法）、全 class 零 Rand。
+        // helper 契約（v2，review 修正後）：轉呼叫恰 2（off 直通＋主路徑 try/finally 夾測合一）、
+        // 幀源 getFrameCounter 恰 1、fail-open 的 getCurrentSimulationLevel/getFrameMod 各恰 1、
+        // 主方法熱路徑零 NEW（banner/beat 拼接都在獨立方法）、全 class 零 Rand、
+        // 例外語意：具名 handler 只允許 RuntimeException（LinkageError 必須穿透＝fail-fast，
+        // 比照 W6/W10 catch 型別鎖；type==null 的 finally any-handler 允許——它 rethrow 不吞）。
         MethodNode gAlgUpd = method(distJava, algCls, "updateLOS", "(L" + isoAnimalCls + ";)V");
-        failed += check("W18 helper：委派3、幀源1、熱路徑零NEW、零Rand",
+        failed += check("W18 helper：委派2、幀源1、LOD fail-open、零NEW、零Rand、catch 只 RuntimeException",
                 countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
-                        isoAnimalCls, "updateLOS", "()V") == 3
+                        isoAnimalCls, "updateLOS", "()V") == 2
                 && countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
                         "zombie/MovingObjectUpdateScheduler", "getFrameCounter", "()J") == 1
+                && classNode(distJava, algCls).methods.stream()
+                        .mapToInt(m -> countExactCalls(m, Opcodes.INVOKEVIRTUAL,
+                                isoAnimalCls, "getCurrentSimulationLevel",
+                                "()Lzombie/UpdateSchedulerSimulationLevel;")).sum() == 1
+                && classNode(distJava, algCls).methods.stream()
+                        .mapToInt(m -> countExactCalls(m, Opcodes.INVOKEVIRTUAL,
+                                "zombie/UpdateSchedulerSimulationLevel", "getFrameMod", "()I")).sum() == 1
                 && countOpcode(gAlgUpd, Opcodes.NEW) == 0
                 && classNode(distJava, algCls).methods.stream()
-                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0
+                && gAlgUpd.tryCatchBlocks != null
+                && gAlgUpd.tryCatchBlocks.stream().allMatch(
+                        tcb -> tcb.type == null || "java/lang/RuntimeException".equals(tcb.type)));
+
+        // 承重前提釘（review B1；grok 前輪 BLOCKING 的失效類）：enforce 的「Δframe 恆 1 ⇒
+        // 無 gcd 剩餘類失明」不是數學免疫，而是「server ⇒ FULL ⇒ frameMod==1 ⇒ 每 tick 全跑」
+        // 這條 42.20.3 前提鏈。五支結構釘＋helper 端 runtime fail-open 雙保險；任一紅＝
+        // TIS 動了排程結構，重驗 gcd 面再出貨。
+        // 註（review r2）：這些是「存在性＋計數＋位置」錨，不含分支語意——ifeq 反轉之類的
+        // 語意改寫抓不到；該失效面由 fail-open（frameMod≠1 直接 forward）與 client 側的
+        // desync 防線（釘⑦）分別兜底，釘的角色是「結構變了就逼人重看」而非證明語意。
+        // ① server ⇒ FULL 短路存在性：getUpdateSchedulerSimulationLevelForObject 內
+        //    GETSTATIC GameServer.server 恰 1、GETSTATIC FULL ≥ 2（短路回傳＋比較各一）。
+        MethodNode vLevelFor = methodFromJar(jar, "zombie/MovingObjectUpdateScheduler",
+                "getUpdateSchedulerSimulationLevelForObject",
+                "(Lzombie/iso/IsoMovingObject;F)Lzombie/UpdateSchedulerSimulationLevel;");
+        // ② 分級節拍：getFrameMod 仍為 1 << getUpdateOrderIndex（真指令恰 5：ICONST_1/ALOAD_0/呼叫/ISHL/IRETURN）。
+        MethodNode vGetFrameMod = methodFromJar(jar, "zombie/UpdateSchedulerSimulationLevel",
+                "getFrameMod", "()I");
+        // ③ 幀計數增量：startFrame 的 frameCounter 更新仍為 lconst_1/ladd（增量改 2 ⇒ gcd(2,N)>1）。
+        MethodNode vStartFrame = methodFromJar(jar, "zombie/MovingObjectUpdateScheduler",
+                "startFrame", "()V");
+        // ④ 子桶分派：bucket.add 仍以 getID() % frameMod 入桶（失明剩餘類的來源形狀）。
+        MethodNode vBucketAdd = methodFromJar(jar, "zombie/MovingObjectUpdateSchedulerUpdateBucket",
+                "add", "(Lzombie/iso/IsoMovingObject;)V");
+        failed += check("W18 承重前提：server⇒FULL 短路、frameMod=1<<idx、startFrame +1、bucket getID%mod",
+                countExactFields(vLevelFor, Opcodes.GETSTATIC,
+                        "zombie/network/GameServer", "server", "Z") == 1
+                && countExactFields(vLevelFor, Opcodes.GETSTATIC,
+                        "zombie/UpdateSchedulerSimulationLevel", "FULL",
+                        "Lzombie/UpdateSchedulerSimulationLevel;") >= 2
+                && realInsnCount(vGetFrameMod) == 5
+                && countOpcode(vGetFrameMod, Opcodes.ICONST_1) == 1
+                && countOpcode(vGetFrameMod, Opcodes.ISHL) == 1
+                && countOpcode(vStartFrame, Opcodes.LCONST_1) == 1
+                && countOpcode(vStartFrame, Opcodes.LADD) == 1
+                && countExactCalls(vBucketAdd, Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/IsoMovingObject", "getID", "()I") == 1
+                && countOpcode(vBucketAdd, Opcodes.IREM) == 1);
+
+        // ⑤ 每幀全桶掃描（review r2 residual——雙保險的共同盲區）：MOUS.update() 每幀對
+        //    simulationLevels 全長迴圈各呼叫一次 bucket.update((int)frameCounter)。TIS 若改成
+        //    隔幀呼叫，Δframe 變 2 而 frameMod 仍 1 ⇒ fail-open 不觸發、gcd 失明重現——
+        //    釘住「update() 內 bucket.update 恰 1（迴圈體）＋getfield simulationLevels 恰 1
+        //    ＋getfield frameCounter 恰 1」的迴圈形狀。誠實標記（r3）：這是計數錨——以
+        //    frameCounter 取模的隔幀改法會多讀 frameCounter（抓得到），但獨立 boolean toggle
+        //    式隔幀（三計數全不變）抓不到，且該失效面 fail-open 依定義不觸發（frameMod 仍 1）
+        //    ＝雙保險的殘餘共同盲區；接受理由：TIS 動排程節奏大概率碰 frameCounter/桶結構。
+        MethodNode vMousUpdate = methodFromJar(jar, "zombie/MovingObjectUpdateScheduler",
+                "update", "()V");
+        failed += check("W18 承重前提⑤：MOUS.update 每幀全桶掃描形狀",
+                countExactCalls(vMousUpdate, Opcodes.INVOKEVIRTUAL,
+                        "zombie/MovingObjectUpdateSchedulerUpdateBucket", "update", "(I)V") == 1
+                && countExactFields(vMousUpdate, Opcodes.GETFIELD,
+                        "zombie/MovingObjectUpdateScheduler", "simulationLevels",
+                        "[Lzombie/MovingObjectUpdateSchedulerUpdateBucket;") == 1
+                && countExactFields(vMousUpdate, Opcodes.GETFIELD,
+                        "zombie/MovingObjectUpdateScheduler", "frameCounter", "J") == 1);
+
+        // client 支配釘（review I3；前案 §2 表 #1 的不變式落實）：updateInternal 的
+        // GameClient.client 短路必須存在且位於 redirect callsite 之前——TIS 把 updateLOS
+        // 移出守衛區時此條紅（server-only enforce 會產生 client desync，2n 受精蛋案教訓）。
+        failed += check("W18 client 支配：GameClient.client 恰 1 且在 callsite 前",
+                countExactFields(vAniUpdInt, Opcodes.GETSTATIC,
+                        "zombie/network/GameClient", "client", "Z") == 1
+                && firstFieldIndex(vAniUpdInt, Opcodes.GETSTATIC,
+                        "zombie/network/GameClient", "client", "Z")
+                        < firstCallIndex(vAniUpdInt, Opcodes.INVOKEVIRTUAL,
+                                isoAnimalCls, "updateLOS", "()V"));
 
         // 完備性回歸釘（前案 docs/isoanimal-updatelos-design-v1.md §2 七呼叫點表 #2）：
         // IsoPlayer.updateInternal1 的 isAnimal 短路是「動物走不到玩家版 updateLOS」的結構

@@ -281,11 +281,12 @@ public final class PatchConfig {
         // 每 tick 掃 getCell().getObjectList() 全表（Set）只為找 zombie/player 呼叫 spotted()。
         // caller 側 updateInternal 內唯一 updateLOS callsite（offset 197）改道 AnimalLosGate——
         // observe 量化（size 分布＋耗時採樣）、enforce 以 vanilla frameCounter 輪轉每動物每
-        // N tick 掃一次（grok 審查修正：v1 草案 nanoTime 窗口在低 fps 有 gcd 剩餘類永久失明，
-        // 幀源 Δframe 恆 1 免疫）。行為代價=spotted 速率 ×1/N＋首偵延遲 ≤(N-1) tick，故預設
-        // N=2 保守出貨（-Dmdc.animalLosN 1..16 可調）。動物版 spottedList 恆 {this} 零 server
-        // 消費者（skip 零差）；聽覺 respondToSound 不經 LOS。三態 -Dmdc.animalLosGate
-        // （0/1/2，預設 2 observe）。
+        // N tick 掃一次（grok 審查修正：v1 草案 nanoTime 窗口在低 fps 有 gcd 剩餘類永久失明；
+        // Δframe=1 是 server⇒FULL⇒frameMod=1 的條件性事實，SmokeCheck 承重前提釘＋helper
+        // gateApplies fail-open 雙保險，見 patches.md 2af）。行為代價=spotted 速率 ×1/N＋首偵
+        // 延遲 ≤(N-1) tick，故預設 N=2 保守出貨（-Dmdc.animalLosN 1..16 可調）。動物版
+        // spottedList 恆 {this} 零 server 消費者（skip 零差）；聽覺 respondToSound 不經 LOS。
+        // 三態 -Dmdc.animalLosGate（0|off / 1|enforce / 2|observe 預設，parseMode 文字別名）。
         Patcher.MethodOps a5 = animal.method("updateInternal", "()V");
         a5.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/characters/animals/IsoAnimal", "updateLOS", "()V",
