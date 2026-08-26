@@ -2586,7 +2586,8 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
    anticheat `is not valid` 仍會輸出。
 4. **行為觀察**：動物面板（admin cheat）壓力恢復約快一倍、槍聲增量約 1/3。
    （殭屍 `zombiesCulled` 觀察項隨 2a 一併移除。）
-5. **安全屋驗證**：在曾回報失敗的房屋重新申請，應先看到 repair log，隨後由原版規則成功建立；
+5. **安全屋驗證**（**2026-07-29 起 SafehouseClaimPacket 修復已停用**，本條僅在重新啟用該刀後
+   適用）：在曾回報失敗的房屋重新申請，應先看到 repair log，隨後由原版規則成功建立；
    非房屋座標仍必須被 `building not found` 拒絕。
 6. **容器刷新驗證**：在無 TownZone 的自訂地圖與 `haveConstruction=true` 的 vanilla Zone 各選一個
    已探索、已拿取且少於 `MaxItemsForLootRespawn` 的原生固定容器；等下一個正常週期後應可補貨。
@@ -2609,8 +2610,10 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
    與 `.../zombie/mdc/FertilizedEggGuard.class` 皆應「No such file」。**只殘留改道版
    `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
    最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
-   (b) 新 `patch-manifest.txt` 共 **55 筆**，`grep -c . patch-manifest.txt` = 55；其中
-   `NetTimedActionGuard.class`、`NetTimedAction.class`、`NetTimedActionPacket.class` 各恰一筆，
+   (b) 新 `patch-manifest.txt` 行數必須與本次 build 的 `dist/manifest.txt` 完全一致
+   （`grep -c . patch-manifest.txt` 對帳；42.20.4/acf4410 版為 **71** 筆——歷史數字 48/51/55
+   皆為當時版本，勿拿舊數字驗新部署）；其中 `NetTimedActionGuard.class`、`NetTimedAction.class`、
+   `NetTimedActionPacket.class` 各恰一筆，
    且 `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
    (c) 開機健檢無 `VerifyError`／`NoSuchMethodError`／`LinkageError`（此路徑跑在
    `ServerChunkLoader` 執行緒上，出現即立刻 uninstall）。

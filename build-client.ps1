@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 $PATCH_VERSION = if ($Variant -eq 'lowmem') { 'v3.0-lowmem' } else { 'v3.0' }
 $CLIENT_MODE = if ($Variant -eq 'lowmem') { 'client-lowmem' } else { 'client' }
 # 支援的遊戲版本（出包檔名與 install.bat 訊息；整 jar SHA 閘由 work jar 自動注入）
-$GAME_VERSION = '42.20.3'
+$GAME_VERSION = '42.20.4'
 $DIST = if ($Variant -eq 'lowmem') { "$PSScriptRoot\dist-client-lowmem" } else { "$PSScriptRoot\dist-client" }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $R = $PSScriptRoot
