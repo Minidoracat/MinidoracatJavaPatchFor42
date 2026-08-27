@@ -2578,6 +2578,103 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   updateLOS 殘餘佔比仍 ≥8% 時以「Gate forward 時 delegate 給 Scan」疊加。
 ---
 
+## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
+
+### 立案（2026-08-23 Player-F 案＋2026-08-28 三方核實）
+
+正式服 8/23 三輛未認領完好車（`Trailer_Livestock` id=462、`StepVan` id=468、`SmallCar`
+id=173）被玩家以噴燈拆解永久刪除——`vehicles.db` 整列 DELETE，MVCK 認領車倖存
+（MinidoracatServerAnalyze `reports/incidents/2026-08-23-Player-F-拖車被拆.md`）。源碼定罪
+（42.20.4 逐項實查＋codex/grok 雙 lane 獨立復核）：
+
+- vanilla `VehicleCommands.lua:359-366` 的 `Commands.remove` 直呼
+  `vehicle:permanentlyRemove()` 且**無任何權限檢查**（同檔 `repairPart:345-357` 有
+  `checkPermissions(player, Capability.UseMechanicsCheat)`，`remove` 沒有）；dispatcher
+  `:457-467` 只驗 `module=='vehicle'`。
+- Java 側 `GameServer.receiveClientCommand`（:2289-2297 反編譯）對 vehicle/remove 有一道
+  **形式閘**，但其中 `NetworkPlayerAI.isDismantleAllowed()`（NetworkPlayerAI.java:647-649）
+  **恆回 true**＝實質全放行——TIS 自留的 hook 點從未實作。
+- **Player-F 案實路不經 Commands.remove**：`ISRemoveBurntVehicle.lua:135` 是 shared timed
+  action 的 `complete()`，在 server 端 Lua 直呼 `permanentlyRemove()`（Nep Dismantle Any
+  Car 只改 client 選單開放完好車，server 跑的 complete 是 vanilla 的；其 `isValid` 只驗
+  噴燈不驗燒毀）。⇒ Lua 層只蓋 `Commands.remove` 攔不到本案；換裝任何拆車 MOD（VSO 等）
+  也都委派到同一 vanilla 能力。**唯一交匯點＝Java 咽喉 `permanentlyRemove` 本身。**
+
+### 咽喉 caller census（SmokeCheck 全 jar 釘死＝4）
+
+| callsite | 語境 | server 可達 |
+|---|---|---|
+| `LuaManager$GlobalObject.removeVehicle` | `!GameServer.server` 分支（javap offset 44-54） | 否（死路徑，守衛被 SmokeCheck 釘住） |
+| `RandomizedWorldBase`（:442 反編譯） | 世界事件清理 | 是（合法維運） |
+| `VehicleManager.removeVehicles`（:50） | admin `/remove vehicles` 批次 | 是（合法維運） |
+| `BaseVehicle.setSmashed`（:10442） | 換殼重建（先刪舊車再 new） | 是（合法維運） |
+
+Lua 端另有三個入口全走上述咽喉：`Commands.remove`（client command——admin 機械面板
+`onCheatRemove` 與任意玩家偽造/委派 command **同路**）、`ISRemoveBurntVehicle`（timed
+action）、其他 MOD server Lua 直呼。
+
+### 手術（headCall，純觀測）
+
+`BaseVehicle.permanentlyRemove()V` 頭部 headCall → `zombie/mdc/VehicleRemoveGuard.onRemove
+(BaseVehicle)V`（`ALOAD 0 → INVOKESTATIC`，與 W15 preupdate 同機制，真指令 +2、
+expectedHits=1；掛在既存 W3-4 BaseVehicle ClassPatch 上——同 class 不得開第二個
+ClassPatch，否則後者從 vanilla 重讀覆蓋前者的手術）。vanilla 頭部形狀 `iconst_0;
+istore_1` 起、單一尾部 RETURN（javap 42.20.4 offset 0-88）。
+
+每刪除一行 log：`remove#seq vid script pos claim caller lua nearest near`。
+
+- **caller 分類**：`Thread.currentThread().getStackTrace()` 取第一個非 mdc/非咽喉自身
+  frame（Java 維運 caller 直接可辨）＋全 stack 掃 `se.krka.kahlua.`/`zombie.Lua.` 前綴
+  （＝Lua 驅動）。低頻刀（日常刪車每日數十次量級）成本可忽略。
+- **MVCK 認領狀態（六路，來源＝MVCK 42.15 源碼實證）**：車輛 modData 的 `SQLID` 只是
+  imprint 印記——**`unclaimVehicle` 不清印記**（MVCKServer.lua:120-147），SQLID 存在≠
+  仍認領；owner 真相在 Global ModData 表 `MVCKByVehicleSQLID`（key=SQLID →
+  `OwnerPlayerID`，MVCKServer.lua:53/69/90）。狀態：`unclaimed`（無印記）／
+  `stale-imprint`（有印記、表無條目＝已解除）／`claimed:<owner>`／`no-mvck-table`／
+  `no-moddata`／`unknown-*`（讀取失敗記錄而非靜默放行）。helper 全程唯讀
+  （SmokeCheck 釘零 rawset）。
+- **近距玩家**：`GameServer.getPlayers()` 掃最近距離＋32 格內名單（cap 3）——「借位刪車」
+  訊號。環境不可用（測試 JVM）回占位。
+- rate limit：10s 窗上限 20 行完整記錄、超限 `suppressed++`（防未知高頻迴圈刷版；正常
+  頻率遠低於此）。
+
+### 為什麼本版不 enforce（三方審查一致）
+
+授權判定需要 (requester, vehicle) 對，而咽喉點只有 vehicle——requester 藏在 Lua 層
+（client command 的 player／timed action 的 `action.character`）。三個 enforce 候選
+全數有致命面：只蓋 `Commands.remove`（Lua）漏 timed-action 實路；單點 ThreadLocal 橋
+（receiveClientCommand）橋不到 `NetTimedAction.perform`（:132-137）的第二來源；純車況
+規則（燒毀放行＋完好拒）**誤殺 admin 刪完好車**（admin 與惡意同走 command、Kahlua
+frame 分不出人）並擋 `setSmashed` 換殼。enforce 條件（候選：admin capability OR
+認領者+距離+燒毀；unclaimed burnt 是否 public 需明寫）待 observe 回答「合法刪除頻率
+與 caller 分佈」後另案設計；屆時身分橋需同時覆蓋 receiveClientCommand 與
+NetTimedAction.perform 兩個入口（W14 ThreadLocal 捕獲＋finally 清除慣例）。
+
+kill switch：`-Dmdc.vehicleRemoveGuard=2|observe`（預設）／`1|enforce`（**本版
+observe-alias**，比照 W16）／`0|off`（純早退）；文字別名＋未知值落回 observe。
+
+### 守門與行為測試
+
+- SmokeCheck：全 jar `permanentlyRemove` 呼叫點恰 4 且逐類分佈釘死（總數＋分佈雙鎖堵
+  互抵；TIS 新增 caller＝observe 分類器過時＝建置紅）；`GlobalObject.removeVehicle` 的
+  `GameServer.server` 守衛存在（死路徑前提）；手術後 headCall 全序＋真指令恰 +2；helper
+  契約（零 `permanentlyRemove` 遞迴、`getStackTrace` 恰 1、claim/onRemove 零 rawset）。
+- `VehicleRemoveGuardTest` 三組態獨立 JVM（observe 預設／1=observe-alias／off 文字別名，
+  MODE 自驗防 property 假綠）：caller 分類三向（Kahlua 反射鏈／Java 維運 frame／
+  setSmashed 自呼跳自身）＋MVCK 狀態機全六路（GlobalModData 注入）＋空殼 vehicle 整段
+  不炸（觀測刀不得擋刪車）＋rate-limit 30 連打→20 記錄/10 壓制。
+
+### 部署與觀測（驗收）
+
+- observe 一輪（建議 ≥7 天，涵蓋週末晚峰）後能回答：合法刪除頻率（burnt 拆解／admin
+  批次／世界事件 各多少）、可疑事件（完好＋unclaimed/stale＋Lua 驅動＋近距玩家非 admin）
+  是否存在。
+- 車輛數量驗證**不用** `vehicles.db` 總列數（新車生成會抵銷刪除）：以本刀 log 的
+  per-vid ledger 對照 DB 差分。
+- 立即止血屬營運面（移除 Nep 或降 admin-only＋`MVCK.ServerSideChecking=true`），與本刀
+  互補不互替（8/25 稽核建議 #5/#6）。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
