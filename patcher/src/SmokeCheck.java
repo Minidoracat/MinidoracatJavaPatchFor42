@@ -2113,6 +2113,120 @@ public final class SmokeCheck {
                         "se/krka/kahlua/vm/KahluaTable", "rawset",
                         "(Ljava/lang/Object;Ljava/lang/Object;)V") == 0);
 
+        // ---- W20 衣物同步守衛 ----
+        String csgCls = "zombie/mdc/ClothingSyncGuard";
+        String cipCls = "zombie/mdc/ContainerIdProbe";
+        String cidCls = "zombie/network/fields/ContainerID";
+        String scpCls = "zombie/network/packets/SyncClothingPacket";
+        String idCls = "zombie/network/packets/SyncClothingPacket$ItemDescription";
+        String svpCls = "zombie/network/packets/SyncVisualsPacket";
+        String ivCls = "zombie/core/skinnedmodel/visual/ItemVisual";
+        String w20Ic = "zombie/core/ImmutableColor";
+        String pidCls = "zombie/network/fields/character/PlayerID";
+        String cidSetDesc = "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V";
+        String wornCtorDesc = "(Lzombie/characters/WornItems/WornItem;)V";
+        String svpParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String getPlayerDesc = "()Lzombie/characters/IsoPlayer;";
+        // vanilla 前提 (b)：ctor 對 baseTexture/textureChoice 有守衛（IFNONNULL 恰 2）、
+        // getVisual 恰 5、getTint 恰 1 且無守衛＝TIS 自己防兩行漏第三行的結構事實。
+        // TIS 補上守衛（IFNONNULL 變 3）＝本刀 (b) 撤刀訊號，建置紅提醒。
+        MethodNode vIdCtor = methodFromJar(jar, idCls, "<init>", wornCtorDesc);
+        failed += check("W20 vanilla (b)：ctor getVisual=5、getTint=1、IFNONNULL=2（tint 獨漏守衛）",
+                countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem",
+                        "getVisual", "()L" + ivCls + ";") == 5
+                && countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint",
+                        "()L" + w20Ic + ";") == 1
+                && countOpcode(vIdCtor, Opcodes.IFNONNULL) == 2);
+        // vanilla 前提 (b)：write 無條件解參考 tint（GETFIELD tint 恰 4）＝ctor 若被繞過
+        // （tint 存成 null），write 是第二個 NPE 點——enforce white 保序列化的存在理由。
+        MethodNode vIdWrite = methodFromJar(jar, idCls, "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V");
+        failed += check("W20 vanilla (b)：write 內 GETFIELD tint 恰 4（第二 NPE 點）",
+                countExactFields(vIdWrite, Opcodes.GETFIELD, idCls, "tint", "L" + w20Ic + ";") == 4);
+        // vanilla 前提（禁止過濾的行為錨）：process 會把封包未列出的 worn item 從遠端
+        // WornItems.remove——「lambda 過濾整件」＝遠端脫裝，此錨紅時重估該結論。
+        MethodNode vScpProcess = methodFromJar(jar, scpCls, "process", "()V");
+        failed += check("W20 vanilla：process 內 WornItems.remove(InventoryItem) 恰 1（過濾＝脫裝的行為錨）",
+                countExactCalls(vScpProcess, Opcodes.INVOKEVIRTUAL,
+                        "zombie/characters/WornItems/WornItems", "remove",
+                        "(Lzombie/inventory/InventoryItem;)V") == 1);
+        // vanilla 前提 (c)：parse 內 getPlayer 恰 3、error(Object) 恰 1、getItemVisuals 恰 1
+        // （server 本地重建 vs wire count 的比對結構）。
+        MethodNode vSvpParse = methodFromJar(jar, svpCls, "parse", svpParseDesc);
+        failed += check("W20 vanilla (c)：parse getPlayer=3、DebugType.error(Object)=1、getItemVisuals=1",
+                countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 3
+                && countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
+                        "error", "(Ljava/lang/Object;)V") == 1
+                && countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
+                        "getItemVisuals", "(Lzombie/core/skinnedmodel/visual/ItemVisuals;)V") == 1);
+        // vanilla 前提 (a)：雙參 set 直讀 raw square（GETFIELD square=6：頭部守衛塊 4＋
+        // ObjectContainer/IsoObject 分支各 1；零 getSquare()）且 getObjects 恰 2（NPE 點）；
+        // 單參 set 呼叫雙參恰 1（stack 兩層 set 的結構）。
+        MethodNode vCidSet2 = methodFromJar(jar, cidCls, "set", cidSetDesc);
+        MethodNode vCidSet1 = methodFromJar(jar, cidCls, "set", "(Lzombie/inventory/ItemContainer;)V");
+        failed += check("W20 vanilla (a)：雙參 set raw square=6／getSquare=0／getObjects=2；單參呼叫雙參=1",
+                countExactFields(vCidSet2, Opcodes.GETFIELD, "zombie/iso/IsoObject", "square",
+                        "Lzombie/iso/IsoGridSquare;") == 6
+                && countExactCalls(vCidSet2, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject",
+                        "getSquare", "()Lzombie/iso/IsoGridSquare;") == 0
+                && countExactCalls(vCidSet2, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoGridSquare",
+                        "getObjects", "()Lzombie/util/list/PZArrayList;") == 2
+                && countExactCalls(vCidSet1, Opcodes.INVOKEVIRTUAL, cidCls, "set", cidSetDesc) == 1);
+        // 手術後：三個 headCall（含多 slot 首用）全序＋redirect 歸零／真指令數對帳。
+        MethodNode pCidSet2 = method(distJava, cidCls, "set", cidSetDesc);
+        failed += check("W20 手術後 (a)：雙參 set 頭部 aload_1→aload_2→onSet、真指令恰 +3",
+                headCallSlotsOk(pCidSet2, cipCls, "onSet", cidSetDesc, 1, 2)
+                && realInsnCount(pCidSet2) == realInsnCount(vCidSet2) + 3);
+        MethodNode vScpSet = methodFromJar(jar, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
+        MethodNode pScpSet = method(distJava, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
+        failed += check("W20 手術後 (b)：SyncClothingPacket.set 頭部 aload_1→onClothingSet、真指令恰 +2",
+                headCallSlotsOk(pScpSet, csgCls, "onClothingSet", "(Lzombie/characters/IsoPlayer;)V", 1)
+                && realInsnCount(pScpSet) == realInsnCount(vScpSet) + 2);
+        MethodNode pIdCtor = method(distJava, idCls, "<init>", wornCtorDesc);
+        failed += check("W20 手術後 (b)：ctor tintOf 改道 x1、原 getTint 歸零、真指令不變",
+                countExactCalls(pIdCtor, Opcodes.INVOKESTATIC, csgCls, "tintOf",
+                        "(L" + ivCls + ";)L" + w20Ic + ";") == 1
+                && countExactCalls(pIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint",
+                        "()L" + w20Ic + ";") == 0
+                && realInsnCount(pIdCtor) == realInsnCount(vIdCtor));
+        MethodNode pSvpParse = method(distJava, svpCls, "parse", svpParseDesc);
+        failed += check("W20 手術後 (c)：parse parsePlayer x3＋onVisualsMismatch x1、原呼叫歸零、真指令不變",
+                countExactCalls(pSvpParse, Opcodes.INVOKESTATIC, csgCls, "parsePlayer",
+                        "(L" + pidCls + ";)Lzombie/characters/IsoPlayer;") == 3
+                && countExactCalls(pSvpParse, Opcodes.INVOKESTATIC, csgCls, "onVisualsMismatch",
+                        "(Lzombie/debug/DebugType;Ljava/lang/Object;)V") == 1
+                && countExactCalls(pSvpParse, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 0
+                && countExactCalls(pSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
+                        "error", "(Ljava/lang/Object;)V") == 0
+                && realInsnCount(pSvpParse) == realInsnCount(vSvpParse));
+        // 負對照：write() 也讀 getPlayer/getItemVisuals，redirect 是 method-scope——write 未動。
+        MethodNode vSvpWrite = methodFromJar(jar, svpCls, "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V");
+        MethodNode pSvpWrite = method(distJava, svpCls, "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V");
+        failed += check("W20 負對照：SyncVisualsPacket.write 未被改動（getPlayer 數與真指令數同）",
+                countExactCalls(pSvpWrite, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc)
+                        == countExactCalls(vSvpWrite, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc)
+                && realInsnCount(pSvpWrite) == realInsnCount(vSvpWrite));
+        // helper 契約：tintOf 的 getTint 委派恰 2（off 直通＋非 null 主路徑）、white 引用恰 2
+        // （nullVisual/nullTint 兩個 enforce 出口）；onVisualsMismatch 的 error 委派恰 1
+        // （唯一出口，off/observe 同一 sink）；parsePlayer 的 getPlayer 委派恰 1；
+        // ContainerIdProbe.onSet 純觀測（getStackTrace 恰 1、零 KahluaTable 觸碰由 import 面保證）。
+        MethodNode gTintOf = method(distJava, csgCls, "tintOf", "(L" + ivCls + ";)L" + w20Ic + ";");
+        MethodNode gMismatch = method(distJava, csgCls, "onVisualsMismatch",
+                "(Lzombie/debug/DebugType;Ljava/lang/Object;)V");
+        MethodNode gParsePlayer = method(distJava, csgCls, "parsePlayer",
+                "(L" + pidCls + ";)Lzombie/characters/IsoPlayer;");
+        MethodNode gOnSet = method(distJava, cipCls, "onSet", cidSetDesc);
+        failed += check("W20 helper 契約：tintOf 委派2/white 引用2；mismatch error 出口1；parsePlayer 委派1；onSet getStackTrace 1",
+                countExactCalls(gTintOf, Opcodes.INVOKEVIRTUAL, ivCls, "getTint", "()L" + w20Ic + ";") == 2
+                && countExactFields(gTintOf, Opcodes.GETSTATIC, w20Ic, "white", "L" + w20Ic + ";") == 2
+                && countExactCalls(gMismatch, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
+                        "error", "(Ljava/lang/Object;)V") == 1
+                && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 1
+                && countExactCalls(gOnSet, Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
+                        "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -2318,6 +2432,19 @@ public final class SmokeCheck {
         AbstractInsnNode[] h = firstReal(m, 2);
         return h[0] instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0
                 && h[1] instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
+                && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)
+                && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == 1;
+    }
+
+    /** 多 slot head-call 全序鎖（W20 起）：首 N 條真指令＝依序 aload 各 slot；接 invokestatic helper 恰一次。 */
+    static boolean headCallSlotsOk(MethodNode m, String owner, String name, String desc, int... slots) {
+        AbstractInsnNode[] h = firstReal(m, slots.length + 1);
+        for (int i = 0; i < slots.length; i++) {
+            if (!(h[i] instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != slots[i]) {
+                return false;
+            }
+        }
+        return h[slots.length] instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
                 && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)
                 && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == 1;
     }

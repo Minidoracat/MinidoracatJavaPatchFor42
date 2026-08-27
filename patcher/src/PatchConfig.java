@@ -882,6 +882,64 @@ public final class PatchConfig {
                 "(Lzombie/vehicles/BaseVehicle;)V");
         permRemove.expectedHits = 1;
 
+        // ---- W20 衣物同步守衛（2026-08-28 立案；docs/patches.md 2ah）----
+        // 8/28 當輪三個 log 叢集（send Exception ×362 per-connection 放大＋SyncVisuals
+        // mismatch ×129）。(a) ContainerID.set 雙參的 ObjectContainer/IsoObject 分支直讀
+        // o.square.getObjects()（offset 197/233）無守衛——上游 Unwear 用 getSquare()
+        // （current?:square）放行、此處讀 raw square＝矛盾根源；純觀測分解（headCall
+        // slots={1,2}，多 slot 版首用）。(b) ItemDescription ctor 對 baseTexture/
+        // textureChoice 有 getVisual()==null 守衛、唯 tint 直呼 getVisual().getTint()
+        // （offset 91-101）漏——redirect getTint→tintOf（observe 記錄後拋 NPE 保 vanilla
+        // 語意；enforce null→ImmutableColor.white 只保序列化）。禁止 lambda 過濾整件：
+        // process 會把未列出 worn item 從遠端 WornItems.remove＝遠端脫裝。(c) SyncVisuals
+        // 是純 positional 協定（wire 無 item identity），跳項/clamp 會索引錯位套錯衣服，
+        // vanilla 整包拒絕反而安全——只觀測：redirect parse 的 3 處 PlayerID.getPlayer
+        // （捕獲 parse 對象）＋mismatch error callsite（資訊超集行：player＋signed diff）。
+        // 共同根因假說（observe 證偽）：同一件 null-visual worn item 令 (b) 炸且令
+        // getItemVisuals 少算 1 ⇒ (c) wire-local=+1。kill switch 三把分離：
+        // -Dmdc.containerIdProbe（0/2 預設）、-Dmdc.clothingTintGuard（0/1/2 預設）、
+        // -Dmdc.visualsMismatchProbe（0/2 預設）。
+        Patcher.ClassPatch containerId = new Patcher.ClassPatch("zombie/network/fields/ContainerID");
+        Patcher.MethodOps cidSet = containerId.method("set",
+                "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V");
+        cidSet.headCall = new Patcher.HeadCall("zombie/mdc/ContainerIdProbe", "onSet",
+                "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V", new int[]{1, 2});
+        cidSet.expectedHits = 1;
+        patches.add(containerId);
+
+        Patcher.ClassPatch syncClothing = new Patcher.ClassPatch(
+                "zombie/network/packets/SyncClothingPacket");
+        Patcher.MethodOps scpSet = syncClothing.method("set", "(Lzombie/characters/IsoPlayer;)V");
+        scpSet.headCall = new Patcher.HeadCall("zombie/mdc/ClothingSyncGuard", "onClothingSet",
+                "(Lzombie/characters/IsoPlayer;)V", new int[]{1});
+        scpSet.expectedHits = 1;
+        patches.add(syncClothing);
+
+        Patcher.ClassPatch itemDesc = new Patcher.ClassPatch(
+                "zombie/network/packets/SyncClothingPacket$ItemDescription");
+        Patcher.MethodOps idCtor = itemDesc.method("<init>",
+                "(Lzombie/characters/WornItems/WornItem;)V");
+        idCtor.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/skinnedmodel/visual/ItemVisual", "getTint",
+                "()Lzombie/core/ImmutableColor;",
+                "zombie/mdc/ClothingSyncGuard", "tintOf"));
+        idCtor.expectedHits = 1;
+        patches.add(itemDesc);
+
+        Patcher.ClassPatch syncVisuals = new Patcher.ClassPatch(
+                "zombie/network/packets/SyncVisualsPacket");
+        Patcher.MethodOps svpParse = syncVisuals.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        svpParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/fields/character/PlayerID", "getPlayer",
+                "()Lzombie/characters/IsoPlayer;",
+                "zombie/mdc/ClothingSyncGuard", "parsePlayer"));
+        svpParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/debug/DebugType", "error", "(Ljava/lang/Object;)V",
+                "zombie/mdc/ClothingSyncGuard", "onVisualsMismatch"));
+        svpParse.expectedHits = 4;   // getPlayer 3 + error 1
+        patches.add(syncVisuals);
+
         return patches;
     }
 

@@ -89,11 +89,19 @@ public final class Patcher {
 
     /**
      * 方法頭線性呼叫（v2.0 起，貼圖洩漏根治用）：visitCode 後插
-     * `aload_0; invokestatic helperOwner.helperName helperDesc`（desc 收 receiver 型別、回 void）。
-     * 純線性、無分支、無新 branch target——frames 完全不需增補；堆疊峰值 1，
-     * visitMaxs 以 max(原值,1) 保底。helper 對遊戲 jar 正常編譯，內部自帶冪等與例外紀律。
+     * `aload &lt;slots...&gt;; invokestatic helperOwner.helperName helperDesc`（desc 依序收各
+     * slot 的 reference 型別、回 void）。預設 slots={0}＝原 receiver 版（instance 方法的
+     * this；static 方法的第一參數）。W20 起支援多 reference slot（如 ContainerID.set 雙參
+     * 的 slot 1+2）——仍純線性、無分支、無新 branch target，frames 完全不需增補；
+     * 堆疊峰值 = slots.length，visitMaxs 以其保底。slot 必須是方法簽名內的 reference
+     * 參數（頭部尚無任何 store，local 只有參數本身）。helper 對遊戲 jar 正常編譯，
+     * 內部自帶冪等與例外紀律。
      */
-    record HeadCall(String helperOwner, String helperName, String helperDesc) {}
+    record HeadCall(String helperOwner, String helperName, String helperDesc, int[] slots) {
+        HeadCall(String helperOwner, String helperName, String helperDesc) {
+            this(helperOwner, helperName, helperDesc, new int[]{0});
+        }
+    }
 
     /**
      * void instance 方法尾部線性呼叫：每個 RETURN 前插
@@ -179,7 +187,9 @@ public final class Patcher {
             }
             HeadCall hc = ops.headCall;
             if (hc != null) {
-                super.visitVarInsn(Opcodes.ALOAD, 0);
+                for (int slot : hc.slots()) {
+                    super.visitVarInsn(Opcodes.ALOAD, slot);
+                }
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, hc.helperOwner(), hc.helperName(),
                         hc.helperDesc(), false);
                 ops.actualHits++;
@@ -188,12 +198,16 @@ public final class Patcher {
 
         @Override
         public void visitMaxs(int maxStack, int maxLocals) {
-            // 頭／尾部插入峰值 1；VehicleChunkIndexRepair 的 buffer＋vehicle＋float＋int 峰值為 4
+            // 頭／尾部插入峰值＝載入的 slot 數（單 slot 版=1）；VehicleChunkIndexRepair 的
+            // buffer＋vehicle＋float＋int 峰值為 4
             int minimum;
             if (ops.vehicleChunkIndexRepair != null) {
                 minimum = 4;
+            } else if (ops.headCall != null) {
+                minimum = Math.max(ops.headCall.slots().length,
+                        ops.tailCall != null || ops.headGuard != null ? 1 : 0);
             } else {
-                minimum = ops.headCall != null || ops.tailCall != null || ops.headGuard != null ? 1 : 0;
+                minimum = ops.tailCall != null || ops.headGuard != null ? 1 : 0;
             }
             super.visitMaxs(Math.max(maxStack, minimum), maxLocals);
         }
