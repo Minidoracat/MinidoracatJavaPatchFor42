@@ -86,6 +86,7 @@ $helperEntries = @(
     'zombie/characters/animals/MdcAnimalPersistProbe.class',
     'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/AnimalLosGate.class',
+    'zombie/mdc/VehicleRemoveGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -281,6 +282,16 @@ java "-Dmdc.animalLosGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomb
 Assert-Ok "AnimalLosGateTest（off 文字別名，純直通 kill switch）"
 java "-Dmdc.animalLosGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
 Assert-Ok "AnimalLosGateTest（未知值 bogus 落回 observe——parseMode 安全預設方向）"
+
+Write-Host "[9p/10] 車輛永久移除授權守衛（W19 observe）三組態行為驗證（獨立 JVM）..."
+# observe＝預設出貨；1 是尚未實作 enforce 的 observe-alias（授權條件待 observe 數據定案）；
+# off＝純早退。三個 static-final 組態都真跑並自驗 MODE，property 拼錯不得假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest observe
+Assert-Ok "VehicleRemoveGuardTest（observe，預設出貨模式）"
+java "-Dmdc.vehicleRemoveGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest enforce
+Assert-Ok "VehicleRemoveGuardTest（mode=1，本版 observe-alias）"
+java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest off
+Assert-Ok "VehicleRemoveGuardTest（off 文字別名，純早退 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

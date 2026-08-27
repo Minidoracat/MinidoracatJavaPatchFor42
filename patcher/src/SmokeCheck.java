@@ -2067,6 +2067,52 @@ public final class SmokeCheck {
                 && countExactCalls(vUpdInt1, Opcodes.INVOKEVIRTUAL,
                         "zombie/characters/IsoPlayer", "updateLOS", "()V") == 1);
 
+        // ---- W19 車輛永久移除授權守衛（observe）----
+        String vrgCls = "zombie/mdc/VehicleRemoveGuard";
+        String bvCls = "zombie/vehicles/BaseVehicle";
+        // vanilla census：全 jar permanentlyRemove 呼叫點恰 4 且逐類分佈釘死（總數＋分佈
+        // 雙鎖堵「舊點消失＋新點出現」互抵）。TIS 新增 caller＝observe 分類器過時＝建置紅。
+        failed += check("W19 census：全 jar permanentlyRemove 呼叫點恰 4（GlobalObject/RWB/VehicleManager/setSmashed 各 1）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 4
+                && classWideCalls(classNodeFromJar(jar, "zombie/Lua/LuaManager$GlobalObject"),
+                        Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 1
+                && classWideCalls(classNodeFromJar(jar, "zombie/randomizedWorld/RandomizedWorldBase"),
+                        Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 1
+                && classWideCalls(classNodeFromJar(jar, "zombie/vehicles/VehicleManager"),
+                        Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 1
+                && classWideCalls(classNodeFromJar(jar, bvCls),
+                        Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 1);
+        // vanilla 前提：GlobalObject.removeVehicle 的 server 死路徑守衛（!GameServer.server
+        // 才直呼 permanentlyRemove）。TIS 拿掉守衛＝該路徑在 server 復活，caller 分類重驗。
+        MethodNode vGoRemove = methodFromJar(jar, "zombie/Lua/LuaManager$GlobalObject",
+                "removeVehicle", "(Lzombie/characters/IsoPlayer;Lzombie/vehicles/BaseVehicle;)V");
+        failed += check("W19 vanilla 前提：GlobalObject.removeVehicle 有 GameServer.server 守衛（server 死路徑）",
+                countExactFields(vGoRemove, Opcodes.GETSTATIC,
+                        "zombie/network/GameServer", "server", "Z") == 1
+                && countExactCalls(vGoRemove, Opcodes.INVOKEVIRTUAL,
+                        bvCls, "permanentlyRemove", "()V") == 1);
+        // 手術後：permanentlyRemove 頭部 headCall 全序、真指令恰 +2（原體未動）。
+        MethodNode pPermRemove = method(distJava, bvCls, "permanentlyRemove", "()V");
+        MethodNode vPermRemove = methodFromJar(jar, bvCls, "permanentlyRemove", "()V");
+        failed += check("W19 手術後：permanentlyRemove 頭部 headCall 全序、真指令恰 +2",
+                headCallOk(pPermRemove, vrgCls, "onRemove", "(L" + bvCls + ";)V")
+                && realInsnCount(pPermRemove) == realInsnCount(vPermRemove) + 2);
+        // helper 契約：onRemove 零 permanentlyRemove 呼叫（防遞迴）、getStackTrace 恰 1、
+        // 觀測唯讀——onRemove 與 claimStateOf 皆零 KahluaTable.rawset（不寫 modData）。
+        MethodNode gVrgOnRemove = method(distJava, vrgCls, "onRemove", "(L" + bvCls + ";)V");
+        MethodNode gVrgClaim = method(distJava, vrgCls, "claimStateOf",
+                "(Lse/krka/kahlua/vm/KahluaTable;)Ljava/lang/String;");
+        failed += check("W19 helper 契約：零遞迴、getStackTrace 恰 1、claim/onRemove 零 rawset（唯讀）",
+                countExactCalls(gVrgOnRemove, Opcodes.INVOKEVIRTUAL, bvCls, "permanentlyRemove", "()V") == 0
+                && countExactCalls(gVrgOnRemove, Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
+                        "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1
+                && countExactCalls(gVrgOnRemove, Opcodes.INVOKEINTERFACE,
+                        "se/krka/kahlua/vm/KahluaTable", "rawset",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)V") == 0
+                && countExactCalls(gVrgClaim, Opcodes.INVOKEINTERFACE,
+                        "se/krka/kahlua/vm/KahluaTable", "rawset",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)V") == 0);
+
         if (failed > 0) {
             System.exit(1);
         }

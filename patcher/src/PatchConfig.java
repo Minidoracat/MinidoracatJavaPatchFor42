@@ -864,6 +864,24 @@ public final class PatchConfig {
         hutchLoad.expectedHits = 1;
         patches.add(hutch);
 
+        // ---- W19 車輛永久移除授權守衛 observe（2026-08-28 立案；docs/patches.md 2ag）----
+        // vanilla Commands.remove（VehicleCommands.lua:359-366）無權限檢查直呼
+        // permanentlyRemove；Java 側 receiveClientCommand 的 vehicle/remove 閘經
+        // NetworkPlayerAI.isDismantleAllowed() 恆 true＝實質全放行；另一條玩家路徑
+        // ISRemoveBurntVehicle.lua:135（server 端 timed action complete 直呼，不經
+        // Commands.remove）＝2026-08-23 Player-F 案三輛未認領完好車 vehicles.db 整列 DELETE
+        // 的實路。移除拆車 MOD 只關選單不關能力，咽喉唯一交匯點＝permanentlyRemove 本身。
+        // 本版純 observe（headCall 頭部記錄 vid/script/pos/MVCK 認領/caller frame/Lua 驅動/
+        // 近距玩家）：enforce 需要 (requester, vehicle) 對而咽喉點只有 vehicle，身分橋
+        // 未定案前 enforce 必然誤殺（admin onCheatRemove 與惡意刪車走同一條 command；
+        // 純車況規則會擋 setSmashed 換殼與 admin /remove vehicles 批次）——三方審查
+        // （codex/grok lane 2026-08-28）一致。jar-wide callsite census=4 由 SmokeCheck 釘死。
+        // kill switch：-Dmdc.vehicleRemoveGuard（2 observe 預設／1 本版 observe-alias／0 off）。
+        Patcher.MethodOps permRemove = baseVeh.method("permanentlyRemove", "()V");
+        permRemove.headCall = new Patcher.HeadCall("zombie/mdc/VehicleRemoveGuard", "onRemove",
+                "(Lzombie/vehicles/BaseVehicle;)V");
+        permRemove.expectedHits = 1;
+
         return patches;
     }
 
