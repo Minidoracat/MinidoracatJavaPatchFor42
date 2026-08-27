@@ -87,6 +87,8 @@ $helperEntries = @(
     'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/AnimalLosGate.class',
     'zombie/mdc/VehicleRemoveGuard.class',
+    'zombie/mdc/ClothingSyncGuard.class',
+    'zombie/mdc/ContainerIdProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -292,6 +294,17 @@ java "-Dmdc.vehicleRemoveGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectz
 Assert-Ok "VehicleRemoveGuardTest（mode=1，本版 observe-alias）"
 java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest off
 Assert-Ok "VehicleRemoveGuardTest（off 文字別名，純早退 kill switch）"
+
+Write-Host "[9q/10] 衣物同步守衛（W20）三組態行為驗證（獨立 JVM）..."
+# observe＝預設出貨（(b) 記錄後拋 NPE 保 vanilla 語意、(c) 資訊超集行、(a) square-null 分解）；
+# enforce＝(b) null→white 修復（僅 tint 刀有 enforce 語意）；off＝三把 kill switch 全關、
+# 純直通/早退。三組態都真跑並自驗模式，property 拼錯不得假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest observe
+Assert-Ok "ClothingSyncGuardTest（observe，預設出貨模式）"
+java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest enforce
+Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
+java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" "-Dmdc.containerIdProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
+Assert-Ok "ClothingSyncGuardTest（三把 kill switch 全關，純直通）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

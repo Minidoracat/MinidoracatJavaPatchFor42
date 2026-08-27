@@ -2675,6 +2675,119 @@ observe-alias**，比照 W16）／`0|off`（純早退）；文字別名＋未知
   互補不互替（8/25 稽核建議 #5/#6）。
 ---
 
+## 2ah. 衣物同步守衛（W20，server，預設 observe；(b) 附可開的 enforce）
+
+### 立案（2026-08-28 三方核實的三個 log 叢集）
+
+8/28 當輪 68 分鐘（分析 repo errors.txt）：ERROR 1,589，其中
+`INetworkPacket.send> Exception thrown` ×362＋NPE 指紋 ×363＋
+`SyncVisualsPacket.parse > Player h...` ×129——三叢集合計約 490。
+**362 是 per-connection 放大值**（`INetworkPacket.send` :124-133 的 try-catch 是
+per-connection；`sendToRelative`/`sendToAll` 對每條 relevant connection 各
+getPacket＋setData＋各自炸），且 (a)(b) 混在同一指紋，實際邏輯事件數遠小於 362、
+分解靠本刀計數。
+
+**(a) ContainerID square-null NPE**：`IsoGameCharacter.addHole` →
+`BloodClothingType.addHole` → `Clothing.setCondition`（condition≤0 → :817
+`isWorn()&&isRemoveOnBroken()`）→ `Unwear(true)` → `GameServer.sendRemoveItemFromContainer`
+→ **sendToRelative 分支**（:2452＝`container.getCharacter()` 非 IsoPlayer——玩家自身走
+:2450 且 ContainerID 有 IsoPlayer 專用分支，**受害主體是殭屍/屍體等非玩家角色**）→
+`ContainerID.set(ItemContainer)` :94 → 雙參 set 的 ObjectContainer/IsoObject 分支
+`o.square.getObjects()`（javap offset 197/233）**無 null 守衛**。
+square 矛盾根源（codex lane 定位）：`Unwear` :120 用 `c.getSquare()!=null` 放行
+（`IsoMovingObject.getSquare()`＝`current ?: square`），ContainerID 卻直讀 raw `square`
+field——IsoGameCharacter 建構只填 current。NPE 被 per-connection catch 吞掉後
+`Unwear` 的 `inventory.Remove`＋`AddWorldInventoryItem` 照常執行 ⇒ client 未收到移除
+通知＝黏性 desync（可能「身上副本未消＋地面副本出現」的複製視覺）。
+
+**(b) tint NPE**：`SyncClothingPacket$ItemDescription` 帶參 ctor 對 baseTexture/
+textureChoice 都有 `getVisual()==null ? -1 :` 守衛（offset 39-87、IFNONNULL×2），
+**唯獨 tint 直呼 `getVisual().getTint()`（offset 91-101）**——vanilla 同一 ctor 自防
+兩行漏第三行。`getVisual()` 於 clothing asset 不存在/未 ready 時清成 null
+（InventoryItem 反編譯 :2320-2333）⇒ 該玩家每次 SyncClothing 廣播（IsoGameCharacter
+:3470、Clothing :1012/:1061/:1111 等 sendToAll）對每條 connection 各炸一次＝
+**該玩家衣物同步黏性全滅**。
+
+**(c) visuals count mismatch**：`SyncVisualsPacket.parse` :57-130 以 server 本地 player
+重建 itemVisuals（:60）、讀 wire count（:61）、不符即 error＋**整包 return**。server
+console 的 "Player has X ... sync Y"＝server 本地 X、client 宣稱 Y（**client 多
+server 少**，8/28 樣本 14/15）。`isConsistent` :53 同判 ⇒ 不 process/forward。
+
+### 三叢集關係（核實定案＋待 observe 證偽）
+
+- (a)→(c) **因果不成立**：(a) 主體非 IsoPlayer，SyncVisuals 只對玩家。
+- (b)(c) **強共同根因假說**：`WornItems.getItemVisuals` 跳過 null-visual item
+  （WornItems.java :155-167），SyncClothing.set 的 lambda 只濾 item/getItem() null——
+  同一件 null-visual worn item 同時讓 (b) ctor 炸、讓 server itemVisual count 比
+  client 少 1 ⇒ (c) 的 wireMinusLocal=+1。observe 以「(b) 的 player 與 (c) 的 player
+  同一人＋diff 恆 +1」定罪；若 (c) 無 null-visual 玩家或 diff 分佈雜訊化則分流。
+  MirageWardrobe（wid 3770186452，8/17 起在服）歸因也依此，不預設成立。
+
+### 手術（1 headCall 多 slot＋1 headCall＋4 redirect）
+
+| 掛點 | 手術 | expectedHits |
+|---|---|---|
+| `ContainerID.set(ItemContainer,IsoObject)V` 頭部 | headCall slots={1,2} → `ContainerIdProbe.onSet`（**多 slot headCall 首用**：aload_1→aload_2→invokestatic，真指令 +3、峰值 2、frames 不需增補） | 1 |
+| `SyncClothingPacket.set(IsoPlayer)V` 頭部 | headCall slots={1} → `ClothingSyncGuard.onClothingSet`（ThreadLocal 記組包對象） | 1 |
+| `ItemDescription.<init>(WornItem)V` | redirect `ItemVisual.getTint()` → `tintOf(ItemVisual)`（1:1 同形） | 1 |
+| `SyncVisualsPacket.parse` | redirect `PlayerID.getPlayer()` ×3 → `parsePlayer`（捕獲 parse 對象）＋`DebugType.error(Object)` ×1 → `onVisualsMismatch`（資訊超集行：原訊息＋player＋signed diff＋分佈計數） | 4 |
+
+- **(b) 語意**：off＝直通（null 就地 NPE，vanilla 等價）；observe（預設）＝記錄後拋
+  NPE（**保 vanilla 失敗語意**——同樣被 send 的 per-connection catch 吞，行為零差、
+  log 指紋換成可歸因版）；enforce＝null visual／null tint 都回 `ImmutableColor.white`
+  （**只保序列化存活**，transport liveness——接收端 process :190-207 仍有
+  `getVisual().setTint` 假設，不宣稱端到端根治）。
+  **禁止改成 lambda 過濾整件 item**：`SyncClothingPacket.process` 會把封包未列出的
+  worn item 從遠端 `WornItems.remove`（SmokeCheck 行為錨釘死）＝把 asset 暫未 ready
+  解讀成脫衣。
+- **(c) 刻意不 enforce**：SyncVisuals 是純 positional 協定（wire 只有 count＋依序
+  patch/dirt/blood，無 item identity）——「跳過異常項」「clamp 到 min(count)」都會把
+  洞/血/condition 套到錯的衣服；vanilla 整包拒絕反而安全。修復方向只能是治成因
+  （(b) enforce）或完整 SyncClothing reconciliation/resync（另案）。
+- **(a) 刻意不修**：修復要動封包定位語意（改讀 getSquare() 或 null 時換 ContainerType
+  fallback），影響所有容器封包——等本探針分解（o class 分佈、square vs getSquare 差、
+  caller）後另案。
+- (b) 的 NPE 現況無 pool 洩漏疑慮：PacketsCache 是 per-connection 每 PacketType 長存
+  handler，setData 失敗時尚未 startPacket（codex lane 查證）——helper 也不在 packet
+  欄位留狀態。
+
+### 守門與行為測試
+
+- vanilla 前提釘：ctor `getVisual=5、getTint=1、IFNONNULL=2`（**TIS 補上守衛時
+  IFNONNULL 變 3＝(b) 撤刀訊號**）；write 內 GETFIELD tint=4（第二 NPE 點）；process
+  的 `WornItems.remove(InventoryItem)`=1（禁止過濾的行為錨）；parse `getPlayer=3、
+  error(Object)=1、getItemVisuals=1`；雙參 set `raw square=6／getSquare=0／getObjects=2`
+  ＋單參呼叫雙參=1（兩層 set 結構）。
+- 手術後：三 headCall 全序（`headCallSlotsOk` 多 slot 版首用）＋真指令對帳（+3/+2/不變）；
+  redirect 原呼叫歸零；**負對照**：`SyncVisualsPacket.write` 未被動（redirect 是
+  method-scope，write 的 getPlayer 保持 vanilla）。
+- helper 契約：tintOf 委派 2（off 直通＋非 null 主路徑）、white 引用 2（兩個 enforce
+  出口）；onVisualsMismatch 的 error 出口恰 1（off/observe 同 sink，資訊超集不翻倍）；
+  parsePlayer 委派 1；onSet 的 getStackTrace 恰 1（square-null 時才走）。
+- `ClothingSyncGuardTest` 三組態獨立 JVM（observe 預設／tint enforce／三把全 off，
+  模式自驗）：parseCounts 三例（+1/-1/格式不符→null）、tintOf 三態（observe 拋 NPE
+  帶刀名、enforce white＋repaired、off 直通 NPE 計數凍結）、tint-null 三態、mismatch
+  signed diff 分佈（plus/minus/other 各 +1）、ContainerIdProbe 分解計數（objectNull/
+  squareNull/正常路徑）與 off 純早退、caller 分類（跳過兩層 ContainerID.set）。
+
+### kill switch（三把分離、獨立降級，比照 W10）
+
+`-Dmdc.containerIdProbe`（0|off／2|observe 預設）；
+`-Dmdc.clothingTintGuard`（0|off／1|enforce＝null→white／2|observe 預設）；
+`-Dmdc.visualsMismatchProbe`（0|off／2|observe 預設）。未知值一律落回 observe。
+
+### 部署與觀測（驗收）
+
+- observe 一輪後能回答：(a) 的 o class 分佈（殭屍/屍體/其他）與 square-vs-getSquare
+  指紋、(b) 集中在哪些玩家與 fullType（nullTint 路徑帶 item）、(c) 的 diff 符號分佈
+  與 player、(b)(c) 是否同人＝共同根因定罪、是否集中 MirageWardrobe 物品。
+- (b) 開 enforce（`-Dmdc.clothingTintGuard=1`，需重啟）後驗收：`nullVisual` 續計但
+  `repaired`>0 且 send-exception 指紋中 (b) 份額歸零；**不看 ERROR 總量**（(a) 未修）。
+  若 (b)(c) 同根因成立，(c) 的 129 條應同步顯著下降——這是免費的因果驗證。
+- 玩家面回歸：無新「衣服脫不掉／別人看不到我衣服」回報（enforce 只影響 tint 序列化，
+  白色 tint 是可見但無害的降級指紋）。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
