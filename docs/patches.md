@@ -2305,6 +2305,16 @@ popman 分支獲得明確 native 機制——`n_updateMain` 對 `PassToMain` SPS
 backlog stall 定罪；`mcd::MapCollisionData::shouldWait` 為 worker idle 判斷、
 不阻塞主執行緒，MCD 側排除。
 
+**2026-08-29 首戰定罪（80+ 人破峰值，376ce13 session）**：兩次凍結全拍到、同族——
+**排程存檔 `QueuedSaveAll` 在主執行緒的同步阻塞**，三假說（動物重活/ZGC/malloc）於此
+兩例全排除，第四機制成立。#1（f:26524，5.8s，RUNNABLE，heap 22.4G/32G）：
+`WorldMapVisitedServer.save`（`QueuedSaveAll:831`）逐玩家 zip deflate world-map-visited，
+「Saving took 5868ms」自證，人數線性放大。#2（f:40623，7s，TIMED_WAITING，heap 28.2G）：
+`ServerMap.SaveAll:173` 的 `Thread.sleep` 等 save worker 清佇列（「SaveAll took 5851ms」）。
+兩次 `ticksDuringStall=1`＝近乎完全凍結。候選刀方向（另案立案）：(a) worldmap visited
+save 移出主執行緒/分批（非世界一致性關鍵資料）；(b) SaveAll 等待迴圈的 backlog 來源
+（SaveChunkThread 吞吐 vs 80+ 人 chunk 量）。W15 本身維持觀測不動。
+
 ### 手術（headCall，與 W4-1 同機制）
 
 - 掛點：`ServerMap.preupdate()V` 頭部插入 `ALOAD 0; INVOKESTATIC
@@ -2635,6 +2645,14 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   SmokeCheck 鎖 42.20.4 本體/caller census/live-threshold/GameTime前綴；行為測試鎖
   off/observe/on、遠距 fast skip、lastAlerted 負值 clamp、近距 delegate、12.2 邊界帶、
   隱形玩家、null fallback、**pair 中途 spottingDist 10→100 後下一 pair 必須 delegate**。
+  **2026-08-29 晚峰 observe 判定（80+ 人破峰值）**：Δbeat 差分 580 calls/幀 ×
+  avgUs=55（累積均值，瞬時更高）≈ 31.9ms/幀；主迴圈 3.2fps（幀長 ~312ms）⇒
+  **殘餘 ≈10–13% ≥ 8% 門檻，on canary 解封條件成立**（objAvg 2035→峰值更大、
+  sizeMax=2611；離峰 19 時僅 6.7%——佔比隨人數/動物/objectList 線性）。
+  scanned/fastSkipped/delegated 恆 0（observe 不走 fast path，語意正確）、
+  fallbacks=0、anomalies=0、Gate forwarded ≈ Scan calls 對帳成立、Gate 與 Scan
+  avgUs 一致（wrapper 開銷不可見）。下一步：離峰（清晨）獨立 canary 開
+  `-Dmdc.animalLosScan=on`（寫兩份 JVM json、需重啟），A/B 加速比 ≤1.1× 即撤。
 ---
 
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
