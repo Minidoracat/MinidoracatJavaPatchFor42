@@ -2651,8 +2651,12 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   sizeMax=2611；離峰 19 時僅 6.7%——佔比隨人數/動物/objectList 線性）。
   scanned/fastSkipped/delegated 恆 0（observe 不走 fast path，語意正確）、
   fallbacks=0、anomalies=0、Gate forwarded ≈ Scan calls 對帳成立、Gate 與 Scan
-  avgUs 一致（wrapper 開銷不可見）。下一步：離峰（清晨）獨立 canary 開
-  `-Dmdc.animalLosScan=on`（寫兩份 JVM json、需重啟），A/B 加速比 ≤1.1× 即撤。
+  avgUs 一致（wrapper 開銷不可見）。**canary 已排入：8/29 20:5x 將
+  `-Dmdc.animalLosScan=on` 寫入兩份 JVM json（serverfiles＋canonical，bak
+  `.bak-20260829-losscan`），下次重啟自動生效、為該次重啟唯一變更**；驗收＝on 實測
+  avgUs ÷ observe 基線（離峰 25／晚峰 55，以 objAvg 校正規模差），加速比 ≤1.1× 即
+  改回 observe 撤刀。scanned>0、fastSkipped≫delegated、fallbacks/anomalies=0 為健康指紋；
+  AnimalSpotted（W3-3）skipped 增速驟降屬預期（歸屬轉移到 fastSkipped）。
 ---
 
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
