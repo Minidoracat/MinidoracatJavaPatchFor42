@@ -69,6 +69,7 @@ $helperEntries = @(
     'zombie/mdc/ChunkRequestPacker.class',
     'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/ContainerCycleGuard$State.class',
+    'zombie/mdc/ContainerAddCycleProbe.class',
     'zombie/mdc/ChunkLoadGuard.class',
     'zombie/mdc/ForwardVectorGuard.class',
     'zombie/mdc/ChunkWriteGuard.class',
@@ -86,6 +87,7 @@ $helperEntries = @(
     'zombie/characters/animals/MdcAnimalPersistProbe.class',
     'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/AnimalLosGate.class',
+    'zombie/mdc/AnimalLosScan.class',
     'zombie/mdc/VehicleRemoveGuard.class',
     'zombie/mdc/ClothingSyncGuard.class',
     'zombie/mdc/ContainerIdProbe.class',
@@ -146,6 +148,12 @@ Assert-Ok "ContainerCycleGuardTest"
 # 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場
 java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
 Assert-Ok "ContainerCycleGuardTest（maxDepth=0 kill switch）"
+# W5-2 門口 probe：預設 observe＋off kill switch 各獨立 JVM（probe 純函式仍跑，wrapper 模式自驗）。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerAddCycleProbeTest
+Assert-Ok "ContainerAddCycleProbeTest（observe 預設）"
+java "-Dmdc.containerAddCycleProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerAddCycleProbeTest
+Assert-Ok "ContainerAddCycleProbeTest（off kill switch）"
+
 
 Write-Host "[9b/10] chunk 供給併包（W4-1）行為驗證＋kill switch 模式..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
@@ -284,6 +292,14 @@ java "-Dmdc.animalLosGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomb
 Assert-Ok "AnimalLosGateTest（off 文字別名，純直通 kill switch）"
 java "-Dmdc.animalLosGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
 Assert-Ok "AnimalLosGateTest（未知值 bogus 落回 observe——parseMode 安全預設方向）"
+
+Write-Host "[9o2/10] 動物 LOS 迴圈殼 Scan 三模式行為驗證（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest observe
+Assert-Ok "AnimalLosScanTest（observe 預設 timing wrapper）"
+java "-Dmdc.animalLosScan=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest on
+Assert-Ok "AnimalLosScanTest（on fast/delegate/fallback/邊界）"
+java "-Dmdc.animalLosScan=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest off
+Assert-Ok "AnimalLosScanTest（off 直通）"
 
 Write-Host "[9p/10] 車輛永久移除授權守衛（W19 observe）三組態行為驗證（獨立 JVM）..."
 # observe＝預設出貨；1 是尚未實作 enforce 的 observe-alias（授權條件待 observe 數據定案）；

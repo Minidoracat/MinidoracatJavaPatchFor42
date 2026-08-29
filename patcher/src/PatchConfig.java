@@ -473,6 +473,19 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoGameCharacter;)Z",
                 "zombie/mdc/ContainerCycleGuard", "isInCharacterInventory"));
         inCharInv.expectedHits = 1;
+        // ---- W5-2 環「門口」偵測（observe 首發，2026-08-29；enforce 待 observe 數據另案）----
+        // 根治方向：AddItem 加入前偵測「物品是 target 祖先」＝將成環。vanilla 述詞
+        // chainContainsContainingItem 是 private 且只爬 2 層，helper 自行實作完整深度同語意爬升。
+        // 本版純 observe：不改回傳值、不拒絕；且 containsID=true 時 vanilla 根本不加入，helper
+        // 只在 false 時 probe，避免污染 wouldCycle。AddItemBlind 不設 item.container backlink、
+        // headCall 又在容量拒絕前，無法產生可信訊號；Java 外部 caller=0，暫不掛（W5 捕手兜底）。
+        // AddItem：方法內唯一 containsID 呼叫 redirect（1→1 同形，原值照回＋旁路 probe）。
+        Patcher.MethodOps addItem = itemCont.method("AddItem",
+                "(Lzombie/inventory/InventoryItem;)Lzombie/inventory/InventoryItem;");
+        addItem.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/inventory/ItemContainer", "containsID", "(I)Z",
+                "zombie/mdc/ContainerAddCycleProbe", "containsID"));
+        addItem.expectedHits = 1;
         patches.add(itemCont);
 
         // ---- W6 地圖格載入捕手（2026-08-14 全服假死實案，凍結 114 分鐘；docs/patches.md 2r）----
