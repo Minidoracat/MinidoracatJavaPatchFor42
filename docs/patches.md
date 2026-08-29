@@ -969,13 +969,21 @@ helper 自身例外有界印出堆疊（前 3 次）。
 `ItemContainer.Remove` 的 `removeFromHands` 會被跳過（物品從容器移除卻留在手上）。
 **因此本刀是止血＋捕手，不是根治。**
 
-**根因仍待處理（W5-2，不可進 backlog）**：`AddItem`（`ItemContainer.java:458`）與
-`AddItemBlind` 應在加入前拒絕成環。vanilla 自己已有現成述詞
-`TransactionManager.chainContainsContainingItem(ItemContainer,int)`，而 `AddItem` 的
-`containsID` 呼叫點（javap offset 11）堆疊恰為 `[ItemContainer, itemId]`，與該述詞簽名吻合。
-**風險**：拒絕加入會讓 `AddItem` 回 null，若呼叫端已先把物品從舊容器移除，物品會憑空消失
-——修 bug 修出物品遺失更糟，故需獨立的分析與審查循環。在 W5-2 落地前，**不可認定此類假死已排除**。
-同一條鏈上另有 `isInside` 與 `InventoryContainer.save`（存檔路徑）仍無防環。
+**W5-2 門口偵測已於 2026-08-29 落地（observe 首發；enforce 待數據）**：
+`AddItem(InventoryItem)` 內唯一 `containsID(I)Z` 1→1 改道至
+`ContainerAddCycleProbe.containsID(ItemContainer,int)`；vanilla 原值照回，且**只有
+containsID=false（vanilla 真會進加入路徑）才旁路 probe**，避免把 duplicate 拒絕污染
+wouldCycle。掛在既存 W5 `ItemContainer` ClassPatch 上（同 class 不開第二個 ClassPatch）。
+vanilla `TransactionManager.chainContainsContainingItem` 是 private 且只爬 2 層；helper
+自行實作同語意完整 64 層向上爬升（零配置、depth cap＝既存環/異常深鏈訊號）。
+**AddItemBlind 刻意不掛**：headCall 在 null/容量拒絕前會造 false positive，且 Blind 只
+`items.add(item)`、不設 `item.container` backlink，向上 walk 可漏報真環；42.20.4 Java
+外部 caller census=0（Lua/reflection 理論可達），由 W5 使用層捕手兜底，待可信中段掛點/
+下行圖判定再補。**本版純 observe、不拒絕**：caller 盤點實證至少四條 remove→add
+（`ItemContainer.transferItems`、`IsoMannequin`、`GameServer` replace、`EvolvedRecipe`），
+直接拒絕會讓已移除物品消失；enforce 必須等 `wouldCycle/depthCapped/caller` 實測後設計
+rollback，不可借道 containsID=true（誤導 error＋`getItemWithID` null）。`isInside` 與
+`InventoryContainer.save` 仍無防環；W5 捕手持續兜底，尚不可宣稱「環不會形成」。
 
 **驗證**：SmokeCheck——兩刀各自的 vanilla 前提（恰一個自身遞迴）、改道恰一次且原遞迴歸零、
 **指令總數未變**（1:1 替換的結構事實）、原體保留（`getParent` 呼叫數與 `containingItem`
@@ -2613,8 +2621,20 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   以 observe 實測回填）＋行為面抽查（殭屍咬雞/逃跑、馴養靠近速度、偷襲 XP、高壓動物
   起手）；AnimalSpottedPrefilter 計數下降屬預期；**`lodPassthrough` 應恆 0**（非 0＝TIS
   已開 LOD、fail-open 生效中、節流面縮小）。N 上調前重驗速率代價＋Rand 位移＋排程結構。
-- 前案銜接：AnimalLosScan（迴圈殼 bit-exact 優化，草案）同 callsite 互斥——enforce 後
-  updateLOS 殘餘佔比仍 ≥8% 時以「Gate forward 時 delegate 給 Scan」疊加。
+- **W18-2 AnimalLosScan 已於 2026-08-29 落地（預設 observe）**：W18 Gate 已佔用
+  `updateInternal` 唯一 callsite，故不再新增 bytecode 手術；改為 Gate forward 路徑
+  `invokestatic AnimalLosScan.updateLOS`（Gate off 仍直通、不經 Scan，kill switch 分層）。
+  observe＝純 timing wrapper（`calls/elapsedNs/sumObjects`）量 Gate enforce 後的真實殘餘；
+  on 才啟用保守裕度平方預篩（`d² > (threshold+0.25)²`）消除遠距 pair 的 sqrt/
+  `tryCastTo`/prefilter 白繳；**threshold 每個 zombie/player candidate pair live 讀**
+  （W3-3 must-keep：前一 pair 的 mod behavior 可動態改 spottingDist；讀取異常該 pair
+  全額 delegate，禁止沿用舊 gate）。邊界帶與近距全額 delegate W3-3，與現行行為
+  bit-exact（含 RNG）。三態 `-Dmdc.animalLosScan=0|off/1|on/2|observe`（預設 observe）；
+  on 等 observe `ms/s` 與 jstack 佔比互驗後才離峰 canary（加速比 ≤1.1× 即撤）。
+  review 修正：Gate banner 在 sample t0 前完成；delegated 只計實際 prefilter 呼叫。
+  SmokeCheck 鎖 42.20.4 本體/caller census/live-threshold/GameTime前綴；行為測試鎖
+  off/observe/on、遠距 fast skip、lastAlerted 負值 clamp、近距 delegate、12.2 邊界帶、
+  隱形玩家、null fallback、**pair 中途 spottingDist 10→100 後下一 pair 必須 delegate**。
 ---
 
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）

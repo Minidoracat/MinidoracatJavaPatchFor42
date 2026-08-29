@@ -67,8 +67,9 @@ public final class AnimalSpottedPrefilter {
     /**
      * 純函式：預過濾門檻。spotted() 內所有持久效果門檻的上包絡（10）＋2 格裕度，
      * 下限 12 對抗 mod 把 spottingDist 調小；mod 調大時動態跟隨。
+     * public：W18-2 AnimalLosScan 直呼同一真相源（單一定義防漂移，SmokeCheck 另釘語意）。
      */
-    static float thresholdOf(int spottingDist) {
+    public static float thresholdOf(int spottingDist) {
         return Math.max(12.0F, spottingDist + 2.0F);
     }
 

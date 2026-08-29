@@ -128,9 +128,13 @@ public final class AnimalLosGate {
         if (skip) {
             return;
         }
+        // 一次性 Scan banner 在 LOS sample t0 之前完成，避免永久污染 losMaxUs。
+        AnimalLosScan.prepare();
         long t0 = sample ? System.nanoTime() : 0L;
         try {
-            animal.updateLOS();
+            // W18-2 疊加：forward 路徑 delegate 給 AnimalLosScan（scan off 時其內部直通
+            // vanilla patched 本體；Gate off 直通不經 Scan——kill switch 分層，設計 §5 銜接）。
+            AnimalLosScan.updateLOS(animal);
         } finally {
             if (sample) {
                 long dt = System.nanoTime() - t0;

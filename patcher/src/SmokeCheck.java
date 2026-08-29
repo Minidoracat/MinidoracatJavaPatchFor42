@@ -731,6 +731,42 @@ public final class SmokeCheck {
         failed += check("W5 負對照：全 class 各僅一處改道（其他呼叫端保持 vanilla）",
                 guardCallsWholeClass == 1 && guardInvCallsWholeClass == 1);
 
+        // ---- W5-2 容器環門口 observe：同一個 ItemContainer ClassPatch 上疊加 ----
+        String addProbeCls = "zombie/mdc/ContainerAddCycleProbe";
+        String invItemCls = "zombie/inventory/InventoryItem";
+        String w52AddDesc = "(L" + invItemCls + ";)L" + invItemCls + ";";
+        String containsDesc = "(I)Z";
+        String probeContainsDesc = "(L" + icCls + ";I)Z";
+        MethodNode vAddItem = methodFromJar(jar, icCls, "AddItem", w52AddDesc);
+        MethodNode pAddItem = method(distJava, icCls, "AddItem", w52AddDesc);
+        MethodNode vAddBlind = methodFromJar(jar, icCls, "AddItemBlind", w52AddDesc);
+        MethodNode pAddBlind = method(distJava, icCls, "AddItemBlind", w52AddDesc);
+        failed += check("W5-2 vanilla：AddItem containsID 恰1、Blind無probe掛點",
+                countExactCalls(vAddItem, Opcodes.INVOKEVIRTUAL,
+                        icCls, "containsID", containsDesc) == 1);
+        failed += check("W5-2 patched：AddItem 1→1 observe改道；Blind刻意保持vanilla",
+                countExactCalls(pAddItem, Opcodes.INVOKESTATIC,
+                        addProbeCls, "containsID", probeContainsDesc) == 1
+                && countExactCalls(pAddItem, Opcodes.INVOKEVIRTUAL,
+                        icCls, "containsID", containsDesc) == 0
+                && realInsnCount(pAddItem) == realInsnCount(vAddItem)
+                && realInsnCount(pAddBlind) == realInsnCount(vAddBlind));
+        MethodNode addProbeEntry = method(distJava, addProbeCls, "containsID", probeContainsDesc);
+        failed += check("W5-2 wrapper：vanilla containsID恰1、probeAndLog恰1",
+                countExactCalls(addProbeEntry, Opcodes.INVOKEVIRTUAL,
+                        icCls, "containsID", containsDesc) == 1
+                && countExactCalls(addProbeEntry, Opcodes.INVOKESTATIC,
+                        addProbeCls, "probeAndLog", "(L" + icCls + ";I)V") == 1);
+        MethodNode addProbe = method(distJava, addProbeCls, "probe", "(L" + icCls + ";I)I");
+        failed += check("W5-2 helper：probe零NEW零Rand；catch只RuntimeException",
+                countOpcode(addProbe, Opcodes.NEW) == 0
+                && classNode(distJava, addProbeCls).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0
+                && classNode(distJava, addProbeCls).methods.stream()
+                        .flatMap(m -> m.tryCatchBlocks.stream())
+                        .allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type)));
+
+
         // ---- W6 地圖格載入捕手（IsoChunk.doLoadGridsquare 的 addToWorld 改道）----
         String chunkCls = "zombie/iso/IsoChunk";
         String isoObjCls = "zombie/iso/IsoObject";
@@ -1962,15 +1998,16 @@ public final class SmokeCheck {
                         == classWideCalls(classNodeFromJar(jar, isoAnimalCls), Opcodes.INVOKEVIRTUAL,
                                 isoAnimalCls, "updateLOS", "()V") - 1);
 
-        // helper 契約（v2，review 修正後）：轉呼叫恰 2（off 直通＋主路徑 try/finally 夾測合一）、
-        // 幀源 getFrameCounter 恰 1、fail-open 的 getCurrentSimulationLevel/getFrameMod 各恰 1、
-        // 主方法熱路徑零 NEW（banner/beat 拼接都在獨立方法）、全 class 零 Rand、
-        // 例外語意：具名 handler 只允許 RuntimeException（LinkageError 必須穿透＝fail-fast，
-        // 比照 W6/W10 catch 型別鎖；type==null 的 finally any-handler 允許——它 rethrow 不吞）。
+        // helper 契約（W18-2 疊加後）：Gate off 仍直通 vanilla 一次；forward 路徑改為
+        // AnimalLosScan 靜態委派恰 1。幀源/LOD fail-open/零配置/例外型別紀律原樣。
         MethodNode gAlgUpd = method(distJava, algCls, "updateLOS", "(L" + isoAnimalCls + ";)V");
-        failed += check("W18 helper：委派2、幀源1、LOD fail-open、零NEW、零Rand、catch 只 RuntimeException",
+        String scanCls = "zombie/mdc/AnimalLosScan";
+        String aniRecvDesc = "(L" + isoAnimalCls + ";)V";
+        failed += check("W18 helper：vanilla直通1＋Scan委派1、幀源1、LOD fail-open、零NEW零Rand",
                 countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
-                        isoAnimalCls, "updateLOS", "()V") == 2
+                        isoAnimalCls, "updateLOS", "()V") == 1
+                && countExactCalls(gAlgUpd, Opcodes.INVOKESTATIC,
+                        scanCls, "updateLOS", aniRecvDesc) == 1
                 && countExactCalls(gAlgUpd, Opcodes.INVOKEVIRTUAL,
                         "zombie/MovingObjectUpdateScheduler", "getFrameCounter", "()J") == 1
                 && classNode(distJava, algCls).methods.stream()
@@ -1986,6 +2023,47 @@ public final class SmokeCheck {
                 && gAlgUpd.tryCatchBlocks != null
                 && gAlgUpd.tryCatchBlocks.stream().allMatch(
                         tcb -> tcb.type == null || "java/lang/RuntimeException".equals(tcb.type)));
+
+        // W18-2 Scan：vanilla 迴圈殼語境指紋＋jar-wide caller census＋helper delegate 契約。
+        // 任一紅＝TIS 改了 updateLOS，fast-path 等價性必須重證，不能只改命中數放行。
+        failed += check("W18-2 vanilla指紋：objectList1/DistanceTo1/tryCastTo3/prefilter2/caller1",
+                countExactCalls(vAniLos, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                        "getObjectList", "()Ljava/util/Set;") == 1
+                && countCallsToOwner(vAniLos, "zombie/iso/IsoUtils") == 1
+                && countCallsToOwner(vAniLos, "zombie/util/Type") == 3
+                && countExactCalls(method(distJava, isoAnimalCls, "updateLOS", "()V"),
+                        Opcodes.INVOKESTATIC,
+                        "zombie/characters/animals/behavior/AnimalSpottedPrefilter",
+                        "spotted",
+                        "(Lzombie/characters/animals/behavior/BaseAnimalBehavior;"
+                                + "Lzombie/iso/IsoMovingObject;ZF)V") == 2
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V") == 1);
+        MethodNode scanUpd = method(distJava, scanCls, "updateLOS", aniRecvDesc);
+        failed += check("W18-2 Scan helper：fallback3/prefilter2/live-threshold/DistanceTo/前綴/零Rand/catch型別",
+                countExactCalls(scanUpd, Opcodes.INVOKEVIRTUAL,
+                        isoAnimalCls, "updateLOS", "()V") == 3
+                && countExactCalls(scanUpd, Opcodes.INVOKESTATIC,
+                        "zombie/characters/animals/behavior/AnimalSpottedPrefilter",
+                        "spotted",
+                        "(Lzombie/characters/animals/behavior/BaseAnimalBehavior;"
+                                + "Lzombie/iso/IsoMovingObject;ZF)V") == 2
+                && countExactCalls(scanUpd, Opcodes.INVOKESTATIC,
+                        "zombie/characters/animals/behavior/AnimalSpottedPrefilter",
+                        "thresholdOf", "(I)F") == 1
+                && countExactCalls(scanUpd, Opcodes.INVOKESTATIC,
+                        "zombie/iso/IsoUtils", "DistanceTo", "(FFFF)F") == 1
+                && countExactCalls(scanUpd, Opcodes.INVOKESTATIC,
+                        "zombie/GameTime", "getInstance", "()Lzombie/GameTime;") == 1
+                && countExactCalls(scanUpd, Opcodes.INVOKEVIRTUAL,
+                        "zombie/GameTime", "getMultiplier", "()F") == 1
+                && countFieldTouches(scanUpd,
+                        "zombie/characters/animals/behavior/BaseAnimalBehavior", "lastAlerted") >= 4
+                && countFieldTouches(scanUpd, isoAnimalCls, "spottedChr") >= 1
+                && classNode(distJava, scanCls).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0
+                && scanUpd.tryCatchBlocks.stream()
+                        .allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type)));
 
         // 承重前提釘（review B1；grok 前輪 BLOCKING 的失效類）：enforce 的「Δframe 恆 1 ⇒
         // 無 gcd 剩餘類失明」不是數學免疫，而是「server ⇒ FULL ⇒ frameMod==1 ⇒ 每 tick 全跑」
