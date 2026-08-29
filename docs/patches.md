@@ -369,6 +369,35 @@ getFloat×3/get×1/getInt×4 計出，並與 helper 實際 clamp ceiling 連動�
 部署後觀測：`UpdateStuff> Exception thrown`＋`BufferUnderflowException` 應歸零；
 若 `[PopmanBufferGuard]` clamp log 出現＝native 超額頁實際發生率的直接量測。
 
+**2026-08-29 native 反編譯驗證後記**（libPZPopMan64.so 帶完整 DWARF，Ghidra headless 反編譯
+`snapshots/42.20.4-20260829/native/decompiled/libPZPopMan64.so.c`；主分析＋codex 獨立復核一致，
+skill `pz-native-decompile`）：v3 的四個承重前提全數獲 native 級證實——
+(1) **無位址快取**：全 lib 唯一 `GetDirectBufferAddress` 在 `ByteBuffer` wrapper ctor，
+六個 JNI 入口的 wrapper 全是棧上物件、每呼叫重取，無任何 buffer registry；
+(2) **position 語意**：wrapper `position=0` 起算、只 `CallIntMethod` 讀 Java
+`capacity()`，native 從不讀寫 `java.nio.Buffer.position`——共享 position 競爭純屬 Java 側
+兩執行緒推進同一欄位，與 swap 專用 buffer 完全相容；
+(3) **29 bytes/筆對帳**：x/y/z float＋dir byte＋descriptorID/state/pathTargetX/pathTargetY int
+（`position += 0x1d`）；
+(4) **21 bytes/筆消費端**：`n_saveRealZombies` 逐 byte 解析 21B 記錄入
+`ManagerMain::instance.saveRealZombieHack`，210=10×21 的 overlap 證據
+獲 native 直接確認。
+**一項歷史敘述修正**：「native 回報筆數可超過 buffer 容量」不成立——`n_getAddZombieData`
+每筆寫完做預測性終止檢查（`length < position*2 - recordStart`），1024 buffer 正常
+路徑**恆 ≤35 筆/頁**；v2 clamp 觀測到的 `pageCount=35 > readable=28` 實為 Java 側 position
+已被寫側推進的直接證據（把執行緒競爭根因定罪得更死），count-clamp 自始就是冗餘保險絲
+（ceiling 公式與 native 真相精確一致，無害）。官方 42.20.2 `readByteBuffer` 收編與 v3 的
+同構性由此獲 native 級追認。
+**備查（native 驗證的新發現，均非 v3 範圍）**：(a) 全 lib direct-buffer writer 恰 4
+（`n_getAddZombieData` 29B＋MPDebugInfo 三支 12B/9B/8B，後三者用自己的 private buffer、
+dedicated server 有 `GameClient.client` 守衛）、reader 恰 2（`n_saveRealZombies` 21B＋
+`MapCollisionData.n_squareUpdateTask` 9B），無 alias 可觸他人 buffer；(b) vanilla 疑似
+獨立窄窗：`n_beginSaveRealZombies` 清空→`n_saveRealZombies` 填入→worker `saveCell`/`save`
+讀取的 `saveRealZombieHack` 全域 vector，主執行緒設 `thread.save=true` 前 pending cell save
+可清空/替換同一 vector（靜態可達、中信心、無 runtime 證據，若未來 popman 存檔異常此為
+候選根因）；(c) `n_pathTask`/`n_getRadarZombieData` 寫 primitive array 後以 `JNI_ABORT`
+release——JVM 若回 copy 則寫入被丟棄（HotSpot 實務上回直接指標，可攜性疑點備查）。
+
 ---
 
 ## 2i. join 卡頓量測（觀測 patch）
@@ -2257,6 +2286,16 @@ chunk 重串流＝黑邊。事後鑑識收斂到三個互不排斥的候選機�
 ——不含 W13 的 clean 版 session 頓挫更嚴重；W14 當時未生效）。8 vCPU 下 GC worker
 搶核為共同放大器（cpu.pressure 累計 3.8h）。三假說的裁決手段一致：**下一次凍結時的
 主執行緒 stack**。本刀把它自動化。
+
+**2026-08-29 native 反編譯補充**（libPZPopMan64.so DWARF 反編譯，詳見 2h 後記）：假說 1 的
+popman 分支獲得明確 native 機制——`n_updateMain` 對 `PassToMain` SPSC queue 做
+**drain-to-empty、無筆數/時間 budget**（只有觀察到 queue 空才 return），
+大 backlog＝主執行緒線性長 stall；且 moodycamel queue 的 512 是**單一 block 大小**而非
+總容量（block 滿即 malloc 新 block 串接、無 backpressure），排除
+「queue 滿直接阻塞」機制、也意味 backlog 可無上限累積。裁決指紋因此更精確：快照若拍到
+主執行緒停在 `ZombiePopulationManager.n_updateMain`（native method frame）＝popman
+backlog stall 定罪；`mcd::MapCollisionData::shouldWait` 為 worker idle 判斷、
+不阻塞主執行緒，MCD 側排除。
 
 ### 手術（headCall，與 W4-1 同機制）
 
