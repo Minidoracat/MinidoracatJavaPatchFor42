@@ -110,8 +110,13 @@ public final class MainLoopWatchdog {
     /**
      * {@code ServerMap.preupdate()V} 頭部 headCall 的目標。參數是 headCall 機制固定
      * 傳入的 {@code this}（slot 0），本刀不使用——收下只為符合插入形狀。
+     *
+     * <p>版本橫幅（{@link PatchInfo#announceOnce}）掛在這裡：主迴圈每幀必經、與 kill switch
+     * 無關（放在 MODE 檢查之前），且 DebugLog 未就緒時會自動在下一幀重試。2026-09-02 退役
+     * W4-1 後它是唯一入口（SmokeCheck 釘死），沒有橫幅＝線上指紋無法追溯到 commit。
      */
     public static void tick(ServerMap unused) {
+        PatchInfo.announceOnce();
         if (MODE == MODE_OFF) {
             return;
         }
