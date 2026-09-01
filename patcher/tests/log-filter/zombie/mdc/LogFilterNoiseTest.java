@@ -63,7 +63,18 @@ public final class LogFilterNoiseTest {
         // OBJ_PREFIX 既有行為鎖（PacketsCache 動態尾綴）
         requireSuppressed("No packet handler for type: 999");
         requireForwarded("No packet handler for typo: 999");
-        System.out.println("log-filter OK  雙向鏡像 19+17／equals 紀律／名單防呆／prefix 行為全數通過");
+        // 抑噪 #9 println 名單：只攔 IsoThumpable 的 not-found；同方法的 square-is-null、
+        // 其他 class 的 not-found（破損訊號）、null 一律放行
+        require(LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on square 8769,15252,0"),
+                "IsoThumpable not-found 必須被攔");
+        require(!LogFilter.suppressesPrintln("ERROR: IsoThumpable square is null"),
+                "square-is-null 必須放行");
+        require(!LogFilter.suppressesPrintln("ERROR: IsoDoor not found on square 1,2,0"),
+                "其他 class 的 not-found 必須放行");
+        require(!LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on squar"),
+                "截斷前綴必須放行");
+        require(!LogFilter.suppressesPrintln(null), "null 必須放行（不得 NPE）");
+        System.out.println("log-filter OK  雙向鏡像 19+17／equals 紀律／名單防呆／prefix 行為／println 名單全數通過");
     }
 
     private static void requireSuppressed(String msg) {
@@ -75,6 +86,12 @@ public final class LogFilterNoiseTest {
     private static void requireForwarded(String msg) {
         if (LogFilter.suppressesObj(msg)) {
             throw new AssertionError("名單外訊息必須放行：" + msg);
+        }
+    }
+
+    private static void require(boolean ok, String what) {
+        if (!ok) {
+            throw new AssertionError(what);
         }
     }
 

@@ -22,8 +22,8 @@ import zombie.vehicles.BaseVehicle;
  * - 動態 per-vehicle 半徑，超長 MOD 載具自動放大，不賭固定 margin。
  * - script null／非有限值一律委派原版（fail-open；原版此時的 NPE 行為不變）。
  *
- * 觀測：reject/delegate/anomaly 計數每 2^24 次呼叫印一行（同 LoginMetrics
- * 使用既有 Multiplayer sink），供部署後驗證 reject 率——這是 codex 設下的
+ * 觀測：reject/delegate/anomaly 計數每 2^24 次呼叫印一行（使用既有 Multiplayer
+ * sink），供部署後驗證 reject 率——這是 codex 設下的
  * 放寬人數上限前提之一。主執行緒單執行緒呼叫，計數不需同步。
  */
 public final class VehicleIntersectPrefilter {

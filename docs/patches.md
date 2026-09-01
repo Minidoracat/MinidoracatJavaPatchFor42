@@ -33,7 +33,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
-## 1. 抑噪類（8 項）——為什麼值得做
+## 1. 抑噪類（9 項）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：
 (a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與
@@ -49,6 +49,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 | 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
+| 9 | IsoObject.syncIsoObject | `ERROR: IsoThumpable not found on square x,y,z`（`System.out.println`，訊息 invokedynamic 組成 → 前綴 startsWith；2026-09-02） | B42 建造流程每次 `ISBuildIsoEntity -> consume success` 後對已被 IsoEntity 取代的 IsoThumpable 送 sync，`getObjectIndex()==-1` 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 門檻 4/h） | 同方法的 `square is null` 與其他 class（IsoDoor／IsoWindow／IsoStove…）的 not-found 是破損訊號，照常印；sync 封包段逐指令未動（SmokeCheck 釘 send/doPacket 數與真指令數）；方法內兩處 println 同改道、class 其餘 println 保持 vanilla |
 
 > **42.20 變更**：`ActionStateContainer.tryInsertChildState` 的抑噪已移除——TIS 自己把那兩個
 > `DebugType.warn` 降級為 `trace`（全 class warn 8→6、trace 1→3），噪音源由官方修掉。
@@ -401,6 +402,13 @@ release——JVM 若回 copy 則寫入被丟棄（HotSpot 實務上回直接指�
 ---
 
 ## 2i. join 卡頓量測（觀測 patch）
+
+> **退役（2026-09-02）**：本刀（LoginPacket ×3、CreatePlayerPacket ×4、
+> ConnectPacket／ConnectCoopPacket 的 `receivePlayerConnect` 各 ×1、
+> `GameServer.receivePlayerConnect` 的 `serverLoadNetworkCharacter` ×2）已移除。
+> join 卡頓歸因任務完成：正式服 8/30–9/2 巡檢 REJOIN_TOTAL 常態 5–13ms，
+> 已無待答問題，量測 wrapper 不再需要常駐 patch 表面。
+> 復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **動機**:正式服主迴圈實測 6–11 秒停頓集中在玩家 join／死亡重生換角(例:17:20:33–17:20:39
 的 6.6s 正值 Player-C「replacing dead player」),但無法從 log 分辨時間花在哪一段。
@@ -867,6 +875,11 @@ STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會
 以實際生效值計），觀測與洩漏根治線全保留。
 
 ## 2p. chunk 供給併包（W4-1，server）＋請求逾時 8s→15s（W4-2，client）
+
+> **退役（2026-09-02）**：W4-1（`PlayerDownloadServer.removeOlderDuplicateRequests`
+> headCall）已移除。42.20.3 官方 pending 機制上線後 packed 只剩 47–82 次/session、
+> skip[short] 99.3%＝效益≈0，而本刀每次遊戲更新都要重驗 WorkerThread 互斥前提。
+> 以下分析全文保留供將來再評估。復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **根因**（八路鑑識＋對抗驗證；完整設計見 `docs/chunk-throughput-design-v1.md`）：
 vanilla 的 chunk 供給只跑到設計值的 15%——client 每幀送一包 `RequestZipList`（約 3 chunk）→
@@ -1608,6 +1621,11 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
 ## 2w. 食材重量記憶化（**實測後決定不啟用 `on`，維持 observe**）
 
+> **退役（2026-09-02）**：本刀（`InventoryItem.getExtraItemsWeight` 的 `CreateItem`
+> 改道）已移除。observe 實測收益僅 0.06–0.18%，「永不啟用 `on`」既已定案，
+> 留著 observe 只是白背一個 patch 表面與每次更新的重驗成本。
+> 復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+
 **浪費**：`InventoryItem.getExtraItemsWeight ()F` 對 `extraItems` 内每個 fullType 字串完整建構
 一個 InventoryItem，只為讀 `getActualWeight()` 就丟棄。單次建構含 `ScriptManager.FindItem`（兩次
 hash、miss 退化為 moduleList 線性掃描）＋`Item.InstanceItem`（codeLen=4064 ＞ FreqInlineSize=325
@@ -2315,6 +2333,18 @@ backlog stall 定罪；`mcd::MapCollisionData::shouldWait` 為 worker idle 判�
 save 移出主執行緒/分批（非世界一致性關鍵資料）；(b) SaveAll 等待迴圈的 backlog 來源
 （SaveChunkThread 吞吐 vs 80+ 人 chunk 量）。W15 本身維持觀測不動。
 
+**2026-09-02 定罪閉環（8/30–9/2 全部 RUNNABLE 凍結對帳）**：4 天所有非關機的 5–7s 凍結
+（8/30 ×9、8/31 ×1、9/1 ×3、9/2 ×3）快照**全部**落在同一族——`ServerMap.SaveAll` 等 4 條
+`WorkerThread` 序列化 loaded cells（「SaveAll took 4474–5043ms」＝大頭）→
+`WorldMapVisitedServer.saveUser` deflate（<1s，快照恰好拍在此段是 5s 門檻的時序巧合；
+`map_visited_server/*.zip` 每人僅 ~10KB）。**這是 vanilla「全存檔＝同步凍結」的設計**
+（`SaveAll` 主執行緒 `sleep(10)` 輪詢 worker 完成；chunk 序列化需世界靜止），patch 無法
+根治，候選 W21（visited 搬背景執行緒）只省 <1s、不立案。可省的是**頻率**：排程存檔
+`SaveWorldEveryMinutes=60`（每小時 2–3.6s）之外，`restart-countdown.sh` 的 `build_message`
+每次公告（5/3/1 分鐘）都 `send_save`（註解自承「讓玩家因短暫暫停注意到公告」）＝每次
+重啟前 5 分鐘 **3 次額外 5–6s 全服凍結**（9/1 21:05/21:07/21:09、9/2 00:00/00:02/00:04、
+00:35/00:37/00:39 逐筆對上），一天 5–8 次重啟。屬營運腳本層，本刀維持純觀測、收案。
+
 ### 手術（headCall，與 W4-1 同機制）
 
 - 掛點：`ServerMap.preupdate()V` 頭部插入 `ALOAD 0; INVOKESTATIC
@@ -2366,6 +2396,14 @@ heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticks
 本刀就是零成本保險絲，不撤。
 
 ## 2ad. 動物卸載接手守衛（W16，server，observe）
+
+> **退役（2026-09-02）**：本刀（APM `removeChunkFromWorld` headCall＋4 redirect、
+> `virtualizeAnimal`、Worker `addAnimal`／`saveRealAnimals`／`moveAnimal`、
+> Main `saveRealAnimals`、`AnimalZones.spawnAnimalsOnZone`、`IsoChunk.removeFromWorld`
+> 2 redirect＋TailCall）已移除。8 天全零遺失（s2Missed／queueFailures／sourceGap／
+> cellNullAdd／chunkNullAdd／duplicateRemoved／cellNullSave 全 0；clearShortfall 1–4 但
+> handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測結論已達；其 heartbeat
+> 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 ### 立案（2026-08-24～25，全服流失定罪）
 
@@ -2657,6 +2695,14 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   avgUs ÷ observe 基線（離峰 25／晚峰 55，以 objAvg 校正規模差），加速比 ≤1.1× 即
   改回 observe 撤刀。scanned>0、fastSkipped≫delegated、fallbacks/anomalies=0 為健康指紋；
   AnimalSpotted（W3-3）skipped 增速驟降屬預期（歸屬轉移到 fastSkipped）。
+  **2026-09-02 on canary 驗收（8/30 00:12 起 on，對照 8/29 20-14 observe 基線）**：
+  on 期 `avgUs` 35–43 @ `objAvg` 2809–3119（9/1 21-21 晚峰 40@3076、9/2 00-41 離峰
+  43@3119、9/1 18-26 晚峰 35@2809）vs observe 基線 53–55 @ 3298 ⇒ objAvg 線性校正後
+  **加速比 ≈1.25×（> 1.1× 門檻），保留 on**；`fastSkipped` 26.2G／`delegated` 9.2M
+  （pair 級 99.96% 走 fast path）、`fallbacks=0`、`anomalies=0`、Gate `forwarded` ≈ Scan
+  `calls` 對帳成立。**但 pair 級 99.96% 只換來 ~25%**＝迴圈本體（`Set` 迭代＋instanceof
+  ＋距離平方，≈35ns/pair × ~1136 pair/call）是底線；再往下只能換資料來源（W18 B 方案：
+  zombie/player 專用清單取代 `getObjectList()` 全掃），另案。
 ---
 
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
@@ -2754,6 +2800,14 @@ observe-alias**，比照 W16）／`0|off`（純早退）；文字別名＋未知
   per-vid ledger 對照 DB 差分。
 - 立即止血屬營運面（移除 Nep 或降 admin-only＋`MVCK.ServerSideChecking=true`），與本刀
   互補不互替（8/25 稽核建議 #5/#6）。
+- **2026-09-02 收案（8/28–9/2，6 天 285 筆）**：`claim=unclaimed` 264／`stale-imprint`
+  16／`claimed:<owner>` 5（**全是認領者本人**，near=[owner]）；100% `lua=true`（Kahlua
+  反射鏈）、`nearest≤2` 格 267 筆＝玩家親手拆；script 分佈為一般車（SmallCar 30、
+  CarNormal 23、SmallCar02 17…），`CarNormalBurnt` 僅 4。**六天內零「他人認領中的車被拆」**
+  ⇒ 「只保護已認領車」在此窗會擋 0 筆、「完好未認領拒拆」會擋 264 筆合法玩法（含 MSW
+  裝載，8/28 已知語意混雜）——enforce 沒有任何規則有數據支持。**決策：本刀收成純鑑識帳本
+  （observe 保留、每筆 rate-limit 內記錄），不 enforce；Player-F 類事件靠帳本事後對帳＋營運
+  規則（MVCK 認領）處理。**
 ---
 
 ## 2ah. 衣物同步守衛（W20，server，預設 observe；(b) 附可開的 enforce）
@@ -2867,6 +2921,85 @@ server 少**，8/28 樣本 14/15）。`isConsistent` :53 同判 ⇒ 不 process/
   若 (b)(c) 同根因成立，(c) 的 129 條應同步顯著下降——這是免費的因果驗證。
 - 玩家面回歸：無新「衣服脫不掉／別人看不到我衣服」回報（enforce 只影響 tint 序列化，
   白色 tint 是可見但無害的降級指紋）。
+- **2026-09-02 巡檢收案（8/28–9/2 observe＋(b) enforce 各一輪）**：nullVisual 8 天 480+ 筆
+  **全部 `player=Player-G`**，enforce 生效後 `action=white`、send-exception 指紋消失；(c)
+  mismatch 仍在（8/30 21-46 ×6、9/1 00-06 ×20，全 Player-G、`wireMinusLocal=+1`）——
+  同根因（同人同號）成立，但「enforce 讓 (c) 下降」的預期**不成立**：tint 修復只保
+  序列化，`getItemVisuals` 少算 1 的機制未動，(c) 要等那件物品被找出並處理。
+  **(a) 主體推翻**：squareNull 全部是 `o=IsoPlayer`（`getSquare=non-null(current)`、
+  `container=none/IsoPlayer`、caller `SyncItemFieldsPacket.setData:135`），非殭屍／屍體；
+  對應 `Error with packet of type: SyncItemFields` 40/2 天；低頻（1–5/session），維持不修。
+
+### W20-2：nullVisual 物品歸因（2026-09-02）
+
+nullVisual 路徑印不出物品——redirect 只換了 `getTint` 的 receiver，而那個 receiver 就是
+null（`nullTint` 路徑才有 `describeItem(visual)`）。補一刀 ctor 頭部 headCall
+`ItemDescription.<init>(WornItem)V` slot 1 → `ClothingSyncGuard.onItemDescription(WornItem)`
+（ThreadLocal 存當前 WornItem；ctor 頭部 `aload_1` 只碰參數不碰 uninitializedThis，
+super 之前合法，`-Xverify:all` 通過），nullVisual 行改印 `item=<fullType>@<bodyLocation>`
+（任一環節缺→`?`，`ItemBodyLocation.toString()` 走 Registries、失敗落回 `?`）。
+`expectedHits` 1→2（headCall＋getTint redirect）；SmokeCheck 釘 ctor 頭部全序、真指令 +2、
+helper 純 `ThreadLocal.set`（零 NEW／零 DebugLog／零 WornItem 呼叫）。部署後第一筆
+`nullVisual#N player=Player-G item=…` 即物品歸因；MirageWardrobe 假說由 fullType 直接證實或排除。
+
+---
+
+## 2ai. 面向物件 sprite-grid null 守衛（W22，server，預設 on）
+
+### 立案（2026-09-02 全 patch 巡檢，log 最大單一例外源）
+
+9/1–9/2 兩天 `ERROR: StateMachine.stateExecute> Exception thrown` **3386 次（≈70/h）**，
+100% 同一指紋：`NullPointerException: Cannot invoke "IsoObject.getFacingPosition(Vector2)"
+because "object" is null` at `IsoGameCharacter.faceThisObject`；caller 全是動物狀態機——
+`AnimalIdleState.execute` 2366／`AnimalEatState.execute` 1020（各自對 `eatFromTrough`／
+`drinkFromTrough` 呼叫 `faceThisObject`）。每次帶 8 行 stack，是本輪巡檢 log 噪音第一名。
+
+### 根因（javap 對 42.20.4 jar＋反編譯）
+
+`faceThisObject` 對 sprite-grid 物件（食槽等多格物件）先呼叫
+`object.getClosestSpriteGridObject(getX(), getY())`（offset 200）再 `astore_1 / aload_1 /
+getFacingPosition`（offset 203–206）**無條件解參考**。而 `getClosestSpriteGridObject` 在
+`getSpriteGridObjects(result, true)` 回空清單時回 `null`（IsoObject:5436-5450）：
+「包含 self」只在 self 仍列於其 square 的 `objects` 清單時成立（5389-5395 的
+`testSq.getObjects()` 迭代＋`object.getSpriteGrid() == spriteGrid`）——動物側
+`eatFromTrough`／`drinkFromTrough` 指向**已移出世界的食槽**（拆除／搬移後動物側參照未清）
+或 grid 格在 server 端未載入（`getGridSquare` 回 null）時，清單為空 ⇒ NPE。100% vanilla。
+
+**後果不只是噪音**：例外中斷該 tick 的 `state.execute`——`AnimalIdleState.execute` 的
+`faceThisObject` 在前、`changeState(AnimalEatState／AnimalWalkState)` 在後，動物卡在 idle
+不轉 eat/walk、每 tick 重炸直到參照被別的路徑覆蓋。與 W16/W17 的動物議題同域，機制獨立。
+
+### 手術
+
+`IsoGameCharacter.faceThisObject(IsoObject)V` 內唯一 `invokevirtual
+IsoObject.getClosestSpriteGridObject(FF)` → `invokestatic FaceObjectGuard.closestSpriteGridObject
+(IsoObject,FF)IsoObject`（1:1 同形，receiver 前置，`expectedHits=1`）。helper 委派 vanilla；
+結果 null 時回原 `object`（`getFacingPosition` 以 object 自身 x/y 計算＝面向舊位置），非 null
+逐位元等價；委派拋出的任何例外原樣穿透（含 `getSquare()==null` 那類不同訊息的 NPE）。
+`faceThisObjectAlt` 內同名 callsite **刻意不動**（log 零命中；SmokeCheck 負對照釘死 Alt 仍
+vanilla、class-wide 改道恰 1）。掛在既存 W7 的 IsoGameCharacter ClassPatch 上（同 class 不得
+開第二個 ClassPatch，W19 教訓）。診斷：前 32 次 fallback 印 class／sprite／square／呼叫者
+座標（可對回農場與食槽），之後只計數；heartbeat 每 2²⁰ 次 `calls/fallbacks/anomalies`。
+kill switch `-Dmdc.faceObjectGuard=0`（純直通，null 照回＝vanilla 語意）。
+
+### 守門與行為測試
+
+- vanilla 前提：`faceThisObject` 內 `getClosestSpriteGridObject=1、getFacingPosition(Vector2)=1、
+  IFNULL+IFNONNULL=5`，且 closest 結果緊接 `astore_1→aload_1→aload→getFacingPosition`
+  （`callFollowedByStoreLoadCall`：TIS 補上 null 檢查／換 slot／改鏈式呼叫時建置紅＝撤刀訊號）；
+  `faceThisObjectAlt` 另 1、class-wide 2。
+- 手術後：改道 x1、原呼叫歸零、真指令不變；Alt 未動；class-wide 改道恰 1；helper 委派恰 1、
+  零 NEW、零 DebugLog（診斷在獨立方法）。
+- `FaceObjectGuardTest` on/off 獨立 JVM（旗標自驗）：非 null 同實例轉發、null→原 object＋
+  fallbacks+1（off 回 null）、半初始化物件診斷不炸、RuntimeException／Error 穿透、零 anomalies。
+
+### 驗收
+
+- `StateMachine.stateExecute` 的 faceThisObject NPE 歸零（vanilla 別處 NPE 仍會印、不混算）。
+- 首批 fallback 詳細行的 sprite／square 對回食槽：預期是 `furniture_feeding_trough`／水槽
+  且 square 已無該物件（stale 參照定罪）；若出現 square=null 或非食槽，重估根因分佈。
+- 行為面：農場動物是否恢復進 eat state（食槽消耗、動物飢餓值）——與動物減少議題的關聯
+  由 W17 之後的 apop 對照觀察，本刀不宣稱根治動物消失。
 ---
 
 ## 3. 部署後驗證清單

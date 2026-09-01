@@ -15,9 +15,6 @@ public final class PatchConfig {
     private static final String DL = "zombie/debug/DebugLog";
     private static final String LOG_STR = "(Ljava/lang/String;)V";
     private static final String DL_TYPE_STR = "(Lzombie/debug/DebugType;Ljava/lang/String;)V";
-    private static final String LOGIN_METRICS = "zombie/network/MinidoracatLoginMetrics";
-    private static final String JOIN_METRICS = "zombie/network/MinidoracatJoinMetrics";
-    private static final String TWO_STR_VOID = "(Ljava/lang/String;Ljava/lang/String;)V";
     private static final String ENTITY_ARRAY = "zombie/entity/util/Array";
     private static final String FAST_ARRAY_REMOVAL = "zombie/mdc/FastIdentityArrayRemoval";
 
@@ -61,6 +58,21 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoZombie;Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)V");
         nzmM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, DL, "log", LOG_STR, "log"));
         nzmM.expectedHits = 1;
+
+        // 抑噪 #9（2026-09-02 巡檢）：`ERROR: IsoThumpable not found on square x,y,z` 是
+        // IsoObject.syncIsoObject 在 getObjectIndex()==-1 時的 System.out.println——B42 建造
+        // 流程每次 `ISBuildIsoEntity -> consume success` 後對已被替換的 IsoThumpable 送 sync
+        // 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 入列門檻 4/h）。方法內兩處
+        // println(String)（offset 22 "square is null"、offset 70 "not found on square"）同方法
+        // 改道，helper 只攔 IsoThumpable 的 not-found 前綴（其他 class 的 not-found 與
+        // square-is-null 是破損訊號，照常印）。訊息由 invokedynamic 組成 → startsWith。
+        Patcher.ClassPatch isoObj = new Patcher.ClassPatch("zombie/iso/IsoObject");
+        Patcher.MethodOps syncIso = isoObj.method("syncIsoObject",
+                "(ZBLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)V");
+        syncIso.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println",
+                LOG_STR, "println"));
+        syncIso.expectedHits = 2;
+        patches.add(isoObj);
         patches.add(nzm);
 
         Patcher.ClassPatch cache = new Patcher.ClassPatch("zombie/network/PacketsCache");
@@ -101,68 +113,13 @@ public final class PatchConfig {
         lootRespawnChunk.expectedHits = 2;
         patches.add(lootRespawn);
 
-        // 登入尖峰先量測三個同步 DB 寫入的個別耗時；只改呼叫目標，不改順序、參數、return/POP 或例外邊界
-        Patcher.ClassPatch login = new Patcher.ClassPatch("zombie/network/packets/connection/LoginPacket");
-        Patcher.MethodOps loginProcess = login.method("processServer",
-                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
-        loginProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/network/ServerWorldDatabase",
-                "setPassword", TWO_STR_VOID, LOGIN_METRICS, "setPassword"));
-        loginProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/network/ServerWorldDatabase",
-                "updateLastConnectionDate", TWO_STR_VOID, LOGIN_METRICS, "updateLastConnectionDate"));
-        loginProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/network/ServerWorldDatabase",
-                "setUserSteamID", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                LOGIN_METRICS, "setUserSteamID"));
-        loginProcess.expectedHits = 3;
-        patches.add(login);
-
-        // join 卡頓量測（正式服實測 6–11 秒主迴圈停頓集中在玩家 join/死亡重生換角）：
-        // CreatePlayerPacket.processServer 尾段四個重活各包 timing wrapper，不改呼叫順序、
-        // 參數與例外邊界。IsoPlayer ctor 無法以 redirect 包（INVOKESPECIAL <init> 的
-        // 未初始化物件不可傳遞）——殘差時間＝ctor＋spawn 邏輯，由四項量測反推。
-        Patcher.ClassPatch createPlayer = new Patcher.ClassPatch("zombie/network/packets/character/CreatePlayerPacket");
-        Patcher.MethodOps createProcess = createPlayer.method("processServer",
-                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
-        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/Lua/LuaEventManager",
-                "triggerEvent", "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V",
-                JOIN_METRICS, "triggerEvent"));
-        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
-                "serverUpdateNetworkCharacter",
-                "(Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V",
-                JOIN_METRICS, "serverUpdateNetworkCharacter"));
-        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
-                "process", "()V", JOIN_METRICS, "process"));
-        createProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/network/packets/character/CreatePlayerPacket",
-                "write", "(Lzombie/core/network/ByteBufferWriter;)V", JOIN_METRICS, "write"));
-        createProcess.expectedHits = 4;
-        patches.add(createPlayer);
-
-        // 一般重連（既有角色，join 大宗）走 GameServer.receivePlayerConnect，CreatePlayerPacket
-        // 只蓋新角色/死亡換角。REJOIN_TOTAL 包整個 receivePlayerConnect（兩個呼叫點：一般＋coop），
-        // REJOIN_LOAD_CHARACTER 包內層 SQL SELECT＋玩家全量反序列化（同方法兩個 if/else 呼叫點）。
-        String rpcDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V";
-        Patcher.ClassPatch connect = new Patcher.ClassPatch("zombie/network/packets/connection/ConnectPacket");
-        Patcher.MethodOps connectParse = connect.method("parse",
-                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
-        connectParse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                "receivePlayerConnect", rpcDesc, JOIN_METRICS, "receivePlayerConnect"));
-        connectParse.expectedHits = 1;
-        patches.add(connect);
-
-        Patcher.ClassPatch connectCoop = new Patcher.ClassPatch("zombie/network/packets/connection/ConnectCoopPacket");
-        Patcher.MethodOps connectCoopParse = connectCoop.method("parse",
-                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
-        connectCoopParse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                "receivePlayerConnect", rpcDesc, JOIN_METRICS, "receivePlayerConnect"));
-        connectCoopParse.expectedHits = 1;
-        patches.add(connectCoop);
+        // 退役（2026-09-02）：登入／join 卡頓量測（LoginPacket 三個同步 DB 寫入、
+        // CreatePlayerPacket 尾段四個重活、Connect/ConnectCoopPacket 與 GameServer
+        // .receivePlayerConnect 的 REJOIN 兩層）。join 卡頓歸因任務已完成，正式服
+        // REJOIN_TOTAL 常態 5–13ms＝已無待答問題。詳見 docs/patches.md 2i；
+        // 復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         Patcher.ClassPatch gameServer = new Patcher.ClassPatch("zombie/network/GameServer");
-        Patcher.MethodOps rpc = gameServer.method("receivePlayerConnect", rpcDesc);
-        rpc.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/savefile/ServerPlayerDB",
-                "serverLoadNetworkCharacter", "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;",
-                JOIN_METRICS, "serverLoadNetworkCharacter"));
-        rpc.expectedHits = 2;
 
         // 抑噪：`Send Toxic Building at [ x , y Toxic: b ]` 佔正式服 console 34.4%
         // （2026-08-16 實測 9512/27682 行／57 分鐘）。來源不是 vanilla——全服 77 個 mod 只有
@@ -208,29 +165,10 @@ public final class PatchConfig {
         bucketMembership.expectedHits = 2;
         patches.add(entityBucket);
 
-        // evolved-recipe 食材重量：getExtraItemsWeight 對每個 extraItem 字串建構一個完整
-        // InventoryItem 只為讀 getActualWeight() 就丟棄（Item.InstanceItem codeLen=4064＞
-        // FreqInlineSize=325 故永不 inline，含 4 個 ArrayList／10 次 Translator.getText／
-        // synchWithVisual／ConfigureItemOnCreate，~1.6-2.0 KB 配置）。而呼叫端是
-        // Moodle.Update 的 HEAVY_LOAD 分支（無節流）→ getCapacityWeight → getInventoryWeight
-        // → getUnequippedWeight ↔ ItemContainer.getContentsWeight 相互遞迴走訪整棵背包樹，
-        // 每玩家每 tick 一次（2026-08-16 jstack 46 樣本命中 2 次）。
-        // 不能做死工消除：Moodles.Update 的 :9129 callsite 在 !GameClient.client 分支，
-        // HEAVY_LOAD 的 moodleLevel 被 calculateBaseSpeed（speed -= level*0.15）、
-        // Fitness.reduceEndurance、getClimbingFailChanceFloat 消費，是 server 權威 gameplay。
-        // 故只做值保存的 per-item-type 記憶化，且**預設 observe 模式**（行為同原版、只量測
-        // 兩側耗時與等價性），確認收益後才用 -Dmdc.itemWeightMemo=on 啟用——W3-2 ECS memo
-        // 的教訓是「審查證明無風險，只有量測證明有收益」。
-        // 必須 method-scoped：InventoryItem 全 class 另有 4 個 CreateItem(String) 命中
-        // （DoTooltipEmbedded ×2、update、createCloneItem），其中 createCloneItem 若被改道
-        // 成回傳共用實例會讓所有 clone 指向同一物件。本方法內只有 offset 35 這一個。
-        Patcher.ClassPatch invItem = new Patcher.ClassPatch("zombie/inventory/InventoryItem");
-        Patcher.MethodOps extraWeight = invItem.method("getExtraItemsWeight", "()F");
-        extraWeight.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/inventory/InventoryItemFactory",
-                "CreateItem", "(Ljava/lang/String;)Lzombie/inventory/InventoryItem;",
-                "zombie/mdc/ItemWeightMemo", "createItem"));
-        extraWeight.expectedHits = 1;
-        patches.add(invItem);
+        // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
+        // CreateItem 改道）。observe 實測收益僅 0.06–0.18%，「永不啟用 on」已定案——
+        // W3-2 的教訓是「只有量測證明有收益」，這次量測的答案是沒有。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- 行為（method 範圍內常數替換；ClassWriter 產新常數池條目，不動共享條目）----
 
@@ -431,21 +369,11 @@ public final class PatchConfig {
         vehicleSet.expectedHits = 1;
         patches.add(vehicleBuffer);
 
-        // ---- W4-1 chunk 供給併包（黑邊根因修復；docs/chunk-throughput-design-v1.md）----
-        // vanilla 供給只跑到設計值 15%：client 每幀送一包（約 3 chunk）→ parse 每包無條件
-        // new 一個 ccr 入列 → update() 每 worker 週期只處理一個 ccr（10Hz）＝約 30 chunk/s，
-        // 而 NON_LARGE_AREA_CHUNKS_LIMIT=20 × 10Hz = 200 chunk/s 的預算浪費 85%。
-        // 需求超過供給後越過 client 8 秒逾時 → client 丟棄已送達資料並重發且不通知取消
-        // → 自我維持 livelock（實測 pending 恆＝請求率×8s＝240、18 分鐘燒 105MB 全丟棄）。
-        // headCall 把佇列前段併包：不新增 chunk、不改順序、不碰 largeArea；隊首已含同座標者
-        // 不搬（保留 vanilla 跨 ccr 去重語意）；搬空的 ccr 由同一方法後段的 vanilla 本體回收。
-        // **掛點是 removeOlderDuplicateRequests()V 而非 update()V**（審查抓到的 blocking）：
-        // update() 對 ccrWaiting 的存取全包在 if (workerThread.ready) 內，那是 vanilla 與
-        // WorkerThread（sendArray 會 add ccrForRetries 並持續 chunks.add）互斥的唯一機制；
-        // headCall 插在 offset 0 會落在閘外，與 worker 同時改同一個 plain ArrayList，最壞情況
-        // 是同一 Chunk 實例雙重 releaseChunk 進 static freeChunks 池＝跨玩家汙染。
-        // removeOlderDuplicateRequests 全 class 僅被 update() 呼叫一次（javap 實證）且就在
-        // ready 閘內、vanilla 去重之前——正是本刀需要的位置。
+        // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer
+        // .removeOlderDuplicateRequests headCall）。42.20.3 官方 pending 機制上線後
+        // packed 只剩 47–82 次/session、skip[short] 99.3%＝效益≈0，而每次遊戲更新都要
+        // 重驗 WorkerThread 互斥前提。詳見 docs/patches.md 2p；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+
         // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
         // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
         // 自我遞迴 → 假死 13 分鐘、graceful quit 收不進去、看門狗強制重啟。
@@ -530,13 +458,6 @@ public final class PatchConfig {
         loadSquare.expectedHits = 2;
         patches.add(isoChunk);
 
-        Patcher.ClassPatch pds = new Patcher.ClassPatch("zombie/network/PlayerDownloadServer");
-        Patcher.MethodOps pdsDedupe = pds.method("removeOlderDuplicateRequests", "()V");
-        pdsDedupe.headCall = new Patcher.HeadCall("zombie/mdc/ChunkRequestPacker", "packQueue",
-                "(Lzombie/network/PlayerDownloadServer;)V");
-        pdsDedupe.expectedHits = 1;
-        patches.add(pds);
-
         // ---- W7 朝向暫存執行緒隔離（2026-08-13 Player-A 雞舍實案；docs/patches.md 2s）----
         // 事故：chunk 1160,968（方格 9280-9287, 7744-7751）在 19:55:03 載入失敗被 Blam 重生，
         // 46,142 → 8,549 bytes（雞舍＋32 隻家禽的完整基因組＋水桶全滅，只剩草地）。
@@ -571,7 +492,27 @@ public final class PatchConfig {
                 "zombie/characters/IsoGameCharacter", "tempVector2_2", "Lzombie/iso/Vector2;",
                 "zombie/mdc/ForwardVectorGuard", "swap");
         fwdFromIso.expectedHits = 2;
-        patches.add(gameChr);
+        patches.add(gameChr);   // W7＋W22 共用；faceObj 於下方掛入同一 ClassPatch
+
+        // ---- W22 面向物件 sprite-grid null 守衛（2026-09-02 巡檢；docs/patches.md 2ai）----
+        // 正式服 9/1–9/2 兩天 3386 次（約 70/h，log 最大單一例外源）
+        // `StateMachine.stateExecute > NPE: "object" is null` at faceThisObject——
+        // caller 100% 動物狀態機（AnimalIdleState.execute 2366／AnimalEatState.execute 1020）。
+        // vanilla：sprite-grid 物件先 getClosestSpriteGridObject 再無條件解參考（javap offset
+        // 200→204），而該方法在 getSpriteGridObjects 回空清單時回 null——「包含 self」只在
+        // self 仍列於其 square 的 objects 時成立（反編譯 IsoObject:5389-5395）；動物的
+        // eatFromTrough／drinkFromTrough 指向已移出世界的食槽（stale 參照）就必炸。
+        // 例外中斷該 tick 的 state.execute ⇒ AnimalIdleState 後段 changeState(Eat/Walk) 跳過
+        // ＝動物卡 idle 每 tick 重炸。手術：方法內唯一 getClosestSpriteGridObject callsite
+        // 1:1 改道，helper 委派後 null→回原 object（面向舊位置），非 null 逐位元等價。
+        // faceThisObjectAlt 內同名 callsite 刻意不動（log 零命中，SmokeCheck 負對照釘死）。
+        // 掛在既存 W7 ClassPatch 上——同 class 不得開第二個 ClassPatch（W19 教訓）。
+        // kill switch：-Dmdc.faceObjectGuard=0。
+        Patcher.MethodOps faceObj = gameChr.method("faceThisObject", "(Lzombie/iso/IsoObject;)V");
+        faceObj.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoObject", "getClosestSpriteGridObject", "(FF)Lzombie/iso/IsoObject;",
+                "zombie/mdc/FaceObjectGuard", "closestSpriteGridObject"));
+        faceObj.expectedHits = 1;
 
         // ---- W8 chunk 寫入閘（2026-08-14；CRC-blam 家族 43 筆資料損失的止血＋蒐證；
         //      docs/patches.md 2t）----
@@ -771,91 +712,11 @@ public final class PatchConfig {
         preupdate.expectedHits = 1;
         patches.add(serverMap);
 
-        // ---- W16 動物卸載接手守衛 observe（2026-08-24/25；docs/patches.md 2ad）----
-        // 純觀測、零行為改變。per-wave 帳由 APM.removeChunkFromWorld headCall 開、IsoChunk
-        // removeFromWorld 唯一 RETURN 前 TailCall 關；完整 wave 才分類 cleared-seen，
-        // 正差 s2Missed／負差 clearShortfall 永不跨 wave 抵銷。n_unload 成功後才開始 scanNs；
-        // unloaded 前記 scanSeen，n_addAnimal 成功返回後才記 handedOff。
-        String persistGuard = "zombie/mdc/AnimalPersistGuard";
-        String persistProbe = "zombie/characters/animals/MdcAnimalPersistProbe";
-        String apmOwner = "zombie/characters/animals/AnimalPopulationManager";
-        String amwOwner = "zombie/characters/animals/AnimalManagerWorker";
-        String ammOwner = "zombie/characters/animals/AnimalManagerMain";
-        String animalDesc = "(Lzombie/characters/animals/IsoAnimal;)V";
-        String virtualDesc = "(Lzombie/characters/animals/VirtualAnimal;)V";
-        String animalCellDesc = "(II)Lzombie/characters/animals/AnimalCell;";
-
-        Patcher.ClassPatch apm = new Patcher.ClassPatch(apmOwner);
-        Patcher.MethodOps apmRemove = apm.method("removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V");
-        apmRemove.headCall = new Patcher.HeadCall(persistGuard, "unloadEnter", "(L" + apmOwner + ";)V");
-        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                apmOwner, "n_unloadChunk", "(II)V", persistProbe, "unloadChunk"));
-        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/characters/animals/IsoAnimal", "unloaded", "()V",
-                persistGuard, "scanAnimal"));
-        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                apmOwner, "n_addAnimal", animalDesc, persistProbe, "queueUnloadedAnimal"));
-        apmRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "gnu/trove/set/hash/TIntHashSet", "remove", "(I)Z",
-                persistGuard, "unloadScanExit"));
-        apmRemove.expectedHits = 5;   // headCall + 四個 redirect，各恰 1
-        // public virtualizeAnimal 也是 n_addAnimal 來源，與 unload 分帳。
-        Patcher.MethodOps apmVirtualize = apm.method("virtualizeAnimal", animalDesc);
-        apmVirtualize.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                apmOwner, "n_addAnimal", animalDesc, persistProbe, "queueVirtualizedAnimal"));
-        apmVirtualize.expectedHits = 1;
-        patches.add(apm);
-
-        // Worker.addAnimal：S1 cell、S1b chunk，加上 S3 防重分支兩個實際 ArrayList.remove(int)。
-        Patcher.ClassPatch amw = new Patcher.ClassPatch(amwOwner);
-        Patcher.MethodOps amwAdd = amw.method("addAnimal", virtualDesc);
-        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                amwOwner, "getCellFromSquarePos", animalCellDesc, persistProbe, "cellForAdd"));
-        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/characters/animals/AnimalCell", "getOrCreateChunkFromSquarePos",
-                "(II)Lzombie/characters/animals/AnimalChunk;", persistProbe, "chunkForAdd"));
-        amwAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;",
-                persistGuard, "removeDuplicate"));
-        amwAdd.expectedHits = 4;   // cell 1 + chunk 1 + S3 remove 2
-        Patcher.MethodOps amwSave = amw.method("saveRealAnimals", "(Ljava/util/ArrayList;)V");
-        amwSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                amwOwner, "getCellFromSquarePos", animalCellDesc, persistProbe, "cellForSave"));
-        amwSave.expectedHits = 1;
-        // moveAnimal 是 Worker.addAnimal 的第二個直接 caller，成功返回後分來源計數。
-        Patcher.MethodOps amwMove = amw.method("moveAnimal",
-                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
-        amwMove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                amwOwner, "addAnimal", virtualDesc, persistProbe, "addMovedAnimal"));
-        amwMove.expectedHits = 1;
-        patches.add(amw);
-
-        // Main.saveRealAnimals：world-save 實體動物分母（O4）。
-        Patcher.ClassPatch amm = new Patcher.ClassPatch(ammOwner);
-        Patcher.MethodOps ammSave = amm.method("saveRealAnimals", "()V");
-        ammSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;",
-                persistGuard, "saveScan"));
-        ammSave.expectedHits = 1;
-        patches.add(amm);
-
-        // AnimalZones.spawnAnimalsOnZone 是 Main.addAnimal 的另一個直接來源。
-        Patcher.ClassPatch animalZones = new Patcher.ClassPatch("zombie/characters/animals/AnimalZones");
-        Patcher.MethodOps zoneSpawn = animalZones.method("spawnAnimalsOnZone",
-                "(Lzombie/characters/animals/AnimalZone;)V");
-        zoneSpawn.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                ammOwner, "addAnimal", virtualDesc, persistProbe, "addZoneAnimal"));
-        zoneSpawn.expectedHits = 1;
-        patches.add(animalZones);
-
-        // IsoChunk 清場兩處 redirect；TailCall 在唯一 RETURN 前分 wave 結帳。
-        Patcher.MethodOps chunkRemove = isoChunk.method("removeFromWorld", "()V");
-        chunkRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/IsoMovingObject", "removeFromWorld", "()V",
-                persistGuard, "clearMoving"));
-        chunkRemove.tailCall = new Patcher.TailCall(persistGuard, "chunkUnloadExit",
-                "(Lzombie/iso/IsoChunk;)V");
-        chunkRemove.expectedHits = 3;   // clear redirect 2 + tailCall 1
+        // 退役（2026-09-02）：W16 動物卸載接手守衛 observe。8 天正式服全零遺失
+        // （s2Missed／queueFailures／sourceGap／cellNull／chunkNull／duplicateRemoved 全 0，
+        // clearShortfall 的 handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測
+        // 結論已達；heartbeat 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W17 hutch 載入回傳檢查 enforce（靜態已定罪；docs/patches.md 2ae）----
         // IsoHutch.load 逐隻 addAnimalInside(animal,false) 忽略 boolean 回傳（offset 526：
@@ -936,7 +797,14 @@ public final class PatchConfig {
                 "zombie/core/skinnedmodel/visual/ItemVisual", "getTint",
                 "()Lzombie/core/ImmutableColor;",
                 "zombie/mdc/ClothingSyncGuard", "tintOf"));
-        idCtor.expectedHits = 1;
+        // W20-2（2026-09-02 巡檢）：enforce 後 nullVisual 仍恆為同一玩家（Player-G，8 天
+        // 480+ 筆）但 nullVisual 路徑拿不到 item（redirect 只換 getTint 的 receiver，
+        // 那個 receiver 就是 null）。ctor 頭部 headCall slot 1 把 WornItem 交給 helper
+        // ThreadLocal，nullVisual 行才印得出 fullType／bodyLocation＝物品歸因的唯一路徑。
+        // ctor 頭部 aload_1 只碰參數不碰 uninitializedThis，verifier 合法（super 之前）。
+        idCtor.headCall = new Patcher.HeadCall("zombie/mdc/ClothingSyncGuard", "onItemDescription",
+                "(Lzombie/characters/WornItems/WornItem;)V", new int[]{1});
+        idCtor.expectedHits = 2;   // headCall 1 + getTint redirect 1
         patches.add(itemDesc);
 
         Patcher.ClassPatch syncVisuals = new Patcher.ClassPatch(

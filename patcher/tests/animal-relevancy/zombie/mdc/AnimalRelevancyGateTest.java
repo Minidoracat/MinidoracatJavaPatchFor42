@@ -10,7 +10,7 @@ import zombie.vehicles.BaseVehicle;
  *
  * <p>argv：{@code enforce}（預設出貨）／{@code observe}／{@code off}。測試自驗
  * {@code MODE} 與 argv 相符——property 名稱打錯會炸在測試裡，不會默默把 enforce
- * 版跑三遍假綠（與 ItemWeightMemoTest 同紀律）。
+ * 版跑三遍假綠（與 ChunkLoadGuardTest 同紀律）。
  *
  * <pre>
  *   GameServer.java:2771-2772,2788  chunkGridWidth = range; relevantRange = range/2 + 2

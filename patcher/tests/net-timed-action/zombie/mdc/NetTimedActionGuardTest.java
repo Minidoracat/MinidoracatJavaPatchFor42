@@ -18,7 +18,7 @@ import zombie.network.packets.NetTimedActionPacket;
  *
  * <p>argv：無參數＝兩刀啟用；{@code guard-off}／{@code state-off} 各對應一個 kill switch。
  * 測試會反射自驗 helper 的實際旗標與 argv 相符——property 名稱打錯時炸在測試裡，
- * 不會默默把 enabled 版跑三遍假綠（沿用 ChunkLoadGuardTest／ItemWeightMemoTest 的紀律）。
+ * 不會默默把 enabled 版跑三遍假綠（沿用 ChunkLoadGuardTest 的紀律）。
  */
 public final class NetTimedActionGuardTest {
 

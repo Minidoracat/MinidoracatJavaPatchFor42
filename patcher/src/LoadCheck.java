@@ -82,35 +82,8 @@ public final class LoadCheck {
             lf.getDeclaredMethod("canBeSafehouse", square, player);
             System.out.println("helper OK 所有改道簽名一致");
 
-            Class<?> database = Class.forName("zombie.network.ServerWorldDatabase", false, cl);
-            Class<?> metrics = Class.forName("zombie.network.MinidoracatLoginMetrics", false, cl);
-            var setPassword = metrics.getDeclaredMethod(
-                    "setPassword", database, String.class, String.class);
-            var updateLastConnection = metrics.getDeclaredMethod(
-                    "updateLastConnectionDate", database, String.class, String.class);
-            var setUserSteamID = metrics.getDeclaredMethod(
-                    "setUserSteamID", database, String.class, String.class);
-            if (setPassword.getReturnType() != void.class
-                    || setPassword.getExceptionTypes().length != 1
-                    || setPassword.getExceptionTypes()[0] != java.sql.SQLException.class) {
-                throw new NoSuchMethodException("LoginMetrics.setPassword signature/throws");
-            }
-            if (updateLastConnection.getReturnType() != void.class
-                    || updateLastConnection.getExceptionTypes().length != 0) {
-                throw new NoSuchMethodException("LoginMetrics.updateLastConnectionDate signature/throws");
-            }
-            if (setUserSteamID.getReturnType() != String.class
-                    || setUserSteamID.getExceptionTypes().length != 0) {
-                throw new NoSuchMethodException("LoginMetrics.setUserSteamID signature/throws");
-            }
-            for (var field : metrics.getDeclaredFields()) {
-                int modifiers = field.getModifiers();
-                if (java.lang.reflect.Modifier.isStatic(modifiers)
-                        && !java.lang.reflect.Modifier.isFinal(modifiers)) {
-                    throw new IllegalStateException("LoginMetrics mutable static field: " + field.getName());
-                }
-            }
-            System.out.println("login helper OK 精確簽名、checked exception 與 stateless 契約一致");
+            // 退役（2026-09-02）：登入量測 wrapper 的精確簽名／checked exception／stateless
+            // 契約守門隨刀一併移除（歸因任務已完成）。見 patches.md 2i。
 
             Class<?> array = Class.forName("zombie.entity.util.Array", false, cl);
             Class<?> fastRemoval = Class.forName("zombie.mdc.FastIdentityArrayRemoval", false, cl);
