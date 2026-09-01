@@ -1442,6 +1442,12 @@ public final class SmokeCheck {
                         "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1
                 && classWideCalls(classNode(distJava, wdCls), Opcodes.INVOKESTATIC, "java/lang/Thread",
                         "getAllStackTraces", "()Ljava/util/Map;") == 0);
+        // 版本橫幅唯一入口（2026-09-02 退役 W4-1 時橫幅隨 ChunkRequestPacker 一起消失的回歸鎖）：
+        // tick 內 announceOnce 恰 1，且位於 MODE 檢查之前（首條真指令），kill switch 不影響橫幅。
+        AbstractInsnNode[] tickHead = firstReal(wdTick, 1);
+        failed += check("W15 版本橫幅：tick 首條真指令＝PatchInfo.announceOnce（恰 1，先於 kill switch）",
+                countExactCalls(wdTick, Opcodes.INVOKESTATIC, "zombie/mdc/PatchInfo", "announceOnce", "()V") == 1
+                && tickHead[0] instanceof MethodInsnNode th && th.name.equals("announceOnce"));
 
         // 退役（2026-09-02）：W16 動物卸載接手守衛 observe 的全部 census、掛點與 helper
         // 契約斷言。8 天正式服全零遺失 ⇒ vanilla 卸載接手鏈無辜、觀測結論已達；
