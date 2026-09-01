@@ -42,8 +42,8 @@ import zombie.iso.IsoCell;
  *
  * <p>例外語意（家族慣例）：主 try 只 catch {@code RuntimeException}——簿記自身可恢復錯誤
  * fail-open（anomalies++ 後照常轉呼叫）；{@code LinkageError} 一律外逃＝fail-fast（新 jar＋
- * 舊 loose class 的二進位不相容必須炸得可見，比照 ChunkRequestPacker 的 rethrow 紀律與
- * 2026-08-17 NoSuchFieldError 事故的處置）。vanilla 委派在 try 外，例外原樣上拋。
+ * 舊 loose class 的二進位不相容必須炸得可見，比照 2026-08-17 NoSuchFieldError 事故的
+ * 處置）。vanilla 委派在 try 外，例外原樣上拋。
  * {@link #maybeBeat} 在簿記完成後才執行（log 故障不再讓 forward 被記成 skip），內部自包
  * {@code RuntimeException}（log 基礎設施故障不外逃、不擋主流程——W8 慣例）。
  *

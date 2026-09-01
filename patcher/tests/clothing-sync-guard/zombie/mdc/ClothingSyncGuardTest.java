@@ -2,9 +2,11 @@ package zombie.mdc;
 
 import java.lang.reflect.Constructor;
 
+import zombie.characters.WornItems.WornItem;
 import zombie.core.ImmutableColor;
 import zombie.core.skinnedmodel.visual.ItemVisual;
 import zombie.debug.DebugType;
+import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
@@ -63,6 +65,32 @@ public final class ClothingSyncGuardTest {
         ClothingSyncGuard.onClothingSet(null);
         expect("onClothingSet(null) → ThreadLocal=?",
                 "?".equals(ClothingSyncGuard.clothingPlayerForTest()));
+
+        // W20-2：ctor headCall 捕獲 WornItem（nullVisual 歸因）。null 照存；描述任一環節缺
+        // 一律 "?"，半初始化 item（fullType 為 null）與 Registries 未就緒的 location 都不得炸。
+        ClothingSyncGuard.onItemDescription(null);
+        expect("onItemDescription(null) → ThreadLocal=null、描述=?",
+                ClothingSyncGuard.currentWornForTest() == null
+                && "?".equals(ClothingSyncGuard.describeWornForTest(null)));
+        WornItem worn = (WornItem) rawInstance(WornItem.class);
+        ClothingSyncGuard.onItemDescription(worn);
+        expect("onItemDescription 捕獲同一 WornItem 實例",
+                ClothingSyncGuard.currentWornForTest() == worn);
+        String bareDesc = ClothingSyncGuard.describeWornForTest(worn);
+        expect("半初始化 WornItem（item/location 皆 null）描述不炸＝?@?", "?@?".equals(bareDesc));
+        WornItem typed = (WornItem) rawInstance(WornItem.class);
+        InventoryItem item = (InventoryItem) rawInstance(InventoryItem.class);
+        // getFullType 有 assert fullType.equals(module+"."+type)——三欄一起設，-ea 下也成立
+        for (String[] kv : new String[][]{{"fullType", "Base.Shirt_Lumberjack"}, {"module", "Base"}, {"type", "Shirt_Lumberjack"}}) {
+            java.lang.reflect.Field f = InventoryItem.class.getDeclaredField(kv[0]);
+            f.setAccessible(true);
+            f.set(item, kv[1]);
+        }
+        java.lang.reflect.Field itemField = WornItem.class.getDeclaredField("item");
+        itemField.setAccessible(true);
+        itemField.set(typed, item);
+        expect("fullType 可得時描述以 fullType 開頭（location 缺→?）",
+                "Base.Shirt_Lumberjack@?".equals(ClothingSyncGuard.describeWornForTest(typed)));
 
         // 正常路徑：tint 非 null，三態一律回原值。
         ItemVisual visual = (ItemVisual) rawInstance(ItemVisual.class);

@@ -457,177 +457,10 @@ public final class SmokeCheck {
         failed += check("未把 PacketTypes$PacketType 一起出貨（anticheat warn 保持原版路徑）",
                 !Files.exists(distJava.resolve("zombie/network/PacketTypes$PacketType.class")));
 
-        String loginDesc =
-                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
-        String database = "zombie/network/ServerWorldDatabase";
-        String metrics = "zombie/network/MinidoracatLoginMetrics";
-        String twoStringsVoid = "(Ljava/lang/String;Ljava/lang/String;)V";
-        String twoStringsResult = "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;";
-        MethodNode login = method(distJava, "zombie/network/packets/connection/LoginPacket",
-                "processServer", loginDesc);
-        failed += check("登入三個 DB 呼叫逐點改道且原呼叫歸零",
-                countExactCalls(login, Opcodes.INVOKESTATIC, metrics, "setPassword",
-                        "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V") == 1
-                && countExactCalls(login, Opcodes.INVOKESTATIC, metrics, "updateLastConnectionDate",
-                        "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V") == 1
-                && countExactCalls(login, Opcodes.INVOKESTATIC, metrics, "setUserSteamID",
-                        "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") == 1
-                && countExactCalls(login, Opcodes.INVOKEVIRTUAL, database, "setPassword", twoStringsVoid) == 0
-                && countExactCalls(login, Opcodes.INVOKEVIRTUAL, database,
-                        "updateLastConnectionDate", twoStringsVoid) == 0
-                && countExactCalls(login, Opcodes.INVOKEVIRTUAL, database,
-                        "setUserSteamID", twoStringsResult) == 0);
-
-        MethodInsnNode steamIDCall = findExactCall(login, Opcodes.INVOKESTATIC, metrics, "setUserSteamID",
-                "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
-        AbstractInsnNode afterSteamIDCall = steamIDCall == null ? null : nextReal(steamIDCall);
-        failed += check("setUserSteamID 改道後仍保留原 POP stack effect",
-                afterSteamIDCall != null && afterSteamIDCall.getOpcode() == Opcodes.POP);
-
-        MethodNode metricPassword = method(distJava, metrics, "setPassword",
-                "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V");
-        MethodNode metricUpdate = method(distJava, metrics, "updateLastConnectionDate",
-                "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)V");
-        MethodNode metricSteam = method(distJava, metrics, "setUserSteamID",
-                "(Lzombie/network/ServerWorldDatabase;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
-        failed += check("LoginMetrics 三個 wrapper 各 delegate exactly once",
-                countExactCalls(metricPassword, Opcodes.INVOKEVIRTUAL,
-                        database, "setPassword", twoStringsVoid) == 1
-                && countExactCalls(metricUpdate, Opcodes.INVOKEVIRTUAL,
-                        database, "updateLastConnectionDate", twoStringsVoid) == 1
-                && countExactCalls(metricSteam, Opcodes.INVOKEVIRTUAL,
-                        database, "setUserSteamID", twoStringsResult) == 1);
-        failed += check("LoginMetrics 每個非 fatal outcome 至多一個 metrics sink",
-                countExactCalls(metricPassword, Opcodes.INVOKESTATIC,
-                        metrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(metricUpdate, Opcodes.INVOKESTATIC,
-                        metrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(metricSteam, Opcodes.INVOKESTATIC,
-                        metrics, "safeLog", "(Ljava/lang/String;J)V") == 1);
-        failed += check("LoginMetrics checked exception 只保留 setPassword SQLException",
-                metricPassword.exceptions != null
-                && metricPassword.exceptions.size() == 1
-                && metricPassword.exceptions.contains("java/sql/SQLException")
-                && (metricUpdate.exceptions == null || metricUpdate.exceptions.isEmpty())
-                && (metricSteam.exceptions == null || metricSteam.exceptions.isEmpty()));
-
-        MethodNode safeLog = method(distJava, metrics, "safeLog", "(Ljava/lang/String;J)V");
-        failed += check("LoginMetrics 只使用既有 Multiplayer log sink",
-                countFieldReads(safeLog, "zombie/debug/DebugType", "Multiplayer") == 1
-                && countExactCalls(safeLog, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
-                        "println", "(Ljava/lang/String;)V") == 1);
-
-        // ---- join 卡頓量測：四個重活逐點改道且原呼叫歸零、wrapper delegate exactly once ----
-        String joinMetrics = "zombie/network/MinidoracatJoinMetrics";
-        String createPacket = "zombie/network/packets/character/CreatePlayerPacket";
-        String luaEvents = "zombie/Lua/LuaEventManager";
-        String playerDb = "zombie/savefile/ServerPlayerDB";
-        String triggerDesc = "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;)V";
-        String updateCharDesc = "(Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V";
-        String writeDesc = "(Lzombie/core/network/ByteBufferWriter;)V";
-        MethodNode createProcess = method(distJava, createPacket, "processServer",
-                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
-        failed += check("join 四個重活逐點改道且原呼叫歸零",
-                countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "triggerEvent", triggerDesc) == 1
-                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "serverUpdateNetworkCharacter",
-                        "(Lzombie/savefile/ServerPlayerDB;Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V") == 1
-                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "process",
-                        "(Lzombie/savefile/ServerPlayerDB;)V") == 1
-                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, joinMetrics, "write",
-                        "(Lzombie/network/packets/character/CreatePlayerPacket;Lzombie/core/network/ByteBufferWriter;)V") == 1
-                && countExactCalls(createProcess, Opcodes.INVOKESTATIC, luaEvents, "triggerEvent", triggerDesc) == 0
-                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, playerDb,
-                        "serverUpdateNetworkCharacter", updateCharDesc) == 0
-                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, playerDb, "process", "()V") == 0
-                && countExactCalls(createProcess, Opcodes.INVOKEVIRTUAL, createPacket, "write", writeDesc) == 0);
-
-        MethodNode jmTrigger = method(distJava, joinMetrics, "triggerEvent", triggerDesc);
-        MethodNode jmUpdate = method(distJava, joinMetrics, "serverUpdateNetworkCharacter",
-                "(Lzombie/savefile/ServerPlayerDB;Lzombie/characters/IsoPlayer;ILzombie/core/raknet/UdpConnection;)V");
-        MethodNode jmProcess = method(distJava, joinMetrics, "process", "(Lzombie/savefile/ServerPlayerDB;)V");
-        MethodNode jmWrite = method(distJava, joinMetrics, "write",
-                "(Lzombie/network/packets/character/CreatePlayerPacket;Lzombie/core/network/ByteBufferWriter;)V");
-        failed += check("JoinMetrics 四個 wrapper 各 delegate exactly once",
-                countExactCalls(jmTrigger, Opcodes.INVOKESTATIC, luaEvents, "triggerEvent", triggerDesc) == 1
-                && countExactCalls(jmUpdate, Opcodes.INVOKEVIRTUAL, playerDb,
-                        "serverUpdateNetworkCharacter", updateCharDesc) == 1
-                && countExactCalls(jmProcess, Opcodes.INVOKEVIRTUAL, playerDb, "process", "()V") == 1
-                && countExactCalls(jmWrite, Opcodes.INVOKEVIRTUAL, createPacket, "write", writeDesc) == 1);
-        failed += check("JoinMetrics 每個 wrapper 至多一個 metrics sink、無 checked exception",
-                countExactCalls(jmTrigger, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(jmUpdate, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(jmProcess, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(jmWrite, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && (jmTrigger.exceptions == null || jmTrigger.exceptions.isEmpty())
-                && (jmUpdate.exceptions == null || jmUpdate.exceptions.isEmpty())
-                && (jmProcess.exceptions == null || jmProcess.exceptions.isEmpty())
-                && (jmWrite.exceptions == null || jmWrite.exceptions.isEmpty()));
-
-        MethodNode jmSafeLog = method(distJava, joinMetrics, "safeLog", "(Ljava/lang/String;J)V");
-        failed += check("JoinMetrics 只使用既有 Multiplayer log sink",
-                countFieldReads(jmSafeLog, "zombie/debug/DebugType", "Multiplayer") == 1
-                && countExactCalls(jmSafeLog, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
-                        "println", "(Ljava/lang/String;)V") == 1);
-
-        // ---- 一般重連（既有角色）量測：REJOIN_TOTAL 兩個呼叫點＋REJOIN_LOAD_CHARACTER ----
-        String rpcDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;Ljava/lang/String;)V";
-        String loadCharDesc = "(ILjava/lang/String;)Lzombie/characters/IsoPlayer;";
-        String parseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
-        MethodNode connectParse = method(distJava, "zombie/network/packets/connection/ConnectPacket",
-                "parse", parseDesc);
-        MethodNode connectCoopParse = method(distJava, "zombie/network/packets/connection/ConnectCoopPacket",
-                "parse", parseDesc);
-        failed += check("REJOIN_TOTAL 兩個呼叫點各改道一次且原呼叫歸零",
-                countExactCalls(connectParse, Opcodes.INVOKESTATIC, joinMetrics, "receivePlayerConnect", rpcDesc) == 1
-                && countExactCalls(connectParse, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "receivePlayerConnect", rpcDesc) == 0
-                && countExactCalls(connectCoopParse, Opcodes.INVOKESTATIC, joinMetrics, "receivePlayerConnect", rpcDesc) == 1
-                && countExactCalls(connectCoopParse, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "receivePlayerConnect", rpcDesc) == 0);
-        MethodNode gsReceive = method(distJava, "zombie/network/GameServer", "receivePlayerConnect", rpcDesc);
-        failed += check("REJOIN_LOAD_CHARACTER 兩個 if/else 呼叫點改道且原呼叫歸零",
-                countExactCalls(gsReceive, Opcodes.INVOKESTATIC, joinMetrics, "serverLoadNetworkCharacter",
-                        "(Lzombie/savefile/ServerPlayerDB;ILjava/lang/String;)Lzombie/characters/IsoPlayer;") == 2
-                && countExactCalls(gsReceive, Opcodes.INVOKEVIRTUAL, playerDb,
-                        "serverLoadNetworkCharacter", loadCharDesc) == 0);
-        MethodNode jmRpc = method(distJava, joinMetrics, "receivePlayerConnect", rpcDesc);
-        MethodNode jmLoadChar = method(distJava, joinMetrics, "serverLoadNetworkCharacter",
-                "(Lzombie/savefile/ServerPlayerDB;ILjava/lang/String;)Lzombie/characters/IsoPlayer;");
-        failed += check("重連兩個 wrapper 各 delegate exactly once、單一 sink、無 checked exception",
-                countExactCalls(jmRpc, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "receivePlayerConnect", rpcDesc) == 1
-                && countExactCalls(jmLoadChar, Opcodes.INVOKEVIRTUAL, playerDb,
-                        "serverLoadNetworkCharacter", loadCharDesc) == 1
-                && countExactCalls(jmRpc, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && countExactCalls(jmLoadChar, Opcodes.INVOKESTATIC, joinMetrics, "safeLog", "(Ljava/lang/String;J)V") == 1
-                && (jmRpc.exceptions == null || jmRpc.exceptions.isEmpty())
-                && (jmLoadChar.exceptions == null || jmLoadChar.exceptions.isEmpty()));
-
-        // 回傳契約結構鎖（codex 對抗審查發現）：delegate 結果必須 astore→尾端 aload 同 slot→areturn，
-        // 且全方法恰一個 areturn——wrapper 誤改成永遠回傳 null（全部重連被 kick）時建置失敗
-        MethodInsnNode loadCharDelegate = findExactCall(jmLoadChar, Opcodes.INVOKEVIRTUAL, playerDb,
-                "serverLoadNetworkCharacter", loadCharDesc);
-        boolean returnContract = false;
-        if (loadCharDelegate != null) {
-            AbstractInsnNode afterDelegate = nextReal(loadCharDelegate);
-            AbstractInsnNode lastReal = null;
-            int areturns = 0;
-            for (AbstractInsnNode in : jmLoadChar.instructions) {
-                if (in.getOpcode() >= 0) {
-                    lastReal = in;
-                }
-                if (in.getOpcode() == Opcodes.ARETURN) {
-                    areturns++;
-                }
-            }
-            returnContract = afterDelegate instanceof VarInsnNode st && st.getOpcode() == Opcodes.ASTORE
-                    && areturns == 1
-                    && lastReal != null && lastReal.getOpcode() == Opcodes.ARETURN
-                    && prevReal(lastReal) instanceof VarInsnNode ld && ld.getOpcode() == Opcodes.ALOAD
-                    && ld.var == st.var;
-        }
-        failed += check("REJOIN_LOAD_CHARACTER 回傳 identity 結構鎖（astore→aload 同 slot→唯一 areturn）",
-                returnContract);
+        // 退役（2026-09-02）：登入／join 卡頓量測的全部結構斷言（LoginPacket 三個 DB
+        // wrapper、CreatePlayerPacket 四個重活、REJOIN_TOTAL／REJOIN_LOAD_CHARACTER）。
+        // 歸因任務已完成、正式服 REJOIN_TOTAL 常態 5–13ms，量測刀隨斷言一併移除。
+        // 詳見 docs/patches.md 2i；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
@@ -894,59 +727,13 @@ public final class SmokeCheck {
                 guardBody.tryCatchBlocks != null && guardBody.tryCatchBlocks.size() == 1
                 && "java/lang/RuntimeException".equals(guardBody.tryCatchBlocks.get(0).type));
 
-        // ---- W4-1 chunk 供給併包（PlayerDownloadServer.update headCall）----
-        String pdsCls = "zombie/network/PlayerDownloadServer";
-        String packerCls = "zombie/mdc/ChunkRequestPacker";
-        String packerDesc = "(Lzombie/network/PlayerDownloadServer;)V";
-        MethodNode vPdsUpdate = methodFromJar(jar, pdsCls, "update", "()V");
-        // vanilla 前提：三個同簽名 List.remove(I)（1 個 ccrWaiting、2 個 ccr.chunks）——
-        // 正因無法以 owner/name/desc 區分才選 headCall 而非 redirect；數量漂移＝重新分析
-        failed += check("vanilla 前提：update 有 3 個 List.remove(I)、1 個 removeOlderDuplicateRequests、無既存 packer 呼叫",
-                countExactCalls(vPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
-                        "remove", "(I)Ljava/lang/Object;") == 3
-                && countExactCalls(vPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
-                        "removeOlderDuplicateRequests", "()V") == 1
-                && countExactCalls(vPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
-        // **掛點必須在 ready 閘內**：update() 頭部（閘外）落在 vanilla 唯一互斥機制之外。
-        // 42.20.2 當時 WorkerThread.sendArray 會把 ccrForRetries 掛回 ccrWaiting＝閘外插入
-        // 有雙重 releaseChunk 風險；42.20.3 起重試機制刪除、worker 改走 queuedByWorker
-        // concurrent queue 不再寫 ccrWaiting，互斥前提更寬鬆，掛點維持不動。以下兩條把
-        // 「掛在 removeOlderDuplicateRequests、且 update() 內零 packer 呼叫」鎖進建置期
-        // ——重打包導致掛點漂移會建置失敗而非靜默回到 race。
-        MethodNode pPdsUpdate = method(distJava, pdsCls, "update", "()V");
-        MethodNode pPdsDedupe = method(distJava, pdsCls, "removeOlderDuplicateRequests", "()V");
-        failed += check("W4-1 掛點在 ready 閘內（dedupe 頭部全序 aload_0→packQueue，且 update 內零 packer 呼叫）",
-                headCallOk(pPdsDedupe, packerCls, "packQueue", packerDesc)
-                && countExactCalls(pPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
-        failed += check("W4-1 原體保留（update 的三個 List.remove(I) 與 dedupe 呼叫數未變）",
-                countExactCalls(pPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
-                        "remove", "(I)Ljava/lang/Object;") == 3
-                && countExactCalls(pPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
-                        "removeOlderDuplicateRequests", "()V") == 1);
-        // dedupe 原體保留：vanilla 的空 ccr 回收（我們依賴它）與去重掃描未被破壞
-        MethodNode vPdsDedupe = methodFromJar(jar, pdsCls, "removeOlderDuplicateRequests", "()V");
-        failed += check("W4-1 dedupe 原體保留（List.remove(I) 與 cancelDuplicateChunk 呼叫數未變）",
-                countExactCalls(pPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
-                        "remove", "(I)Ljava/lang/Object;")
-                == countExactCalls(vPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
-                        "remove", "(I)Ljava/lang/Object;")
-                && countExactCalls(pPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
-                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z")
-                == countExactCalls(vPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
-                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z"));
-        // helper 依賴的三個 public 成員契約（漂移＝建置失敗而非上線 IllegalAccessError）
-        ClassNode vPds = classNodeFromJar(jar, pdsCls);
-        ClassNode vCcr = classNodeFromJar(jar, "zombie/network/ClientChunkRequest");
-        failed += check("W4-1 欄位契約：ccrWaiting/chunks/largeArea 皆 public 且型別未變",
-                hasField(vPds, "ccrWaiting", "Ljava/util/List;")
-                && hasField(vCcr, "chunks", "Ljava/util/List;")
-                && hasField(vCcr, "largeArea", "Z"));
+        // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer 掛點）的全部
+        // vanilla 前提與手術後斷言。42.20.3 官方 pending 機制上線後 packed 只剩
+        // 47–82 次/session、skip[short] 99.3%＝效益≈0，刀與斷言一併移除。
+        // 詳見 docs/patches.md 2p；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（server）",
                 patchInfoOk(distJava, "server"));
-        // 批次上限必須綁回 vanilla 自己的 isChunksFilled 門檻（TIS 調小而我們沒跟＝超發）
-        failed += check("W4-1 vanilla 批次上限仍為 20（isChunksFilled 的 bipush）",
-                countIntConst(methodFromJar(jar, "zombie/network/ClientChunkRequest",
-                        "isChunksFilled", "()Z"), 20) == 1);
 
         // ---- 效能第一波（載具預篩；VehicleManager 512→256 已於 42.20.2 退役）----
         String prefilterCls = "zombie/mdc/VehicleIntersectPrefilter";
@@ -1330,72 +1117,10 @@ public final class SmokeCheck {
                 && classWideCalls(pGs, Opcodes.INVOKESTATIC, dlCls, "log", dlTypeDesc) == vGsLog - 1
                 && classWideCalls(pGs, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "logType", dlTypeDesc) == 1);
 
-        // ---- 食材重量記憶化：InventoryItem.getExtraItemsWeight 的 CreateItem 改道 ----
-        String iiCls = "zombie/inventory/InventoryItem";
-        String iifCls = "zombie/inventory/InventoryItemFactory";
-        String memoCls = "zombie/mdc/ItemWeightMemo";
-        String createDesc = "(Ljava/lang/String;)L" + iiCls + ";";
-        MethodNode vExtra = methodFromJar(jar, iiCls, "getExtraItemsWeight", "()F");
-        // vanilla 語境指紋——這才是「共用實例安全」論證的實際錨點：factory 結果存進
-        // 區域變數後，只被 IFNULL 與兩次 getActualWeight() 讀取，從不逃逸。
-        // PZ 若改寫此方法（例如把結果放進 list），全序不符即建置失敗，而非讓共用實例外洩。
-        failed += check("記憶化 vanilla 前提：getExtraItemsWeight 恰一個 CreateItem(String)＋兩個 getActualWeight()＋零逃逸",
-                countExactCalls(vExtra, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 1
-                && countExactCalls(vExtra, Opcodes.INVOKEVIRTUAL, iiCls, "getActualWeight", "()F") == 2
-                && extraWeightNoEscape(vExtra, iifCls, createDesc, iiCls));
-        MethodNode pExtra = method(distJava, iiCls, "getExtraItemsWeight", "()F");
-        failed += check("記憶化手術後：改道 x1、原 CreateItem 歸零、指令總數未變（1:1 替換）",
-                countExactCalls(pExtra, Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 1
-                && countExactCalls(pExtra, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 0
-                && realInsnCount(pExtra) == realInsnCount(vExtra));
-        // 負對照：InventoryItem 另外四個 CreateItem(String) 必須維持原版。
-        // createCloneItem 尤其致命——回傳共用實例會讓所有 clone 指向同一物件。
-        ClassNode vIi = classNodeFromJar(jar, iiCls);
-        ClassNode pIi = classNode(distJava, iiCls);
-        int vIiCreate = classWideCalls(vIi, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc);
-        boolean cloneClean = countExactCalls(method(distJava, iiCls, "createCloneItem", "()L" + iiCls + ";"),
-                Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 1
-                && countExactCalls(method(distJava, iiCls, "createCloneItem", "()L" + iiCls + ";"),
-                        Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 0;
-        failed += check("記憶化負對照：全 class CreateItem(String) 5→4 保持 vanilla，createCloneItem 未被動到",
-                vIiCreate == 5
-                && classWideCalls(pIi, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == vIiCreate - 1
-                && classWideCalls(pIi, Opcodes.INVOKESTATIC, memoCls, "createItem", createDesc) == 1
-                && cloneClean);
-        // helper 契約三條：
-        //  (1) factory 委派恰 2 處（off 純轉發＋phase 2），沒有第三處＝不存在 fail-open 重試；
-        //  (2) 那兩處**都不在任何 try-catch 的保護範圍內**——這才是「factory 例外原樣外傳」的
-        //      精準結構鎖。三份 review 同時定罪的缺陷正是「跨越 factory 的 catch 觸發重試」，
-        //      而行為測試無法在無 ScriptManager 的環境讓 factory 拋例外，只有這條擋得住回歸；
-        //  (3) 四道門的三個 script 判定各恰一次，且 MOVEABLE 那道門讀的真的是
-        //      ItemType.MOVEABLE（只數 isItemType 次數的話，改成任何 enum 都會通過）。
-        MethodNode memoCreate = method(distJava, memoCls, "createItem", "(Ljava/lang/String;)L" + iiCls + ";");
-        failed += check("記憶化 helper 契約：factory 委派恰 2 處（off 純轉發＋phase 2），無第三處重試路徑",
-                countExactCalls(memoCreate, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 2);
-        failed += check("記憶化 helper 契約：兩個 factory 委派都不在 try-catch 範圍內（例外必須原樣外傳）",
-                callsInsideTryRange(memoCreate, Opcodes.INVOKESTATIC, iifCls, "CreateItem", createDesc) == 0);
-        // (4) 正式路徑的兩條契約——測試環境的 ScriptManager 沒有任何 item，factory 恆回 null，
-        //     所以「回傳的是 factory 結果」與「on 的 miss 真的會 store」無法用行為測試鎖住
-        //     （codex 第二輪 Major 2）。這裡用結構鎖補：
-        //     a. createItem 內恰一個 store 呼叫——刪掉 phase 3 的 store 就紅；
-        //     b. createItem 內恰一個 noteObserved 呼叫——observe 記帳被拔掉就紅；
-        //     c. 沒有任何 ACONST_NULL 緊接 ARETURN——把 `return fresh` 改成 `return null` 就紅。
-        String storeDesc = "(Ljava/lang/String;L" + iiCls + ";)V";
-        failed += check("記憶化 helper 契約：createItem 內 store 恰 1 次、noteObserved 恰 1 次",
-                countExactCalls(memoCreate, Opcodes.INVOKESTATIC, memoCls, "store", storeDesc) == 1
-                && countExactCalls(memoCreate, Opcodes.INVOKESTATIC, memoCls, "noteObserved",
-                        "(Ljava/lang/String;L" + iiCls + ";Z)V") == 1);
-        failed += check("記憶化 helper 契約：createItem 沒有 return null（回傳值必須來自 factory 或快取）",
-                !hasNullReturn(memoCreate));
-        MethodNode memoGate = method(distJava, memoCls, "cacheable", "(L" + iiCls + ";)Z");
-        failed += check("記憶化五道門：scriptItem／getLuaCreate／getItemConfig／isItemType(MOVEABLE)／hasComponents 各恰一次",
-                countExactCalls(memoGate, Opcodes.INVOKEVIRTUAL, iiCls, "getScriptItem",
-                        "()Lzombie/scripting/objects/Item;") == 1
-                && countCalls(memoGate, "zombie/scripting/objects/Item", "getLuaCreate") == 1
-                && countCalls(memoGate, "zombie/scripting/objects/Item", "getItemConfig") == 1
-                && countCalls(memoGate, "zombie/scripting/objects/Item", "isItemType") == 1
-                && countCalls(memoGate, "zombie/scripting/objects/Item", "hasComponents") == 1
-                && countFieldReads(memoGate, "zombie/scripting/objects/ItemType", "MOVEABLE") == 1);
+        // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
+        // CreateItem 改道）的全部 vanilla 前提、負對照與 helper 契約斷言。observe 實測
+        // 收益僅 0.06–0.18%，「永不啟用 on」已定案，刀與斷言一併移除。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截 ＋ processServer 回覆 state 補正）----
         String ntaCls = "zombie/core/NetTimedAction";
@@ -1718,206 +1443,13 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, wdCls), Opcodes.INVOKESTATIC, "java/lang/Thread",
                         "getAllStackTraces", "()Ljava/util/Map;") == 0);
 
-        // ---- W16 動物卸載接手守衛 observe ----
-        String apgCls = "zombie/mdc/AnimalPersistGuard";
-        String probeCls = "zombie/characters/animals/MdcAnimalPersistProbe";
-        String apmCls = "zombie/characters/animals/AnimalPopulationManager";
-        String amwCls = "zombie/characters/animals/AnimalManagerWorker";
-        String ammCls = "zombie/characters/animals/AnimalManagerMain";
-        String zonesCls = "zombie/characters/animals/AnimalZones";
-        String isoAnimalCls = "zombie/characters/animals/IsoAnimal";
-        String movCls = "zombie/iso/IsoMovingObject";
-        String troveCls = "gnu/trove/set/hash/TIntHashSet";
-        String vaDesc = "(Lzombie/characters/animals/VirtualAnimal;)V";
-        String animalDesc = "(L" + isoAnimalCls + ";)V";
-        String cellPosDesc = "(II)Lzombie/characters/animals/AnimalCell;";
-        String chunkPosDesc = "(II)Lzombie/characters/animals/AnimalChunk;";
-        String w16ChunkCls = "zombie/iso/IsoChunk";
+        // 退役（2026-09-02）：W16 動物卸載接手守衛 observe 的全部 census、掛點與 helper
+        // 契約斷言。8 天正式服全零遺失 ⇒ vanilla 卸載接手鏈無辜、觀測結論已達；
+        // heartbeat 每 256 unload 一行佔正式服 log 7.3%，刀與斷言一併移除。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
-        MethodNode vChunkRemove = methodFromJar(jar, w16ChunkCls, "removeFromWorld", "()V");
-        MethodNode vApmRemove = methodFromJar(jar, apmCls, "removeChunkFromWorld",
-                "(L" + w16ChunkCls + ";)V");
-        MethodNode vApmVirtualize = methodFromJar(jar, apmCls, "virtualizeAnimal", animalDesc);
-        MethodNode vAmwAdd = methodFromJar(jar, amwCls, "addAnimal", vaDesc);
-        MethodNode vAmwSave = methodFromJar(jar, amwCls, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
-        MethodNode vAmwMove = methodFromJar(jar, amwCls, "moveAnimal",
-                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
-        MethodNode vAmmAdd = methodFromJar(jar, ammCls, "addAnimal", vaDesc);
-        MethodNode vAmmSave = methodFromJar(jar, ammCls, "saveRealAnimals", "()V");
-        MethodNode vZoneSpawn = methodFromJar(jar, zonesCls, "spawnAnimalsOnZone",
-                "(Lzombie/characters/animals/AnimalZone;)V");
-
-        // vanilla 全序：n_unload < unloaded < n_add < tail remove；四者各恰 1。
-        int w16Unload = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls,
-                "n_unloadChunk", "(II)V");
-        int w16Unloaded = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls,
-                "unloaded", "()V");
-        int w16Add = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls,
-                "n_addAnimal", animalDesc);
-        int w16TailRemove = firstCallIndex(vApmRemove, Opcodes.INVOKEVIRTUAL, troveCls,
-                "remove", "(I)Z");
-        failed += check("W16 vanilla：APM remove 全序 n_unload<unloaded<n_add<remove，各恰 1",
-                countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 1
-                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 1
-                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
-                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, troveCls, "remove", "(I)Z") == 1
-                && w16Unload < w16Unloaded && w16Unloaded < w16Add && w16Add < w16TailRemove);
-        // IsoChunk 接手恰 1、清場恰 2、唯一 RETURN（TailCall 前提），且接手先於清場。
-        failed += check("W16 vanilla：IsoChunk 接手1＋清場2＋唯一RETURN，接手先於清場",
-                countExactCalls(vChunkRemove, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
-                        "(L" + w16ChunkCls + ";)V") == 1
-                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
-                        "(L" + w16ChunkCls + ";)V") == 1
-                && countExactCalls(vChunkRemove, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 2
-                && countOpcode(vChunkRemove, Opcodes.RETURN) == 1
-                && firstCallIndex(vChunkRemove, Opcodes.INVOKEVIRTUAL, apmCls, "removeChunkFromWorld",
-                        "(L" + w16ChunkCls + ";)V")
-                        < firstCallIndex(vChunkRemove, Opcodes.INVOKEVIRTUAL, movCls,
-                                "removeFromWorld", "()V"));
-        // S4 釘死：Worker.removeFromWorld 不做 addAnimal。
-        MethodNode vAmwRfw = methodFromJar(jar, amwCls, "removeFromWorld", animalDesc);
-        failed += check("W16 S4：Worker.removeFromWorld 零 addAnimal",
-                countCalls(vAmwRfw, amwCls, "addAnimal") == 0);
-        // S1/S1b/S3/O4b 掛點。
-        failed += check("W16 vanilla：Worker add 的 cell1/chunk1/S3 remove2，save cell1",
-                countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL, amwCls,
-                        "getCellFromSquarePos", cellPosDesc) == 1
-                && countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL,
-                        "zombie/characters/animals/AnimalCell", "getOrCreateChunkFromSquarePos",
-                        chunkPosDesc) == 1
-                && countExactCalls(vAmwAdd, Opcodes.INVOKEVIRTUAL,
-                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 2
-                && countExactCalls(vAmwSave, Opcodes.INVOKEVIRTUAL, amwCls,
-                        "getCellFromSquarePos", cellPosDesc) == 1);
-        // 完整來源 census：APM.n_add 只在 remove/virtualize；Main.add 只在 n_add/zone；
-        // Worker.add 只在 Main/move。這三層一起構成 sourceGap 可解讀性的 fail-closed 鎖。
-        MethodNode vApmNAdd = methodFromJar(jar, apmCls, "n_addAnimal", animalDesc);
-        failed += check("W16 source census：n_add/Main.add/Worker.add 各 jar-wide 恰2且分佈各1+1",
-                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 2
-                && countExactCalls(vApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
-                && countExactCalls(vApmVirtualize, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
-                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 2
-                && countExactCalls(vApmNAdd, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
-                && countExactCalls(vZoneSpawn, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
-                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 2
-                && countExactCalls(vAmmAdd, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1
-                && countExactCalls(vAmwMove, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1);
-        failed += check("W16 vanilla：Main.saveRealAnimals 內 getObjectList 恰1",
-                countExactCalls(vAmmSave, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
-                        "getObjectList", "()Ljava/util/Set;") == 1);
-
-        // patched APM remove：head + 4 redirect，原呼叫歸零，只有 head 令真指令 +2。
-        MethodNode pApmRemove = method(distJava, apmCls, "removeChunkFromWorld",
-                "(L" + w16ChunkCls + ";)V");
-        failed += check("W16 patched APM remove：head＋四redirect，原呼叫歸零，真指令+2",
-                headCallOk(pApmRemove, apgCls, "unloadEnter", "(L" + apmCls + ";)V")
-                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, probeCls, "unloadChunk",
-                        "(L" + apmCls + ";II)V") == 1
-                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, apgCls, "scanAnimal",
-                        animalDesc) == 1
-                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, probeCls, "queueUnloadedAnimal",
-                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V") == 1
-                && countExactCalls(pApmRemove, Opcodes.INVOKESTATIC, apgCls, "unloadScanExit",
-                        "(L" + troveCls + ";I)Z") == 1
-                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 0
-                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 0
-                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 0
-                && countExactCalls(pApmRemove, Opcodes.INVOKEVIRTUAL, troveCls, "remove", "(I)Z") == 0
-                && realInsnCount(pApmRemove) == realInsnCount(vApmRemove) + 2);
-        MethodNode pApmVirtualize = method(distJava, apmCls, "virtualizeAnimal", animalDesc);
-        failed += check("W16 patched virtualize：來源改道1、原n_add歸零、真指令不變",
-                countExactCalls(pApmVirtualize, Opcodes.INVOKESTATIC, probeCls,
-                        "queueVirtualizedAnimal", "(L" + apmCls + ";L" + isoAnimalCls + ";)V") == 1
-                && countExactCalls(pApmVirtualize, Opcodes.INVOKEVIRTUAL,
-                        apmCls, "n_addAnimal", animalDesc) == 0
-                && realInsnCount(pApmVirtualize) == realInsnCount(vApmVirtualize));
-
-        MethodNode pAmwAdd = method(distJava, amwCls, "addAnimal", vaDesc);
-        MethodNode pAmwSave = method(distJava, amwCls, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
-        MethodNode pAmwMove = method(distJava, amwCls, "moveAnimal",
-                "(Lzombie/characters/animals/VirtualAnimal;FF)V");
-        String cellProbeDesc = "(L" + amwCls + ";II)Lzombie/characters/animals/AnimalCell;";
-        String chunkProbeDesc = "(Lzombie/characters/animals/AnimalCell;II)"
-                + "Lzombie/characters/animals/AnimalChunk;";
-        failed += check("W16 patched Worker：S1/S1b/S3/save/move 全改道，原呼叫歸零，真指令不變",
-                countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, probeCls, "cellForAdd", cellProbeDesc) == 1
-                && countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, probeCls, "chunkForAdd", chunkProbeDesc) == 1
-                && countExactCalls(pAmwAdd, Opcodes.INVOKESTATIC, apgCls, "removeDuplicate",
-                        "(Ljava/util/ArrayList;I)Ljava/lang/Object;") == 2
-                && countExactCalls(pAmwAdd, Opcodes.INVOKEVIRTUAL,
-                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 0
-                && countExactCalls(pAmwSave, Opcodes.INVOKESTATIC, probeCls, "cellForSave", cellProbeDesc) == 1
-                && countExactCalls(pAmwMove, Opcodes.INVOKESTATIC, probeCls, "addMovedAnimal",
-                        "(L" + amwCls + ";Lzombie/characters/animals/VirtualAnimal;)V") == 1
-                && countExactCalls(pAmwMove, Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 0
-                && realInsnCount(pAmwAdd) == realInsnCount(vAmwAdd)
-                && realInsnCount(pAmwSave) == realInsnCount(vAmwSave)
-                && realInsnCount(pAmwMove) == realInsnCount(vAmwMove));
-        MethodNode pAmmSave = method(distJava, ammCls, "saveRealAnimals", "()V");
-        MethodNode pZoneSpawn = method(distJava, zonesCls, "spawnAnimalsOnZone",
-                "(Lzombie/characters/animals/AnimalZone;)V");
-        failed += check("W16 patched Main save＋zone source：改道各1、原呼叫歸零、真指令不變",
-                countExactCalls(pAmmSave, Opcodes.INVOKESTATIC, apgCls, "saveScan",
-                        "(Lzombie/iso/IsoCell;)Ljava/util/Set;") == 1
-                && countExactCalls(pZoneSpawn, Opcodes.INVOKESTATIC, probeCls, "addZoneAnimal",
-                        "(L" + ammCls + ";Lzombie/characters/animals/VirtualAnimal;)V") == 1
-                && countExactCalls(pZoneSpawn, Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 0
-                && realInsnCount(pAmmSave) == realInsnCount(vAmmSave)
-                && realInsnCount(pZoneSpawn) == realInsnCount(vZoneSpawn));
-
-        // IsoChunk：clear 2 redirect＋TailCall，原呼叫歸零，只有 tail 令真指令 +2。
-        MethodNode pChunkRemove = method(distJava, w16ChunkCls, "removeFromWorld", "()V");
-        failed += check("W16 patched IsoChunk：clear改道2＋唯一RETURN前TailCall，真指令+2",
-                countExactCalls(pChunkRemove, Opcodes.INVOKESTATIC, apgCls, "clearMoving",
-                        "(L" + movCls + ";)V") == 2
-                && countExactCalls(pChunkRemove, Opcodes.INVOKESTATIC, apgCls, "chunkUnloadExit",
-                        "(L" + w16ChunkCls + ";)V") == 1
-                && callFollowedByOpcode(pChunkRemove, Opcodes.INVOKESTATIC, apgCls,
-                        "chunkUnloadExit", "(L" + w16ChunkCls + ";)V", Opcodes.RETURN)
-                && countExactCalls(pChunkRemove, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 0
-                && realInsnCount(pChunkRemove) == realInsnCount(vChunkRemove) + 2);
-
-        // helper 契約：每個 wrapper 恰一次原委派；熱 clear 零配置零 log；S3 純委派。
-        failed += check("W16 helper：probe 八 wrapper 各恰1原委派；scan/exit/clear/S3/save 契約",
-                countExactCalls(method(distJava, probeCls, "unloadChunk", "(L" + apmCls + ";II)V"),
-                        Opcodes.INVOKEVIRTUAL, apmCls, "n_unloadChunk", "(II)V") == 1
-                && countExactCalls(method(distJava, probeCls, "queueUnloadedAnimal",
-                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V"),
-                        Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "queueVirtualizedAnimal",
-                        "(L" + apmCls + ";L" + isoAnimalCls + ";)V"),
-                        Opcodes.INVOKEVIRTUAL, apmCls, "n_addAnimal", animalDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "addZoneAnimal",
-                        "(L" + ammCls + ";Lzombie/characters/animals/VirtualAnimal;)V"),
-                        Opcodes.INVOKEVIRTUAL, ammCls, "addAnimal", vaDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "addMovedAnimal",
-                        "(L" + amwCls + ";Lzombie/characters/animals/VirtualAnimal;)V"),
-                        Opcodes.INVOKEVIRTUAL, amwCls, "addAnimal", vaDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "cellForAdd", cellProbeDesc),
-                        Opcodes.INVOKEVIRTUAL, amwCls, "getCellFromSquarePos", cellPosDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "chunkForAdd", chunkProbeDesc),
-                        Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/AnimalCell",
-                        "getOrCreateChunkFromSquarePos", chunkPosDesc) == 1
-                && countExactCalls(method(distJava, probeCls, "cellForSave", cellProbeDesc),
-                        Opcodes.INVOKEVIRTUAL, amwCls, "getCellFromSquarePos", cellPosDesc) == 1
-                && countExactCalls(method(distJava, apgCls, "scanAnimal", animalDesc),
-                        Opcodes.INVOKEVIRTUAL, isoAnimalCls, "unloaded", "()V") == 1
-                && countExactCalls(method(distJava, apgCls, "unloadScanExit",
-                        "(L" + troveCls + ";I)Z"), Opcodes.INVOKEVIRTUAL,
-                        troveCls, "remove", "(I)Z") == 1
-                && countExactCalls(method(distJava, apgCls, "removeDuplicate",
-                        "(Ljava/util/ArrayList;I)Ljava/lang/Object;"), Opcodes.INVOKEVIRTUAL,
-                        "java/util/ArrayList", "remove", "(I)Ljava/lang/Object;") == 1
-                && countExactCalls(method(distJava, apgCls, "saveScan",
-                        "(Lzombie/iso/IsoCell;)Ljava/util/Set;"), Opcodes.INVOKEVIRTUAL,
-                        "zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;") == 1);
-        MethodNode gClear = method(distJava, apgCls, "clearMoving", "(L" + movCls + ";)V");
-        failed += check("W16 clearMoving：原委派1＋server讀1＋零NEW／零DebugLog",
-                countExactCalls(gClear, Opcodes.INVOKEVIRTUAL, movCls, "removeFromWorld", "()V") == 1
-                && countFieldReads(gClear, "zombie/network/GameServer", "server") == 1
-                && countOpcode(gClear, Opcodes.NEW) == 0
-                && countCallsToOwner(gClear, "zombie/debug/DebugLog") == 0);
         // ---- W17 hutch 載入回傳檢查 ----
+        String isoAnimalCls = "zombie/characters/animals/IsoAnimal";
         String hlgCls = "zombie/mdc/HutchLoadGuard";
         String hutchCls = "zombie/iso/objects/IsoHutch";
         String addInsideDesc = "(L" + isoAnimalCls + ";Z)Z";
@@ -2261,12 +1793,11 @@ public final class SmokeCheck {
                 headCallSlotsOk(pScpSet, csgCls, "onClothingSet", "(Lzombie/characters/IsoPlayer;)V", 1)
                 && realInsnCount(pScpSet) == realInsnCount(vScpSet) + 2);
         MethodNode pIdCtor = method(distJava, idCls, "<init>", wornCtorDesc);
-        failed += check("W20 手術後 (b)：ctor tintOf 改道 x1、原 getTint 歸零、真指令不變",
+        failed += check("W20 手術後 (b)：ctor tintOf 改道 x1、原 getTint 歸零（真指令對帳併入 W20-2 的 +2）",
                 countExactCalls(pIdCtor, Opcodes.INVOKESTATIC, csgCls, "tintOf",
                         "(L" + ivCls + ";)L" + w20Ic + ";") == 1
                 && countExactCalls(pIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint",
-                        "()L" + w20Ic + ";") == 0
-                && realInsnCount(pIdCtor) == realInsnCount(vIdCtor));
+                        "()L" + w20Ic + ";") == 0);
         MethodNode pSvpParse = method(distJava, svpCls, "parse", svpParseDesc);
         failed += check("W20 手術後 (c)：parse parsePlayer x3＋onVisualsMismatch x1、原呼叫歸零、真指令不變",
                 countExactCalls(pSvpParse, Opcodes.INVOKESTATIC, csgCls, "parsePlayer",
@@ -2304,6 +1835,90 @@ public final class SmokeCheck {
                 && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 1
                 && countExactCalls(gOnSet, Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
                         "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1);
+
+        // ---- W20-2：ItemDescription ctor 頭部 headCall 捕 WornItem（nullVisual 歸因）----
+        // ctor 頭部 aload_1 只碰參數不碰 uninitializedThis；真指令 +2；tintOf 改道不受影響。
+        failed += check("W20-2 手術後：ctor 頭部 aload_1→onItemDescription、真指令恰 +2、tintOf 仍 x1",
+                headCallSlotsOk(pIdCtor, csgCls, "onItemDescription", wornCtorDesc, 1)
+                && realInsnCount(pIdCtor) == realInsnCount(vIdCtor) + 2
+                && countExactCalls(pIdCtor, Opcodes.INVOKESTATIC, csgCls, "tintOf",
+                        "(L" + ivCls + ";)L" + w20Ic + ";") == 1);
+        MethodNode gOnItemDesc = method(distJava, csgCls, "onItemDescription", wornCtorDesc);
+        failed += check("W20-2 helper 契約：onItemDescription 純 ThreadLocal.set（零 NEW、零 DebugLog、零 invokevirtual on WornItem）",
+                countOpcode(gOnItemDesc, Opcodes.NEW) == 0
+                && countCallsToOwner(gOnItemDesc, "zombie/debug/DebugLog") == 0
+                && countCallsToOwner(gOnItemDesc, "zombie/characters/WornItems/WornItem") == 0
+                && countExactCalls(gOnItemDesc, Opcodes.INVOKEVIRTUAL, "java/lang/ThreadLocal",
+                        "set", "(Ljava/lang/Object;)V") == 1);
+
+        // ---- 抑噪 #9：IsoObject.syncIsoObject 的兩個 System.out.println 改道 ----
+        String ioCls = "zombie/iso/IsoObject";
+        String syncDesc = "(ZBLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)V";
+        String printlnDesc = "(Ljava/lang/String;)V";
+        String filterPrintlnDesc = "(Ljava/io/PrintStream;Ljava/lang/String;)V";
+        MethodNode vSync = methodFromJar(jar, ioCls, "syncIsoObject", syncDesc);
+        // vanilla 前提：恰 2 個 println(String)、恰 1 個 getObjectIndex（not-found 分支的判定源）、
+        // 封包段存在（send ≥1）——TIS 把 println 換成 DebugLog 或加第三句時建置紅，重驗語境。
+        failed += check("抑噪#9 vanilla 前提：syncIsoObject println(String)=2、getObjectIndex=1、封包段存在",
+                countExactCalls(vSync, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 2
+                && countExactCalls(vSync, Opcodes.INVOKEVIRTUAL, ioCls, "getObjectIndex", "()I") == 1
+                && countCalls(vSync, "zombie/network/PacketTypes$PacketType", "send") >= 1);
+        MethodNode pSync = method(distJava, ioCls, "syncIsoObject", syncDesc);
+        failed += check("抑噪#9 手術後：println 改道 x2、原 println 歸零、封包段與真指令數未變",
+                countExactCalls(pSync, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "println", filterPrintlnDesc) == 2
+                && countExactCalls(pSync, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 0
+                && countCalls(pSync, "zombie/network/PacketTypes$PacketType", "send")
+                        == countCalls(vSync, "zombie/network/PacketTypes$PacketType", "send")
+                && countCalls(pSync, "zombie/network/PacketTypes$PacketType", "doPacket")
+                        == countCalls(vSync, "zombie/network/PacketTypes$PacketType", "doPacket")
+                && realInsnCount(pSync) == realInsnCount(vSync));
+        // 負對照：IsoObject 其餘方法的 println（含 Object 多載）一律 vanilla；method-scope 鎖。
+        ClassNode vIo = classNodeFromJar(jar, ioCls);
+        ClassNode pIo = classNode(distJava, ioCls);
+        failed += check("抑噪#9 負對照：IsoObject 其餘 println 保持 vanilla（class-wide 改道恰 2）",
+                classWideCalls(pIo, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "println", filterPrintlnDesc) == 2
+                && classWideCalls(pIo, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc)
+                        == classWideCalls(vIo, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) - 2);
+        // helper 契約：println 恰一個 PrintStream.println 出口（不翻倍、不換 sink）。
+        MethodNode gPrintln = method(distJava, "zombie/mdc/LogFilter", "println", filterPrintlnDesc);
+        failed += check("抑噪#9 helper 契約：LogFilter.println 委派 PrintStream.println 恰 1",
+                countExactCalls(gPrintln, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 1);
+
+        // ---- W22 面向物件 sprite-grid null 守衛（IsoGameCharacter.faceThisObject）----
+        String fogCls = "zombie/mdc/FaceObjectGuard";
+        String faceDesc = "(Lzombie/iso/IsoObject;)V";
+        String closestDesc = "(FF)Lzombie/iso/IsoObject;";
+        String fogDesc = "(Lzombie/iso/IsoObject;FF)Lzombie/iso/IsoObject;";
+        MethodNode vFace = methodFromJar(jar, igcCls, "faceThisObject", faceDesc);
+        MethodNode vFaceAlt = methodFromJar(jar, igcCls, "faceThisObjectAlt", faceDesc);
+        // vanilla 前提：faceThisObject 內 getClosestSpriteGridObject 恰 1 且緊接 astore_1 →
+        // aload_1 → getFacingPosition（「無條件解參考」的結構事實＝本刀存在理由；TIS 補 null
+        // 檢查時 IFNULL/IFNONNULL 數會變，建置紅提醒撤刀）；faceThisObjectAlt 另 1（負對照）。
+        failed += check("W22 vanilla 前提：faceThisObject getClosestSpriteGridObject=1、getFacingPosition(Vector2)=1、IFNULL/IFNONNULL 合計 5；Alt 另 1",
+                countExactCalls(vFace, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
+                && countExactCalls(vFace, Opcodes.INVOKEVIRTUAL, ioCls, "getFacingPosition",
+                        "(Lzombie/iso/Vector2;)Lzombie/iso/Vector2;") == 1
+                && countOpcode(vFace, Opcodes.IFNULL) + countOpcode(vFace, Opcodes.IFNONNULL) == 5
+                && countExactCalls(vFaceAlt, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
+                && classWideCalls(vIgcNode, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 2);
+        failed += check("W22 vanilla 前提：closest 結果緊接 astore_1→aload_1→getFacingPosition（無條件解參考）",
+                callFollowedByStoreLoadCall(vFace, ioCls, "getClosestSpriteGridObject", closestDesc,
+                        ioCls, "getFacingPosition"));
+        MethodNode pFace = method(distJava, igcCls, "faceThisObject", faceDesc);
+        MethodNode pFaceAlt = method(distJava, igcCls, "faceThisObjectAlt", faceDesc);
+        failed += check("W22 手術後：faceThisObject 改道 x1、原呼叫歸零、真指令不變；Alt 未動；class-wide 改道恰 1",
+                countExactCalls(pFace, Opcodes.INVOKESTATIC, fogCls, "closestSpriteGridObject", fogDesc) == 1
+                && countExactCalls(pFace, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 0
+                && realInsnCount(pFace) == realInsnCount(vFace)
+                && countExactCalls(pFaceAlt, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
+                && realInsnCount(pFaceAlt) == realInsnCount(vFaceAlt)
+                && classWideCalls(pIgcNode, Opcodes.INVOKESTATIC, fogCls, "closestSpriteGridObject", fogDesc) == 1);
+        // helper 契約：恰一次 vanilla 委派、零 NEW（熱路徑零配置；診斷路徑的字串拼接是 indy 不是 NEW）。
+        MethodNode gClosest = method(distJava, fogCls, "closestSpriteGridObject", fogDesc);
+        failed += check("W22 helper 契約：closestSpriteGridObject 委派 vanilla 恰 1、零 NEW、零 DebugLog（診斷在獨立方法）",
+                countExactCalls(gClosest, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
+                && countOpcode(gClosest, Opcodes.NEW) == 0
+                && countCallsToOwner(gClosest, "zombie/debug/DebugLog") == 0);
 
         if (failed > 0) {
             System.exit(1);
@@ -3098,23 +2713,6 @@ public final class SmokeCheck {
         return count;
     }
 
-    /** 指定精確 callsite 的下一條真指令是否為 wantOpcode（W17「回傳緊接 POP」缺陷錨）。 */
-    static boolean callFollowedByOpcode(MethodNode method, int opcode, String owner, String name,
-                                        String desc, int wantOpcode) {
-        int found = 0;
-        for (AbstractInsnNode in : method.instructions) {
-            if (!isCall(in, opcode, owner, name, desc)) {
-                continue;
-            }
-            found++;
-            AbstractInsnNode next = nextReal(in);
-            if (next == null || next.getOpcode() != wantOpcode) {
-                return false;
-            }
-        }
-        return found == 1;
-    }
-
     /** W17 load callsite 全序：ALOAD0, ALOAD7, ICONST0, 精確 call（恰 1）, POP。 */
     static boolean hutchLoadCallShape(MethodNode method, int opcode, String owner,
                                        String name, String desc) {
@@ -3335,6 +2933,34 @@ public final class SmokeCheck {
         return null;
     }
 
+    /**
+     * W22 語境錨：{@code call} 之後的真指令序列必須是 ASTORE s → ALOAD s →（一條 ALOAD，
+     * Vector2 參數）→ INVOKEVIRTUAL nextOwner.nextName——「結果存回同 slot 後立刻無條件解參考」。
+     * 任何一步不符（TIS 插入 null 檢查、換 slot、改成直接鏈式呼叫）都回 false 讓建置紅。
+     */
+    static boolean callFollowedByStoreLoadCall(MethodNode m, String owner, String name, String desc,
+                                               String nextOwner, String nextName) {
+        MethodInsnNode call = findExactCall(m, Opcodes.INVOKEVIRTUAL, owner, name, desc);
+        if (call == null) {
+            return false;
+        }
+        AbstractInsnNode store = nextReal(call);
+        if (!(store instanceof VarInsnNode s) || s.getOpcode() != Opcodes.ASTORE) {
+            return false;
+        }
+        AbstractInsnNode load = nextReal(store);
+        if (!(load instanceof VarInsnNode l) || l.getOpcode() != Opcodes.ALOAD || l.var != s.var) {
+            return false;
+        }
+        AbstractInsnNode arg = nextReal(load);
+        if (!(arg instanceof VarInsnNode a) || a.getOpcode() != Opcodes.ALOAD) {
+            return false;
+        }
+        AbstractInsnNode next = nextReal(arg);
+        return next instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && mi.owner.equals(nextOwner) && mi.name.equals(nextName);
+    }
+
     /** 取前 n 條「真指令」（跳過 label/frame/line）。 */
     static AbstractInsnNode[] firstReal(MethodNode m, int n) {
         AbstractInsnNode[] out = new AbstractInsnNode[n];
@@ -3383,82 +3009,6 @@ public final class SmokeCheck {
             }
         }
         return inside;
-    }
-
-    /**
-     * 方法內是否存在「{@code ACONST_NULL} 緊接 {@code ARETURN}」。
-     * 用於鎖住「回傳值必須來自原版 factory 或快取」——把 {@code return fresh} 改成
-     * {@code return null} 這種 mutation，在 factory 恆回 null 的測試環境完全測不出來
-     * （codex 第二輪 Major 2），只有結構鎖擋得住。
-     */
-    static boolean hasNullReturn(MethodNode m) {
-        for (AbstractInsnNode in : m.instructions) {
-            if (in.getOpcode() != Opcodes.ACONST_NULL) {
-                continue;
-            }
-            AbstractInsnNode next = in.getNext();
-            while (next != null && next.getOpcode() < 0) {
-                next = next.getNext();
-            }
-            if (next != null && next.getOpcode() == Opcodes.ARETURN) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 記憶化的共用實例安全性指紋：{@code getExtraItemsWeight} 內 factory 的結果必須
-     * 立刻存進區域變數（ASTORE），且該 slot <b>只</b>被 ALOAD 讀出來做 IFNULL 或
-     * {@code getActualWeight()}——沒有 PUTFIELD／ARETURN／任何其他呼叫的引數位置。
-     * 這正是「共用實例不逃逸」論證的實際錨；PZ 若改寫成把結果放進 list 或存成欄位，
-     * 這條會失敗而不是讓共用實例外洩。
-     */
-    static boolean extraWeightNoEscape(MethodNode m, String factoryOwner, String factoryDesc,
-                                       String itemOwner) {
-        MethodInsnNode factory = findExactCall(m, Opcodes.INVOKESTATIC, factoryOwner, "CreateItem", factoryDesc);
-        if (factory == null) {
-            return false;
-        }
-        AbstractInsnNode next = factory.getNext();
-        while (next != null && next.getOpcode() < 0) {
-            next = next.getNext();
-        }
-        if (!(next instanceof VarInsnNode store) || store.getOpcode() != Opcodes.ASTORE) {
-            return false;
-        }
-        int slot = store.var;
-        // 分開計數：只算「三次 ALOAD」不足以鎖住語境——三次 IFNULL 加上別處兩個 weight call
-        // 也會通過。要求 1 個寫入、1 個 null 檢查、2 個「對受測 class 自己」的 getActualWeight。
-        int stores = 0;
-        int nullChecks = 0;
-        int weightReads = 0;
-        for (AbstractInsnNode in : m.instructions) {
-            if (!(in instanceof VarInsnNode v) || v.var != slot) {
-                continue;
-            }
-            if (v.getOpcode() == Opcodes.ASTORE) {
-                stores++;
-                continue;
-            }
-            if (v.getOpcode() != Opcodes.ALOAD) {
-                return false;           // 該 slot 被當成別的型別使用
-            }
-            AbstractInsnNode use = v.getNext();
-            while (use != null && use.getOpcode() < 0) {
-                use = use.getNext();
-            }
-            if (use != null && use.getOpcode() == Opcodes.IFNULL) {
-                nullChecks++;
-            } else if (use instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
-                    && "getActualWeight".equals(mi.name) && "()F".equals(mi.desc)
-                    && mi.owner.equals(itemOwner)) {
-                weightReads++;
-            } else {
-                return false;           // 逃逸：被存欄位、回傳、或當成別的呼叫的引數
-            }
-        }
-        return stores == 1 && nullChecks == 1 && weightReads == 2;
     }
 
     private SmokeCheck() {}

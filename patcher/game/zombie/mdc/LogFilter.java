@@ -82,6 +82,15 @@ public final class LogFilter {
         "Send Toxic Building at [ ",                                                      // GameServer.sendToxicBuilding
     };
 
+    /**
+     * System.out.println(String) 呼叫點（IsoObject.syncIsoObject 兩處同方法改道）——只攔
+     * B42 建造流程每次必印的 IsoThumpable not-found（訊息由 invokedynamic 組成 → startsWith）；
+     * 同方法的 "square is null" 與其他 class（IsoDoor／IsoWindow…）的 not-found 是破損訊號，照常印。
+     */
+    private static final String[] PRINTLN_PREFIX = {
+        "ERROR: IsoThumpable not found on square ",                                     // IsoObject.syncIsoObject（8/30–9/2 四天 11,567 行）
+    };
+
     public static void warnFmt(DebugType type, String format, Object[] args) {
         if (format != null) {
             for (String p : FMT_EXACT) {
@@ -148,6 +157,26 @@ public final class LogFilter {
             }
         }
         DebugLog.log(type, message);
+    }
+
+    /** PRINTLN_PREFIX 的攔截判定——pure function 供 LogFilterNoiseTest 鎖行為（{@code s} 可為 null）。 */
+    static boolean suppressesPrintln(String s) {
+        if (s == null) {
+            return false;
+        }
+        for (String p : PRINTLN_PREFIX) {
+            if (s.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static void println(java.io.PrintStream out, String message) {
+        if (suppressesPrintln(message)) {
+            return;
+        }
+        out.println(message);
     }
 
     /**

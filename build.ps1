@@ -57,16 +57,13 @@ Assert-Ok "Patcher"
 # Runtime helpers 置於 manifest 最前（origSha=- 表無 jar 原版）；部署時先 helper、再 patched caller。
 $helperEntries = @(
     'zombie/mdc/LogFilter.class',
-    'zombie/network/MinidoracatLoginMetrics.class',
     'zombie/mdc/FastIdentityArrayRemoval.class',
     'zombie/mdc/FastIdentityArrayRemoval$State.class',
-    'zombie/network/MinidoracatJoinMetrics.class',
     'zombie/mdc/VehicleIntersectPrefilter.class',
     'zombie/mdc/GlassAttachmentGuard.class',
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
-    'zombie/mdc/ChunkRequestPacker.class',
     'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/ContainerCycleGuard$State.class',
     'zombie/mdc/ContainerAddCycleProbe.class',
@@ -74,7 +71,6 @@ $helperEntries = @(
     'zombie/mdc/ForwardVectorGuard.class',
     'zombie/mdc/ChunkWriteGuard.class',
     'zombie/mdc/ChunkSaveIsolation.class',
-    'zombie/mdc/ItemWeightMemo.class',
     'zombie/mdc/NetTimedActionGuard.class',
     'zombie/mdc/AnimalSortGuard.class',
     'zombie/mdc/VehicleChunkIndexGuard.class',
@@ -82,15 +78,13 @@ $helperEntries = @(
     'zombie/mdc/AnimalRequestGate.class',
     'zombie/mdc/AnimalRequestGate$Bucket.class',
     'zombie/mdc/MainLoopWatchdog.class',
-    'zombie/mdc/AnimalPersistGuard.class',
-    'zombie/mdc/AnimalPersistGuard$Wave.class',
-    'zombie/characters/animals/MdcAnimalPersistProbe.class',
     'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/AnimalLosGate.class',
     'zombie/mdc/AnimalLosScan.class',
     'zombie/mdc/VehicleRemoveGuard.class',
     'zombie/mdc/ClothingSyncGuard.class',
     'zombie/mdc/ContainerIdProbe.class',
+    'zombie/mdc/FaceObjectGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -132,11 +126,8 @@ Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
 java "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
 Assert-Ok "SmokeCheck"
 
-Write-Host "[8/10] LoginMetrics／JoinMetrics 行為與例外 precedence 驗證..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.LoginMetricsBehaviorTest
-Assert-Ok "LoginMetricsBehaviorTest"
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.JoinMetricsBehaviorTest
-Assert-Ok "JoinMetricsBehaviorTest"
+# 退役（2026-09-02）：[8/10] 登入／join 量測 wrapper 的行為與例外 precedence 驗證隨刀
+# 移除（歸因任務已完成，REJOIN_TOTAL 常態 5–13ms）。詳見 docs/patches.md 2i。
 
 Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
@@ -155,14 +146,8 @@ java "-Dmdc.containerAddCycleProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\pr
 Assert-Ok "ContainerAddCycleProbeTest（off kill switch）"
 
 
-Write-Host "[9b/10] chunk 供給併包（W4-1）行為驗證＋kill switch 模式..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
-Assert-Ok "ChunkRequestPackerTest"
-# 緊急降級旋鈕必須真的能停刀（正式服不重新部署即可回到 vanilla）
-java "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
-Assert-Ok "ChunkRequestPackerTest（windowBudget=0 kill switch）"
-java "-Dmdc.chunkPacker.batch=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest
-Assert-Ok "ChunkRequestPackerTest（batch=0 kill switch）"
+# 退役（2026-09-02）：[9b/10] W4-1 chunk 供給併包測試隨刀移除（42.20.3 官方 pending
+# 機制上線後效益≈0）。詳見 docs/patches.md 2p。
 
 Write-Host "[9c/10] 地圖格載入捕手（W6）行為驗證（含替身必拋負對照）＋kill switch..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest
@@ -179,16 +164,8 @@ Write-Host "[9d/10] 存檔管線隔離（W9）kill switch off 路徑行為驗證
 java "-Dmdc.chunkSaveIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkSaveIsolationTest
 Assert-Ok "ChunkSaveIsolationTest（chunkSaveIsolation=0 kill switch）"
 
-Write-Host "[9e/10] 食材重量記憶化三模式行為驗證（獨立 JVM；模式是 static final）..."
-# 三個模式都必須真的跑過：observe 是預設出貨模式（行為須與原版逐位元相同）、
-# on 是確認收益後才會啟用的目標模式、off 是緊急降級。測試自驗 argv 與實際 mode 相符，
-# property 名稱打錯會炸在測試裡，不會默默把 observe 版跑三遍假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest observe
-Assert-Ok "ItemWeightMemoTest（observe，預設出貨模式）"
-java "-Dmdc.itemWeightMemo=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest on
-Assert-Ok "ItemWeightMemoTest（on）"
-java "-Dmdc.itemWeightMemo=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ItemWeightMemoTest off
-Assert-Ok "ItemWeightMemoTest（off kill switch）"
+# 退役（2026-09-02）：[9e/10] 食材重量記憶化三模式測試隨刀移除（observe 實測收益
+# 0.06–0.18%，永不啟用 on 已定案）。詳見 docs/patches.md 2w。
 
 Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不收名／反作弊放行）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
@@ -252,15 +229,8 @@ Assert-Ok "MainLoopWatchdogTest（off kill switch：零記錄零偵測）"
 java "-Dmdc.mainLoopWatchdogThresholdMs=999999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest clamp
 Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
 
-Write-Host "[9m/10] 動物卸載接手守衛（W16 observe）三模式行為驗證（獨立 JVM）..."
-# observe＝預設；1 是尚未實作 enforce 的 observe-alias；off＝純委派。三個 static-final
-# 組態都真跑並自驗 MODE，property 拼錯不得假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest observe
-Assert-Ok "AnimalPersistGuardTest（observe，預設出貨模式）"
-java "-Dmdc.animalPersistGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest enforce
-Assert-Ok "AnimalPersistGuardTest（mode=1，本版 observe-alias）"
-java "-Dmdc.animalPersistGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalPersistGuardTest off
-Assert-Ok "AnimalPersistGuardTest（off，純委派 kill switch）"
+# 退役（2026-09-02）：[9m/10] W16 動物卸載接手守衛測試隨刀移除（8 天全零遺失，
+# 觀測結論已達）。詳見 docs/patches.md 2ad。
 
 Write-Host "[9n/10] hutch 載入回傳守衛（W17）三模式行為驗證（獨立 JVM）..."
 # ZeroRandom 確定性製造「有空槽但 vanilla 101 次全撞同槽」；enforce force-put、
@@ -321,6 +291,13 @@ java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzo
 Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
 java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" "-Dmdc.containerIdProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
 Assert-Ok "ClothingSyncGuardTest（三把 kill switch 全關，純直通）"
+
+Write-Host "[9r/10] 面向物件 sprite-grid null 守衛（W22）行為驗證＋kill switch（獨立 JVM）..."
+# on＝預設出貨（null→回原 object、非 null 逐位元轉發、委派例外穿透）；off＝純直通（null 照回）。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest
+Assert-Ok "FaceObjectGuardTest（on，出貨組態）"
+java "-Dmdc.faceObjectGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest off
+Assert-Ok "FaceObjectGuardTest（faceObjectGuard=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

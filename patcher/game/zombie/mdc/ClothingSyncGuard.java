@@ -1,6 +1,7 @@
 package zombie.mdc;
 
 import zombie.characters.IsoPlayer;
+import zombie.characters.WornItems.WornItem;
 import zombie.core.ImmutableColor;
 import zombie.core.skinnedmodel.visual.ItemVisual;
 import zombie.debug.DebugLog;
@@ -65,6 +66,8 @@ public final class ClothingSyncGuard {
     /** 組包（SyncClothingPacket.set）與 parse（SyncVisualsPacket.parse）語境的玩家名。 */
     private static final ThreadLocal<String> CLOTHING_PLAYER = new ThreadLocal<>();
     private static final ThreadLocal<String> PARSE_PLAYER = new ThreadLocal<>();
+    /** 正在建構 ItemDescription 的 WornItem（ctor headCall 捕獲；nullVisual 歸因用）。 */
+    private static final ThreadLocal<WornItem> CURRENT_WORN = new ThreadLocal<>();
 
     // 主迴圈單寫；觀測刀容忍罕見交錯。
     private static long tintCalls;
@@ -95,6 +98,15 @@ public final class ClothingSyncGuard {
     }
 
     /**
+     * headCall（slot 1）目標：ItemDescription ctor 頭部（super 之前只碰參數）——把當前
+     * WornItem 交給 ThreadLocal，nullVisual 路徑才有物品可歸因（W20-2，2026-09-02）。
+     * 每件穿戴物一次 set，零配置；null 參數照存（vanilla 隨後自己 NPE，非本刀責任）。
+     */
+    public static void onItemDescription(WornItem worn) {
+        CURRENT_WORN.set(worn);
+    }
+
+    /**
      * redirect 目標：ItemDescription ctor 內唯一 `ItemVisual.getTint()`（receiver 前置）。
      * off＝直通（visual null 時本行拋 NPE，與 vanilla offset 98 同語意、同樣被 send 的
      * per-connection catch 吞掉）；observe＝記錄後拋 NPE（保 vanilla 失敗語意）；
@@ -119,6 +131,7 @@ public final class ClothingSyncGuard {
                 player = String.valueOf(CLOTHING_PLAYER.get());
                 if (allowLine()) {
                     DebugLog.log(TAG + " nullVisual#" + nullVisual + " player=" + player
+                            + " item=" + describeWorn(CURRENT_WORN.get())
                             + (TINT_MODE == MODE_ENFORCE ? " action=white" : " action=vanilla-npe")
                             + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
                 }
@@ -249,6 +262,21 @@ public final class ClothingSyncGuard {
         }
     }
 
+    /** nullVisual 歸因：fullType@bodyLocation；任一環節缺就退回 "?"，絕不讓診斷本身炸。 */
+    private static String describeWorn(WornItem worn) {
+        if (worn == null) {
+            return "?";
+        }
+        try {
+            String type = worn.getItem() == null ? "?" : worn.getItem().getFullType();
+            // ItemBodyLocation.toString() 走 Registries 反查（無 getId），失敗一律落回 "?"
+            String location = worn.getLocation() == null ? "?" : worn.getLocation().toString();
+            return type + "@" + location;
+        } catch (RuntimeException e) {
+            return "?";
+        }
+    }
+
     private static boolean allowLine() {
         long now = System.nanoTime();
         if (windowStartNs == 0L || now - windowStartNs >= WINDOW_NS) {
@@ -339,6 +367,15 @@ public final class ClothingSyncGuard {
 
     static String parsePlayerForTest() {
         return PARSE_PLAYER.get();
+    }
+
+    static WornItem currentWornForTest() {
+        return CURRENT_WORN.get();
+    }
+
+    /** 測試用：nullVisual 行的 item 欄位字串（與 log 同一函式）。 */
+    static String describeWornForTest(WornItem worn) {
+        return describeWorn(worn);
     }
 
     static void resetWindowForTest() {

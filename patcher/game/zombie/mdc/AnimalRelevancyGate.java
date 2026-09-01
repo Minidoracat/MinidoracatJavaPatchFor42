@@ -283,7 +283,7 @@ public final class AnimalRelevancyGate {
         }
     }
 
-    /** 測試掛點（package-private，與 ItemWeightMemo／ChunkLoadGuard 同慣例）：目前模式。 */
+    /** 測試掛點（package-private，與 ChunkLoadGuard 同慣例）：目前模式。 */
     static int mode() {
         return MODE;
     }
