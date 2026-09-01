@@ -1,0 +1,103 @@
+# TIS 官方回報總表（2026-09-02，對 42.20.4 逐項核對）
+
+> 全部草稿分三檔（每份含 `### Title` 一行＋`### Body` fenced block，貼上即用）：
+> - `2026-09-02-tis-reports-A.md`：伺服器假死／資料損失 6 份（A-R1…A-R6）
+> - `2026-09-02-tis-reports-B.md`：MP 玩法／動物／同步／minor 7 份（B-R1…B-R7）
+> - `2026-09-02-tis-reports-C.md`：client 貼圖洩漏、native crash、設計面建議 3 份（C1…C3）
+>
+> 現況核對基準：正式服 jar `80e405a4`（42.20.4，2026-08-26 至今最新 public；unstable 分支已於
+> 2026-07-29 移除）。每份 Root cause 都引用 42.20.4 反編譯快照行號或 javap offset；
+> 另有 SmokeCheck 的 vanilla 前提斷言（釘「缺陷存在的結構事實」）在 42.20.4 jar 上全綠。
+
+## 0. 論壇格式（依 TIS 官方 Bug Report Guide 與你先前被 QA 採納的貼文）
+
+- 板別：`Bug Reports`（forum/85）；標題 `[42.20.4] [MP] <concise symptom>`（你 42.17 那篇用 `[42.17 MP]`，兩者皆可）。
+- 內文開頭五行欄位：`Version / Mode / Server settings / Mods / Save`，再 `Reproduction steps`（競態類寫 Trigger conditions）。
+- Guide 要求「Mods must be disabled」：草稿的 Mods 欄位一律誠實寫 ~80 mods＋「根因在 vanilla Java、附 class/method 引用」——
+  這是你 getFileWriter 那篇的做法，QA 接受了 bytecode 級證據。
+- 每篇一個主題；建議**分批發**（每天 3–4 篇，先發資料損失與假死），避免同日 15 篇被當洗版。
+- 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
+
+## 1. 你先前的回報現況
+
+| 貼文 | 板 | 現況（42.20.4） |
+|---|---|---|
+| [42.17 MP] visited map fragmented / 3.83 MB blob per login（2026-04-26，QA Artem_VB 已建 ticket） | Bug Reports | **部分處理**：`WorldMapVisitedServer.sendRequestData` 現以 `Deflater` 壓縮後傳送（42.20.4 反編譯 :125-156），5 分鐘 `savePeriod` 已不存在（改由 `QueuedSaveAll` 統一存檔）。傳輸層 ack/retry 未見。可在該串回一句 follow-up。 |
+| [42.20] getFileWriter allowlist 靜默回 null（2026-08-01） | Mod Portal | 未查 42.20.4 是否加 log；與本批無關。 |
+| Dedicated Server can't download mods（2026-07-14 回覆） | PZ Support | 不適用。 |
+
+## 2. 本批 16 份：分類、優先級、現況
+
+優先級：**P0** 資料損失／全服假死；**P1** 玩法卡死／動物滅失；**P2** 網路效能；**P3** minor／設計建議。
+
+### I. 伺服器假死／活鎖（Bug Reports）
+
+| # | 標題 | P | 42.20.4 現況與依據 | 附件 |
+|---|---|---|---|---|
+| A-R1 | Container cycles → `ItemContainer.getCharacter()` 無限遞迴 → SOE 主迴圈死 13 分鐘 | P0 | 仍在：`ItemContainer.java:3250-3256`／`:342-358` 無 visited/深度；`AddItem :458-495` 只擋重複 id；`TransactionManager.chainContainsContainingItem :97` private 且只 2 層。守衛 8/13 起零復發。 | 8/13 21:31 SOE 堆疊、環閉合點 log |
+| A-R2 | "Entity is already registered" 主迴圈活鎖 114 分鐘＋stale `entitySet` 每日仍發生 | P0 | 仍在：`ServerMap.Load2 :798-799` dequeue 在 fallible 之後；`EngineEntityManager :137` throw 為首句。**新根因鏈**（本批發現）：`GameEntity.reset :445` 無條件清 `addedToEngine`、`GameEntityManager.UnregisterEntity :235/:255` 早退跳過 `engine.removeEntity`、`RegisterEntity :211` 先 add 後 `:217` 設旗標＝自封；IsoObject 池（`IsoGridSquare :2551-2552`、`IsoObject.getNew :366-373`）重用同一實例。8/27–9/2 捕手 21 次全 `addedToEngine=false`。 | 8/14 01:34 stack、21 筆 victim 清單 |
+| A-R4 | `BaseAnimalSoundManager` comparator NaN → TimSort IAE → `clear()` 跳過 → 全服卡讀條「時間停止」 | P0 | 仍在：`BaseAnimalSoundManager.java :19-24` 現場重算＋手寫三態、`:42` sort 先於 `:59` clear。8/23 1411 次；捕手 8/27–9/2 仍攔 18 次、`nanAnimals=0`。 | 8/23 IAE 堆疊、捕手 log |
+| A-R5 | `IsoGridSquare.removeGlassAttachments` 無條件 `n--` → 一個砸窗封包無限迴圈（SIGKILL） | P0 | 仍在：`IsoGridSquare.java :8226-8227`；`IsoObjectUtils :36-41/:45-60` 給出兩條「沒移除任何東西」的實路。8/02 事故。 | 8/02 兩份 thread dump |
+
+### II. 伺服器資料損失（Bug Reports）
+
+| # | 標題 | P | 42.20.4 現況與依據 | 附件 |
+|---|---|---|---|---|
+| A-R3 | 共用 static `tempVector2_2` 跨執行緒競態 → chunk 載入失敗 → Blam 抹除玩家建造 | P0 | 仍在：`IsoGameCharacter.java :440/:5072-5074`、`IsoMovingObject :380-381` 先歸零；`IsoChunk :2302-2306` Blam。Player-A 案 46,142→8,549 bytes。 | 8/13 19:55 例外＋chunk 大小前後 |
+| A-R6 | 存檔管線共用 CRC32 競態 → header CRC 錯／0 → SANITY CHECK FAIL → Blam | P0 | 仍在：`ServerChunkLoader :430/:440/:478`（`SaveChunkThread.crc32`）、`:31/:593-596`（`crcSave`）、`IsoChunk.Save :4496-4502`；42.20.3/42.20.4 逐指令未變。43 chunk 損失；隔離後 flagged=0（2.92M 寫入）。 | 8/14 首晚 8 筆 BLOCKED stack、43 筆鑑識表 |
+| B-R5 | `VehiclesDB2$VehicleBuffer.set` 從 stale/pooled `vehicle.chunk` 取 wx/wy → 車輛永久不可見 | P0 | 仍在：`VehiclesDB2.java :1028-1032`（載入 `WHERE wx=? AND wy=?` :705/:737）；`IsoChunk.resetForStore :5255-5256` wx/wy=0。守衛 8/27–9/2 修正 182 次（\|Δ\|=1 ×176）。 | 三輛車 DB 列快照、8/28 NaN 案 |
+| B-R2 | `IsoHutch.load` 丟棄 `addAnimalInside` 回傳 → 近滿舍動物載入即滅失 | P1 | 仍在：`IsoHutch.java :882` 呼叫後 POP；`:776-786` 101 次隨機選位、`:788` 最終只查 `animalInside`、`:801` 靜默 `return false`。靜態定罪（無執行期實例）。 | 無（靜態） |
+
+### III. MP 玩法／同步（Bug Reports）
+
+| # | 標題 | P | 42.20.4 現況與依據 | 附件 |
+|---|---|---|---|---|
+| B-R1 | Timed action 100% 卡死、整條 action queue 堵塞（null 參數 → 既不 Accept 也不 Reject） | P1 | 仍在：`PZNetKahluaTableImpl :473-478` 靜默 null；`NetTimedActionPacket :70-86` 對 `act` 設 state 卻 `this.write`（javap offset 81/142 `aload_0`）。修正後 8/27–9/2 送出 60 次本應有的 Reject。 | `Lua(Vanilla).new` 例外樣本 |
+| B-R3 | `faceThisObject` 對 `getClosestSpriteGridObject` 回 null 無條件解參考 → 動物狀態機每 tick NPE、卡 idle | P1 | 仍在：`IsoGameCharacter :10387-10391`（javap 200→204 無 ifnull）；`IsoObject :5389-5395/:5450`。9/1–9/2 3386 次。 | NPE 堆疊＋caller 統計 |
+| B-R4 | 衣物同步三叢集：(b) `ItemDescription` ctor tint 漏守衛→單一玩家衣物廣播全滅；(c) SyncVisuals count 不符整包丟；(a) `ContainerID` 直讀 raw square | P1 | 仍在：`SyncClothingPacket :259-262`（260/261 有守衛、262 無）；`SyncVisualsPacket :57-65`；`WornItems :155-165` 跳過 null-visual；`ContainerID :182/:186`。8 天 480+ 筆同一玩家。 | send Exception／mismatch 樣本 |
+| B-R6 | 動物 relevancy 半徑 10/8 於 client 載入半寬＋requested 無冷卻/範圍 → 完整快照重送迴圈 ~38% 上行 | P2 | 仍在：`AnimalSynchronizationManager :122`（`(getRelevantRange()-2)*10`）、`:57-60` setRequested 無閘、`:107` 唯一上限 150。pcap 8.03s：109 req↔109 full、14 個 ID、87.2% 重送。 | pcap decoder 統計表 |
+
+### IV. Client（Bug Reports，標 client-side）
+
+| # | 標題 | P | 42.20.4 現況與依據 | 附件 |
+|---|---|---|---|---|
+| C1 | `ImageData.dispose()` 不釋放 `frames` → DirectBuffer 地板超過 `waitFileTask` 50 MB 硬門檻 → 貼圖載入永久停擺 → 實體只剩影子＋名牌 | P0 | 仍在：`ImageData`／`TextureID`／`TextureIDAssetManager`／`WorldStreamer` 四 class 42.20.2→42.20.4 逐位元組相同（pz-42.20.4-update-analysis §2）。修後地板 1096 MB→0、隱形零復發。 | 修前/修後 console (12)/(17)、遙測表 |
+
+### V. Native crash（Bug Reports；Steam 指南說 crash 走 Support——本文是根因分析，建議仍發 Bug Reports 並首行註明 crash）
+
+| # | 標題 | P | 42.20.4 現況與依據 | 附件 |
+|---|---|---|---|---|
+| C2 | `PolygonalMap2::createVehicleClusters()` SIGSEGV：`VehicleRect` 池交出 `0x30`，經 `VisibilityGraph::release()` 一輪前入池；池無驗證＋`reallocate_aligned` 拷貝 `malloc_usable_size(old)` | P0 | 仍在：`libPZPathFind64.so` sha `0777dda6…`（42.20.4 depot）；8/22–8/31 七次、8/31 00:58 最近一次。首次寫入者未定罪（誠實揭露）。 | hs_err（截斷）、ucontext／pool census 輸出、七次 console 摘錄 |
+
+### VI. Minor（Bug Reports，低優先，可合一篇）
+
+| # | 標題 | P | 42.20.4 現況與依據 |
+|---|---|---|---|
+| B-R7 | `IsoObject.syncIsoObject` 的 `ERROR: IsoThumpable not found on square` println（每次建造必印，4 天 11,567 行）＋`SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件必刷 `Invalid SpriteConfig object!` | P3 | 仍在：`IsoObject :866-873`（`System.out.println`，繞過 debug channel）；`SpriteConfig :51-72`。 |
+
+### VII. 設計面建議（PZ Suggestions，不是 Bug Reports）
+
+| # | 標題 | P | 依據 |
+|---|---|---|---|
+| C3 | `QueuedSaveAll` 全存檔在主執行緒同步凍結 5–7 s（80 人）——建議增量／off-thread cell save | P3 | `ServerMap.SaveAll :94-147` 主執行緒 `sleep(10)` 輪詢；看門狗 4 天 16 次快照同族。 |
+
+## 3. 已知但**不**建議本批回報的項目
+
+| 項目 | 理由 |
+|---|---|
+| popman 共享 buffer 競爭（2h） | 官方 42.20.2 已收編（`readByteBuffer` 專用讀 buffer），退役。 |
+| WorldStreamer 8 s 逾時重發 livelock（W4-2 client） | 42.20.3 官方重構（`ChunkNotReady` 主動通知），撤刀。 |
+| hit 封包 `Zombie.process` / `Fall.process` 無 null 檢查（2c） | 42.20.4 仍無檢查（`hit/Zombie.java :56-67`），但只是防禦性守衛、正式服無事故實證，證據不足。 |
+| `Send Toxic Building` 洪水（抑噪 #8） | 來源是 PSR mod 的 `setToxic` 週期呼叫，非 vanilla；已另回報 PSR 作者。 |
+| 42.20.4 移除 `loadstring`（CleanUI 事故） | 應屬刻意安全修補；若要反映 mod 生態衝擊走 Mod Portal（可選，非 bug）。 |
+| `NetTimedAction.perform` unboxing NPE、`Error with packet: GameCharacterAttachedItem` | vanilla 自行 catch／未調查，證據不足。 |
+| 受精蛋清除 client 無守衛（2n）、LootRespawn Zone gate（2e） | 設計語意問題，非缺陷。 |
+
+## 4. 發文順序建議
+
+1. **第一批（資料損失，P0）**：A-R6（CRC race）、A-R3（tempVector2_2 Blam）、B-R5（vehicle wx/wy）、C1（client 隱形）。
+2. **第二批（假死，P0）**：A-R1、A-R2、A-R4、A-R5、C2（native crash）。
+3. **第三批（玩法，P1）**：B-R1（卡讀條）、B-R3（動物 NPE）、B-R4（衣物）、B-R2（hutch）。
+4. **第四批（P2/P3）**：B-R6（動物網路）、B-R7（log spam）、C3（Suggestions 板）。
+
+每篇貼出後把論壇 URL 回填到本表（方便日後 follow-up 與 changelog 對照）。
