@@ -103,12 +103,22 @@ public final class Patcher {
         }
     }
 
+    /**
+     * void instance 方法尾部線性呼叫：每個 RETURN 前插
+     * {@code aload_0; invokestatic helperOwner.helperName helperDesc}。與 HeadCall 同形，
+     * 純線性、無新 branch/frame（RETURN 前的 frame 狀態不變，插入的兩條指令不引入 branch
+     * target）。W16 首用（2026-09-02 隨其退役移除）；W10-C 復用於 NetTimedAction.start 尾部
+     * （setTimeData 之後讀 duration）。
+     */
+    record TailCall(String helperOwner, String helperName, String helperDesc) {}
+
     static final class MethodOps {
         final String name, desc;
         final List<Site> redirects = new ArrayList<>();
         final List<ConstChange> consts = new ArrayList<>();
         HeadGuard headGuard = null;
         HeadCall headCall = null;
+        TailCall tailCall = null;
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
         VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
@@ -195,9 +205,10 @@ public final class Patcher {
             if (ops.vehicleChunkIndexRepair != null) {
                 minimum = 4;
             } else if (ops.headCall != null) {
-                minimum = Math.max(ops.headCall.slots().length, ops.headGuard != null ? 1 : 0);
+                minimum = Math.max(ops.headCall.slots().length,
+                        ops.headGuard != null || ops.tailCall != null ? 1 : 0);
             } else {
-                minimum = ops.headGuard != null ? 1 : 0;
+                minimum = ops.headGuard != null || ops.tailCall != null ? 1 : 0;
             }
             super.visitMaxs(Math.max(maxStack, minimum), maxLocals);
         }
@@ -266,6 +277,13 @@ public final class Patcher {
 
         @Override
         public void visitInsn(int opcode) {
+            TailCall tc = ops.tailCall;
+            if (tc != null && opcode == Opcodes.RETURN) {
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, tc.helperOwner(), tc.helperName(),
+                        tc.helperDesc(), false);
+                ops.actualHits++;
+            }
             super.visitInsn(opcode);
             clampState = clampState == 4 && opcode == Opcodes.IADD ? 5 : 0;
             vehicleChunkState = 0;

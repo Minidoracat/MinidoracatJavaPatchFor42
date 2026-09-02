@@ -85,6 +85,7 @@ $helperEntries = @(
     'zombie/mdc/ClothingSyncGuard.class',
     'zombie/mdc/ContainerIdProbe.class',
     'zombie/mdc/FaceObjectGuard.class',
+    'zombie/core/MdcTimedActionProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -298,6 +299,16 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceOb
 Assert-Ok "FaceObjectGuardTest（on，出貨組態）"
 java "-Dmdc.faceObjectGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest off
 Assert-Ok "FaceObjectGuardTest（faceObjectGuard=0 kill switch）"
+
+Write-Host "[9s/10] 卡讀條第二波觀測（W10-C）三組態行為驗證（獨立 JVM）..."
+# observe＝預設出貨（負 duration／打斷／performFalse 純記錄）；enforce＝打斷時補送 Reject（無連線安全跳過）；
+# off＝三點純直通。三個 static-final 組態都真跑並自驗 MODE，property 拼錯不得假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe
+Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
+java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest enforce
+Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
+java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
+Assert-Ok "MdcTimedActionProbeTest（off 文字別名，純直通）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
