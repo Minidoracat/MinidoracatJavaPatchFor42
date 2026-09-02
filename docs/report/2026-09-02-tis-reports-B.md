@@ -23,7 +23,7 @@
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]
 Save: [Existing MP save; not save-specific - see analysis]
 
@@ -134,7 +134,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]
 Save: [Existing MP save; not save-specific - see analysis]
 
@@ -210,7 +210,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]
 Save: [Existing MP save; not save-specific - see analysis]
 
@@ -302,7 +302,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The defects are in vanilla Java (class/method references below) and do not involve any mod code.]
 Save: [Existing MP save; not save-specific - see analysis]
 
@@ -386,7 +386,7 @@ W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` �
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code; no mod writes vehicles.db chunk fields.]
 Save: [Existing MP save; the corrupted rows persist across restarts and are not recoverable in-game]
 
@@ -482,7 +482,7 @@ W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` �
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. The geometry defect is in vanilla Java (class/method references below); the affected animals were wild and no mod touches the animal sync path.]
 Save: [Existing MP save; not save-specific - see analysis]
 
@@ -567,7 +567,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 60-80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods on the production server where this was observed. Both messages are emitted by vanilla Java for vanilla conditions (class/method references below).]
 Save: [Existing MP save; not save-specific]
 

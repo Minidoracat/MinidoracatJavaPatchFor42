@@ -21,7 +21,7 @@
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer (client-side defect; observed on a dedicated server)]
-Server settings: [Dedicated, Linux x86_64, 60–80 concurrent players at peak]
+Server settings: [Dedicated, Linux x86_64, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01)]
 Mods: [Clients and server run ~80 workshop mods. The leak is in vanilla zombie.core.textures.ImageData / TextureIDAssetManager (class/method references below); mods only add more textures and therefore reach the threshold sooner. We could not build a mod-free repro because the trigger is "enough unique texture content seen in one session", which a vanilla-only client on a vanilla server reaches much more slowly.]
 Save: [Any; not save-related]
 
@@ -75,7 +75,7 @@ We validated 1–3 as an experimental client-side patch on affected players of o
 ```text
 Version: [42.20.4] (build id 24909836)
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, glibc 2.39, kernel 6.17.4), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots, 20–80 concurrent players]
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, glibc 2.39, kernel 6.17.4), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
 Mods: [~80 workshop mods, none of which ship native code. The corrupted objects are native-only structures inside libPZPathFind64.so (unmodified Steam depot file, sha256 0777dda6…). Full disclosure of our own Java-side patches is in the report body; none of them touch zombie.pathfind or any native structure.]
 Save: [Existing MP save; not save-related]
 
@@ -101,7 +101,7 @@ Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux, 60–80 concurrent players at peak, SaveWorldEveryMinutes=60]
+Server settings: [Dedicated, Linux, 7-day average ≈30 concurrent players, evening peaks 60–95, SaveWorldEveryMinutes=60]
 Mods: [~80 workshop mods; not mod-related — the path below is vanilla ServerMap]
 Save: [Existing MP save]
 
