@@ -20,6 +20,7 @@ itemId / fullType）。
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, freeze, inventory`
 
 ### Title
 
@@ -173,6 +174,7 @@ entitySet 殘留（reset/pool 路徑繞過 `removeEntityInternal`）。優先級
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, freeze, chunk`
 
 ### Title
 
@@ -393,6 +395,7 @@ request.
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, data loss, chunk`
 
 ### Title
 
@@ -561,6 +564,7 @@ was never corrupt. Logs / bytecode diffs available on request.
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, freeze, animals`
 
 ### Title
 
@@ -718,6 +722,7 @@ priority instead of the server. Logs / bytecode diffs available on request.
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, freeze, window`
 
 ### Title
 
@@ -870,6 +875,7 @@ object plus one log line. Logs / bytecode diffs available on request.
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, data loss, save`
 
 ### Title
 
