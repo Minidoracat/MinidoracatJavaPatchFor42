@@ -5,8 +5,7 @@
 選最高的 version 目錄（只比 major.minor）。遊戲版本：--game-version，否則從
 server-console.txt 的 `version=X.Y.Z` 讀。
 
-正式服每 5 分鐘由 cron
-呼叫 apply-workshop-compat-patches.sh --apply，再跑 fix-permissions.sh。
+正式服每 5 分鐘由 cron 呼叫 apply-workshop-compat-patches.sh --apply，再跑 fix-permissions.sh。
 
 2026-08-21 正式服稽核：Project Gurashi、Tikitown、Secretz 已停用；
 Tsarslib 的 AnimSets 大小寫 symlink 亦已退役，B42.20.3 會以

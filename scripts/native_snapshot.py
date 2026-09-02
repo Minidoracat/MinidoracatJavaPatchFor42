@@ -33,6 +33,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -49,7 +50,7 @@ TOOLS_ROOT = REF_ROOT / "tools"
 GHIDRA_ROOT = TOOLS_ROOT / "ghidra"
 WORK_NATIVE = PROJECT_ROOT / "work" / "native"
 
-SSH_HOST = "<your-ssh-host>"
+SSH_HOST = os.environ.get("PZ_SSH_HOST", "your-ssh-host")  # ~/.ssh/config alias of the game server
 REMOTE_DIR = "/home/pzserver/serverfiles/linux64"
 # TIS-authored libs only; Valve runtime (steam_api/steamwebrtc/steamclient) excluded.
 LIBS = (

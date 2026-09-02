@@ -13,3 +13,4 @@ temp/
 .playwright-cli/
 dist-client-lowmem/
 native-observer/out/
+private/
