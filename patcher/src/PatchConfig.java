@@ -117,7 +117,7 @@ public final class PatchConfig {
         // CreatePlayerPacket 尾段四個重活、Connect/ConnectCoopPacket 與 GameServer
         // .receivePlayerConnect 的 REJOIN 兩層）。join 卡頓歸因任務已完成，正式服
         // REJOIN_TOTAL 常態 5–13ms＝已無待答問題。詳見 docs/patches.md 2i；
-        // 復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         Patcher.ClassPatch gameServer = new Patcher.ClassPatch("zombie/network/GameServer");
 
@@ -168,7 +168,7 @@ public final class PatchConfig {
         // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
         // CreateItem 改道）。observe 實測收益僅 0.06–0.18%，「永不啟用 on」已定案——
         // W3-2 的教訓是「只有量測證明有收益」，這次量測的答案是沒有。
-        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- 行為（method 範圍內常數替換；ClassWriter 產新常數池條目，不動共享條目）----
 
@@ -372,7 +372,7 @@ public final class PatchConfig {
         // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer
         // .removeOlderDuplicateRequests headCall）。42.20.3 官方 pending 機制上線後
         // packed 只剩 47–82 次/session、skip[short] 99.3%＝效益≈0，而每次遊戲更新都要
-        // 重驗 WorkerThread 互斥前提。詳見 docs/patches.md 2p；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 重驗 WorkerThread 互斥前提。詳見 docs/patches.md 2p；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
         // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
@@ -716,7 +716,7 @@ public final class PatchConfig {
         // （s2Missed／queueFailures／sourceGap／cellNull／chunkNull／duplicateRemoved 全 0，
         // clearShortfall 的 handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測
         // 結論已達；heartbeat 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。
-        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W17 hutch 載入回傳檢查 enforce（靜態已定罪；docs/patches.md 2ae）----
         // IsoHutch.load 逐隻 addAnimalInside(animal,false) 忽略 boolean 回傳（offset 526：
