@@ -14,6 +14,10 @@
 優先級：**最高**（玩家可見、需重開遊戲、社群長期回報）。
 附件：8/23 session 的三筆 Lua ctor 例外全 stack、8/27–9/2 我方 hotfix 的 60 筆 reject 分類表、`NetTimedActionPacket.processServer` 與 `ItemTransactionPacket.processServer` 的 javap 對照。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] Timed actions can stall permanently at 100% and block the whole action queue when a packet argument deserializes to null — the server sends neither Accept nor Reject`
@@ -125,6 +129,10 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 優先級：**高**（靜默資料損失、修法只有幾行）。
 附件：42.20.4 `IsoHutch.load` / `addAnimalInside` 反編譯節錄、零 `Rand` 測試 harness 的重現說明（「有空槽但 vanilla 101 次全撞」）。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] IsoHutch.load discards the addAnimalInside() return value - animals in a near-full hutch are silently destroyed on load`
@@ -200,6 +208,10 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 報 W22：`IsoObject.getClosestSpriteGridObject` 在 sprite-grid 清單為空時回 null，`IsoGameCharacter.faceThisObject` 無條件解參考 → 動物狀態機每 tick 炸、卡 idle 不轉 eat/walk。9/1–9/2 兩天 3386 次（≈70/h），是我方 log 最大單一例外源。
 優先級：**高**（一行修法、有行為後果、噪音第一名）。
 附件：`StateMachine.stateExecute` 例外樣本（含 caller 分佈 2366/1020）、42.20.4 `faceThisObject` javap（offset 200→206 無 ifnull）。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
 
 ### Title
 
@@ -293,6 +305,10 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 優先級：**中高**（(b) 修法一行，影響單一玩家全服可見度）。
 附件：nullVisual 歸因統計（單一玩家 480+）、(c) mismatch 的 signed diff 分佈、`ContainerID` 探針的 `o class` 分佈（全為 IsoPlayer）。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] Clothing/visuals sync: an unguarded getVisual().getTint() disables all clothing broadcasts for one player, SyncVisualsPacket drops whole packets on count mismatch, and ContainerID reads a raw square field`
@@ -376,6 +392,10 @@ We validated (b) and the (b)/(c) link with an experimental server-side hotfix (A
 W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` 的 wx/wy 取自 `vehicle.chunk`、x/y 取自 physics，兩來源無 invariant；`resetForStore` 把 pooled chunk 的 wx/wy 清成 0,0 卻不清車輛的反向參照；載入只查 `WHERE wx=? AND wy=?`。42.20.4 逐行核對後 `VehicleBuffer.set` 未變。
 優先級：**高**（永久資料不可達、修法四行、涵蓋所有 persistence 路徑）。
 附件：三筆實案 SQLite 前後列、8/27–9/2 hotfix 的 182 筆修正分佈（|Δ|=1 ×176、|Δ|=2 ×6）、8/28 兩輛 NaN 車紀錄。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
 
 ### Title
 
@@ -473,6 +493,10 @@ W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` �
 優先級：**中**（無 crash，但吃掉近四成上傳；requested 路徑另有放大面）。
 附件：pcap decoder 統計摘要（去識別化）、W13 前後對照、`range` 值以便重算環帶。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] Animal relevancy radius is 10/8 of the client's guaranteed loaded half-width, and the requested path has no cooldown or range check - a repeating full-snapshot loop consuming ~38% of server upload`
@@ -557,6 +581,10 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 兩項純噪音（無玩法影響），合成一份短報告：(i) `IsoObject.syncIsoObject` 在 `getObjectIndex()==-1` 時用 `System.out.println` 印 `ERROR:`，B42 建造流程每次必觸發，四天 11,567 行；(ii) `SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件每次載入必刷 `Invalid SpriteConfig object!`，42.20.3 實測 26h 23,517 行。
 優先級：**低**（minor，但會淹沒真錯誤）。
 附件：兩段 log 樣本與計數指令、19 個 vanilla 物件名單。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
 
 ### Title
 

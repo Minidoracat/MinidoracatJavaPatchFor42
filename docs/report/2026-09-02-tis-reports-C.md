@@ -14,6 +14,10 @@
 - 附件：受影響玩家修前／修後 console.txt（console (12)／(17)）、遙測表；不要附 patch 本體。
 - 板別：Bug Reports（B42）；標 client-side。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 [42.20.4] [MP client] Native DirectBuffer leak in the texture pipeline silently starves texture loading — zombies/players/vehicles render as shadow + nametag only until the game is restarted
 
@@ -68,6 +72,10 @@ We validated 1–3 as an experimental client-side patch on affected players of o
 - 板別：Bug Reports（B42）；Steam 指南說 crash 走 Support，但本文是根因分析，建議 Bug Reports 並在首行註明 crash。
 - 內文＝既有草稿 `docs/report/2026-08-31-pathfind-vehiclerect-pool-poisoning-tis.md` 全文，前面加下列欄位頭。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 [42.20.4] [MP dedicated] Native SIGSEGV in PolygonalMap2::createVehicleClusters() — VehicleRect object pool hands out a corrupted slot (0x30) that entered the pool through VisibilityGraph::release() one round earlier
 
@@ -93,6 +101,10 @@ Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs
   80 人時每次 5–7 秒全服凍結（我方看門狗 4 天 16 次快照全同族）；`checkClientPause` 有送 Pause 封包所以不踢線，但玩家體感每小時一次 rubber-band。
 - 優先級：低（feedback）；可與 C1/C2 分開、獨立發文或放在 PZ Suggestions。
 - 板別：PZ Suggestions／General Discussion（不是 Bug Reports）。
+
+### 建議板塊
+
+**PZ Suggestions** — https://theindiestone.com/forums/forum/20-pz-suggestions/（發新主題：https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）
 
 ### Title
 [42.20.4] [MP dedicated] Suggestion: full world save (QueuedSaveAll) blocks the main loop for 5–7 s on a busy server — consider an incremental / off-thread cell save

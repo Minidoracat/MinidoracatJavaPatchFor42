@@ -22,13 +22,15 @@
 
 ### 板塊對照（2026-09-02 查論壇實際結構）
 
-| 板 | URL | 放什麼 |
-|---|---|---|
-| **Bug Reports** | `forums/forum/85-bug-reports/` | A-R1…A-R6、B-R1…B-R7、C1、C2 共 15 份。板規只有「English only」，**沒有 MP 子板**，用標題 `[MP]`／`[MP client]` 區分。 |
-| PZ Support | `forums/forum/18-pz-support/` | 板頭寫「crash reports… Bug reports go here（連到 85）」——給「不知原因的崩潰求助」。C2 有根因與修法，仍發 Bug Reports，首行註明 crash 即可。 |
-| PZ Suggestions | `forums/forum/20-pz-suggestions/` | C3（SaveAll 同步凍結，設計面）。 |
-| Mod Portal | `forums/forum/87-mod-portal/` | 你 getFileWriter 那篇在此；若要反映 42.20.4 移除 `loadstring` 的 mod 生態衝擊（可選），也在此。 |
-| PZ Multiplayer › Help | `forums/forum/72-help/` | 玩家求助用，**不要**放 bug 回報。 |
+| 板 | 板 URL | 發新主題 | 放什麼 |
+|---|---|---|---|
+| **Bug Reports** | https://theindiestone.com/forums/forum/85-bug-reports/ | https://theindiestone.com/forums/forum/85-bug-reports/?do=add | A-R1…A-R6、B-R1…B-R7、C1、C2 共 15 份。板規只有「English only」，**沒有 MP 子板**，用標題 `[MP]`／`[MP client]` 區分。 |
+| PZ Support | https://theindiestone.com/forums/forum/18-pz-support/ | https://theindiestone.com/forums/forum/18-pz-support/?do=add | 板頭寫「crash reports… Bug reports go here（連到 85）」——給「不知原因的崩潰求助」。C2 有根因與修法，仍發 Bug Reports，首行註明 crash 即可。 |
+| PZ Suggestions | https://theindiestone.com/forums/forum/20-pz-suggestions/ | https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add | C3（SaveAll 同步凍結，設計面）。 |
+| Mod Portal | https://theindiestone.com/forums/forum/87-mod-portal/ | https://theindiestone.com/forums/forum/87-mod-portal/?do=add | 你 getFileWriter 那篇在此；若要反映 42.20.4 移除 `loadstring` 的 mod 生態衝擊（可選），也在此。 |
+| PZ Multiplayer › Help | https://theindiestone.com/forums/forum/72-help/ | — | 玩家求助用，**不要**放 bug 回報。 |
+
+每份草稿（A/B/C 三檔）的 `### 中文摘要` 之後都有一段 `### 建議板塊`，帶板 URL 與發新主題 URL（`?do=add` 需登入）。
 
 ### 去識別化（已檢查三份草稿的英文 body）
 
@@ -47,15 +49,15 @@
 
 | 貼文 | 板 | 現況（42.20.4） |
 |---|---|---|
-| [42.17 MP] visited map fragmented / 3.83 MB blob per login（2026-04-26，QA Artem_VB 已建 ticket） | Bug Reports | **部分處理**：`WorldMapVisitedServer.sendRequestData` 現以 `Deflater` 壓縮後傳送（42.20.4 反編譯 :125-156），5 分鐘 `savePeriod` 已不存在（改由 `QueuedSaveAll` 統一存檔）。傳輸層 ack/retry 未見。可在該串回一句 follow-up。 |
-| [42.20] getFileWriter allowlist 靜默回 null（2026-08-01） | Mod Portal | 未查 42.20.4 是否加 log；與本批無關。 |
-| Dedicated Server can't download mods（2026-07-14 回覆） | PZ Support | 不適用。 |
+| [42.17 MP] visited map fragmented / 3.83 MB blob per login（2026-04-26，QA Artem_VB 已建 ticket）— https://theindiestone.com/forums/topic/94585-4217-mp-player-visited-map-data-fragmented-and-sometimes-lost-on-relog-server-streams-a-fixed-~383mb-blob-per-user-on-every-login/ | Bug Reports | **部分處理**：`WorldMapVisitedServer.sendRequestData` 現以 `Deflater` 壓縮後傳送（42.20.4 反編譯 :125-156），5 分鐘 `savePeriod` 已不存在（改由 `QueuedSaveAll` 統一存檔）。傳輸層 ack/retry 未見。可在該串回一句 follow-up。 |
+| [42.20] getFileWriter allowlist 靜默回 null（2026-08-01）— https://theindiestone.com/forums/topic/97743-4220-getfilewriter-silently-returns-null-for-non-allowlisted-extensions-mod-data-writes-fail-with-no-error-and-no-log/ | Mod Portal | 未查 42.20.4 是否加 log；與本批無關。 |
+| Dedicated Server can't download mods（2026-07-14 回覆）— https://theindiestone.com/forums/topic/96649-dedicated-server-cant-download-mods/ | PZ Support | 不適用。 |
 
 ## 2. 本批 16 份：分類、優先級、現況
 
 優先級：**P0** 資料損失／全服假死；**P1** 玩法卡死／動物滅失；**P2** 網路效能；**P3** minor／設計建議。
 
-### I. 伺服器假死／活鎖（Bug Reports）
+### I. 伺服器假死／活鎖 → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
@@ -64,7 +66,7 @@
 | A-R4 | `BaseAnimalSoundManager` comparator NaN → TimSort IAE → `clear()` 跳過 → 全服卡讀條「時間停止」 | P0 | 仍在：`BaseAnimalSoundManager.java :19-24` 現場重算＋手寫三態、`:42` sort 先於 `:59` clear。8/23 1411 次；捕手 8/27–9/2 仍攔 18 次、`nanAnimals=0`。 | 8/23 IAE 堆疊、捕手 log |
 | A-R5 | `IsoGridSquare.removeGlassAttachments` 無條件 `n--` → 一個砸窗封包無限迴圈（SIGKILL） | P0 | 仍在：`IsoGridSquare.java :8226-8227`；`IsoObjectUtils :36-41/:45-60` 給出兩條「沒移除任何東西」的實路。8/02 事故。 | 8/02 兩份 thread dump |
 
-### II. 伺服器資料損失（Bug Reports）
+### II. 伺服器資料損失 → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
@@ -73,7 +75,7 @@
 | B-R5 | `VehiclesDB2$VehicleBuffer.set` 從 stale/pooled `vehicle.chunk` 取 wx/wy → 車輛永久不可見 | P0 | 仍在：`VehiclesDB2.java :1028-1032`（載入 `WHERE wx=? AND wy=?` :705/:737）；`IsoChunk.resetForStore :5255-5256` wx/wy=0。守衛 8/27–9/2 修正 182 次（\|Δ\|=1 ×176）。 | 三輛車 DB 列快照、8/28 NaN 案 |
 | B-R2 | `IsoHutch.load` 丟棄 `addAnimalInside` 回傳 → 近滿舍動物載入即滅失 | P1 | 仍在：`IsoHutch.java :882` 呼叫後 POP；`:776-786` 101 次隨機選位、`:788` 最終只查 `animalInside`、`:801` 靜默 `return false`。靜態定罪（無執行期實例）。 | 無（靜態） |
 
-### III. MP 玩法／同步（Bug Reports）
+### III. MP 玩法／同步 → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
@@ -82,25 +84,25 @@
 | B-R4 | 衣物同步三叢集：(b) `ItemDescription` ctor tint 漏守衛→單一玩家衣物廣播全滅；(c) SyncVisuals count 不符整包丟；(a) `ContainerID` 直讀 raw square | P1 | 仍在：`SyncClothingPacket :259-262`（260/261 有守衛、262 無）；`SyncVisualsPacket :57-65`；`WornItems :155-165` 跳過 null-visual；`ContainerID :182/:186`。8 天 480+ 筆同一玩家。 | send Exception／mismatch 樣本 |
 | B-R6 | 動物 relevancy 半徑 10/8 於 client 載入半寬＋requested 無冷卻/範圍 → 完整快照重送迴圈 ~38% 上行 | P2 | 仍在：`AnimalSynchronizationManager :122`（`(getRelevantRange()-2)*10`）、`:57-60` setRequested 無閘、`:107` 唯一上限 150。pcap 8.03s：109 req↔109 full、14 個 ID、87.2% 重送。 | pcap decoder 統計表 |
 
-### IV. Client（Bug Reports，標 client-side）
+### IV. Client → **Bug Reports**（標 client-side）：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
 | C1 | `ImageData.dispose()` 不釋放 `frames` → DirectBuffer 地板超過 `waitFileTask` 50 MB 硬門檻 → 貼圖載入永久停擺 → 實體只剩影子＋名牌 | P0 | 仍在：`ImageData`／`TextureID`／`TextureIDAssetManager`／`WorldStreamer` 四 class 42.20.2→42.20.4 逐位元組相同（pz-42.20.4-update-analysis §2）。修後地板 1096 MB→0、隱形零復發。 | 修前/修後 console (12)/(17)、遙測表 |
 
-### V. Native crash（Bug Reports；Steam 指南說 crash 走 Support——本文是根因分析，建議仍發 Bug Reports 並首行註明 crash）
+### V. Native crash → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add（Steam 指南說 crash 走 Support，但本文是根因分析，仍發 Bug Reports 並首行註明 crash）
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
 | C2 | `PolygonalMap2::createVehicleClusters()` SIGSEGV：`VehicleRect` 池交出 `0x30`，經 `VisibilityGraph::release()` 一輪前入池；池無驗證＋`reallocate_aligned` 拷貝 `malloc_usable_size(old)` | P0 | 仍在：`libPZPathFind64.so` sha `0777dda6…`（42.20.4 depot）；8/22–8/31 七次、8/31 00:58 最近一次。首次寫入者未定罪（誠實揭露）。 | hs_err（截斷）、ucontext／pool census 輸出、七次 console 摘錄 |
 
-### VI. Minor（Bug Reports，低優先，可合一篇）
+### VI. Minor → **Bug Reports**（低優先，可合一篇）：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
 | # | 標題 | P | 42.20.4 現況與依據 |
 |---|---|---|---|
 | B-R7 | `IsoObject.syncIsoObject` 的 `ERROR: IsoThumpable not found on square` println（每次建造必印，4 天 11,567 行）＋`SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件必刷 `Invalid SpriteConfig object!` | P3 | 仍在：`IsoObject :866-873`（`System.out.println`，繞過 debug channel）；`SpriteConfig :51-72`。 |
 
-### VII. 設計面建議（PZ Suggestions，不是 Bug Reports）
+### VII. 設計面建議 → **PZ Suggestions**：https://theindiestone.com/forums/forum/20-pz-suggestions/（發文 https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）
 
 | # | 標題 | P | 依據 |
 |---|---|---|---|
