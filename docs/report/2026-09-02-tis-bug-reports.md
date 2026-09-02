@@ -44,6 +44,11 @@
   - pcap 統計（B-R6）：只貼 decoder 彙總表，不附 pcap 本體（含 IP）。
   - 貼圖遙測／console (12)/(17)（C1）：是玩家自己的 client console，含其 Steam 名與本機路徑——貼前把 `Users\<name>` 與暱稱塗掉，或只貼遙測行。
 - 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
+- **貼法（第一篇的教訓）**：草稿 Body 外面的 ```text 圍欄只是給 markdown 看的，**不要把整篇貼成一個 code block**
+  （論壇會變成等寬字整塊、長行不換行、手機要橫向捲、QA 無法引用段落）。做法：在編輯器貼純文字
+  （Ctrl+Shift+V），只把縮排的 log 指紋與反編譯片段各自選起來按「Code」；段落標題（Summary／Root cause…）
+  可加粗。Tags 輸入時注意下拉自動配對：打 `freeze` 會跳成現有的 `freezers`（冰箱），要按 Enter 建新 tag
+  或改用 `crash`／`server`；`42.20.4` 沒有現成 tag，打完直接 Enter。
 
 ## 1. 你先前的回報現況
 
@@ -61,7 +66,7 @@
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
-| A-R1 | Container cycles → `ItemContainer.getCharacter()` 無限遞迴 → SOE 主迴圈死 13 分鐘 | P0 | 仍在：`ItemContainer.java:3250-3256`／`:342-358` 無 visited/深度；`AddItem :458-495` 只擋重複 id；`TransactionManager.chainContainsContainingItem :97` private 且只 2 層。守衛 8/13 起零復發。 | 8/13 21:31 SOE 堆疊、環閉合點 log |
+| A-R1 | Container cycles → `ItemContainer.getCharacter()` 無限遞迴 → SOE 主迴圈死 13 分鐘 — **已發 2026-09-02** https://theindiestone.com/forums/topic/100891-42204-mp-container-cycles-cause-unbounded-recursion-in-itemcontainergetcharacter-stackoverflowerror-kills-the-dedicated-server-main-loop-13-minute-silent-freeze/ | P0 | 仍在：`ItemContainer.java:3250-3256`／`:342-358` 無 visited/深度；`AddItem :458-495` 只擋重複 id；`TransactionManager.chainContainsContainingItem :97` private 且只 2 層。守衛 8/13 起零復發。 | 8/13 21:31 SOE 堆疊、環閉合點 log |
 | A-R2 | "Entity is already registered" 主迴圈活鎖 114 分鐘＋stale `entitySet` 每日仍發生 | P0 | 仍在：`ServerMap.Load2 :798-799` dequeue 在 fallible 之後；`EngineEntityManager :137` throw 為首句。**新根因鏈**（本批發現）：`GameEntity.reset :445` 無條件清 `addedToEngine`、`GameEntityManager.UnregisterEntity :235/:255` 早退跳過 `engine.removeEntity`、`RegisterEntity :211` 先 add 後 `:217` 設旗標＝自封；IsoObject 池（`IsoGridSquare :2551-2552`、`IsoObject.getNew :366-373`）重用同一實例。8/27–9/2 捕手 21 次全 `addedToEngine=false`。 | 8/14 01:34 stack、21 筆 victim 清單 |
 | A-R4 | `BaseAnimalSoundManager` comparator NaN → TimSort IAE → `clear()` 跳過 → 全服卡讀條「時間停止」 | P0 | 仍在：`BaseAnimalSoundManager.java :19-24` 現場重算＋手寫三態、`:42` sort 先於 `:59` clear。8/23 1411 次；捕手 8/27–9/2 仍攔 18 次、`nanAnimals=0`。 | 8/23 IAE 堆疊、捕手 log |
 | A-R5 | `IsoGridSquare.removeGlassAttachments` 無條件 `n--` → 一個砸窗封包無限迴圈（SIGKILL） | P0 | 仍在：`IsoGridSquare.java :8226-8227`；`IsoObjectUtils :36-41/:45-60` 給出兩條「沒移除任何東西」的實路。8/02 事故。 | 8/02 兩份 thread dump |
