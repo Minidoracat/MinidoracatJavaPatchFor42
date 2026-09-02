@@ -6,5 +6,60 @@
 <p>Mods: [~80 workshop mods, none of which ship native code. The corrupted objects are native-only structures inside libPZPathFind64.so (unmodified Steam depot file, sha256 0777dda6…). Full disclosure of our own Java-side patches is in the report body; none of them touch zombie.pathfind or any native structure.]</p>
 <p>Save: [Existing MP save; not save-related]</p>
 <p>Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs_err is truncated at the "Host:" line because glibc aborted inside the JVM crash handler — attached anyway; the core dump is the only usable artifact and is available privately (it contains player data).</p>
-<p>&lt;paste "## Summary" … "## Attachments we can provide on request" from docs/report/2026-08-31-pathfind-vehiclerect-pool-poisoning-tis.md here, headings demoted one level&gt;</p>
+<p><strong>Summary</strong></p>
+<p>On a 42.20.4 Linux dedicated server, PolygonalMap2::createVehicleClusters() crashed with SIGSEGV because VehicleRect::alloc() returned the value 0x30, which is not a pointer. A full core dump shows how that value got into the pool: an earlier VisibilityGraph::release() walked a VehicleCluster's rect array and pushed every slot into the VehicleRect pool without validation — and one of those slots, together with the array's glibc chunk header, had already been overwritten by something else. The core proves the corruption and its shape; it does <strong>not</strong> identify the writer, so we describe it below as an apparent short-range out-of-bounds or dangling-pointer store rather than a demonstrated one.</p>
+<p>The crash site is therefore <strong>not</strong> the site of the bug. Two separate vanilla design issues turn one such corrupting store into a delayed, unattributable crash, and we would like both addressed regardless of where the original store comes from.</p>
+<p><strong>Environment</strong></p>
+<table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Build</td><td>42.20.4, build id 24909836, Linux dedicated server</td></tr><tr><td>JVM</td><td>Zulu 25.30+17-CA (25.0.1+8-LTS), ZGC</td></tr><tr><td>OS</td><td>Ubuntu 24.04, glibc 2.39, kernel 6.17.4</td></tr><tr><td>Library</td><td>linux64/libPZPathFind64.so, sha256 0777dda6db77ddd3059f27f94e0d56fae827b21436b5feb4d719e96878fd21c4 (unmodified Steam depot file)</td></tr><tr><td>Load</td><td>20–80 concurrent players, 824 vehicle polys live at crash time</td></tr><tr><td>Frequency</td><td>7 crashes with glibc heap-corruption signatures between 2026-08-22 and 2026-08-31</td></tr></tbody></table>
+<p><strong>Disclosure:</strong> this server runs our own Java bytecode patches (loose .class files, log redirection / metrics / throttling gates). They contain <strong>no native code and no .so</strong>. No patched class lives in zombie.pathfind.*, and nothing we do touches PolygonalMap2, PathfindNative, or any pooled native structure. For completeness: one of our helpers reads the public float fields of zombie.pathfind.VehiclePoly on the <strong>client-only</strong> branch of a vehicle visibility check (on a server it returns before touching it) and never writes to it. No Workshop mod on this server ships native code. The corrupted objects are native-only structures with no Java representation. We are happy to reproduce with all patches removed if you need that, but we do not believe they are relevant to a corruption inside a native object pool.</p>
+<p><strong>Crash signature</strong></p>
+<pre>SIGSEGV (0xb) at pc=libPZPathFind64.so+0x4ca19, tid=&lt;pathfind thread&gt;
+Problematic frame: C [libPZPathFind64.so+0x4ca19] PolygonalMap2::createVehicleClusters()+0x89
+... then, while the JVM was writing hs_err:
+corrupted size vs. prev_size
+Aborted (core dumped)</pre>
+<p>Note the hs_err file is <strong>truncated at the Host: line</strong> because glibc aborted inside the JVM's own crash handler. Any 42.20.x crash of this family will produce a useless hs_err; the core dump is the only usable artifact.</p>
+<p><strong>What the core proves</strong></p>
+<p>Recovered the original SIGSEGV ucontext_t from the crash thread's stack (the core itself is the later SIGABRT):</p>
+<pre>RIP    = libPZPathFind64.so + 0x4ca19      (movups %xmm0,(%rbx))
+RBX    = 0x30                              (the value VehicleRect::alloc() returned)
+CR2    = 0x30
+trapno = 0x0e, err = 0x06                  (user-mode write to a not-present page)
+R12    = 31                                (loop index; 32nd allocation of this round)
+R13    = the PolygonalMap2 instance</pre>
+<p>VehicleRect pool state (ObjectPool&lt;VehicleRect&gt;, a std::deque&lt;void*&gt; used as a front-push / front-pop free list):</p>
+<pre>total allocations counter        832
+free-list entries               800   (all 800 distinct)
+slot just popped (start.cur-8)  0x30
+in-flight ArrayList this round   capacity 32, count 31, all 31 distinct
+=&gt; 800 + 31 = 831 accounted, exactly one allocation unaccounted for</pre>
+<p>The polluted owner:</p>
+<pre>VehicleCluster @X: capacity 4, count 2, rect array @A
+  array[0] = 0x30                       &lt;-- not a pointer
+  array[1] = &lt;a real VehicleRect&gt;
+glibc chunk of A:  size word at A-8 has been overwritten with a heap pointer value
+                   (the neighbouring chunk header at A+0x28 is still intact: 0x35)</pre>
+<p>Timing, and the reason the crash site cannot identify the writer:</p>
+<ul><li>the VehicleCluster above is <strong>already in the cluster free pool</strong> at crash time;</li><li>the VisibilityGraph that owned it is <strong>already in the graph free pool</strong>;</li><li>PolygonalMap2's cluster list count is <strong>0</strong> — the crash happened in the first loop of createVehicleClusters(), before any cluster was built this round;</li><li>array[1] is the <strong>31st allocation of the current round</strong> (index 30), i.e. the allocation immediately before the poisoned one.</li></ul>
+<p>That last point pins the mechanism exactly: VisibilityGraph::release() releases the cluster's rect array in index order 0, 1; the pool pushes to the front and pops from the front, so those two entries must come back out as 1, 0. That is precisely what the core shows. <strong>The 0x30 entered the pool through VisibilityGraph::release(), one or more rounds before the crash.</strong></p>
+<p>Also worth noting: in the shipped library there is exactly <strong>one</strong> call site of VehicleRect::release() (inside VisibilityGraph::release()) and exactly <strong>one</strong> call site of VehicleRect::alloc() (inside PolygonalMap2::createVehicleClusters()).</p>
+<p><strong>Issue 1 — the object pool has no validation, so it launders corruption across rounds</strong></p>
+<p>VehicleRect::alloc() pops a void* and returns it; VehicleRect::release() pushes a void* and returns. Neither performs any check. Consequently:</p>
+<ul><li>a single corrupted array slot is stored verbatim in the free list;</li><li>it is handed to a consumer one or more rounds later;</li><li>the crash therefore happens in a function that is entirely innocent, at a point in time unrelated to the corruption, with no way to attribute it.</li></ul>
+<p>Suggested change: validate <strong>pool ownership</strong> on release() (an exact registry of this pool's allocated objects, with object generation/liveness where needed) and log the offending cluster / array / slot index. Do <strong>not</strong> use a low-address or magnitude heuristic: that would hide only values such as 0x30, let high-address corruption through, and still lose the writer. Validating on release() is far more useful than validating on alloc(), because release() still has the cluster and slot index in scope.</p>
+<p>The same pattern exists for the other ObjectPool&lt;T&gt; instantiations in this library (VehicleCluster, VisibilityGraph, node/edge pools), so a fix in the template covers all of them.</p>
+<p><strong>Issue 2 — reallocate_aligned() copies malloc_usable_size(old), not min(old, new)</strong></p>
+<p>reallocate_aligned(void*, unsigned long, unsigned long) at offset 0x5af50 does:</p>
+<pre>p = aligned_alloc(alignment, newSize)
+memcpy(p, old, malloc_usable_size(old))     &lt;-- source length, never clamped to newSize
+free(old)</pre>
+<p>We checked all <strong>136</strong> call sites in the shipped library: every one passes either a doubled requested capacity or an initial requested capacity. That is useful context but <strong>does not prove</strong> newSize &gt;= malloc_usable_size(old): glibc size-class rounding can make an older, smaller request have a larger usable size than the next request. We therefore cannot exclude this primitive as the writer from static call-site shape alone. <strong>We are not claiming this caused the crash.</strong> We are reporting it because a future logical shrink — and potentially some current size-class transitions — can turn it into a heap overflow of up to the old usable size. min(malloc_usable_size(old), newSize) costs nothing.</p>
+<p><strong>What we cannot tell you (and what we would need)</strong></p>
+<p>The <strong>first</strong> corrupting store is not identifiable from this core:</p>
+<ul><li>it happened at least one full createVehicleClusters() round before the crash;</li><li>the value written over the chunk header is a valid pointer to a live 96-byte heap object, so the write looks like a short-range out-of-bounds or dangling-pointer store rather than allocator misbehaviour;</li><li>we cannot rule out a writer in another native module — the process shares one glibc heap between PathFind, PopMan/MapCollisionData, RakNet and the JVM. We are <strong>not</strong> claiming PathFind wrote it.</li></ul>
+<p>We have built a read-only observation shim that moves only this library's reallocate_aligned / deallocate_aligned block family onto guarded mmap regions (PROT_NONE guard pages both sides, quarantine on free) so that the next occurrence faults on the writing instruction. If that produces a core with a definitive writer, we will send it. If you have a faster way to get there (a debug build with ASan, or a build with ObjectPool validation enabled), we would rather run that.</p>
+<p><strong>Two unrelated minor issues found while investigating</strong></p>
+<ol><li><strong>start-server.sh never manages to preload libjsig.so.</strong> It sets JSIG="libjsig.so" (bare name) while the LD_LIBRARY_PATH it exports contains jre64/lib/amd64, a directory that does not exist in this JRE layout. The file is at jre64/lib/libjsig.so. Every startup logs ERROR: ld.so: object 'libjsig.so' from LD_PRELOAD cannot be preloaded ... ignored. so JVM signal chaining has never actually been active on Linux dedicated servers.</li><li><strong>Pathfind.UseNativeCode cannot be turned off on a dedicated server.</strong> GameServer.main calls IsoWorld.instance.init() — which is where PathfindNative.useNativeCode is read from DebugOptions — before it calls DebugOptions.instance.init(), which is what loads debug-options.ini. The only runtime re-check, PathfindNative.checkUseNativeCode(), is called from IngameState (client only). So the setting is silently ignored server-side, which also removes the obvious workaround for this bug family.</li></ol>
+<p><strong>Attachments we can provide on request</strong></p>
+<ul><li>the recovered ucontext_t, pool census and cluster dump (a reproducible script, not the core itself — the core contains player data);</li><li>the 136-call-site classification for reallocate_aligned;</li><li>console excerpts for the seven crashes in this family (2026-08-22 … 2026-08-31).</li></ul>
 </body></html>

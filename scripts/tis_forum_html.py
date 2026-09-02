@@ -39,10 +39,52 @@ STACK_RE = re.compile(r"^\s*at\s+[\w.$]+\(|^\s*[a-z]+\.[\w.$]*(Exception|Error)\
 
 
 def inline(s: str) -> str:
+    """散文的行內格式。刻意**不產生** <code>／<em>：論壇編輯器（IPS 5 / CKEditor）貼上 HTML 時，
+    6 篇裡 4 篇把行內 <code> 全數搬到段尾（A-R2/A-R3/A-R4/A-R6 實貼對帳），且 `==x==` 會被當
+    highlight 語法吃掉 `==`。只留 <strong>（6/6 存活）。"""
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"(?<![*\w])\*(?!\s)([^*]+?)\*(?![*\w])", r"\1", s)
+    s = s.replace(" == ", " is ")
     s = html.escape(s, quote=False)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
-    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     return s
+
+
+PASTE_RE = re.compile(r'^<paste "## (.+?)" … "## (.+?)" from (\S+) here[^>]*>$', re.M)
+
+
+def markdown_to_draft(md: str) -> str:
+    """把 markdown 章節轉成本轉換器吃的草稿方言：`## X` → 底線小標、fenced code → 縮排 5 格、`---` 丟棄。"""
+    out: list[str] = []
+    in_fence = False
+    for line in md.split("\n"):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            out.append("")
+            continue
+        if in_fence:
+            out.append("     " + (line if line.strip() else "\u00a0"))
+            continue
+        if line.strip() == "---":
+            continue
+        m = re.match(r"^#{2,}\s+(.*)$", line)
+        if m:
+            out += ["", m.group(1), "-----"]
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def expand_paste(body: str) -> str:
+    def repl(m):
+        first, last, rel = m.group(1), m.group(2), m.group(3)
+        md = (ROOT / rel).read_text(encoding="utf-8")
+        a = md.index("\n## " + first)
+        b = md.index("\n## " + last)
+        nxt = md.find("\n## ", b + 1)
+        section = md[a + 1: nxt if nxt != -1 else len(md)]
+        return markdown_to_draft(section)
+    return PASTE_RE.sub(repl, body)
 
 
 def indent_of(line: str) -> int:
@@ -204,7 +246,7 @@ def main() -> None:
                 print(f"skip {name}: title/body not found", file=sys.stderr)
                 continue
             title = mt.group(1).strip().strip("`")
-            body_html = convert(mb.group(1))
+            body_html = convert(expand_paste(mb.group(1)))
             doc = (
                 "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + html.escape(title) + "</title>"
                 "<style>body{font-family:sans-serif;max-width:900px;margin:2em auto;line-height:1.45}"

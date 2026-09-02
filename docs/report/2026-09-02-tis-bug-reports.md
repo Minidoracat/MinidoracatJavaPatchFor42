@@ -49,7 +49,11 @@
   （段落合併、小標粗體、log／程式碼片段各自 code block、清單／表格保留）→ **用瀏覽器（Chrome/Edge）雙擊開啟**
   → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。
   不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。
-  貼完可用 `curl` 抓 topic 頁對帳：第一篇 `<strong>` 小標 6 個、`<pre>` 2 個、`<ol>` 3 個、無 `&lt;p&gt;` 殘留。
+  貼完可用 `curl` 抓 topic 頁對帳：粗體小標數、`<pre>` 數、清單數與本地 .html 相同，且全文 diff 無句子破損。
+- **編輯器已知會咬壞的東西（6 篇實貼對帳，2026-09-02）**：行內 `<code>` 在 4/6 篇被整段搬到段尾
+  （A-R2／A-R3／A-R4／A-R6，句子破損如「uses a JVM-wide shared as scratch space」）、同段兩個 `==`
+  會被當 highlight 語法吃掉。轉換器已改成**不產生行內 code／em、` == ` 改寫成 ` is `**，只留粗體與
+  `<pre>`（6/6 存活）。上述 4 篇已用重生的 .html 重貼修正。
 - **Tags 只能從既有 tag 下拉選，不能自訂**：版本不打 tag（標題已有 `[42.20.4]`，板上其他回報也不打）；`dedicated` 選
   `dedicated server`；打 `freeze` 會跳 `freezers`（冰箱），要點到 `freeze` 那個；`data loss` 不存在，用
   `corruption`／`save-data`。每篇的 4 個 tag 已改成確認存在的名稱（用 `/forums/tags/<tag>/` 逐一驗過）。
