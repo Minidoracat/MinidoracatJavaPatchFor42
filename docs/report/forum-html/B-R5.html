@@ -20,7 +20,10 @@ this.y  = vehicle.getY();</pre><p>No invariant is checked before addToDB (42.20.
 <p>So a save taken after resetForStore and before pool checkout writes wx,wy = 0,0; a save after checkout writes the recycled chunk's unrelated coordinates. Both produce a row with correct x,y that is unreachable from its own chunk. We have no object-identity logging across reset/reuse/save, so that final interleaving is a high-confidence reading rather than a direct trace - but the two observed row shapes match the two states exactly.</p>
 <p><strong>Field data</strong></p>
 <p>Three incidents within roughly one day on our server (first seen on 42.20.3; VehicleBuffer.set is unchanged in 42.20.4):</p>
-<p>sql id | script       | x, y                     | stored wx,wy | correct wx,wy 152    | 84mercLWB4   | 9432.836, 11207.054      | 1168, 969    | 1179, 1400 64     | 92nissanGTR  | 10591.696, 10335.673     | 0, 0         | 1323, 1291 2518   | 90bmwE30m3   | 13793.331, 3864.297      | 0, 0         | 1724, 483</p>
+<pre>sql id | script       | x, y                     | stored wx,wy | correct wx,wy
+152    | 84mercLWB4   | 9432.836, 11207.054      | 1168, 969    | 1179, 1400
+64     | 92nissanGTR  | 10591.696, 10335.673     | 0, 0         | 1323, 1291
+2518   | 90bmwE30m3   | 13793.331, 3864.297      | 0, 0         | 1724, 483</pre>
 <p>All three rows and BLOBs were intact. Recomputing wx = floor(x/8), wy = floor(y/8) during a stopped-server window made all three vehicles load again without touching their serialized data.</p>
 <p>Since then we have run a persistence-boundary guard continuously. Between 2026-08-27 and 2026-09-02 it corrected 182 writes: 176 with |delta chunk| = 1 and 6 with |delta chunk| = 2 on one axis. So the common case is not the dramatic 0,0 row but a vehicle whose chunk back-reference is one chunk behind its physics position - which produces the same unreachable row. On 2026-08-28 it also caught two vehicles saved with non-finite x/y (NaN) and wx,wy = 0,0; there the guard keeps the vanilla values and logs, since no position can be derived from NaN.</p>
 <p><strong>Suggested fix</strong></p>

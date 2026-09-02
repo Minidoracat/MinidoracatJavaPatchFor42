@@ -50,7 +50,13 @@
 }</pre>
 <p>entitySet membership is created only at :142 and destroyed only at :151, and addedToEngine is supposed to track it exactly. Our instrumentation reads GameEntity.isAddedToEngine() at the throw site, and over 2026-08-27..09-02 we recorded 21 occurrences, all on the main thread, EVERY ONE of them with addedToEngine is false -- while the throw itself proves entitySet.contains is true. That combination is unreachable through addEntityInternal / removeEntityInternal alone. It means something cleared the flag without removing the set entry. Reading 42.20.4, three vanilla paths can do exactly that:</p>
 <p>(a) zombie/entity/GameEntity.java:431-451, reset():</p>
-<p>if (this.addedToEngine || this.addedToEntityManager) { ... GameEntityManager.UnregisterEntity(this);        // :441 } ... this.addedToEngine = false;                        // :445 Line :445 is unconditional -- it runs whether or not :441 actually removed anything.</p>
+<pre>  if (this.addedToEngine || this.addedToEntityManager) { ...
+     GameEntityManager.UnregisterEntity(this);        // :441
+  }
+  ...
+  this.addedToEngine = false;                        // :445
+Line :445 is unconditional -- it runs whether or not :441 actually removed
+anything.</pre>
 <p>(b) zombie/entity/GameEntityManager.java:234-316, UnregisterEntity() has two</p>
 <p>early exits that make :441 a no-op while leaving entitySet untouched: - :235  if (gameEntity != null &amp;&amp; gameEntity.addedToEntityManager) -- entire body skipped when the flag is already false; - :255  if (stored != null) -- if idToEntityMap.remove(netID) returns null, engine.removeEntity(gameEntity) at :259 is never called. Note also the ordering in RegisterEntity: engine.addEntity(gameEntity) at GameEntityManager.java:211 runs BEFORE gameEntity.addedToEntityManager = true at :217. So the first time addEntityInternal throws, the object is left with addedToEntityManager is false -- and by (b):235 every later UnregisterEntity on that instance is a no-op. The bad state is self-sealing.</p>
 <p>(c) zombie/entity/GameEntityManager.java:312-313 clears addedToEntityManager and</p>

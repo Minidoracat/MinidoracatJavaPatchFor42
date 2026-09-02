@@ -11,7 +11,15 @@
 <p>Not deterministic (it depends where animals happen to stand), but continuous on any server with wild animals and enough players. No mods required.</p>
 <p><strong>Observed / measurements</strong></p>
 <p>Read-only tcpdump capture decoded with a purpose-built parser (UDP -&gt; RakNet connected datagram with reliability/split headers -&gt; reassembly -&gt; PZ user message -&gt; PacketType -&gt; AnimalUpdatePacket requested section). Window: 8.03 s, 25,000 bidirectional datagrams.</p>
-<p>client -&gt; server requested animal IDs           109 server -&gt; client full animal snapshots          109 distinct (client endpoint, onlineID) pairs       14 pairs that repeated within 5 s               14 / 14 full snapshots that were repeats           95 / 109 (87.2%) requests that received a response         109 / 109 (median 72.7 ms) average dataSize per full snapshot         1,125.4 bytes distance from requesting player to animal  70.4 - 91.5 squares AnimalUpdatePacket parse errors                   0</p>
+<pre>client -&gt; server requested animal IDs           109
+server -&gt; client full animal snapshots          109
+distinct (client endpoint, onlineID) pairs       14
+pairs that repeated within 5 s               14 / 14
+full snapshots that were repeats           95 / 109 (87.2%)
+requests that received a response         109 / 109 (median 72.7 ms)
+average dataSize per full snapshot         1,125.4 bytes
+distance from requesting player to animal  70.4 - 91.5 squares
+AnimalUpdatePacket parse errors                   0</pre>
 <p>Two benign explanations are ruled out: not "many animals entering view" (only 14 distinct pairs produced 109 snapshots), and not packet loss (every request got a response, mostly on reliable frames, yet the same ID was requested again on the next tick). We have no per-request record of the client's loaded state, so "every snapshot was discarded" is an inference; the repetition is the observation.</p>
 <p><strong>Root cause (decompiled 42.20.4, class/method references)</strong></p>
 <p>GameServer.receivePlayerConnect stores, from the client-provided chunk grid width:</p>

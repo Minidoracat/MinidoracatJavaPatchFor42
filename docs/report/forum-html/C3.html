@@ -8,7 +8,10 @@
 <p>This is a performance/design note rather than a bug.</p>
 <p><strong>Observed</strong></p>
 <p>We run a main-thread stall watchdog on our dedicated server. Over four days (2026-08-30 … 09-02) every non-shutdown stall of ≥5 s it captured — 16 of them, 5–7 s each — had the same main-thread stack:</p>
-<p>ServerMap.SaveAll  (waiting: Thread.sleep(10) loop until 4 WorkerThreads finish SaveCell for every loaded cell) → ServerMap.QueuedSaveAll → ServerMap.preupdate → GameServer.main</p>
+<pre>ServerMap.SaveAll  (waiting: Thread.sleep(10) loop until 4 WorkerThreads finish SaveCell for every loaded cell)
+→ ServerMap.QueuedSaveAll
+→ ServerMap.preupdate
+→ GameServer.main</pre>
 <p>with the server's own log confirming it ("SaveAll took 4474–5043 ms", "Saving took 5208–6038 ms"). Duration scales with player count (2–3.6 s at 20–40 players, 5–7 s at 60–80). WorldMapVisitedServer.save() (per-user zip deflate) adds &lt;1 s on top.</p>
 <p>Because QueuedSaveAll sends Pause to clients when the save is slow, nobody gets kicked — but every player experiences a 5–7 s freeze followed by a rubber-band, once per SaveWorldEveryMinutes and again on every "save" command / restart countdown.</p>
 <p><strong>Why we think it is worth a look</strong></p>

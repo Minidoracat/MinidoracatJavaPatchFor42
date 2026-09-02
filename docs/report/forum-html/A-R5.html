@@ -14,7 +14,9 @@
 <p><strong>Observed</strong></p>
 <p>Player-visible: complete server freeze. All players stop moving, no action has any effect, reconnecting hangs at the authentication step, and the console's graceful stop does nothing (the shutdown path also needs the tick).</p>
 <p>This is a live loop, not a deadlock: two thread dumps taken 4 seconds apart both show the main thread RUNNABLE, at different instructions inside the same loop (alternating between PropertyContainer.get and the stream anyMatch on the IsoDirections array). Call chain from the dumps:</p>
-<p>SmashWindowPacket.processServer -&gt; zombie.iso.objects.IsoWindow.smashWindow -&gt; zombie.iso.IsoGridSquare.removeGlassAttachments  &lt;-- spinning here</p>
+<pre>SmashWindowPacket.processServer
+  -&gt; zombie.iso.objects.IsoWindow.smashWindow
+    -&gt; zombie.iso.IsoGridSquare.removeGlassAttachments  &lt;-- spinning here</pre>
 <p>Across all 100 threads in the dump there was no third-party class on any stack.</p>
 <p><strong>Root cause (decompiled 42.20.4, class/method references)</strong></p>
 <ol><li>The unconditional decrement. zombie/iso/IsoGridSquare.java:8218-8230<pre>for (int n = 0; n &lt; this.objects.size(); n++) {
