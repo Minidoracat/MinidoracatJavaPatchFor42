@@ -17,6 +17,7 @@
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, timed action, stuck`
 
 ### Title
 
@@ -132,6 +133,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, animals, hutch`
 
 ### Title
 
@@ -212,6 +214,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, animals, exception`
 
 ### Title
 
@@ -308,6 +311,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, clothing, sync`
 
 ### Title
 
@@ -396,6 +400,7 @@ W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` �
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, vehicles, data loss`
 
 ### Title
 
@@ -496,6 +501,7 @@ W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` �
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, animals, network`
 
 ### Title
 
@@ -585,6 +591,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+建議 tags：`42.20.4, multiplayer, dedicated, log spam`
 
 ### Title
 
