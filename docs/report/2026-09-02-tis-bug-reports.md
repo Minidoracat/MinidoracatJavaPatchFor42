@@ -68,6 +68,8 @@
 
 ## 2. 本批 16 份：分類、優先級、現況
 
+**發文狀態（2026-09-02）**：16/16 已發（Bug Reports 15 篇 topic 100891–100921、PZ Suggestions 1 篇 100925），每篇皆以 `curl` 抓回與本地 .html 對帳通過；原排程 9 天分批改為單日發完（使用者決定）。§4 的排程表僅留作紀錄。
+
 優先級：**P0** 資料損失／全服假死；**P1** 玩法卡死／動物滅失；**P2** 網路效能；**P3** minor／設計建議。
 
 ### I. 伺服器假死／活鎖 → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
@@ -119,7 +121,7 @@
 
 | # | 標題 | P | 依據 |
 |---|---|---|---|
-| C3 | `QueuedSaveAll` 全存檔在主執行緒同步凍結 5–7 s（80 人）——建議增量／off-thread cell save | P3 | `ServerMap.SaveAll :94-147` 主執行緒 `sleep(10)` 輪詢；看門狗 4 天 16 次快照同族。 |
+| C3 | `QueuedSaveAll` 全存檔在主執行緒同步凍結 5–7 s（80 人）——建議增量／off-thread cell save — **已發 2026-09-02（PZ Suggestions）** https://theindiestone.com/forums/topic/100925-42204-mp-dedicated-suggestion-full-world-save-queuedsaveall-blocks-the-main-loop-for-57-s-on-a-busy-server-consider-an-incremental-off-thread-cell-save/ | P3 | `ServerMap.SaveAll :94-147` 主執行緒 `sleep(10)` 輪詢；看門狗 4 天 16 次快照同族。 |
 
 ## 3. 已知但**不**建議本批回報的項目
 
