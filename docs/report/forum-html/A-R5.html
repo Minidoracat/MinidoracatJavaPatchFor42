@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><title>[42.20.4] [MP] IsoGridSquare.removeGlassAttachments decrements its loop index unconditionally — a single smash-window packet can spin the server tick forever (requires SIGKILL)</title><style>body{font-family:sans-serif;max-width:900px;margin:2em auto;line-height:1.45}pre{background:#f4f4f4;padding:.6em;overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:.2em .5em}li{margin:.3em 0}</style></head><body>
+<p><em>Title (copy into the Title field):</em> [42.20.4] [MP] IsoGridSquare.removeGlassAttachments decrements its loop index unconditionally — a single smash-window packet can spin the server tick forever (requires SIGKILL)</p><hr>
+<p>Version: [42.20.4]</p>
+<p>Mode: [Multiplayer]</p>
+<p>Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]</p>
+<p>Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]</p>
+<p>Save: [Existing MP save; not save-specific -- see analysis]</p>
+<p><strong>Summary</strong></p>
+<p>IsoGridSquare.removeGlassAttachments walks <code>this.objects</code> by index and, whenever it removes an attachment, does <code>RemoveTileObject(o); n--;</code> -- assuming the removal always shortens the list. In 42.20 RemoveTileObject routes through IsoObjectUtils.safelyRemoveTileObjectFromSquare, which has code paths that remove nothing. When one of those is taken, the index steps back onto the same object, the same removal fails again, and the loop never terminates. Because removeGlassAttachments is reached from SmashWindowPacket.processServer, one player breaking one window can wedge the entire server tick.</p>
+<p>On 2026-08-02 at 17:48 this froze our production server: frame counter stuck at f:15924, all players motionless, re-login stalled at authentication, graceful stop ignored. <code>pkill -9</code> was the only recovery.</p>
+<p><strong>Reproduction steps</strong></p>
+<p>Not deterministic from a plain window smash, because it needs an attachment whose safe removal is a no-op. Trigger conditions:</p>
+<ol><li>A window with an attachment on it -- an object with the ATTACHED_TO_GLASS property, or an IsoLightSwitch on the window's wall side.</li><li>That attachment must be in a state where safelyRemoveTileObjectFromSquare returns without removing it from THIS square (see root cause: either getAllMultiTileObjects fails, or the object's own <code>square</code> is a different square, or null).</li><li>Any player smashes that window -&gt; SmashWindowPacket.processServer.</li></ol>
+<p><strong>Observed</strong></p>
+<p>Player-visible: complete server freeze. All players stop moving, no action has any effect, reconnecting hangs at the authentication step, and the console's graceful stop does nothing (the shutdown path also needs the tick).</p>
+<p>This is a live loop, not a deadlock: two thread dumps taken 4 seconds apart both show the main thread RUNNABLE, at different instructions inside the same loop (alternating between PropertyContainer.get and the stream anyMatch on the IsoDirections array). Call chain from the dumps:</p>
+<p>SmashWindowPacket.processServer -&gt; zombie.iso.objects.IsoWindow.smashWindow -&gt; zombie.iso.IsoGridSquare.removeGlassAttachments  &lt;-- spinning here</p>
+<p>Across all 100 threads in the dump there was no third-party class on any stack.</p>
+<p><strong>Root cause (decompiled 42.20.4, class/method references)</strong></p>
+<ol><li>The unconditional decrement. zombie/iso/IsoGridSquare.java:8218-8230<pre>for (int n = 0; n &lt; this.objects.size(); n++) {
+   IsoObject o = this.objects.get(n);
+   if (o.sprite != null) {
+      boolean isAttachedToGlass = o.getProperties().has(IsoPropertyType.ATTACHED_TO_GLASS);
+      ...
+      if (isAttachedToGlass || o instanceof IsoLightSwitch &amp;&amp; isAttachedToWindowWall) {
+         this.RemoveTileObject(o);   // :8226
+         n--;                        // :8227  unconditional
+      }
+   }
+}</pre><p><code>n--</code> is only correct if the element at index n was actually removed from <code>this.objects</code>. Nothing checks that.</p></li><li>The removal is not guaranteed. zombie/iso/IsoGridSquare.java:6090-6093<pre>public int RemoveTileObject(IsoObject obj) {
+   boolean chunkIsLoading = obj.getSquare() == null || !obj.getSquare().getChunk().loaded || obj.getSquare().getChunk().preventHotSave;
+   return this.RemoveTileObject(obj, !chunkIsLoading);   // safelyRemove = true for a loaded chunk
+}</pre><p>For a loaded chunk (the normal case when a player smashes a window) this goes to zombie/iso/IsoObjectUtils.java:32-62, safelyRemoveTileObjectFromSquare(IsoObject), which has two ways of not removing anything from <code>this</code>:</p></li></ol>
+<ul><li>:36-41  if the object is multi-square and getAllMultiTileObjects fails, it returns -1 having removed nothing at all:<pre>if (!getAllMultiTileObjects(object, objects)) { ...; return -1; }</pre></li><li>:45-60  removal is always performed against <code>obj.square</code> / <code>object.square</code>, not against the square the loop is iterating. For a multi-square object whose <code>square</code> is a neighbouring square (or null, :60), the caller's <code>this.objects</code> is untouched.<p>In either case <code>this.objects.size()</code> is unchanged, <code>n--</code> steps back onto the same element, the same predicate matches, and the same non-removal repeats -- forever, on the server tick thread.</p></li></ul>
+<p><strong>Field data</strong></p>
+<ul><li>2026-08-02 17:48, production dedicated server, ~50 players online. Frame counter frozen at f:15924. Two thread dumps 4 seconds apart, main thread RUNNABLE at different offsets in the same loop. Graceful stop ineffective; recovered with SIGKILL and a restart.</li><li>We have not seen it again since installing a guard, but the loop shape in 42.20.4 is unchanged from the build we crashed on.</li></ul>
+<p><strong>Suggested fix</strong></p>
+<p>One line. Only step the index back when the list actually shrank:</p>
+<pre>int before = this.objects.size();
+this.RemoveTileObject(o);
+if (this.objects.size() &lt; before) { n--; }</pre>
+<p>Equivalently, iterate over a snapshot copy of <code>this.objects</code> and remove from the live list, which removes the index bookkeeping entirely. Either way, an attachment that cannot be removed should be skipped (ideally with one log line naming the square and sprite) rather than retried forever. It would also be worth auditing the other index-rewinding loops in IsoGridSquare that call RemoveTileObject, since the "safe" removal path can no-op for all of them.</p>
+<p>We validated the diagnosis with an experimental server-side hotfix (ASM bytecode patch) that replaces the loop with the same semantics plus the shrink check, and logs the square and sprite when it skips: normal window smashing is unchanged, and the pathological case degrades from a full server freeze to one uncleared object plus one log line. Logs / bytecode diffs available on request.</p>
+</body></html>

@@ -44,11 +44,14 @@
   - pcap 統計（B-R6）：只貼 decoder 彙總表，不附 pcap 本體（含 IP）。
   - 貼圖遙測／console (12)/(17)（C1）：是玩家自己的 client console，含其 Steam 名與本機路徑——貼前把 `Users\<name>` 與暱稱塗掉，或只貼遙測行。
 - 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
-- **貼法（第一篇的教訓）**：草稿 Body 外面的 ```text 圍欄只是給 markdown 看的，**不要把整篇貼成一個 code block**
-  （論壇會變成等寬字整塊、長行不換行、手機要橫向捲、QA 無法引用段落）。做法：在編輯器貼純文字
-  （Ctrl+Shift+V），只把縮排的 log 指紋與反編譯片段各自選起來按「Code」；段落標題（Summary／Root cause…）
-  可加粗。Tags 輸入時注意下拉自動配對：打 `freeze` 會跳成現有的 `freezers`（冰箱），要按 Enter 建新 tag
-  或改用 `crash`／`server`；`42.20.4` 沒有現成 tag，打完直接 Enter。
+- **貼法（第一篇兩次試錯後定案）**：草稿是 80 字硬換行的純文字——整篇貼成 code block 會變等寬整塊；
+  Ctrl+Shift+V 純文字貼上會把每一行硬換行變成一段（111 段）。正確做法：`python scripts/tis_forum_html.py`
+  已把 16 份轉成 `docs/report/forum-html/<篇>.html`（段落合併、小標粗體、log／程式碼片段各自 code block、
+  清單／表格保留）→ 用瀏覽器開該檔 → 從 `Version:` 那行拖選到最後（或 Ctrl+A 後把最上面的 Title 提示行刪掉）
+  → Ctrl+C → 論壇編輯器 **Ctrl+V**（富文本）。標題另外複製到 Title 欄。
+- **Tags 只能從既有 tag 下拉選，不能自訂**：沒有 `42.20.4`，用 `42.20`（搜尋 42.20）；`dedicated` 選
+  `dedicated server`；打 `freeze` 會跳 `freezers`（冰箱），要點到 `freeze` 那個；`data loss` 不存在，用
+  `corruption`／`save-data`。每篇的 5 個 tag 已改成確認存在的名稱（用 `/forums/tags/<tag>/` 逐一驗過）。
 
 ## 1. 你先前的回報現況
 

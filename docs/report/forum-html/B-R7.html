@@ -1,0 +1,33 @@
+<!doctype html><html><head><meta charset="utf-8"><title>[42.20.4] [MP] Two vanilla console spam sources on a dedicated server: IsoObject.syncIsoObject &quot;not found on square&quot; (~120 lines/hour) and SpriteConfig &quot;Invalid SpriteConfig object!&quot; for base-game objects</title><style>body{font-family:sans-serif;max-width:900px;margin:2em auto;line-height:1.45}pre{background:#f4f4f4;padding:.6em;overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:.2em .5em}li{margin:.3em 0}</style></head><body>
+<p><em>Title (copy into the Title field):</em> [42.20.4] [MP] Two vanilla console spam sources on a dedicated server: IsoObject.syncIsoObject &quot;not found on square&quot; (~120 lines/hour) and SpriteConfig &quot;Invalid SpriteConfig object!&quot; for base-game objects</p><hr>
+<p>Version: [42.20.4]</p>
+<p>Mode: [Multiplayer]</p>
+<p>Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]</p>
+<p>Mods: [~80 workshop mods on the production server where this was observed. Both messages are emitted by vanilla Java for vanilla conditions (class/method references below).]</p>
+<p>Save: [Existing MP save; not save-specific]</p>
+<p>Both items below are minor: no gameplay impact, no crash. They matter only because the volume buries genuine errors in server-console.txt and costs log I/O on a hot path. Reporting them together since neither warrants its own thread.</p>
+<p><strong>(i) IsoObject.syncIsoObject prints an ERROR line on every completed build</strong></p>
+<p>Reproduction: build anything with the B42 construction flow on a dedicated server. Every "ISBuildIsoEntity -&gt; consume success" is followed by one line:</p>
+<p>ERROR: IsoThumpable not found on square &lt;x&gt;,&lt;y&gt;,&lt;z&gt;</p>
+<p>Root cause, decompiled 42.20.4, zombie/iso/IsoObject.java:866-873:</p>
+<pre>public void syncIsoObject(boolean bRemote, byte val, UdpConnection source, ByteBufferReader bb) {
+   if (this.square == null) {
+      System.out.println("ERROR: " + this.getClass().getSimpleName() + " square is null");
+   } else if (this.getObjectIndex() == -1) {
+      System.out.println("ERROR: " + this.getClass().getSimpleName() + " not found on square " + this.square.getX() + "," + ...);
+   } else { ... }</pre>
+<p>The build flow replaces the temporary IsoThumpable with an IsoEntity on the square before the sync call, so getObjectIndex() is always -1 for that object and the branch is taken every single time. Two things make this worse than an ordinary warning: it is written with System.out.println, so it bypasses the debug-channel filters entirely, and it is labelled ERROR for what is the expected outcome of the vanilla flow.</p>
+<p>Field data: 11,567 lines over four days (2026-08-30 to 2026-09-02), roughly 120 per hour.</p>
+<p>Suggested fix: skip the sync call (or downgrade the message to trace) when the object has already been replaced on its square. Keep the "square is null" branch, and keep the not-found message for other classes - IsoDoor, IsoWindow, IsoStove and so on genuinely indicate breakage there.</p>
+<p><strong>(ii) SpriteConfig warns "Invalid SpriteConfig object!" for base-game objects</strong></p>
+<p>Reproduction: run any server that loads these tiles - which is any server.</p>
+<p>Root cause, decompiled 42.20.4, zombie/entity/components/spriteconfig/SpriteConfig.java:67-70, inside initObjectInfo():</p>
+<pre>if (!this.isValid()) {
+   DebugType.General.warn("Invalid SpriteConfig object! scripted object = " + (this.objectInfo != null ? this.objectInfo.getName() : "null"));
+   this.resetObjectInfo();
+}</pre>
+<p>It fires for base-game objects on every load, i.e. what is inconsistent is the shipped sprite-config data, not the server. Names observed on ours: SandFloor, WoodenDarkWallLvl3, GravelFloor, Floor_SpringGrass, DoubleDoor, WoodenWindowFrameLvl3, WoodFloorLvl2, Wood_DoubleDoorDark, WoodDoorFrameLvl3, Fences_MetalFarmGate, DoubleWireGate, BrickWallLvl2, MetalSmallWireFence, BrickWindowFrameLvl2, Piano, WoodenWallLvl3, MetalBigWireFence, WoodFloorLvl3, Wooden_Windows.</p>
+<p>Field data: 23,517 lines in 26 hours measured on 42.20.3; the same names still warn on 42.20.4.</p>
+<p>Suggested fix: correct the sprite-config entries for those objects so isValid() passes. The warning itself is useful for real mod errors and should stay - the fix belongs in the data, not the log call.</p>
+<p>We suppress both messages on our server with an experimental server-side log filter (ASM bytecode patch on the two call sites). That is a workaround for readability only; the underlying conditions are unchanged. Log samples and the counting commands are available on request.</p>
+</body></html>

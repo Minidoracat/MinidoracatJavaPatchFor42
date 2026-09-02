@@ -1,0 +1,45 @@
+<!doctype html><html><head><meta charset="utf-8"><title>[42.20.4] [MP] IsoGameCharacter.faceThisObject dereferences a null result from getClosestSpriteGridObject - animal state machines throw ~70 NPE/hour and stick in idle</title><style>body{font-family:sans-serif;max-width:900px;margin:2em auto;line-height:1.45}pre{background:#f4f4f4;padding:.6em;overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:.2em .5em}li{margin:.3em 0}</style></head><body>
+<p><em>Title (copy into the Title field):</em> [42.20.4] [MP] IsoGameCharacter.faceThisObject dereferences a null result from getClosestSpriteGridObject - animal state machines throw ~70 NPE/hour and stick in idle</p><hr>
+<p>Version: [42.20.4]</p>
+<p>Mode: [Multiplayer]</p>
+<p>Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]</p>
+<p>Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]</p>
+<p>Save: [Existing MP save; not save-specific - see analysis]</p>
+<p><strong>Summary</strong></p>
+<p>IsoObject.getClosestSpriteGridObject can return null, and IsoGameCharacter.faceThisObject dereferences that result without a check. On a dedicated server the animal state machine hits this continuously through eatFromTrough / drinkFromTrough. The exception aborts state.execute for that tick, so the animal never reaches the changeState call that follows faceThisObject: it stays in idle and re-throws on the next tick, indefinitely, until something else overwrites the stale reference.</p>
+<p><strong>Trigger conditions</strong></p>
+<p>Not deterministic. It needs an animal holding a reference to a sprite-grid object (a feeding or water trough) that is no longer listed on its grid square - destroyed, picked up, or moved - or whose grid squares are not currently loaded on the server. On a farm server with troughs this is continuous.</p>
+<p><strong>Observed</strong></p>
+<p>3,386 occurrences over two days (2026-09-01 to 2026-09-02), roughly 70 per hour, 100% the same fingerprint, 8 stack lines each:</p>
+<pre>ERROR: StateMachine.stateExecute&gt; Exception thrown
+java.lang.NullPointerException: Cannot invoke "zombie.iso.IsoObject.getFacingPosition(zombie.iso.Vector2)" because "object" is null
+    at zombie.characters.IsoGameCharacter.faceThisObject</pre>
+<p>Callers: AnimalIdleState.execute 2,366 and AnimalEatState.execute 1,020. This was by a wide margin the single largest exception source in our console.</p>
+<p><strong>Root cause (decompiled 42.20.4, class/method references)</strong></p>
+<p>IsoGameCharacter.faceThisObject(IsoObject), 42.20.4 lines 10387-10391:</p>
+<pre>if (object.hasSpriteGrid()) {
+   object = object.getClosestSpriteGridObject(this.getX(), this.getY());
+}</pre>
+<pre>object.getFacingPosition(facingPosition);</pre>
+<p>javap on the shipped 42.20.4 jar shows the same thing with no null check in between:</p>
+<p>197: invokevirtual getY:()F 200: invokevirtual zombie/iso/IsoObject.getClosestSpriteGridObject:(FF)Lzombie/iso/IsoObject; 203: astore_1 204: aload_1 206: invokevirtual zombie/iso/IsoObject.getFacingPosition:(Lzombie/iso/Vector2;)Lzombie/iso/Vector2;</p>
+<p>IsoObject.getClosestSpriteGridObject, 42.20.4 lines 5432-5452, initialises "closest = null" (line 5437) and only assigns inside the loop over getSpriteGridObjectsIncludingSelf(...). When that list is empty it returns null at line 5450.</p>
+<p>The list comes from IsoObject.getSpriteGridObjects(result, true), 42.20.4 lines 5369-5404. Even with bAddSelf = true, "self" is only added when self is still present in its own square's object list and its sprite grid still matches - the membership test at lines 5391-5395 iterates testSq.getObjects() and requires object.getSpriteGrid() == spriteGrid, and testSq itself comes from getCell().getGridSquare(x, y, z) at line 5389, which returns null for unloaded squares. So an object that has been removed from the world, or whose grid squares are not loaded on the server, yields an empty list and therefore a null "closest". This is entirely vanilla; no mod is involved in that path.</p>
+<p>Worth noting the asymmetry inside faceThisObject itself: the BaseVehicle and BarricadeAble branches above (lines 10375-10385) all handle their cases explicitly, and the sibling method faceThisObjectAlt (line 10422) has the same call shape but produced zero hits in our logs. This reads like an oversight in one branch rather than an intentional invariant.</p>
+<p><strong>Field data</strong></p>
+<p>3,386 exceptions in 48 hours (~70/h), caller split 2,366 AnimalIdleState.execute / 1,020 AnimalEatState.execute, single NPE message, 8 stack lines each.</p>
+<p>The cost is not only log volume. AnimalIdleState.execute calls faceThisObject before changeState(AnimalEatState / AnimalWalkState), so when the NPE fires both the facing and the state transition are lost. The animal is stuck in idle and does not proceed to eat, every tick, for as long as the stale trough reference survives.</p>
+<p><strong>Suggested fix</strong></p>
+<p>The smallest correct change is local to faceThisObject:</p>
+<pre>if (object.hasSpriteGrid()) {
+   IsoObject closest = object.getClosestSpriteGridObject(this.getX(), this.getY());
+   if (closest != null) {
+      object = closest;
+   }
+}
+object.getFacingPosition(facingPosition);</pre>
+<p>Falling back to the original object means the character faces that object's own position, which is the sensible degradation and cannot throw.</p>
+<p>An alternative is to make getClosestSpriteGridObject return "this" instead of null on an empty list, which would match its own early return at line 5434 for objects that have no sprite grid at all. That is arguably the more consistent contract, but it changes behaviour for every caller, so the local guard is the smaller change. faceThisObjectAlt has the same shape and would benefit from the same guard.</p>
+<p>Separately, the underlying cause of the stale references is worth addressing: clearing the animal-side eatFromTrough / drinkFromTrough reference when the trough leaves the world would remove the null case at the source instead of tolerating it.</p>
+<p>We validated the diagnosis with an experimental server-side hotfix (ASM bytecode patch) that substitutes the original object when the vanilla call returns null. The StateMachine.stateExecute NPE fingerprint went to zero and animals resumed transitioning into the eat state; the diagnostic output for the first fallbacks identified the objects as feeding/water troughs whose square no longer contained them, confirming the stale-reference reading. Logs / bytecode diffs available on request.</p>
+</body></html>
