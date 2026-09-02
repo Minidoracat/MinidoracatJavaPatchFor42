@@ -44,15 +44,12 @@
   - pcap 統計（B-R6）：只貼 decoder 彙總表，不附 pcap 本體（含 IP）。
   - 貼圖遙測／console (12)/(17)（C1）：是玩家自己的 client console，含其 Steam 名與本機路徑——貼前把 `Users\<name>` 與暱稱塗掉，或只貼遙測行。
 - 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
-- **貼法（第一篇三次試錯後定案）**：草稿是 80 字硬換行的純文字——整篇貼成 code block 會變等寬整塊；
-  Ctrl+Shift+V 純文字貼上會把每一行硬換行變成一段；把 .html **原始碼**貼進去會變成 html code block。
-  `python scripts/tis_forum_html.py` 產出兩種可貼格式到 `docs/report/forum-html/`：
-  1. **`<篇>.txt`（最穩，建議用這個）**：每段一行、空行分隔、清單有 `1.`／`-` 前綴、code 片段原樣多行。
-     用記事本／VS Code 開 → Ctrl+A → Ctrl+C → 論壇編輯器 **Ctrl+Shift+V**（純文字）。貼上後每段一段，
-     可讀；小標（Summary／Root cause…）與 code 片段要不要再手動加粗／按 Code 隨意。
-  2. `<篇>.html`（有粗體小標與 code block）：**必須用瀏覽器（Chrome/Edge）雙擊開啟**看到排版好的網頁後，
-     在網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇 **Ctrl+V**。用編輯器開再複製會貼到原始碼，不要那樣。
-  標題另外複製到 Title 欄。
+- **貼法（A-R1 實貼驗證通過）**：草稿是 80 字硬換行的純文字，直接貼會壞（整篇 code block／每行一段／
+  html 原始碼 code block 三種都試過）。`python scripts/tis_forum_html.py` 產出 `docs/report/forum-html/<篇>.html`
+  （段落合併、小標粗體、log／程式碼片段各自 code block、清單／表格保留）→ **用瀏覽器（Chrome/Edge）雙擊開啟**
+  → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。
+  不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。
+  貼完可用 `curl` 抓 topic 頁對帳：第一篇 `<strong>` 小標 6 個、`<pre>` 2 個、`<ol>` 3 個、無 `&lt;p&gt;` 殘留。
 - **Tags 只能從既有 tag 下拉選，不能自訂**：沒有 `42.20.4`，用 `42.20`（搜尋 42.20）；`dedicated` 選
   `dedicated server`；打 `freeze` 會跳 `freezers`（冰箱），要點到 `freeze` 那個；`data loss` 不存在，用
   `corruption`／`save-data`。每篇的 5 個 tag 已改成確認存在的名稱（用 `/forums/tags/<tag>/` 逐一驗過）。
