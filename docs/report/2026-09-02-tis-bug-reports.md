@@ -101,13 +101,13 @@
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
-| C1 | `ImageData.dispose()` 不釋放 `frames` → DirectBuffer 地板超過 `waitFileTask` 50 MB 硬門檻 → 貼圖載入永久停擺 → 實體只剩影子＋名牌 | P0 | 仍在：`ImageData`／`TextureID`／`TextureIDAssetManager`／`WorldStreamer` 四 class 42.20.2→42.20.4 逐位元組相同（pz-42.20.4-update-analysis §2）。修後地板 1096 MB→0、隱形零復發。 | 修前/修後 console (12)/(17)、遙測表 |
+| C1 | `ImageData.dispose()` 不釋放 `frames` → DirectBuffer 地板超過 `waitFileTask` 50 MB 硬門檻 → 貼圖載入永久停擺 → 實體只剩影子＋名牌 — **已發 2026-09-02** https://theindiestone.com/forums/topic/100919-42204-mp-client-native-directbuffer-leak-in-the-texture-pipeline-silently-starves-texture-loading-zombiesplayersvehicles-render-as-shadow-nametag-only-until-the-game-is-restarted/ | P0 | 仍在：`ImageData`／`TextureID`／`TextureIDAssetManager`／`WorldStreamer` 四 class 42.20.2→42.20.4 逐位元組相同（pz-42.20.4-update-analysis §2）。修後地板 1096 MB→0、隱形零復發。 | 修前/修後 console (12)/(17)、遙測表 |
 
 ### V. Native crash → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add（Steam 指南說 crash 走 Support，但本文是根因分析，仍發 Bug Reports 並首行註明 crash）
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
-| C2 | `PolygonalMap2::createVehicleClusters()` SIGSEGV：`VehicleRect` 池交出 `0x30`，經 `VisibilityGraph::release()` 一輪前入池；池無驗證＋`reallocate_aligned` 拷貝 `malloc_usable_size(old)` | P0 | 仍在：`libPZPathFind64.so` sha `0777dda6…`（42.20.4 depot）；8/22–8/31 七次、8/31 00:58 最近一次。首次寫入者未定罪（誠實揭露）。 | hs_err（截斷）、ucontext／pool census 輸出、七次 console 摘錄 |
+| C2 | `PolygonalMap2::createVehicleClusters()` SIGSEGV：`VehicleRect` 池交出 `0x30`，經 `VisibilityGraph::release()` 一輪前入池；池無驗證＋`reallocate_aligned` 拷貝 `malloc_usable_size(old)` — **已發 2026-09-02** https://theindiestone.com/forums/topic/100921-42204-mp-dedicated-native-sigsegv-in-polygonalmap2createvehicleclusters-vehiclerect-object-pool-hands-out-a-corrupted-slot-0x30-that-entered-the-pool-through-visibilitygraphrelease-one-round-earlier/ | P0 | 仍在：`libPZPathFind64.so` sha `0777dda6…`（42.20.4 depot）；8/22–8/31 七次、8/31 00:58 最近一次。首次寫入者未定罪（誠實揭露）。 | hs_err（截斷）、ucontext／pool census 輸出、七次 console 摘錄 |
 
 ### VI. Minor → **Bug Reports**（低優先，可合一篇）：https://theindiestone.com/forums/forum/85-bug-reports/?do=add
 
