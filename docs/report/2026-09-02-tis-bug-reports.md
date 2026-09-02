@@ -120,11 +120,42 @@
 | `NetTimedAction.perform` unboxing NPE、`Error with packet: GameCharacterAttachedItem` | vanilla 自行 catch／未調查，證據不足。 |
 | 受精蛋清除 client 無守衛（2n）、LootRespawn Zone gate（2e） | 設計語意問題，非缺陷。 |
 
-## 4. 發文順序建議
+## 4. 發文節奏（避免被當洗版）
 
-1. **第一批（資料損失，P0）**：A-R6（CRC race）、A-R3（tempVector2_2 Blam）、B-R5（vehicle wx/wy）、C1（client 隱形）。
-2. **第二批（假死，P0）**：A-R1、A-R2、A-R4、A-R5、C2（native crash）。
-3. **第三批（玩法，P1）**：B-R1（卡讀條）、B-R3（動物 NPE）、B-R4（衣物）、B-R2（hutch）。
-4. **第四批（P2/P3）**：B-R6（動物網路）、B-R7（log spam）、C3（Suggestions 板）。
+論壇沒有明文的每日發文上限，但 16 篇同一人同日連發，版主第一眼會當 spam、QA 也沒辦法逐篇開 ticket。
+這批每篇都是獨立缺陷＋反編譯證據，**分散節奏**＋**明說是系列**就不會被誤判——你 42.17 那篇 QA（Artem_VB）
+已經回過，他們認得這個 ID。
 
-每篇貼出後把論壇 URL 回填到本表（方便日後 follow-up 與 changelog 對照）。
+**節奏：每天最多 2 篇、同日兩篇間隔數小時、P0 先發，約 9 天發完。**
+
+| 日 | 篇 | 板 |
+|---|---|---|
+| D1 | A-R6（CRC race Blam）、A-R3（tempVector2_2 Blam） | Bug Reports |
+| D2 | B-R5（車輛 wx/wy）、C1（client 隱形） | Bug Reports |
+| D3 | A-R1（容器環 SOE）、A-R2（Entity registered 活鎖） | Bug Reports |
+| D4 | A-R4（動物聲音活鎖）、A-R5（砸窗迴圈） | Bug Reports |
+| D5 | C2（native crash） | Bug Reports |
+| D6 | B-R1（卡讀條）、B-R3（動物 NPE） | Bug Reports |
+| D7 | B-R4（衣物）、B-R2（hutch） | Bug Reports |
+| D8 | B-R6（動物網路） | Bug Reports |
+| D9 | B-R7（log spam）；C3 | Bug Reports；PZ Suggestions |
+
+若 D1–D2 之後 QA 回覆要你「合併」或「改用其他管道」（email／Discord），照他們的做——他們的 ticket 流程優先。
+
+**第一篇開頭加一句**（讓版主知道這是系列，不是洗版）：
+
+```text
+Note: this is the first of a series of independent dedicated-server findings from the same 42.20.4 server, each root-caused in the decompiled bytecode. I will post them as separate topics over the next couple of weeks so each can be tracked on its own; happy to consolidate or move to another channel if QA prefers.
+```
+
+**第二篇起結尾加**（把已發的 URL 串起來，方便 QA 關聯 ticket）：
+
+```text
+Related reports from the same server: <URL of previous topic(s)>
+```
+
+**Tags**：每篇草稿「建議板塊」段下方有一行純文字（如 `42.20.4, multiplayer, dedicated, freeze, inventory`），
+整串貼進 Tags 欄即可（逗號分隔會被拆成多個 tag；若這個版本的輸入框不拆，就一個一個打、每個按 Enter）。
+多字 tag 一律用連字號（`data-loss`、`timed-action`、`log-spam`），不要選下拉裡別人留的雜項。
+
+每篇貼出後把論壇 URL 回填到本表 §2（方便日後 follow-up、changelog 對照與「Related」串連）。

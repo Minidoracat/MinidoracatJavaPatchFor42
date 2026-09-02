@@ -17,7 +17,8 @@
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags：`42.20.4, multiplayer, client, textures, invisible`
+建議 tags（貼進 Tags 欄；逗號分隔，或一個一個打字後按 Enter）：
+42.20.4, multiplayer, client, textures, invisible
 
 ### Title
 [42.20.4] [MP client] Native DirectBuffer leak in the texture pipeline silently starves texture loading — zombies/players/vehicles render as shadow + nametag only until the game is restarted
@@ -76,7 +77,8 @@ We validated 1–3 as an experimental client-side patch on affected players of o
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags：`42.20.4, multiplayer, dedicated, crash, pathfinding`
+建議 tags（貼進 Tags 欄；逗號分隔，或一個一個打字後按 Enter）：
+42.20.4, multiplayer, dedicated, crash, pathfinding
 
 ### Title
 [42.20.4] [MP dedicated] Native SIGSEGV in PolygonalMap2::createVehicleClusters() — VehicleRect object pool hands out a corrupted slot (0x30) that entered the pool through VisibilityGraph::release() one round earlier
@@ -107,7 +109,8 @@ Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs
 ### 建議板塊
 
 **PZ Suggestions** — https://theindiestone.com/forums/forum/20-pz-suggestions/（發新主題：https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）
-建議 tags：`42.20.4, multiplayer, dedicated, performance, save`
+建議 tags（貼進 Tags 欄；逗號分隔，或一個一個打字後按 Enter）：
+42.20.4, multiplayer, dedicated, performance, save
 
 ### Title
 [42.20.4] [MP dedicated] Suggestion: full world save (QueuedSaveAll) blocks the main loop for 5–7 s on a busy server — consider an incremental / off-thread cell save
