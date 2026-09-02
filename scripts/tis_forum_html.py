@@ -189,6 +189,40 @@ def convert(body: str) -> str:
     return "\n".join(out)
 
 
+def to_plain(body_html: str) -> str:
+    """HTML → 「每段一行」純文字（給 Ctrl+Shift+V 純文字貼上用的備援）。
+
+    段落與小標各一行、空行分隔；清單每項一行（`1.`／`-` 前綴）；code 區塊原樣多行、前後空行；
+    表格每列一行以 ` | ` 分隔。貼上後論壇每行成一段，小標與 code 要不要再手動加格式隨意。
+    """
+    s = body_html
+    def pre_repl(m):
+        return "\n\n" + html.unescape(m.group(1)) + "\n\n"
+    s = re.sub(r"<pre>(.*?)</pre>", pre_repl, s, flags=re.S)
+    # 清單
+    def ol_repl(m):
+        items = re.findall(r"<li>(.*?)</li>", m.group(1), flags=re.S)
+        return "\n" + "\n".join(f"{k + 1}. {it}" for k, it in enumerate(items)) + "\n"
+    def ul_repl(m):
+        items = re.findall(r"<li>(.*?)</li>", m.group(1), flags=re.S)
+        return "\n" + "\n".join(f"- {it}" for it in items) + "\n"
+    s = re.sub(r"<ol>(.*?)</ol>", ol_repl, s, flags=re.S)
+    s = re.sub(r"<ul>(.*?)</ul>", ul_repl, s, flags=re.S)
+    # 表格
+    def table_repl(m):
+        rows = re.findall(r"<tr>(.*?)</tr>", m.group(1), flags=re.S)
+        out = []
+        for r in rows:
+            cells = re.findall(r"<t[hd]>(.*?)</t[hd]>", r, flags=re.S)
+            out.append(" | ".join(cells))
+        return "\n" + "\n".join(out) + "\n"
+    s = re.sub(r"<table>(.*?)</table>", table_repl, s, flags=re.S)
+    s = re.sub(r"</p>\s*", "\n\n", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = html.unescape(s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip() + "\n"
+    return s
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -214,8 +248,9 @@ def main() -> None:
                 + body_html + "\n</body></html>\n"
             )
             (OUT / f"{name}.html").write_text(doc, encoding="utf-8", newline="\n")
+            (OUT / f"{name}.txt").write_text(to_plain(body_html), encoding="utf-8", newline="\n")
             count += 1
-            print(f"{name}.html  ({len(body_html)} chars)")
+            print(f"{name}.html / .txt  ({len(body_html)} chars)")
     print(f"wrote {count} files to {OUT}")
 
 
