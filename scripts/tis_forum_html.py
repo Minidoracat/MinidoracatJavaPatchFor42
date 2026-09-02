@@ -98,6 +98,9 @@ def codeish(block: list[str]) -> bool:
         return True
     if any(STACK_RE.search(l) for l in block):
         return True
+    # 對齊欄位表（行內 3+ 連續空格）或 →/-> 呼叫鏈：合併成段落會毀掉排版，當 <pre>
+    if len(block) >= 2 and any(re.search(r"\S {3,}\S", l) or re.match(r"\s*(→|->)\s", l) for l in block):
+        return True
     hits = sum(1 for l in block if CODEISH_RE.search(l))
     return hits * 5 >= len(block) * 3   # ≥60% 行帶 code 符號才算；散文偶有分號不會誤判
 
