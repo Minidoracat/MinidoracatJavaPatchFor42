@@ -16,6 +16,28 @@
 - Guide 要求「Mods must be disabled」：草稿的 Mods 欄位一律誠實寫 ~80 mods＋「根因在 vanilla Java、附 class/method 引用」——
   這是你 getFileWriter 那篇的做法，QA 接受了 bytecode 級證據。
 - 每篇一個主題；建議**分批發**（每天 3–4 篇，先發資料損失與假死），避免同日 15 篇被當洗版。
+
+### 板塊對照（2026-09-02 查論壇實際結構）
+
+| 板 | URL | 放什麼 |
+|---|---|---|
+| **Bug Reports** | `forums/forum/85-bug-reports/` | A-R1…A-R6、B-R1…B-R7、C1、C2 共 15 份。板規只有「English only」，**沒有 MP 子板**，用標題 `[MP]`／`[MP client]` 區分。 |
+| PZ Support | `forums/forum/18-pz-support/` | 板頭寫「crash reports… Bug reports go here（連到 85）」——給「不知原因的崩潰求助」。C2 有根因與修法，仍發 Bug Reports，首行註明 crash 即可。 |
+| PZ Suggestions | `forums/forum/20-pz-suggestions/` | C3（SaveAll 同步凍結，設計面）。 |
+| Mod Portal | `forums/forum/87-mod-portal/` | 你 getFileWriter 那篇在此；若要反映 42.20.4 移除 `loadstring` 的 mod 生態衝擊（可選），也在此。 |
+| PZ Multiplayer › Help | `forums/forum/72-help/` | 玩家求助用，**不要**放 bug 回報。 |
+
+### 去識別化（已檢查三份草稿的英文 body）
+
+- 英文 body **零**玩家名、Steam ID、IP、主機路徑、伺服器名；玩家只以 "one player"／"a player" 指涉。玩家名（Player-A、Player-G…）只出現在中文摘要（不貼）。
+- 遊戲座標、chunk 編號、mod 名稱（BetterFirstAidQuickPatch、PSR）不是個資，保留（mod 名是誠實揭露的一部分）。
+- **附件貼出前要處理**：
+  - console／DebugLog 摘錄：stack 本身無個資，但同段 log 行常帶 username（`fully connected`、`sendItemsToContainer` 等）——只貼 stack 與計數行，或把 username 換成 `<player>`。
+  - `connections.txt`／`user.txt`：含 IP 與 Steam ID，**不附**。
+  - hs_err（C2）：`Command Line:` 一行含我方 `-Dmdc.*` 旗標與 `-Duser.language=CH`——C2 本文已揭露 patch，留著無妨；不想解釋就塗掉那一行。core dump **不附**（含玩家資料，"available privately"）。
+  - `vehicles.db` 列快照（B-R5）：modData blob 內有認領者名（MVCK）——貼 header 欄位（id/wx/wy/x/y）就好，不貼 blob。
+  - pcap 統計（B-R6）：只貼 decoder 彙總表，不附 pcap 本體（含 IP）。
+  - 貼圖遙測／console (12)/(17)（C1）：是玩家自己的 client console，含其 Steam 名與本機路徑——貼前把 `Users\<name>` 與暱稱塗掉，或只貼遙測行。
 - 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
 
 ## 1. 你先前的回報現況
