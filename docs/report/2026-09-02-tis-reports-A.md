@@ -17,6 +17,10 @@
 21:31:10 那份 1024 層 SOE 堆疊全文、以及守衛切斷時印出的環閉合點 log（含 containerId /
 itemId / fullType）。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] Container cycles cause unbounded recursion in ItemContainer.getCharacter() — StackOverflowError kills the dedicated server main loop (13-minute silent freeze)`
@@ -165,6 +169,10 @@ available on request.
 entitySet 殘留（reset/pool 路徑繞過 `removeEntityInternal`）。優先級**最高**（唯一一個會
 造成 114 分鐘全服靜止且看門狗救不了的形態）。建議附件：兩次事故的完整 stack、21 筆捕手
 明細（座標／sprite／class／addedToEngine／identity／jobType）。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
 
 ### Title
 
@@ -382,6 +390,10 @@ request.
 （真實玩家建造永久消失，且存檔本身是好的）。建議附件：Player-A 雞舍案的 `blam/` 前後檔
 （46,142 / 8,549 bytes）與該次 chunk 載入 stack。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] Shared static Vector2 in IsoGameCharacter.setForwardDirectionFromIsoDirection races between the chunk-loader thread and the main loop — "Forward Direction cannot be zero length vector" aborts a chunk load and Blam() wipes player-built content`
@@ -546,6 +558,10 @@ was never corrupt. Logs / bytecode diffs available on request.
 永久跳過 → 全服卡讀條、時間停止」。優先級**高**（frame 照推進，看門狗不救，只能重啟）。
 建議附件：19:25–21:47 的 IAE 計數曲線與 `IngameState.updateInternal` stack。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] BaseAnimalSoundManager comparator violates its contract on NaN distances — TimSort IllegalArgumentException skips characters.clear() and self-sustains into a server-wide livelock (stuck action bars, "time stopped")`
@@ -699,6 +715,10 @@ priority instead of the server. Logs / bytecode diffs available on request.
 優先級**高**（單一封包即可觸發，需 SIGKILL 才能恢復）。修法只有一行。建議附件：兩份
 間隔 4 秒的 thread dump。
 
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
+
 ### Title
 
 `[42.20.4] [MP] IsoGridSquare.removeGlassAttachments decrements its loop index unconditionally — a single smash-window packet can spin the server tick forever (requires SIGKILL)`
@@ -846,6 +866,10 @@ object plus one log line. Logs / bytecode diffs available on request.
 優先級**最高**（唯一一個已定罪、有 A/B 驗證、且會持續吃掉玩家基地的資料損失機制）。
 建議附件：A 組（crc=0）與 B 組（垃圾值）各一份 `blam/*.bin` ＋ `_error.txt`、
 攔截器 BLOCKED log 節錄。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
 
 ### Title
 
