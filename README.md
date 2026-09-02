@@ -2,6 +2,10 @@
 
 PZ B42 專用伺服器 loose-class 優化 patch——自製、可重生、帶同源防護。
 
+> **2026-09-02 歷史改寫**：為去識別化（玩家暱稱改代號、移除主機／本機路徑與他人分享文件），
+> 全部 commit 已用 `git filter-repo` 重寫。此日期前的 commit sha——包括文件裡引用的
+> 與正式服 log 橫幅 `server patch <sha>` 印出的——在本 repo 已不存在，屬歷史事實原樣保留。
+
 ## 原理
 
 PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路徑的 loose `.class`

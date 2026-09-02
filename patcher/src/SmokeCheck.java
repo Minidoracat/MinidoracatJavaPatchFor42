@@ -460,7 +460,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：登入／join 卡頓量測的全部結構斷言（LoginPacket 三個 DB
         // wrapper、CreatePlayerPacket 四個重活、REJOIN_TOTAL／REJOIN_LOAD_CHARACTER）。
         // 歸因任務已完成、正式服 REJOIN_TOTAL 常態 5–13ms，量測刀隨斷言一併移除。
-        // 詳見 docs/patches.md 2i；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2i；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
@@ -730,7 +730,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer 掛點）的全部
         // vanilla 前提與手術後斷言。42.20.3 官方 pending 機制上線後 packed 只剩
         // 47–82 次/session、skip[short] 99.3%＝效益≈0，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2p；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2p；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（server）",
                 patchInfoOk(distJava, "server"));
@@ -1120,7 +1120,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
         // CreateItem 改道）的全部 vanilla 前提、負對照與 helper 契約斷言。observe 實測
         // 收益僅 0.06–0.18%，「永不啟用 on」已定案，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截 ＋ processServer 回覆 state 補正）----
         String ntaCls = "zombie/core/NetTimedAction";
@@ -1452,7 +1452,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：W16 動物卸載接手守衛 observe 的全部 census、掛點與 helper
         // 契約斷言。8 天正式服全零遺失 ⇒ vanilla 卸載接手鏈無辜、觀測結論已達；
         // heartbeat 每 256 unload 一行佔正式服 log 7.3%，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W17 hutch 載入回傳檢查 ----
         String isoAnimalCls = "zombie/characters/animals/IsoAnimal";
