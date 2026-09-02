@@ -408,7 +408,7 @@ release——JVM 若回 copy 則寫入被丟棄（HotSpot 實務上回直接指�
 > `GameServer.receivePlayerConnect` 的 `serverLoadNetworkCharacter` ×2）已移除。
 > join 卡頓歸因任務完成：正式服 8/30–9/2 巡檢 REJOIN_TOTAL 常態 5–13ms，
 > 已無待答問題，量測 wrapper 不再需要常駐 patch 表面。
-> 復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **動機**:正式服主迴圈實測 6–11 秒停頓集中在玩家 join／死亡重生換角(例:17:20:33–17:20:39
 的 6.6s 正值 Player-C「replacing dead player」),但無法從 log 分辨時間花在哪一段。
@@ -879,7 +879,7 @@ STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會
 > **退役（2026-09-02）**：W4-1（`PlayerDownloadServer.removeOlderDuplicateRequests`
 > headCall）已移除。42.20.3 官方 pending 機制上線後 packed 只剩 47–82 次/session、
 > skip[short] 99.3%＝效益≈0，而本刀每次遊戲更新都要重驗 WorkerThread 互斥前提。
-> 以下分析全文保留供將來再評估。復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 以下分析全文保留供將來再評估。復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **根因**（八路鑑識＋對抗驗證；完整設計見 `docs/chunk-throughput-design-v1.md`）：
 vanilla 的 chunk 供給只跑到設計值的 15%——client 每幀送一包 `RequestZipList`（約 3 chunk）→
@@ -1624,7 +1624,7 @@ vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 > **退役（2026-09-02）**：本刀（`InventoryItem.getExtraItemsWeight` 的 `CreateItem`
 > 改道）已移除。observe 實測收益僅 0.06–0.18%，「永不啟用 `on`」既已定案，
 > 留著 observe 只是白背一個 patch 表面與每次更新的重驗成本。
-> 復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **浪費**：`InventoryItem.getExtraItemsWeight ()F` 對 `extraItems` 内每個 fullType 字串完整建構
 一個 InventoryItem，只為讀 `getActualWeight()` 就丟棄。單次建構含 `ScriptManager.FindItem`（兩次
@@ -2403,7 +2403,7 @@ heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticks
 > 2 redirect＋TailCall）已移除。8 天全零遺失（s2Missed／queueFailures／sourceGap／
 > cellNullAdd／chunkNullAdd／duplicateRemoved／cellNullSave 全 0；clearShortfall 1–4 但
 > handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測結論已達；其 heartbeat
-> 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。復活方式：從退役前最後一版 1e637fc 取回（`git checkout 1e637fc -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。復活方式：從退役前最後一版 65b9ebb 取回（`git checkout 65b9ebb -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 ### 立案（2026-08-24～25，全服流失定罪）
 
