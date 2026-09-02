@@ -1,0 +1,13 @@
+Version: [42.20.4] (build id 24909836)
+
+Mode: [Multiplayer]
+
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, glibc 2.39, kernel 6.17.4), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
+
+Mods: [~80 workshop mods, none of which ship native code. The corrupted objects are native-only structures inside libPZPathFind64.so (unmodified Steam depot file, sha256 0777dda6…). Full disclosure of our own Java-side patches is in the report body; none of them touch zombie.pathfind or any native structure.]
+
+Save: [Existing MP save; not save-related]
+
+Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs_err is truncated at the "Host:" line because glibc aborted inside the JVM crash handler — attached anyway; the core dump is the only usable artifact and is available privately (it contains player data).
+
+<paste "## Summary" … "## Attachments we can provide on request" from docs/report/2026-08-31-pathfind-vehiclerect-pool-poisoning-tis.md here, headings demoted one level>

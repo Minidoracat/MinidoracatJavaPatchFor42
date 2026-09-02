@@ -1,0 +1,74 @@
+Version: [42.20.4]
+
+Mode: [Multiplayer]
+
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
+
+Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code; no mod writes vehicles.db chunk fields.]
+
+Save: [Existing MP save; the corrupted rows persist across restarts and are not recoverable in-game]
+
+Summary
+
+A vehicle can remain present and structurally valid in vehicles.db - correct physical x,y, intact serialized BLOB - while its wx,wy chunk index points somewhere else. Chunk loading queries vehicles by wx,wy and never by x,y, so the vehicle can never be found at the place it actually is. It becomes permanently invisible after a reconnect or restart, and repeated chunk reloads do not recover it.
+
+Trigger conditions
+
+Not deterministic - a lifecycle race between chunk pooling and vehicle persistence. The clearest trigger is a player disconnecting while still seated in a vehicle, which makes GameServer.disconnectPlayer() save it immediately. Long drives across many chunks and cell unloads are the other conditions present in our incidents.
+
+Observed
+
+- The vehicle stalls or looks desynchronized while driving.
+- The player disconnects/reconnects, or the server restarts shortly afterwards.
+- The vehicle is no longer visible at its final location, or anywhere along the route.
+- The database row still exists with the correct x,y and an intact BLOB.
+- No error is logged at any point.
+
+Root cause (decompiled 42.20.4, class/method references)
+
+1. VehiclesDB2$VehicleBuffer.set(BaseVehicle), 42.20.4 VehiclesDB2.java:1028-1032, takes the two halves of the row from two independent sources:
+
+this.id = vehicle.sqlId;
+this.wx = vehicle.chunk.wx;     // from the chunk back-reference
+this.wy = vehicle.chunk.wy;
+this.x  = vehicle.getX();       // from physics
+this.y  = vehicle.getY();
+
+No invariant is checked before addToDB (42.20.4 lines 830-838) or updateDB (lines 854-862) commit the row.
+
+2. Loading is by chunk index only. 42.20.4 lines 705 and 737: SELECT id, x, y, data, worldversion, inMeta FROM vehicles WHERE wx=? AND wy=? A mismatched row therefore cannot be discovered from the chunk that physically contains the vehicle.
+3. IsoChunk.resetForStore(), 42.20.4 IsoChunk.java:5226-5256, clears this.vehicles (line 5247) and sets this.wx = 0; this.wy = 0 (lines 5255-5256) - but it does not clear the back-references that BaseVehicle objects still hold in vehicle.chunk. The same IsoChunk instance is then pushed into IsoChunkMap.chunkStore (lines 2265 and 3380) and later re-assigned arbitrary coordinates (LoadOrCreate lines 2313-2314, LoadBrandNew lines 2235-2236).
+4. BaseVehicle.update() advances physical x,y but only rebinds vehicle.chunk when current is non-null and points at a different chunk, and current itself is only refreshed in postupdate(). GameServer.disconnectPlayer() saves the associated vehicle before clearing the player from it.
+
+So a save taken after resetForStore and before pool checkout writes wx,wy = 0,0; a save after checkout writes the recycled chunk's unrelated coordinates. Both produce a row with correct x,y that is unreachable from its own chunk. We have no object-identity logging across reset/reuse/save, so that final interleaving is a high-confidence reading rather than a direct trace - but the two observed row shapes match the two states exactly.
+
+Field data
+
+Three incidents within roughly one day on our server (first seen on 42.20.3; VehicleBuffer.set is unchanged in 42.20.4):
+
+sql id | script       | x, y                     | stored wx,wy | correct wx,wy 152    | 84mercLWB4   | 9432.836, 11207.054      | 1168, 969    | 1179, 1400 64     | 92nissanGTR  | 10591.696, 10335.673     | 0, 0         | 1323, 1291 2518   | 90bmwE30m3   | 13793.331, 3864.297      | 0, 0         | 1724, 483
+
+All three rows and BLOBs were intact. Recomputing wx = floor(x/8), wy = floor(y/8) during a stopped-server window made all three vehicles load again without touching their serialized data.
+
+Since then we have run a persistence-boundary guard continuously. Between 2026-08-27 and 2026-09-02 it corrected 182 writes: 176 with |delta chunk| = 1 and 6 with |delta chunk| = 2 on one axis. So the common case is not the dramatic 0,0 row but a vehicle whose chunk back-reference is one chunk behind its physics position - which produces the same unreachable row. On 2026-08-28 it also caught two vehicles saved with non-finite x/y (NaN) and wx,wy = 0,0; there the guard keeps the vanilla values and logs, since no position can be derived from NaN.
+
+Suggested fix
+
+Narrow, at the persistence boundary, in VehicleBuffer.set:
+
+float x = vehicle.getX();
+float y = vehicle.getY();
+buffer.x  = x;
+buffer.y  = y;
+buffer.wx = PZMath.fastfloor(x / 8.0F);
+buffer.wy = PZMath.fastfloor(y / 8.0F);
+
+with a guard so non-finite coordinates fall back to current behaviour plus a log rather than guessing a location. One change point covers add/update, disconnect, cell unload, trailers, and both statements, and touches neither physics nor chunk membership. It does not repair already-corrupted rows.
+
+A deeper lifecycle fix would clear or rebind stale vehicle.chunk references before an IsoChunk enters the pool in resetForStore(), but that has a much larger MP/physics/towing risk surface. The persistence invariant is worth having regardless.
+
+Useful diagnostics: when vehicle.chunk.wx/wy differ from floor(x/8),floor(y/8), log the sql id, both coordinate pairs, x,y, System.identityHashCode(vehicle.chunk), and whether chunk.vehicles still contains the vehicle. Matching the same chunk identity across reset, reuse and save would close the last gap.
+
+The 42.20.1 changelog fixed a related class of problem ("vehicles could temporarily disappear for players after another player disconnected"); the persistent database-index variant here is a different, non-temporary failure and still occurs on 42.20.4.
+
+We validated the diagnosis with an experimental server-side hotfix (ASM bytecode patch) implementing exactly the invariant above; the 182 corrections and the two NaN cases cited are its counters, and no vehicle has become unreachable since it was deployed. Logs / bytecode diffs available on request.

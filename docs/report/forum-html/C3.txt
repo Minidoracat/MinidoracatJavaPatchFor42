@@ -1,0 +1,26 @@
+Version: [42.20.4]
+
+Mode: [Multiplayer]
+
+Server settings: [Dedicated, Linux, 7-day average ≈30 concurrent players, evening peaks 60–95, SaveWorldEveryMinutes=60]
+
+Mods: [~80 workshop mods; not mod-related — the path below is vanilla ServerMap]
+
+Save: [Existing MP save]
+
+This is a performance/design note rather than a bug.
+
+Observed We run a main-thread stall watchdog on our dedicated server. Over four days (2026-08-30 … 09-02) every non-shutdown stall of ≥5 s it captured — 16 of them, 5–7 s each — had the same main-thread stack:
+
+ServerMap.SaveAll  (waiting: Thread.sleep(10) loop until 4 WorkerThreads finish SaveCell for every loaded cell) → ServerMap.QueuedSaveAll → ServerMap.preupdate → GameServer.main
+
+with the server's own log confirming it ("SaveAll took 4474–5043 ms", "Saving took 5208–6038 ms"). Duration scales with player count (2–3.6 s at 20–40 players, 5–7 s at 60–80). WorldMapVisitedServer.save() (per-user zip deflate) adds <1 s on top.
+
+Because QueuedSaveAll sends Pause to clients when the save is slow, nobody gets kicked — but every player experiences a 5–7 s freeze followed by a rubber-band, once per SaveWorldEveryMinutes and again on every "save" command / restart countdown.
+
+Why we think it is worth a look The world is frozen for the whole duration because chunk serialization needs a quiescent world. Two possible directions, either of which would remove most of the wall-clock cost from the main thread:
+
+1. Incremental cell saves spread over many ticks (only cells dirty since the last save), so no single tick pays for the whole world.
+2. Snapshot-then-serialize: copy the dirty chunk buffers on the main thread (cheap) and let the existing SaveChunkThread do the serialization/CRC/IO off-thread — the loaded-chunk save path already goes through that thread, so the machinery is there.
+
+Happy to provide the watchdog stack captures and the per-save timing series.

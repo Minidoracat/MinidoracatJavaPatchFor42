@@ -1,0 +1,67 @@
+Version: [42.20.4]
+
+Mode: [Multiplayer]
+
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
+
+Mods: [~80 workshop mods on the production server where this was observed. The defect is in vanilla Java (class/method references below) and does not involve any mod code.]
+
+Save: [Existing MP save; not save-specific -- see analysis]
+
+Summary
+
+Nothing in ItemContainer prevents a container from ending up inside its own descendant chain. Once such a cycle exists, ItemContainer.getCharacter() -- which walks "container -> the item holding it -> that item's container" with no cycle detection and no depth bound -- recurses until the stack is exhausted. On 2026-08-13 at 21:31:10 this killed our dedicated server's main loop with a StackOverflowError whose 1024 visible frames were all ItemContainer.getCharacter. The process stayed alive but the world stopped; the frame counter froze at f:54247 for 13 minutes until a watchdog force-restarted it.
+
+Trigger conditions
+
+Not deterministic from a fixed sequence of player actions, because the cycle itself must first be created by a packet-driven item move. The preconditions are in the code, not in the save:
+
+1. Any code path that puts container item A inside container B while B is (transitively) inside A. AddItem is the only gate and it does not check for this (see below).
+2. Afterwards, ANY call to getCharacter() or isInCharacterInventory() on a container on that cycle is fatal. Both are called constantly by inventory UI sync, transaction validation and the container broadcast helpers, so the crash follows within seconds.
+
+We were unable to find the cycle in the save files, and that is expected: the "containingItem" backlink is assigned once in the InventoryContainer constructor and is not serialised, and InventoryContainer.save() is a nested recursive writer -- a cycle present at save time would blow the stack while saving. Our "World saved" 60 seconds before the crash completed normally. The cycle is therefore purely a runtime artifact of the MP item-move path.
+
+Observed
+
+Player-visible: the world stops. Players remain "connected" but nothing moves, no action completes, and the server does not accept the graceful quit typed at 21:40. Only SIGKILL + watchdog restart at 21:44 recovered it. World data loss was small (last successful save 21:30:10) but every player action between 21:31 and 21:44 was silently discarded.
+
+Log fingerprint (truncated -- all 1024 frames are the same frame repeating):
+
+java.lang.StackOverflowError
+  at zombie.inventory.ItemContainer.getCharacter(ItemContainer.java)
+  at zombie.inventory.ItemContainer.getCharacter(ItemContainer.java)
+  ... x1024
+
+Root cause (decompiled 42.20.4, class/method references)
+
+1. Unbounded self-recursion, no cycle detection. zombie/inventory/ItemContainer.java:3250-3256
+
+public IsoGameCharacter getCharacter() {
+   if (this.getParent() instanceof IsoGameCharacter) { ... }
+   else { return this.containingItem != null
+            && this.containingItem.getContainer() != null
+          ? this.containingItem.getContainer().getCharacter()   // :3254
+          : null; }
+}
+
+The same shape exists in isInCharacterInventory(IsoGameCharacter) at ItemContainer.java:342-358 (self-recursion at :352). Neither keeps a visited set nor a depth counter. On a cycle both recurse forever.
+
+2. Nothing stops the cycle from being created. ItemContainer.AddItem(InventoryItem) -- ItemContainer.java:458-495 -- rejects only a duplicate item id (:461, containsID) and then unconditionally performs item.container = this; this.items.add(item); (:478-479). There is no check that this is not already inside item.
+3. The engine does have an ancestor check, but it is private and only two levels deep. zombie/core/TransactionManager.java:91-118, chainContainsContainingItem(ItemContainer, int) walks upward inside for (int i = 0; i < 2; i++) (:97). Two levels is enough for the transaction dedup it was written for, but it cannot see a longer cycle, and being private it is not reachable from AddItem anyway.
+4. Secondary (silent, not fatal): the five GameServer container broadcast helpers (sendAddItemToContainer, GameServer.java:2389-2405, and the same shape in sendAddItemsToContainer :2407, sendReplaceItemInContainer :2425, sendRemoveItemFromContainer :2449, sendRemoveItemsFromContainer :2467) are a three-branch if/else-if with no final else: getCharacter() instanceof IsoPlayer (:2390), getParent() != null (:2392), then container.inventoryContainer != null && ...getWorldItem() != null (:2396). A nested container that satisfies none of the three -- which includes any container whose owner walk cannot resolve -- gets no packet and no log line, so clients never learn about add/remove in it.
+
+Field data
+
+- 2026-08-13 21:31:10, ~60 players online. Main loop dead, frame frozen at f:54247 for 13 minutes. Graceful quit at 21:40 not accepted; forced restart 21:44.
+- Last successful world save 21:30:10 (i.e. the cycle did not exist in, and was not written to, the save).
+- Since installing a depth guard we have not lost the main loop to this again.
+
+Suggested fix
+
+Minimal and low-risk, in order of value:
+
+1. Bound the two walks. Give getCharacter() and isInCharacterInventory() a visited-set or a depth cap (64 is far beyond any legitimate nesting) and return null / false at the cap, which is the same value both methods already produce for "no owner found". This alone converts a server kill into a harmless miss.
+2. Reject the cycle at the door. In AddItem(InventoryItem), before item.container = this, walk this upward and refuse (return the existing item / log) if item is found on the chain. TransactionManager's chainContainsContainingItem is already the right shape -- promoting it to a shared helper and removing the i < 2 bound would cover both uses.
+3. Give the GameServer container broadcasts a final else that logs (or falls back to the owning chunk), so a container that matches none of the three branches cannot silently stop replicating.
+
+We validated the diagnosis with an experimental server-side hotfix (ASM bytecode patch) that truncates both walks at depth 64 and dumps the cycle's closing point: the main loop has not been lost to this StackOverflowError since, and the truncation log confirms real cycles (a control run using the vanilla walk over the same captured chain reproduces the StackOverflowError). Logs / bytecode diffs available on request.

@@ -1,0 +1,63 @@
+Version: [42.20.4]
+
+Mode: [Multiplayer]
+
+Server settings: [Dedicated, Linux x86_64 (Ubuntu 24.04 LXC, 8 vCPU / 62 GB), LinuxGSM, Azul Zulu OpenJDK 25 + ZGC, 254 slots; 7-day average ≈30 concurrent players, evening peaks 60–95 (max 95 on 2026-09-01), 465 distinct players in the last 7 days]
+
+Mods: [~80 workshop mods on the production server where this was observed. The geometry defect is in vanilla Java (class/method references below); the affected animals were wild and no mod touches the animal sync path.]
+
+Save: [Existing MP save; not save-specific - see analysis]
+
+Summary
+
+Animals standing between the client's loaded chunk boundary and the server's animal relevancy radius produce a request/response cycle that never converges: the server advertises the animal in a lightweight update; the client has no local instance for that onlineID and requests the full animal; the server replies with a complete IsoAnimal snapshot (~1.1 KiB, full genome); the client's AnimalPacket.isConsistent requires the target grid square to be loaded, so outside the loaded area the body is skipped and no instance is created; 800-1000 ms later the next update arrives and it repeats. On our server these snapshots were 38.3-39.8% of outgoing bytes in steady state and 87.2% of them were repeats. A second, independent defect on the same path is that the client-supplied requested set is completely ungated.
+
+Trigger conditions
+
+Not deterministic (it depends where animals happen to stand), but continuous on any server with wild animals and enough players. No mods required.
+
+Observed / measurements
+
+Read-only tcpdump capture decoded with a purpose-built parser (UDP -> RakNet connected datagram with reliability/split headers -> reassembly -> PZ user message -> PacketType -> AnimalUpdatePacket requested section). Window: 8.03 s, 25,000 bidirectional datagrams.
+
+client -> server requested animal IDs           109 server -> client full animal snapshots          109 distinct (client endpoint, onlineID) pairs       14 pairs that repeated within 5 s               14 / 14 full snapshots that were repeats           95 / 109 (87.2%) requests that received a response         109 / 109 (median 72.7 ms) average dataSize per full snapshot         1,125.4 bytes distance from requesting player to animal  70.4 - 91.5 squares AnimalUpdatePacket parse errors                   0
+
+Two benign explanations are ruled out: not "many animals entering view" (only 14 distinct pairs produced 109 snapshots), and not packet loss (every request got a response, mostly on reliable frames, yet the same ID was requested again on the next tick). We have no per-request record of the client's loaded state, so "every snapshot was discarded" is an inference; the repetition is the observation.
+
+Root cause (decompiled 42.20.4, class/method references)
+
+GameServer.receivePlayerConnect stores, from the client-provided chunk grid width:
+
+range = clamp(width, 12, 20);  relevantRange = range / 2 + 2;  chunkGridWidth = range   (integer division)
+
+For a normal unclamped odd width, the client chunk window has a guaranteed half-width lower bound of (range / 2) * 8 squares once streaming completes. AnimalSynchronizationManager.sendUpdateToClient uses a different factor - 42.20.4 AnimalSynchronizationManager.java:122:
+
+if (animal != null && connection.RelevantTo(animal.getX(), animal.getY(), (connection.getRelevantRange() - 2) * 10)) {
+
+(getRelevantRange() - 2) * 10 == (range / 2) * 10, i.e. 10/8 of that bound, so the extra ring covers squares for which the client may have no GridSquare. RelevantTo is an axis-aligned square test, so the over-reach is larger on the diagonals. isAnimalOnScreen reuses the same expression at 42.20.4 line 187 for an unrelated purpose (800 vs 1000 ms cadence), so the * 10 reads like a generic "relevancy-ish distance" rather than a value chosen against a hard client-side requirement. ClientServerMap.loaded[] is no substitute for the client's loaded set - it tracks 64-square server-cell isLoaded state, not per-chunk streaming completion.
+
+Second defect - AnimalSynchronizationManager.setRequested, 42.20.4 lines 57-60, copies whatever set the client sends straight into the server map:
+
+HashSet r = requests.computeIfAbsent(connection.getConnectedGUID(), k -> new HashSet<>());
+r.clear();
+r.addAll(request);
+
+No relevancy check, no rate limit, no cooldown. The only bound is the send loop's "if (animalsCount >= 150) break;" at 42.20.4 line 107, and requestedCount is read from the wire as an unbounded int. An authenticated client can therefore request arbitrary animal onlineIDs and receive full IsoAnimal.save() snapshots for animals it should not be able to observe.
+
+Third factor - IsoChunkMap.ProcessChunkPos moves the client's chunk-map centre ahead of the player by currentSpeedKmHour / 5 squares while driving (min(s * 2, 20) as a passenger), and the server's releventPos knows nothing about that look-ahead. So while driving, any player-centred server radius both withholds animals in loaded chunks ahead of the vehicle and keeps advertising animals in unloaded chunks behind it.
+
+Field data
+
+After clamping the radius for walking players only, the loop disappeared for the walking population (0 requests in a 60-second re-measurement), but 598 full snapshots remained: 96.2% inside the vanilla over-reach ring and 98.5% to a single connection that was in a vehicle for the whole window. 172 of 181 tuples re-requested the same animal at least 1 s after receiving a full snapshot. That residual is what a geometry fix structurally cannot reach.
+
+Suggested fix
+
+1. Derive animal relevancy from the client's loaded set rather than relevantRange. Only the client knows it exactly; a server-side approximation cannot account for vehicle look-ahead or streaming chunks.
+2. Gate setRequested: reject onlineIDs outside the requesting connection's plausible area. That fixes residual loops and closes the amplification surface at once.
+3. Add a per-connection/per-animal cooldown for full snapshots, so any future mismatch degrades into one wasted packet instead of a sustained loop. This is the only one of the three that also works in the vehicle case, because it does not depend on geometry.
+4. Client side: skip the request when the target square is not loaded, and/or keep a short negative cache for discarded IDs.
+5. Independently, shrink the animal wire format: genome field names are a fixed schema but are sent as strings three times per gene (gene plus both alleles), which is most of the ~1.1 KiB. That needs both sides updated.
+
+Fixes 2 and 3 are purely server-side and preserve the packet layout, so unmodified clients keep working. Cheap confirmation: log (connection, onlineID) for every entry AnimalUpdatePacket.write serializes into the requested section.
+
+We validated the diagnosis with an experimental server-side hotfix (ASM bytecode patch): clamping the radius to (getChunkGridWidth() / 2) * 8 for walking players with trusted odd widths, plus a per-connection/per-animal cooldown and a generous range check on the requested path. The two measurement sets above are its before and after. We do not claim the clamp is loss-free - chunk alignment means the wider side can withhold animals by under 8 squares, and vehicles, clamped widths (12 and 20) and even widths must bypass it entirely, which is why we regard the cooldown rather than the geometry as the fix that generalises. Logs / bytecode diffs available on request.
