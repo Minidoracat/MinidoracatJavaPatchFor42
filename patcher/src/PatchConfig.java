@@ -633,8 +633,42 @@ public final class PatchConfig {
         ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/network/packets/NetTimedActionPacket", "write",
                 "(Lzombie/core/network/ByteBufferWriter;)V", ntaGuard, "write"));
-        ntaProcess.expectedHits = 2;   // accept 與 reject 分支各一；helper 只在 action==null 時介入
+        ntaProcess.expectedHits = 4;   // W10 write 改道 2 ＋ W10-C headCall 1 ＋ stopPlayerActions 改道 1
+        // ---- W10-C 卡讀條第二波觀測（立案 2026-08-28、落地 2026-09-02；docs/patches.md 2aj）----
+        // W10 後玩家仍回報「讀條走滿不完成」（製作/做奶油/拆除，間歇、排隊多條卡一條），兩份
+        // client log 在卡住當下零 error 零 Reject。反編譯定案三條 W10 未覆蓋、server log 零指紋
+        // 的路徑，本刀把它們量出來（helper 放 zombie.core：Action 是 package-private class）：
+        // (B) processServer 對每個新 Request 先 stopPlayerActions（offset 48），而 server 端
+        //     ActionManager.remove 只移出清單不送任何封包（:188-199）——Accept 中的舊動作在
+        //     client 永遠等不到回應。observe 記被打斷者；enforce 補送 Reject（同 id 重送不補）。
+        // (C) server 的 endTime 由自己的 getDuration()×20 決定，-1 時退到 durationMax=30 分鐘
+        //     （ISHandcraftAction 在 server 端 craftRecipe 為 nil 即回 -1，零 log）——TailCall
+        //     start() 尾部（setTimeData 之後）記 duration，負值逐筆列出。
+        // (R) ActionManager.update 的 perform 出口：perform true/false 分佈＋getConnectionFromPlayer
+        //     null 次數（null＝Done/Reject 不送）。
+        // kill switch：-Dmdc.timedActionProbe（2|observe 預設／1|enforce 補送 Reject／0|off）。
+        String taProbe = "zombie/core/MdcTimedActionProbe";
+        ntaProcess.headCall = new Patcher.HeadCall(taProbe, "onProcessServer",
+                "(Lzombie/network/packets/NetTimedActionPacket;)V");
+        ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/core/ActionManager", "stopPlayerActions",
+                "(Lzombie/network/fields/character/PlayerID;)V", taProbe, "stopPlayerActions"));
         patches.add(ntaPkt);
+
+        Patcher.MethodOps ntaStart = nta.method("start", "()V");
+        ntaStart.tailCall = new Patcher.TailCall(taProbe, "onStart", "(Lzombie/core/NetTimedAction;)V");
+        ntaStart.expectedHits = 1;   // 單一 RETURN（javap offset 57）
+
+        Patcher.ClassPatch actionManager = new Patcher.ClassPatch("zombie/core/ActionManager");
+        Patcher.MethodOps amUpdate = actionManager.method("update", "()V");
+        amUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/Action", "perform", "()Z", taProbe, "perform"));
+        amUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/network/GameServer", "getConnectionFromPlayer",
+                "(Lzombie/characters/IsoPlayer;)Lzombie/core/raknet/UdpConnection;",
+                taProbe, "connectionOf"));
+        amUpdate.expectedHits = 3;   // perform 1 ＋ getConnectionFromPlayer 2（Done/Reject 分支）
+        patches.add(actionManager);
 
         // ---- W11 動物聲音排序活鎖捕手（2026-08-23 晚間事故；docs/patches.md 2y）----
         // BaseAnimalSoundManager 的比較器每次 compare 現場重算 listener 距離，且手寫 >/< 三態

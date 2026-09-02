@@ -1193,10 +1193,10 @@ public final class SmokeCheck {
                 && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 0
                 && realInsnCount(pNtaParse) == realInsnCount(vNtaParse));
         MethodNode pNtaProcess = method(distJava, ntaPktCls, "processServer", psDesc);
-        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數不變",
+        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數恰 +2（W10-C headCall）",
                 countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, ntaGuardCls, "write", writeHelperDesc) == 2
                 && countExactCalls(pNtaProcess, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0
-                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess));
+                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess) + 2);
 
         // helper 契約 1：catch 型別鎖定 RuntimeException——Error（SOE／OOM）必須穿透，
         // 與 W6 同紀律。放寬成 Throwable 會把致命錯誤變成「靜默 reject」。
@@ -1926,6 +1926,69 @@ public final class SmokeCheck {
                 && countOpcode(gClosest, Opcodes.NEW) == 0
                 && countCallsToOwner(gClosest, "zombie/debug/DebugLog") == 0);
 
+        // ---- W10-C 卡讀條第二波觀測（processServer 打斷／start 時長／update perform 出口）----
+        String taProbeCls = "zombie/core/MdcTimedActionProbe";
+        String amCls = "zombie/core/ActionManager";
+        String pidCls2 = "zombie/network/fields/character/PlayerID";
+        String stopDesc = "(L" + pidCls2 + ";)V";
+        String connDesc = "(Lzombie/characters/IsoPlayer;)Lzombie/core/raknet/UdpConnection;";
+        // vanilla 前提 (B)：processServer 內 stopPlayerActions 恰 1；ActionManager.remove 內
+        // startPacket 恰 1（＝client 分支的 GeneralAction Reject；server 分支零封包＝「不通知
+        // client」的結構事實）。TIS 在 server 分支補通知時此條紅＝enforce 補送 Reject 撤刀訊號。
+        MethodNode vAmRemove = methodFromJar(jar, amCls, "remove", "(BZ)V");
+        failed += check("W10-C vanilla (B)：processServer stopPlayerActions=1；ActionManager.remove startPacket 恰 1（server 分支零封包）",
+                countExactCalls(vNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1
+                && countCalls(vAmRemove, "zombie/core/raknet/UdpConnection", "startPacket") == 1
+                && countExactFields(vAmRemove, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1);
+        // vanilla 前提 (C)：start() 單一 RETURN＋setTimeData 恰 1；Action.setTimeData 內
+        // getDurationMax 恰 1（-1 → durationMax 路徑存在）。
+        MethodNode vNtaStart = methodFromJar(jar, ntaCls, "start", "()V");
+        MethodNode vSetTimeData = methodFromJar(jar, "zombie/core/Action", "setTimeData", "()V");
+        failed += check("W10-C vanilla (C)：start RETURN=1、setTimeData=1；setTimeData 內 getDurationMax=1",
+                countOpcode(vNtaStart, Opcodes.RETURN) == 1
+                && countExactCalls(vNtaStart, Opcodes.INVOKEVIRTUAL, ntaCls, "setTimeData", "()V") == 1
+                && countExactCalls(vSetTimeData, Opcodes.INVOKEVIRTUAL, "zombie/network/server/AnimEventEmulator",
+                        "getDurationMax", "()J") == 1);
+        // vanilla 前提 (R)：update 內 Action.perform 恰 1、getConnectionFromPlayer 恰 2（Done/Reject）。
+        MethodNode vAmUpdate = methodFromJar(jar, amCls, "update", "()V");
+        failed += check("W10-C vanilla (R)：update 內 perform=1、getConnectionFromPlayer=2",
+                countExactCalls(vAmUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 1
+                && countExactCalls(vAmUpdate, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "getConnectionFromPlayer", connDesc) == 2);
+        // 手術後：processServer 頭部 headCall 全序＋stopPlayerActions 改道 1（W10 write 改道 2 由
+        // 上方 W10 斷言鎖定）；start 尾部 tailCall；update 改道 3、原呼叫歸零、真指令不變。
+        failed += check("W10-C 手術後：processServer headCall 全序＋stopPlayerActions 改道 x1、原呼叫歸零",
+                headCallOk(pNtaProcess, taProbeCls, "onProcessServer", "(L" + ntaPktCls + ";)V")
+                && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, taProbeCls, "stopPlayerActions", stopDesc) == 1
+                && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 0);
+        MethodNode pNtaStart = method(distJava, ntaCls, "start", "()V");
+        failed += check("W10-C 手術後：start 尾部 aload_0→onStart（RETURN 前）、真指令恰 +2",
+                tailCallOk(pNtaStart, taProbeCls, "onStart", "(L" + ntaCls + ";)V")
+                && realInsnCount(pNtaStart) == realInsnCount(vNtaStart) + 2);
+        MethodNode pAmUpdate = method(distJava, amCls, "update", "()V");
+        failed += check("W10-C 手術後：update perform 改道 x1＋connectionOf 改道 x2、原呼叫歸零、真指令不變",
+                countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, taProbeCls, "perform", "(Lzombie/core/Action;)Z") == 1
+                && countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, taProbeCls, "connectionOf", connDesc) == 2
+                && countExactCalls(pAmUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 0
+                && countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "getConnectionFromPlayer", connDesc) == 0
+                && realInsnCount(pAmUpdate) == realInsnCount(vAmUpdate));
+        // helper 契約：三個委派各恰 1（stopPlayerActions／perform／getConnectionFromPlayer）；
+        // enforce 補送 Reject 的 write 恰 1（sendReject）且與 vanilla 同一組 doPacket/send API。
+        MethodNode gStop = method(distJava, taProbeCls, "stopPlayerActions", stopDesc);
+        MethodNode gPerform = method(distJava, taProbeCls, "perform", "(Lzombie/core/Action;)Z");
+        MethodNode gConn = method(distJava, taProbeCls, "connectionOf", connDesc);
+        MethodNode gSendReject = method(distJava, taProbeCls, "sendReject", "(Lzombie/core/Action;)Z");
+        failed += check("W10-C helper 契約：三委派各 1；sendReject write=1/doPacket=1/send=1",
+                countExactCalls(gStop, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1
+                && countExactCalls(gPerform, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 1
+                && countExactCalls(gConn, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                        "getConnectionFromPlayer", connDesc) == 1
+                && countExactCalls(gSendReject, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "write",
+                        "(Lzombie/core/network/ByteBufferWriter;)V") == 1
+                && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
+                && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -2146,6 +2209,28 @@ public final class SmokeCheck {
         return h[slots.length] instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
                 && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)
                 && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == 1;
+    }
+
+    /**
+     * tail-call 全序鎖（W10-C 起）：每個 RETURN 的前兩條真指令＝aload_0；invokestatic helper，
+     * 且該 helper 呼叫數＝RETURN 數（每個出口恰一次）。
+     */
+    static boolean tailCallOk(MethodNode m, String owner, String name, String desc) {
+        int returns = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() != Opcodes.RETURN) {
+                continue;
+            }
+            returns++;
+            AbstractInsnNode call = prevReal(in);
+            AbstractInsnNode load = call == null ? null : prevReal(call);
+            if (!(call instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKESTATIC
+                    || !mi.owner.equals(owner) || !mi.name.equals(name) || !mi.desc.equals(desc)
+                    || !(load instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 0) {
+                return false;
+            }
+        }
+        return returns > 0 && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == returns;
     }
 
     /** 統計方法內對指定欄位的任何存取（GETFIELD/PUTFIELD/GETSTATIC/PUTSTATIC）。 */

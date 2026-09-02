@@ -3002,6 +3002,104 @@ kill switch `-Dmdc.faceObjectGuard=0`（純直通，null 照回＝vanilla 語意
   由 W17 之後的 apop 對照觀察，本刀不宣稱根治動物消失。
 ---
 
+## 2aj. 卡讀條第二波觀測（W10-C，server，預設 observe；enforce＝打斷時補送 Reject）
+
+### 立案（2026-08-28 回報、2026-09-02 落地）
+
+W10（§2x，8/23 上線）根治「server 建構動作就炸 → 既不 Accept 也不 Reject」後，玩家 8/28 晚峰
+仍回報「讀條走滿不完成」（製作／做奶油／拆除；間歇、排隊多條卡一條、後續動作一起堵死）。
+兩份受害者 client log 在卡住當下**完全安靜**——零 error、零 Reject、零 `[NetTimedAction]`；
+server 端 W10 heartbeat `caught=0 rejected=0`＝W10 的目標情境根本沒發生。其中一份 log 顯示
+DismantleAllAtOnce（wid 3761218629）一次排入 15 條 handcraft action，是「排隊多條卡一條」的
+直接背景。反編譯（42.20.4）定案 **三條 W10 未覆蓋、且在 server log 上零指紋** 的 server 路徑；
+本刀不猜哪一條是主因，把三條全量出來。
+
+### 三條路徑（vanilla 事實，javap 對 42.20.4 jar）
+
+- **B 靜默打斷**：`NetTimedActionPacket.processServer` 對每個新 Request 先
+  `ActionManager.stopPlayerActions(playerId)`（offset 48）再 `start`；而 server 端
+  `ActionManager.remove(B,Z)`（反編譯 :188-199）只移出清單＋`stop()`、**不送任何封包**
+  （`startPacket` 恰 1 且在 `GameServer.server` 判定的 client 分支）。被打斷的 **Accept 中**
+  舊動作在 client 端永遠等不到 Done／Reject——client 的 `isDone`／`isRejected` 都要靠回包。
+  同 id 重送（client retry）不是打斷，另計。
+- **C 30 分鐘路徑**：client 讀條長度用 client Lua 自算的 `maxTime`，server 何時 `perform`
+  用 server 自算的 `endTime`（`NetTimedAction.getDuration`＝Lua `getDuration` ×20ms＋server
+  專屬 `adjustMaxTime`）；`Action.setTimeData`（:30-31）在 `duration<0` 時直接
+  `endTime = start + AnimEventEmulator.getDurationMax()`＝**1,800,000 ms**。`ISHandcraftAction:257-258`
+  在 server 端 `craftRecipe` 為 nil 時就回 -1——ctor 不炸、零 log，client 讀條走滿後 server
+  要 30 分鐘才 perform。**-1 對動畫驅動的動作是合法值**，故本路徑只能觀測不能 enforce。
+- **R Reject 出口**：`ActionManager.update` 的 `Action.perform()`（恰 1）回 false 時走 Reject
+  分支，但 Done／Reject 兩分支各自 `GameServer.getConnectionFromPlayer`（恰 2），回 null
+  ＝**封包不送**（同樣零 log）。量 `perform` true/false 分佈與 connection null 次數。
+
+### 手術（1 headCall＋1 redirect＋1 tailCall＋3 redirect；全部純線性、真指令 +2/+2/±0）
+
+| 目標 | 手術 | 語意 |
+|---|---|---|
+| `NetTimedActionPacket.processServer`（掛在 W10 既存 ClassPatch；`expectedHits` 2→4） | headCall `MdcTimedActionProbe.onProcessServer(packet)`＋`invokestatic ActionManager.stopPlayerActions` → `MdcTimedActionProbe.stopPlayerActions` | headCall 以 ThreadLocal 捕獲當前 Request（判同 id、記新動作型別）；redirect 先掃 `ActionManager.actions` 同玩家 Accept 中的舊動作（type／已等 ms／剩餘 ms／新 Request type／判定），再**原樣委派** vanilla |
+| `NetTimedAction.start()V`（掛在 W10 既存 `nta` ClassPatch；`expectedHits=1`） | **TailCall**（每個 RETURN 前 `aload_0; invokestatic onStart(NetTimedAction)V`；單一 RETURN offset 57） | `setTimeData` 之後讀 `duration`／`endTime`，負值逐筆列出（type／name／player／endTimeDeltaMs） |
+| `ActionManager.update()V`（**新 ClassPatch**；`expectedHits=3`） | `Action.perform()Z` → `perform(Action)Z`；`GameServer.getConnectionFromPlayer` ×2 → `connectionOf` | 1:1 同形；先委派 vanilla 再簿記 |
+
+`TailCall` 詞彙隨 W16 退役被刪、本刀復用（`Patcher.TailCall`：`visitInsn(RETURN)` 前插兩條、
+`visitMaxs` 下限 1、無新 branch target ⇒ 不動 frames）。helper **放 `zombie.core`**（不是
+`zombie.mdc`）：`Action` 是 package-private class、欄位 protected、`perform()` package-private，
+同 package 才能零反射直讀；唯一反射是 `ActionManager.actions`（private static），class init 一次
+快取，找不到即 `IllegalStateException` 外逃＝fail-fast（TIS 改結構時開機就紅，不會靜默直通）。
+
+**enforce（B 唯一可安全修的一條）**：對被打斷的 Accept 中舊動作，模仿 `ActionManager.update`
+Reject 分支（:87-96）的形狀——`state=Reject` → `startPacket` → `NetTimedAction.doPacket` →
+`action.write` → `send`——用**同一物件**送出（W10 的 A 刀教訓：`this.write` 送錯物件＝Reject
+永遠是 Request state）。client 收到 Reject 走 vanilla `isRejected→forceStop`，是既有路徑、無
+更差結果；連線 null／未 fully connected 則 `rejectsSkippedNoConn++` 不動 state。同 id 重送不補
+（那是 client retry，補送會拒掉它剛重送的那條）。C 與 R 在 enforce 下仍只觀測。
+
+### 語意邊界（刻意不做的事）
+
+- 不改 `setTimeData` 的 -1 退路、不縮 `getDurationMax`：-1 是動畫驅動動作的合法值，改了會讓
+  合法動作提前 perform（消耗材料／產出成品的時序錯位）。
+- 不在 processServer 拒絕新 Request 來「保護」舊動作：vanilla 語意就是新請求打斷舊動作
+  （client 端 `ISTimedActionQueue` 也是這樣切換），要修的是「打斷後沒回包」，不是打斷本身。
+- 不猜 R 路徑 connection null 的原因（斷線瞬間 vs 重連中）——先量 `connNull` 是否非零。
+
+### 守門（SmokeCheck 六條）
+
+- vanilla (B)：`processServer` 內 `stopPlayerActions=1`；`ActionManager.remove` 內 `startPacket=1`
+  ＋`GETSTATIC GameServer.server=1`（**server 分支零封包＝B 刀存在理由**；TIS 補送 Reject 時
+  該條紅＝撤刀訊號）。
+- vanilla (C)：`start` 內 `RETURN=1`、`setTimeData=1`；`setTimeData` 內 `getDurationMax=1`。
+- vanilla (R)：`update` 內 `perform=1`、`getConnectionFromPlayer=2`。
+- 手術後：`processServer` headCall 全序＋`stopPlayerActions` 改道 x1／原呼叫歸零（W10 斷言同步
+  改為真指令恰 +2）；`start` 尾部 `aload_0→onStart`（`tailCallOk`：每個 RETURN 前兩條＋呼叫數
+  ＝RETURN 數）、真指令恰 +2；`update` 改道 1+2、原呼叫歸零、真指令不變。
+- helper 契約：三委派各恰 1；`sendReject` 內 `write=1／doPacket=1／send=1`（補送形狀釘死）。
+
+### 行為測試（`MdcTimedActionProbeTest`，獨立 JVM 三組態：observe／`=1`／`=off`）
+
+`onStart` 正 2000ms 與 -1 各一（負值恰 +1、endTimeDelta＝durationMax）；反射注入
+`ActionManager.actions`：Accept 中舊動作被不同 id 的新 Request 打斷 ⇒ `interruptedAccepted+1`、
+Request 態不算、同 id ⇒ `sameIdResend+1` 且 enforce 不補送；enforce 無玩家／連線 ⇒
+`rejectsSkippedNoConn+1`、零 sent、state 未改；`perform` true/false 與 `connectionOf` null 計數；
+off 三點全零；全組態 `anomalies=0`。測試坑（家族通則）：`main` 首行 `RandStandard.INSTANCE.init()`
+（`GameTime.getServerTimeMills → GameClient → ServerOptions → Rand` 靜態鏈）；vanilla 只在 client
+`sendAction` 分配 `Action.id`，測試須顯式給不同 id；打斷偵測走 `inspectInterruptedForTest` 不委派
+vanilla `remove`（會觸發 `GameServer`/`GameClient` class init）。
+
+### 部署與觀測（驗收）
+
+- 開機 `[TimedActionProbe] 首次生效 mode=2`；heartbeat（每 256 個 start 檢查、60s 一行）
+  `starts/negativeDuration/interruptCalls/interruptedAccepted/sameIdResend/rejectsSent/
+  rejectsSkippedNoConn/performCalls/performFalse/connLookups/connNull/logged/suppressed/anomalies`；
+  逐筆行 10s 窗 20 行 rate limit，`anomalies` 必須恆 0。
+- 一個晚峰後看三類份額：`interrupted#`（含 `waitedMs`——已等接近 client maxTime 卻被打斷＝玩家
+  體感「走滿不完成」的直接指紋）vs `negativeDuration#`（type 分佈：預期 `ISHandcraftAction`
+  server 端 recipe nil）vs `performFalse#`／`connNull`。份額決定下一步：B 佔大宗 ⇒ 開
+  `-Dmdc.timedActionProbe=1`（需重啟）並驗 `rejectsSent>0`、玩家回報下降；C 佔大宗 ⇒ 回到
+  Lua 層（哪些 recipe 在 server 端 nil、與 DismantleAllAtOnce／Neat_Crafting 的關聯），Java 側
+  無安全刀；R 非零 ⇒ 另案查連線生命週期。
+- 官方回報：B（server remove 不回包）與 C（-1 → 30 分鐘）各自成案，等本刀數據後補進
+  `docs/report/` 的 TIS 回報（B-R1 更新＋兩份新報告）。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
