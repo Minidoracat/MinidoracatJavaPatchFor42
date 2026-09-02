@@ -1,0 +1,9 @@
+Heads-up for anyone running a B42 (42.20.4) dedicated server: over the last two weeks we ran a 60–95 player Linux server, traced every hang / data-loss incident to specific vanilla code paths (decompiled, with line refs, field data and a minimal fix each), and filed the results on the forum today — 15 bug reports + 1 suggestion. The ones that kill or freeze a server outright:
+• ItemContainer.getCharacter() unbounded recursion → StackOverflowError kills the main loop (13-min silent freeze) <https://theindiestone.com/forums/topic/100891-container-cycles/>
+• "Entity is already registered" from IsoChunk.doLoadGridsquare → permanent main-loop livelock (114 min, watchdog can't see it) <https://theindiestone.com/forums/topic/100893-entity-already-registered/>
+• Shared CRC32 in the chunk-save pipeline → chunks written with a wrong/zero CRC → next load Blams player-built chunks <https://theindiestone.com/forums/topic/100901-shared-crc32/>
+• Shared static Vector2 race between chunk loader and main loop → chunk load aborts → Blam <https://theindiestone.com/forums/topic/100895-shared-static-vector2/>
+• BaseAnimalSoundManager comparator IAE → server-wide "time stopped" / stuck action bars <https://theindiestone.com/forums/topic/100897-animal-sound-comparator/>
+• removeGlassAttachments n-- → one smash-window packet spins the tick forever <https://theindiestone.com/forums/topic/100899-remove-glass-attachments/>
+Full list (timed actions stuck at 100%, hutch animals destroyed on load, vehicles going permanently invisible, animal sync loop eating ~38% of upload, client texture leak → invisible entities, native pathfind crash): <https://theindiestone.com/forums/profile/95849-minidoracat/content/?type=forums_topic>
+Logs / dumps / bytecode diffs available on request.
