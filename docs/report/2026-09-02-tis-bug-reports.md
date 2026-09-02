@@ -50,9 +50,9 @@
   → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。
   不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。
   貼完可用 `curl` 抓 topic 頁對帳：第一篇 `<strong>` 小標 6 個、`<pre>` 2 個、`<ol>` 3 個、無 `&lt;p&gt;` 殘留。
-- **Tags 只能從既有 tag 下拉選，不能自訂**：沒有 `42.20.4`，用 `42.20`（搜尋 42.20）；`dedicated` 選
+- **Tags 只能從既有 tag 下拉選，不能自訂**：版本不打 tag（標題已有 `[42.20.4]`，板上其他回報也不打）；`dedicated` 選
   `dedicated server`；打 `freeze` 會跳 `freezers`（冰箱），要點到 `freeze` 那個；`data loss` 不存在，用
-  `corruption`／`save-data`。每篇的 5 個 tag 已改成確認存在的名稱（用 `/forums/tags/<tag>/` 逐一驗過）。
+  `corruption`／`save-data`。每篇的 4 個 tag 已改成確認存在的名稱（用 `/forums/tags/<tag>/` 逐一驗過）。
 
 ## 1. 你先前的回報現況
 
