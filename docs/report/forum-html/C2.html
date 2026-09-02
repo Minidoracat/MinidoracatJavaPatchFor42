@@ -11,7 +11,7 @@
 <p>The crash site is therefore <strong>not</strong> the site of the bug. Two separate vanilla design issues turn one such corrupting store into a delayed, unattributable crash, and we would like both addressed regardless of where the original store comes from.</p>
 <p><strong>Environment</strong></p>
 <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Build</td><td>42.20.4, build id 24909836, Linux dedicated server</td></tr><tr><td>JVM</td><td>Zulu 25.30+17-CA (25.0.1+8-LTS), ZGC</td></tr><tr><td>OS</td><td>Ubuntu 24.04, glibc 2.39, kernel 6.17.4</td></tr><tr><td>Library</td><td>linux64/libPZPathFind64.so, sha256 0777dda6db77ddd3059f27f94e0d56fae827b21436b5feb4d719e96878fd21c4 (unmodified Steam depot file)</td></tr><tr><td>Load</td><td>20–80 concurrent players, 824 vehicle polys live at crash time</td></tr><tr><td>Frequency</td><td>7 crashes with glibc heap-corruption signatures between 2026-08-22 and 2026-08-31</td></tr></tbody></table>
-<p><strong>Disclosure:</strong> this server runs our own Java bytecode patches (loose .class files, log redirection / metrics / throttling gates). They contain <strong>no native code and no .so</strong>. No patched class lives in zombie.pathfind.*, and nothing we do touches PolygonalMap2, PathfindNative, or any pooled native structure. For completeness: one of our helpers reads the public float fields of zombie.pathfind.VehiclePoly on the <strong>client-only</strong> branch of a vehicle visibility check (on a server it returns before touching it) and never writes to it. No Workshop mod on this server ships native code. The corrupted objects are native-only structures with no Java representation. We are happy to reproduce with all patches removed if you need that, but we do not believe they are relevant to a corruption inside a native object pool.</p>
+<p><strong>Disclosure:</strong> this server runs our own Java bytecode patches (loose .class files, log redirection / metrics / throttling gates). They contain <strong>no native code and no .so</strong>. No patched class lives in zombie.pathfind.∗, and nothing we do touches PolygonalMap2, PathfindNative, or any pooled native structure. For completeness: one of our helpers reads the public float fields of zombie.pathfind.VehiclePoly on the <strong>client-only</strong> branch of a vehicle visibility check (on a server it returns before touching it) and never writes to it. No Workshop mod on this server ships native code. The corrupted objects are native-only structures with no Java representation. We are happy to reproduce with all patches removed if you need that, but we do not believe they are relevant to a corruption inside a native object pool.</p>
 <p><strong>Crash signature</strong></p>
 <pre>SIGSEGV (0xb) at pc=libPZPathFind64.so+0x4ca19, tid=&lt;pathfind thread&gt;
 Problematic frame: C [libPZPathFind64.so+0x4ca19] PolygonalMap2::createVehicleClusters()+0x89
@@ -27,7 +27,7 @@ CR2    = 0x30
 trapno = 0x0e, err = 0x06                  (user-mode write to a not-present page)
 R12    = 31                                (loop index; 32nd allocation of this round)
 R13    = the PolygonalMap2 instance</pre>
-<p>VehicleRect pool state (ObjectPool&lt;VehicleRect&gt;, a std::deque&lt;void*&gt; used as a front-push / front-pop free list):</p>
+<p>VehicleRect pool state (ObjectPool&lt;VehicleRect&gt;, a std::deque&lt;void∗&gt; used as a front-push / front-pop free list):</p>
 <pre>total allocations counter        832
 free-list entries               800   (all 800 distinct)
 slot just popped (start.cur-8)  0x30
@@ -44,12 +44,12 @@ glibc chunk of A:  size word at A-8 has been overwritten with a heap pointer val
 <p>That last point pins the mechanism exactly: VisibilityGraph::release() releases the cluster's rect array in index order 0, 1; the pool pushes to the front and pops from the front, so those two entries must come back out as 1, 0. That is precisely what the core shows. <strong>The 0x30 entered the pool through VisibilityGraph::release(), one or more rounds before the crash.</strong></p>
 <p>Also worth noting: in the shipped library there is exactly <strong>one</strong> call site of VehicleRect::release() (inside VisibilityGraph::release()) and exactly <strong>one</strong> call site of VehicleRect::alloc() (inside PolygonalMap2::createVehicleClusters()).</p>
 <p><strong>Issue 1 — the object pool has no validation, so it launders corruption across rounds</strong></p>
-<p>VehicleRect::alloc() pops a void* and returns it; VehicleRect::release() pushes a void* and returns. Neither performs any check. Consequently:</p>
+<p>VehicleRect::alloc() pops a void∗ and returns it; VehicleRect::release() pushes a void∗ and returns. Neither performs any check. Consequently:</p>
 <ul><li>a single corrupted array slot is stored verbatim in the free list;</li><li>it is handed to a consumer one or more rounds later;</li><li>the crash therefore happens in a function that is entirely innocent, at a point in time unrelated to the corruption, with no way to attribute it.</li></ul>
 <p>Suggested change: validate <strong>pool ownership</strong> on release() (an exact registry of this pool's allocated objects, with object generation/liveness where needed) and log the offending cluster / array / slot index. Do <strong>not</strong> use a low-address or magnitude heuristic: that would hide only values such as 0x30, let high-address corruption through, and still lose the writer. Validating on release() is far more useful than validating on alloc(), because release() still has the cluster and slot index in scope.</p>
 <p>The same pattern exists for the other ObjectPool&lt;T&gt; instantiations in this library (VehicleCluster, VisibilityGraph, node/edge pools), so a fix in the template covers all of them.</p>
 <p><strong>Issue 2 — reallocate_aligned() copies malloc_usable_size(old), not min(old, new)</strong></p>
-<p>reallocate_aligned(void*, unsigned long, unsigned long) at offset 0x5af50 does:</p>
+<p>reallocate_aligned(void∗, unsigned long, unsigned long) at offset 0x5af50 does:</p>
 <pre>p = aligned_alloc(alignment, newSize)
 memcpy(p, old, malloc_usable_size(old))     &lt;-- source length, never clamped to newSize
 free(old)</pre>

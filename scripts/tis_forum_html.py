@@ -41,12 +41,14 @@ STACK_RE = re.compile(r"^\s*at\s+[\w.$]+\(|^\s*[a-z]+\.[\w.$]*(Exception|Error)\
 def inline(s: str) -> str:
     """散文的行內格式。刻意**不產生** <code>／<em>：論壇編輯器（IPS 5 / CKEditor）貼上 HTML 時，
     6 篇裡 4 篇把行內 <code> 全數搬到段尾（A-R2/A-R3/A-R4/A-R6 實貼對帳），且 `==x==` 會被當
-    highlight 語法吃掉 `==`。只留 <strong>（6/6 存活）。"""
+    highlight 語法吃掉 `==`、`* 10 is (range / 2) *` 會被當斜體吃掉兩個星號（B-R6 實貼）。
+    只留 <strong>（13/13 存活）；散文裡的乘號改 ×、其餘星號改 ∗（U+2217，長得一樣但不是語法）。"""
     s = re.sub(r"`([^`]+)`", r"\1", s)
     s = re.sub(r"(?<![*\w])\*(?!\s)([^*]+?)\*(?![*\w])", r"\1", s)
     s = s.replace(" == ", " is ")
     s = html.escape(s, quote=False)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+    s = s.replace(" * ", " × ").replace("*", "\u2217")
     return s
 
 
