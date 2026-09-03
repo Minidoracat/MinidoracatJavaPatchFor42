@@ -91,6 +91,12 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
    `radius * 0.05F`，同時新增了 `fleeDistance = radius * 3.0F + 20.0F`——方法內仍剛好有一個
    `20.0f`，舊座標會**通過守門卻改到逃跑距離**。每次更新都該重跑語境確認，不能只看命中數。
 
+## ☕ 支持作者
+
+MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服器與 MOD 開發上。
+
+[![Ko-fi](https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png)](https://ko-fi.com/minidoracat)
+
 ## 授權與免責
 
 本專案採 MIT 授權，見 [LICENSE](LICENSE)。
