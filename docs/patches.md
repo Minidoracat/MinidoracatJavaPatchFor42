@@ -3159,6 +3159,48 @@ loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未
 - `fail-open` 行 ≠ 0 ⇒ SQL 或 schema 變了，先 `-Dmdc.accountGate=0` 再查。
 ---
 
+## 2al. `%ld` 格式字串修正（W24，server，無旋鈕）
+
+### 立案（2026-09-06，從 minor 升級）
+
+`checkEntityIDChange` 的兩個診斷訊息用 C 風格 `%ld` 當 Java `Formatter` 格式字串 →
+`UnknownFormatConversionException: Conversion = 'l'`，而呼叫鏈無 catch ⇒ 例外上拋、把呼叫端
+整條動作打斷（建造升級扣料不出貨、拆解中止、chunk 卸載中止）。已回報 TIS
+（[tis-bug-report-42.20.3-minor.md](tis-bug-report-42.20.3-minor.md) Bug 2，當時只見 chunk 卸載故判 minor）。
+次數分佈與逐路徑後果見
+`MinidoracatServerAnalyze/reports/ops/2026-09-06-補丁需求總評-0830至0906.md` §4.1。
+Lua 修不安全（例外時移除封包已送出、`idToEntityMap` 可能已被改），故移交本 repo。
+
+### 根因（javap 對 42.20.4 jar，`work/projectzomboid.jar` sha256 `80e405a4…`）
+
+```
+ 72: ldc_w  #396  // String idToEntityMap(%ld)=%s, expected %s     ← 3 個 arg / 3 個 spec
+144: ldc_w  #408  // String idToEntityMap(%ld)=%s, expected null   ← 3 個 arg / 2 個 spec（第 3 個被靜默忽略）
+```
+
+兩個字面值在全 class 只有這兩處 `ldc` ⇒ 無共享常數池汙染。
+
+### 手術
+
+同一方法內兩個 `ConstChange`（`%ld`→`%d`；第二條順手補 `(entity=%s)` 讓被忽略的第 3 個 arg
+有 spec 可對），`expectedHits = 2`。純 LDC 常數替換：堆疊形狀不變、無 helper、無 kill switch
+（**回退＝`uninstall.sh`**）。
+
+### 守門與驗證
+
+`expectedHits = 2` 逐方法守門（字面值被官方改寫即建置失敗）；常數手術「數量對不代表改對地方」，
+每次 PZ 更新重跑上面的 javap 語境對照。手術後 `javap -c dist/java`：目標方法除兩個字面值外
+108 行逐指令相同（offset 與 Exception table 不變）；同 class 其他方法的 `ldc_w`→`ldc` 是 ASM
+常數池重排的既有現象（`GameServer` 586／`IsoObject` 222／`IsoAnimal` 200 行同樣如此），
+由 `LoadCheck`＋`BytecodeVerify` 覆蓋。`dist/manifest.txt`：`GameEntityManager.class … 2hits`。
+
+### 驗收
+
+`grep -c "Conversion = 'l'"` 歸零；反向 `grep 'idToEntityMap('` 應開始印出診斷行
+（原本被格式例外吃掉）。**entity ID 不一致本身是 vanilla 議題、本刀不修**——只是讓它變成
+「印一行、動作照常完成」。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -3192,7 +3234,7 @@ loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未
    `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
    最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
    (b) 新 `patch-manifest.txt` 行數必須與本次 build 的 `dist/manifest.txt` 完全一致
-   （`grep -c . patch-manifest.txt` 對帳；42.20.4/acf4410 版為 **71** 筆——歷史數字 48/51/55
+   （`grep -c . patch-manifest.txt` 對帳；42.20.4／W24 後為 **72** 筆——歷史數字 48/51/55/71
    皆為當時版本，勿拿舊數字驗新部署）；其中 `NetTimedActionGuard.class`、`NetTimedAction.class`、
    `NetTimedActionPacket.class` 各恰一筆，
    且 `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。
