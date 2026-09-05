@@ -86,6 +86,8 @@ $helperEntries = @(
     'zombie/mdc/ContainerIdProbe.class',
     'zombie/mdc/FaceObjectGuard.class',
     'zombie/core/MdcTimedActionProbe.class',
+    'zombie/network/MdcAccountGate.class',
+    'zombie/network/MdcAccountGate$Row.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
