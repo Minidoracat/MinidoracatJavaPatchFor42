@@ -877,6 +877,21 @@ public final class PatchConfig {
             patches.add(p);
         }
 
+        // W24 javap(80e405a4) checkEntityIDChange:  72: ldc_w "idToEntityMap(%ld)=%s, expected %s"   → "%d"
+        //                                          144: ldc_w "idToEntityMap(%ld)=%s, expected null" → "%d" ＋補第 3 個 arg 的 spec
+        // 詳 docs/patches.md 2al
+        Patcher.ClassPatch gameEntityManager = new Patcher.ClassPatch("zombie/entity/GameEntityManager");
+        Patcher.MethodOps checkIdChange = gameEntityManager.method("checkEntityIDChange",
+                "(Lzombie/entity/GameEntity;JJ)V");
+        checkIdChange.consts.add(new Patcher.ConstChange(
+                "idToEntityMap(%ld)=%s, expected %s",
+                "idToEntityMap(%d)=%s, expected %s"));
+        checkIdChange.consts.add(new Patcher.ConstChange(
+                "idToEntityMap(%ld)=%s, expected null",
+                "idToEntityMap(%d)=%s, expected null (entity=%s)"));
+        checkIdChange.expectedHits = 2;
+        patches.add(gameEntityManager);
+
         return patches;
     }
 
