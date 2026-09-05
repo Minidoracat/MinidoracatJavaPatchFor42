@@ -353,6 +353,26 @@ public final class SmokeCheck {
                 srvField.setBoolean(null, prevSrv);
             }
 
+            // W23 名額判定純函式：名次 < max 放行、超額拒絕、新帳號看既有數、PriorityLogin 豁免、max=1 邊界
+            Class<?> gate = Class.forName("zombie.network.MdcAccountGate", true, patched);
+            Class<?> rowCls = Class.forName("zombie.network.MdcAccountGate$Row", true, patched);
+            java.lang.reflect.Constructor<?> rowCtor = rowCls.getDeclaredConstructor(String.class, boolean.class);
+            rowCtor.setAccessible(true);
+            Method allowed = gate.getDeclaredMethod("allowed", java.util.List.class, String.class, int.class);
+            allowed.setAccessible(true);
+            java.util.List<Object> two = java.util.List.of(rowCtor.newInstance("newest", false),
+                    rowCtor.newInstance("older", false));
+            java.util.List<Object> withAdmin = java.util.List.of(rowCtor.newInstance("newest", false),
+                    rowCtor.newInstance("admin", true));
+            boolean gateOk = (Boolean) allowed.invoke(null, two, "newest", 1)
+                    && !(Boolean) allowed.invoke(null, two, "older", 1)
+                    && (Boolean) allowed.invoke(null, two, "older", 2)
+                    && !(Boolean) allowed.invoke(null, two, "brand-new", 2)
+                    && (Boolean) allowed.invoke(null, java.util.List.of(), "brand-new", 1)
+                    && (Boolean) allowed.invoke(null, withAdmin, "admin", 1)
+                    && (Boolean) allowed.invoke(null, withAdmin, "third", 1);
+            failed += check("W23 名額判定：最近登入前 max 名放行、其餘拒、新帳號依既有數、PriorityLogin 豁免", gateOk);
+
         }
 
         // ---- 2. 結構斷言 ----
@@ -1988,6 +2008,25 @@ public final class SmokeCheck {
                         "(Lzombie/core/network/ByteBufferWriter;)V") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
+
+        // ---- W23 帳號上限登入期執法：兩個登入封包各改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla 恰 1 ----
+        String swdbCls = "zombie/network/ServerWorldDatabase";
+        String authDesc = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)L" + swdbCls + "$LogonResult;";
+        String gateCls = "zombie/network/MdcAccountGate";
+        String pktDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        for (String pkt : new String[]{"LoginPacket", "GoogleAuthKeyPacket"}) {
+            String cls = "zombie/network/packets/connection/" + pkt;
+            MethodNode vPs = methodFromJar(jar, cls, "processServer", pktDesc);
+            MethodNode pPs = method(distJava, cls, "processServer", pktDesc);
+            failed += check("W23 " + pkt + "：vanilla authClient=1；手術後改道 x1、原呼叫歸零、真指令不變",
+                    countExactCalls(vPs, Opcodes.INVOKEVIRTUAL, swdbCls, "authClient", authDesc) == 1
+                    && countExactCalls(pPs, Opcodes.INVOKESTATIC, gateCls, "authClient", "(L" + swdbCls + ";" + authDesc.substring(1)) == 1
+                    && countExactCalls(pPs, Opcodes.INVOKEVIRTUAL, swdbCls, "authClient", authDesc) == 0
+                    && realInsnCount(pPs) == realInsnCount(vPs));
+        }
+        MethodNode gAuth = method(distJava, gateCls, "authClient", "(L" + swdbCls + ";" + authDesc.substring(1));
+        failed += check("W23 helper 契約：委派 vanilla authClient 恰 1",
+                countExactCalls(gAuth, Opcodes.INVOKEVIRTUAL, swdbCls, "authClient", authDesc) == 1);
 
         if (failed > 0) {
             System.exit(1);

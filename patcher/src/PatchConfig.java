@@ -855,6 +855,28 @@ public final class PatchConfig {
         svpParse.expectedHits = 4;   // getPlayer 3 + error 1
         patches.add(syncVisuals);
 
+        // ---- W23 每 Steam 身分帳號上限的登入期執法（2026-09-06；docs/patches.md 2ak）----
+        // vanilla MaxAccountsPerUser 只在 authClient 的「查無此帳號名」分支數（offset 685），
+        // 既有帳號分支 offset 643 直接 areturn；計數 key 是子帳號 steamId（家庭共享漏洞）；
+        // whitelist.steamid 又每次登入被 setUserSteamID 改寫。三者疊加＝正式服 636 身分／1284 帳號。
+        // 改道兩個登入封包的 authClient 呼叫：vanilla 授權後，依 lastConnection 名次只放行前 max 個
+        // 帳號名，其餘回 MaxAccountsReached；不刪資料。helper 放 zombie.network：
+        // ServerWorldDatabase.conn 是 package-private。kill switch：-Dmdc.accountGate=0；
+        // 身分 key 預設 steamId（vanilla 語意，家庭共享子帳號各算各的）；-Dmdc.accountGate.key=owner 整個家庭合計。
+        String accountGate = "zombie/network/MdcAccountGate";
+        String authClientDesc = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)"
+                + "Lzombie/network/ServerWorldDatabase$LogonResult;";
+        for (String loginPkt : new String[]{"LoginPacket", "GoogleAuthKeyPacket"}) {
+            Patcher.ClassPatch p = new Patcher.ClassPatch("zombie/network/packets/connection/" + loginPkt);
+            Patcher.MethodOps ps = p.method("processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+            ps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                    "zombie/network/ServerWorldDatabase", "authClient", authClientDesc,
+                    accountGate, "authClient"));
+            ps.expectedHits = 1;   // LoginPacket offset 720／GoogleAuthKeyPacket 各恰一個 5 參數 authClient
+            patches.add(p);
+        }
+
         return patches;
     }
 

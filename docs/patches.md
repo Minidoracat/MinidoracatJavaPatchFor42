@@ -3100,6 +3100,65 @@ vanilla `remove`（會觸發 `GameServer`/`GameClient` class init）。
   `docs/report/` 的 TIS 回報（B-R1 更新＋兩份新報告）。
 ---
 
+## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
+
+### 立案（2026-09-06）
+
+服主要「同一個 Steam ID 只能一個帳號」。`MaxAccountsPerUser` 自 7 月起一直是 2、也真的擋過
+（`*_user.txt` 有 `MaxAccountsReached` 拒絕紀錄），但 whitelist 實查 **636 個 Steam ID 共 1284 個
+帳號**，單一 ID 最多 6 個。把 ini 改成 1 只擋「以後再建」，既有的多帳號照常登入。
+
+### 根因（javap 對 42.20.4 jar）
+
+1. `ServerWorldDatabase.authClient(String,String,String,long,int)` 只在「whitelist 查無此帳號名」
+   分支呼叫 `isNewAccountAllowed`（offset 685）；既有帳號分支 offset 643 直接 `areturn`，
+   **不做任何計數**。
+2. `isNewAccountAllowed` 的計數 key 是連線 `getSteamId()`；家庭共享時是子帳號 ID，whitelist 存的
+   卻是 ownerid ⇒ 每個子帳號一份新額度。
+3. `LoginPacket.processServer` 每次登入都 `setUserSteamID`（offset 1320，`UPDATE whitelist SET
+   steamid=? WHERE username=?`）⇒ `whitelist.steamid` 是「最後登入者」而非「建立者」，多人共用
+   帳號名時計數基準本身在漂移。
+4. 任一列具 `PriorityLogin`（role≥priority）整個 ID 無上限（vanilla 豁免）。
+
+### 手術
+
+`LoginPacket.processServer` 與 `GoogleAuthKeyPacket.processServer` 內各唯一的
+`invokevirtual ServerWorldDatabase.authClient(…)` → `invokestatic
+MdcAccountGate.authClient(ServerWorldDatabase,…)`（1:1 同形，receiver 前置，各 `expectedHits=1`）。
+helper 先委派 vanilla；`authorized` 才追加名額判定：以 key 撈 whitelist 列、依 `lastConnection`
+由新到舊排序（NULL 最舊、同刻以 id 倒序），**帳號名的名次 < `MaxAccountsPerUser` 才放行**，
+新帳號則看既有列數；任一列 `PriorityLogin` 照 vanilla 豁免。拒絕時只改 `LogonResult`
+的 `authorized=false`／`dcReason="MaxAccountsReached"`，後續 log 與 `AccessDenied` 封包全走 vanilla
+既有分支（offset 218-223）。**不刪任何資料**，uninstall 即回 vanilla。
+
+helper 放 `zombie.network`（非 `zombie.mdc`）：`ServerWorldDatabase.conn` 是 package-private，
+loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未 sealed，manifest 實查）。
+
+身分 key **預設連線 `getSteamId()`**（與 vanilla 同語意，家庭共享子帳號各算各的——使用者
+2026-09-06 決定，實查有真的兩個人共用一套家庭庫同時在線）。`-Dmdc.accountGate.key=owner`
+改為 `getOwnerId()`＋whitelist `ownerid` 優先，整個家庭合計 max 個。kill switch
+`-Dmdc.accountGate=0`。例外一律 fail-open（回 vanilla 結果並記 `[AccountGate] fail-open`）。
+
+行為結果：每個 Steam ID 只剩「最近登入的那個」帳號名能進；其餘登入即 `MaxAccountsReached`，
+而拒絕發生在 `updateLastConnectionDate` 之前，名次不會因嘗試而改變（穩定）。
+`MaxAccountsPerUser` 改回 2 就自動放寬到前 2 名。
+
+### 守門與行為測試
+
+- vanilla 前提：兩個封包的 `processServer` 內 5 參數 `authClient` 各恰 1。
+- 手術後：改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla `authClient` 恰 1。
+- `allowed()` 純函式：名次 < max 放行、超額拒、新帳號依既有數、空清單放行、PriorityLogin 豁免
+  （含第三個帳號名）。SQL 已對正式服 whitelist 實跑驗證排序（6 帳號 ID 的名次與預期一致）。
+
+### 驗收
+
+- 開機健檢無 `VerifyError`／`NoClassDefFoundError`；`grep -c 'AccountGate' server-console.txt`。
+- 首個被拒登入：`*_user.txt` 出現 `access denied: user "X" reason "MaxAccountsReached"`，
+  console 同時有 `[AccountGate] deny user="X" key=… rank=N accounts=M max=1`（rank ≥ max）。
+- 反向：單帳號玩家與 admin（PriorityLogin）登入零 deny 行。
+- `fail-open` 行 ≠ 0 ⇒ SQL 或 schema 變了，先 `-Dmdc.accountGate=0` 再查。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
