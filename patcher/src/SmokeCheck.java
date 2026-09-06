@@ -747,10 +747,86 @@ public final class SmokeCheck {
                 guardBody.tryCatchBlocks != null && guardBody.tryCatchBlocks.size() == 1
                 && "java/lang/RuntimeException".equals(guardBody.tryCatchBlocks.get(0).type));
 
-        // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer 掛點）的全部
-        // vanilla 前提與手術後斷言。42.20.3 官方 pending 機制上線後 packed 只剩
-        // 47–82 次/session、skip[short] 99.3%＝效益≈0，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2p；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // ---- W4-1 v2 chunk 供給併包（2026-09-07 復活，預設 observe；PlayerDownloadServer 三掛點）----
+        String pdsCls = "zombie/network/PlayerDownloadServer";
+        String packerCls = "zombie/mdc/ChunkRequestPacker";
+        String packerDesc = "(Lzombie/network/PlayerDownloadServer;)V";
+        String slcVanillaDesc = "(Lzombie/network/ClientChunkRequest$Chunk;Ljava/util/zip/CRC32;)V";
+        String slcHelperDesc = "(Lzombie/iso/IsoChunk;" + slcVanillaDesc.substring(1);
+        MethodNode vPdsUpdate = methodFromJar(jar, pdsCls, "update", "()V");
+        MethodNode vPdsDedupe = methodFromJar(jar, pdsCls, "removeOlderDuplicateRequests", "()V");
+        // vanilla 前提：三個同簽名 List.remove(I)（1 個 ccrWaiting、2 個 ccr.chunks）——正因無法以
+        // owner/name/desc 區分才選 headCall 而非 redirect；1 個 dedupe 呼叫；1 個 SaveLoadedChunk
+        // （主執行緒序列化點，本刀 1:1 改道量時）；零既存 helper 呼叫。數量漂移＝重新分析。
+        failed += check("W4-1 vanilla 前提：update 有 3 個 List.remove(I)、1 個 dedupe、1 個 SaveLoadedChunk、零 packer 呼叫",
+                countExactCalls(vPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;") == 3
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "removeOlderDuplicateRequests", "()V") == 1
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk",
+                        "SaveLoadedChunk", slcVanillaDesc) == 1
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "onUpdate", packerDesc) == 0);
+        // **併包掛點必須在 ready 閘內**：dedupe 全 class 只被 update() 呼叫一次（＝閘內、vanilla
+        // 去重之前）。閘外（update 頭部）與 worker 共用 bb/sb/bbw 與 cancelled HashSet——所以
+        // update 頭部那個 headCall 只准計數、不准碰 ccrWaiting（helper 契約，見 onUpdate 註解）。
+        failed += check("W4-1 vanilla 前提：removeOlderDuplicateRequests 全 class 僅被呼叫 1 次（update 的 ready 閘內）",
+                classWideCalls(classNodeFromJar(jar, pdsCls), Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "removeOlderDuplicateRequests", "()V") == 1);
+        MethodNode pPdsUpdate = method(distJava, pdsCls, "update", "()V");
+        MethodNode pPdsDedupe = method(distJava, pdsCls, "removeOlderDuplicateRequests", "()V");
+        failed += check("W4-1 v2 掛點：update 頭部 aload_0→onUpdate（閘外）＋dedupe 頭部 aload_0→packQueue（閘內），update 內零 packQueue",
+                headCallOk(pPdsUpdate, packerCls, "onUpdate", packerDesc)
+                && headCallOk(pPdsDedupe, packerCls, "packQueue", packerDesc)
+                && countExactCalls(pPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "packQueue", packerDesc) == 0);
+        failed += check("W4-1 v2 主緒序列化改道：update 內 SaveLoadedChunk→saveLoadedChunk x1、原呼叫歸零、真指令 +2（僅 headCall）",
+                countExactCalls(pPdsUpdate, Opcodes.INVOKESTATIC, packerCls, "saveLoadedChunk", slcHelperDesc) == 1
+                && countExactCalls(pPdsUpdate, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk",
+                        "SaveLoadedChunk", slcVanillaDesc) == 0
+                && realInsnCount(pPdsUpdate) == realInsnCount(vPdsUpdate) + 2);
+        // 原體保留：update 的三個 List.remove(I) 與 dedupe 呼叫；dedupe 的空 ccr 回收（我們依賴它
+        // 清掉被搬空的 ccr）與去重掃描未被破壞（真指令恰 +2＝只有 headCall）
+        failed += check("W4-1 原體保留（update 三個 List.remove(I)＋dedupe 呼叫；dedupe remove/cancelDuplicateChunk 數＝vanilla、真指令 +2）",
+                countExactCalls(pPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;") == 3
+                && countExactCalls(pPdsUpdate, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "removeOlderDuplicateRequests", "()V") == 1
+                && countExactCalls(pPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;")
+                == countExactCalls(vPdsDedupe, Opcodes.INVOKEINTERFACE, "java/util/List",
+                        "remove", "(I)Ljava/lang/Object;")
+                && countExactCalls(pPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z")
+                == countExactCalls(vPdsDedupe, Opcodes.INVOKEVIRTUAL, pdsCls,
+                        "cancelDuplicateChunk", "(Lzombie/network/ClientChunkRequest;II)Z")
+                && realInsnCount(pPdsDedupe) == realInsnCount(vPdsDedupe) + 2);
+        // helper 依賴的三個 public 成員契約（漂移＝建置失敗而非上線 IllegalAccessError）
+        ClassNode vPds = classNodeFromJar(jar, pdsCls);
+        ClassNode vCcr = classNodeFromJar(jar, "zombie/network/ClientChunkRequest");
+        failed += check("W4-1 欄位契約：ccrWaiting/chunks/largeArea 皆 public 且型別未變",
+                hasField(vPds, "ccrWaiting", "Ljava/util/List;")
+                && hasField(vCcr, "chunks", "Ljava/util/List;")
+                && hasField(vCcr, "largeArea", "Z"));
+        // v2 批次超過 vanilla 20 的前提：20 只是 parse／pending 的分割門檻（isChunksFilled 恰一個
+        // bipush 20），消費端 update()／WorkerThread.sendArray 依 chunks.size() 迴圈、方法內零 20
+        // 常數。TIS 若在消費端加硬上限，這條會紅＝重評 BATCH。
+        failed += check("W4-1 v2 批次超過 20 的前提：isChunksFilled 恰一個 bipush 20；update／sendArray 內零 20 常數且各 ≥1 個 List.size()",
+                countIntConst(methodFromJar(jar, "zombie/network/ClientChunkRequest", "isChunksFilled", "()Z"), 20) == 1
+                && countIntConst(vPdsUpdate, 20) == 0
+                && countExactCalls(vPdsUpdate, Opcodes.INVOKEINTERFACE, "java/util/List", "size", "()I") >= 1
+                && countIntConst(methodFromJar(jar, pdsCls + "$WorkerThread", "sendArray",
+                        "(Lzombie/network/ClientChunkRequest;)V"), 20) == 0
+                && countExactCalls(methodFromJar(jar, pdsCls + "$WorkerThread", "sendArray",
+                        "(Lzombie/network/ClientChunkRequest;)V"), Opcodes.INVOKEINTERFACE,
+                        "java/util/List", "size", "()I") >= 1);
+        // helper 例外紀律：onUpdate／packQueue 的 catch 是 Throwable（fatal 由 anomaly() 重拋），
+        // saveLoadedChunk 零 catch（例外必須透傳給 vanilla 的 catch→sendNotRequired）
+        MethodNode packerSave = method(distJava, packerCls, "saveLoadedChunk", slcHelperDesc);
+        failed += check("W4-1 v2 helper：saveLoadedChunk 零 catch handler（只有 finally）、兩處委派 SaveLoadedChunk（off 直通＋量測）",
+                (packerSave.tryCatchBlocks == null
+                        || packerSave.tryCatchBlocks.stream().allMatch(tcb -> tcb.type == null))
+                && countExactCalls(packerSave, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk",
+                        "SaveLoadedChunk", slcVanillaDesc) == 2);
 
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（server）",
                 patchInfoOk(distJava, "server"));

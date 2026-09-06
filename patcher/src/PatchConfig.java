@@ -369,10 +369,34 @@ public final class PatchConfig {
         vehicleSet.expectedHits = 1;
         patches.add(vehicleBuffer);
 
-        // 退役（2026-09-02）：W4-1 chunk 供給併包（PlayerDownloadServer
-        // .removeOlderDuplicateRequests headCall）。42.20.3 官方 pending 機制上線後
-        // packed 只剩 47–82 次/session、skip[short] 99.3%＝效益≈0，而每次遊戲更新都要
-        // 重驗 WorkerThread 互斥前提。詳見 docs/patches.md 2p；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // ---- W4-1 v2 chunk 供給併包（2026-09-07 復活，預設 observe；docs/patches.md 2p）----
+        // vanilla 供給＝主迴圈每幀、每連線只交付一個 ccr（update() 的 ready 閘內 remove(0) 一次），
+        // 而 client 每跨一個 chunk 邊界就把整列 chunkGridWidth（1080p 以上＝19）個 chunk 打成
+        // 一包、parse 每包配一個新 ccr ⇒ 每玩家供給上限＝fps × 一列。74 人時主迴圈 3.2 fps
+        // ⇒ ~61 chunk/s，時速 100 直行需 ~66、斜行 ~93 ⇒ 前緣補不上（9/6 22:50 實案）。
+        // v1（BATCH=8）被 9/2 誤退役：一列 19 > 8 ⇒ 隊首永遠 skipFull、刀從未真正併包；
+        // 退役統計 full=66,823/packed=82 其實證明「佇列 ≥2」一個晚上近 7 萬次＝積壓是常態。
+        // v2：批次上限突破 20（chunks 是無上限 ArrayList，消費端依 size() 迴圈；20 只是
+        // parse／pending 的分割門檻，不動 isChunksFilled），預設 38＝兩列、上限 60。
+        // 掛點維持 removeOlderDuplicateRequests()V 頭部（ready 閘內、vanilla 去重之前）：
+        // 閘外會與 worker 共用 bb/sb/bbw 與 cancelled HashSet 競爭，故絕不拆 ready 閘。
+        // 觀測三掛點：update() 頭部 headCall（閘外，只計數＋tick 邊界，不碰 pds 欄位）量
+        // ready=false 比例；dedupe 頭部量佇列深度／隊首大小／would-merge；update() 內唯一的
+        // IsoChunk.SaveLoadedChunk 1:1 改道量主執行緒序列化耗時（enforce 的代價）。
+        // 三態 -Dmdc.chunkPacker（0|off／1|enforce／2|observe 預設）。
+        String packerCls = "zombie/mdc/ChunkRequestPacker";
+        String pdsDesc = "(Lzombie/network/PlayerDownloadServer;)V";
+        Patcher.ClassPatch pds = new Patcher.ClassPatch("zombie/network/PlayerDownloadServer");
+        Patcher.MethodOps pdsUpdate = pds.method("update", "()V");
+        pdsUpdate.headCall = new Patcher.HeadCall(packerCls, "onUpdate", pdsDesc);
+        pdsUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk",
+                "SaveLoadedChunk", "(Lzombie/network/ClientChunkRequest$Chunk;Ljava/util/zip/CRC32;)V",
+                packerCls, "saveLoadedChunk"));
+        pdsUpdate.expectedHits = 2;
+        Patcher.MethodOps pdsDedupe = pds.method("removeOlderDuplicateRequests", "()V");
+        pdsDedupe.headCall = new Patcher.HeadCall(packerCls, "packQueue", pdsDesc);
+        pdsDedupe.expectedHits = 1;
+        patches.add(pds);
 
         // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
         // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
