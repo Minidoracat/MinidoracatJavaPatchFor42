@@ -2344,6 +2344,9 @@ save 移出主執行緒/分批（非世界一致性關鍵資料）；(b) SaveAll
 每次公告（5/3/1 分鐘）都 `send_save`＝每次重啟前 5 分鐘 3 次額外 5–6s 凍結（9/1
 21:05/21:07/21:09、9/2 00:00/00:02/00:04、00:35/00:37/00:39 逐筆對上）——**使用者決策
 （2026-09-02）：刻意保留，作為重啟前的存檔保險，不列待辦**。本刀維持純觀測、收案。
+**2026-09-06 後記**：「不可根治」不等於「不可縮短」——`SaveWorldEveryMinutes` 60→30 後用外部 probe
+量 SaveAll 的 4 條 worker，抓到 80% 樣本卡在 `BitHeader`／`ByteBlock` 共用 `ConcurrentLinkedDeque`
+池的 CAS 競爭（worker 4→8 反而倒賠），立案 **W25**（2am）把池改執行緒私有；縮短幅度以 W25 驗收為準。
 
 ### 手術（headCall，與 W4-1 同機制）
 
@@ -3201,6 +3204,103 @@ Lua 修不安全（例外時移除封包已送出、`idToEntityMap` 可能已被
 「印一行、動作照常完成」。
 ---
 
+## 2am. 序列化物件池執行緒隔離（W25，server，預設 on）
+
+### 立案（2026-09-06，SaveAll 量測）
+
+背景：W15 已定案 `SaveAll` 是 vanilla「全存檔＝主迴圈同步凍結」設計（2ac），問題只剩「能不能縮短」。
+候選 1 是 worker 4→8（主機 8 vCPU），先用外部 probe 量 4 條 worker 到底在幹嘛再決定。
+
+量測工具 `temp/saveall-probe.py`（正式服 systemd transient unit `mdc-saveall-probe`，root）：
+偵測 JVM 冒出 ≥2 條匿名 `Thread-N`（`SaveAll` 每次 new 4 條 `WorkerThread`，所有長駐管線執行緒
+都有名字：`SaveChunk`／`LoadChunk`／`RecalcAll`）即進入 10 Hz `/proc` 逐執行緒 CPU／狀態採樣＋
+最多 6 張 `jcmd Thread.print`，worker 消失後再拍 4 秒；DebugLog 的 `SaveAll took` 自動對帳。
+
+| 存檔事件（online） | 57 | 52 | 48 | 23 |
+|---|---|---|---|---|
+| `SaveAll took` | 4.05s | 3.33s | 3.20s | 2.20s |
+| worker 階段（4 條同時活著） | 3.84s | 3.20s | 2.78s | 1.98s |
+| 4 worker 各自 CPU | 98–100% | 96–97% | 105% | 93–99% |
+| worker 狀態採樣 | R 100%，零 D／零 S | 同 | 同 | 同 |
+| 4 條結束時間差 | 0.42s | 0.21s | 0.20s | 0.20s |
+| 主執行緒 | 5%，`SaveAll:133 sleep` | 7% | 0% | 7% |
+| `SaveChunk`（磁碟寫）| 23% | 13% | 12% | 10% |
+| 整機 8 vCPU 忙碌 | 67% | 49% | 43% | 57% |
+
+- 純 CPU-bound 序列化：不是磁碟（寫入去重靠 `ChunkChecksum`，`SaveChunk` 只 10–23%）、不是鎖等待；
+  round-robin 分配平均、無落單 worker；整機還有 2.5–4 顆核閒著。
+- **worker stack 樣本 43/54＝80% 落在 `ConcurrentLinkedDeque.pollFirst／linkLast／unlink／
+  skipDeletedSuccessors`**，呼叫者是 `zombie.util.io.BitHeader`（`pool_byte/short/int/long` 四個
+  `static ConcurrentLinkedDeque`：`getHeader` 的 `poll()`＋各 `release()` 的 `offer()`）與
+  `zombie.core.utils.ByteBlock`（`pool_data_block` 同款）。每寫一個欄位標頭就對全域池 poll＋offer
+  一次，4 條 worker 打同一組 head/tail cache line；CLD 的 `offer` 每次還 new 一個 Node。
+- 機制驗證（本機 JDK25 microbench `temp/CldBench.java`，poll＋offer 一對）：共用 CLD 1 執行緒
+  19–24ns、**4 執行緒 444–554ns、8 執行緒 1169–2206ns**；ThreadLocal ArrayDeque 4–10ns 與執行緒數
+  無關。⇒ **候選 1（worker 4→8）會把池競爭放大到倒賠**，正確的刀是拿掉共用池。
+  jstack 有 safepoint bias（CLD 的迴圈回邊是 poll 點），80% 是上界；真實份額由 canary 的
+  `SaveAll took` 回答。
+
+### 根因（javap 對 42.20.4 jar `80e405a4`）
+
+```
+BitHeader.getHeader(HeaderSize, ByteBuffer, Z):
+   7: getstatic pool_byte   10: invokevirtual ConcurrentLinkedDeque.poll:()Ljava/lang/Object;   13: checkcast BitHeaderByte
+  48: getstatic pool_short  51: invokevirtual …poll   |  89: getstatic pool_int  92: …poll   |  130: getstatic pool_long  133: …poll
+BitHeader$BitHeaderByte/Short/Int/Long.release()V（四個方法逐指令同形，7 條真指令）:
+   0: aload_0  1: invokevirtual reset  4: getstatic pool_x  7: aload_0  8: invokevirtual ConcurrentLinkedDeque.offer:(Ljava/lang/Object;)Z  11: pop  12: return
+ByteBlock.Start:  0: getstatic pool_data_block  3: invokevirtual …poll
+ByteBlock.End:   12: getstatic pool_data_block 16: invokevirtual …contains（$assertionsDisabled 守衛下＝死碼）
+                 84: getstatic pool_data_block 88: invokevirtual …offer  91: pop
+```
+
+全 jar 對 `pool_byte/short/int/long` 的 `getstatic` 各恰 3（getHeader／release／`debug_print` 的 `size()`），
+`pool_data_block` 恰 3（Start／End ×2）——沒有別的消費者會與私有池不一致。
+
+### 手術
+
+全部 1:1 同形 redirect（receiver 前置、堆疊形狀與指令長度不變）到 `zombie.mdc.IoPoolIsolation`：
+`getHeader` 內 `CLD.poll` ×4 → `poll(CLD)Object`；四個 `release()` 的 `offer` 各 ×1 →
+`offer(CLD,Object)Z`；`ByteBlock.Start` poll ×1、`End` contains ×1＋offer ×1。6 個 class、7 個方法、
+11 個命中點；helper 2 個 class（`IoPoolIsolation`＋nested `Local`）。
+
+helper 不認識任何欄位名：以傳入的池實例做 identity 分槽（每執行緒 `ThreadLocal<Local>`，最多 8 個
+相異池 → 各一顆 `ArrayDeque`，實際 5 個；超出的池原樣委派 vanilla、計 `slotOverflow`）。`poll` 回
+本執行緒先前歸還的物件或 null（呼叫端自行 new）；`offer` 進本執行緒池、LIFO（剛歸還的仍在 L1）、
+每池上限 1024（超出丟給 GC；vanilla 全域池無界）、回傳恆 true；跨執行緒配置／歸還安全（歸還進
+歸還者的池）。SaveAll 的 worker 每次是新執行緒 → 從空池起步（每執行緒駐留＝巢狀深度，數十顆
+24-byte 物件）、結束隨 Thread 物件 GC。熱路徑零共用寫入：無 AtomicLong、無 CAS；橫幅在每執行緒
+首次建 `Local` 時 CAS 印一次。三個改道目標各恰一處委派 vanilla（off／分槽溢位路徑）。
+
+語意差異只有一處：`ByteBlock.End` 的 `assert !Core.debug || !pool.contains(block)` 改查本執行緒池——
+正式服 assertions 關閉，該分支是死碼。header／block 物件本身的 bytes 佈局零變化，存檔格式與網路
+格式不受影響（純配置策略）。kill switch `-Dmdc.ioPoolIsolation=0`（三處全部回到 vanilla 共用池）。
+
+### 守門與驗證
+
+- SmokeCheck：vanilla 前提（`getHeader` poll=4＋四池 getstatic 各 1、class-wide poll=4／offer=0；
+  四個 `release()` 全序 `ALOAD→INVOKEVIRTUAL→GETSTATIC→ALOAD→INVOKEVIRTUAL→POP→RETURN`；
+  `ByteBlock` Start poll=1／End contains=1＋offer=1；全 jar 五個池欄位 getstatic 各 =3）、手術後
+  （改道數／原呼叫歸零／真指令不變／getstatic 池欄位保留供 identity 分槽）、helper 契約（三方法
+  各委派 CLD 恰 1、零 NEW、零 DebugLog）。TIS 若新增第 4 個池消費者或改寫 release 形狀，建置紅。
+- `IoPoolIsolationTest`（on／off 各獨立 JVM，走 dist 內手術後的真 `BitHeader`／`ByteBlock`）：
+  寫→讀 round trip 逐位元；同執行緒 LIFO 回收同實例；4 執行緒 ×20000 巢狀配置零例外、on 時
+  IdentityHashMap 交集為空＋全域池恆空＋每執行緒駐留＝巢狀深度、off 時全域池收到歸還；
+  `contains`／cap 1024＋dropped／第 9 個相異池溢位委派 vanilla／`offer(null)` NPE。
+- A/B（`temp/IoPoolBench.java`，dist 手術後真類別，每 iter 3 alloc＋3 release）：
+  1 執行緒 69→32ns、**4 執行緒 1095→38ns（29×）**、8 執行緒 1858→44ns。
+
+### 驗收
+
+- 部署後下一次重啟起，`temp/saveall-probe.py` 對相近人數的 `SaveAll took`／worker 階段：worker 階段
+  預期顯著縮短（上界 3–5×，實際份額由此回答），4 worker 仍 ~100% R；jcmd 樣本中
+  `ConcurrentLinkedDeque` 應消失、殘餘落在 `IsoGridSquare.save`／`ErosionData`／`InventoryItem.save`
+  等真序列化。
+- 開機零 linkage error；`[IoPoolIsolation] 首次生效` 橫幅恰一行；`slotOverflow` 線上應恆 0
+  （目前無週期行，需要時用 jcmd／測試存取器）。
+- W25 生效後再重估 worker 4→8（屆時才是真 CPU 擴展）。不歸這刀管的殘餘：worker 結束後主執行緒
+  0.4–0.7s RUNNABLE（`ServerPlayerDB`／visited／`GameEntityManager.Save` 那串）。
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
@@ -3234,7 +3334,7 @@ Lua 修不安全（例外時移除封包已送出、`idToEntityMap` 可能已被
    `IsoGridSquare.class` 而 helper 已刪＝chunk 載入路徑必爆 `NoClassDefFoundError`**，這是本項
    最重要的一條。（install.sh 的不明 loose class 巡檢已 fail-closed，會在安裝前擋下這種殘留。）
    (b) 新 `patch-manifest.txt` 行數必須與本次 build 的 `dist/manifest.txt` 完全一致
-   （`grep -c . patch-manifest.txt` 對帳；42.20.4／W24 後為 **72** 筆——歷史數字 48/51/55/71
+   （`grep -c . patch-manifest.txt` 對帳；42.20.4／W25 後為 **80** 筆——歷史數字 48/51/55/71/72
    皆為當時版本，勿拿舊數字驗新部署）；其中 `NetTimedActionGuard.class`、`NetTimedAction.class`、
    `NetTimedActionPacket.class` 各恰一筆，
    且 `grep -E 'IsoGridSquare|FertilizedEggGuard' patch-manifest.txt` 無輸出。

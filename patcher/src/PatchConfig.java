@@ -892,6 +892,42 @@ public final class PatchConfig {
         checkIdChange.expectedHits = 2;
         patches.add(gameEntityManager);
 
+        // ---- W25 序列化物件池執行緒隔離（2026-09-06；docs/patches.md 2am）----
+        // SaveAll 量測：4 條 worker 各 ~100% CPU、jcmd 樣本 80% 在 ConcurrentLinkedDeque.pollFirst/
+        // linkLast——BitHeader 四個 static CLD 池＋ByteBlock 一個，每個欄位標頭 poll+offer 一次，
+        // 4 執行緒打同一組 head/tail（microbench：1T 20ns → 4T 500ns → 8T 1.2–2.2µs）。
+        // 全部 1:1 同形 redirect 到執行緒私有 ArrayDeque；helper 以池實例 identity 分槽，不認欄位名。
+        // javap(80e405a4)：getHeader 10/51/92/133 四個 CLD.poll；四個 release() offset 8 各一個 offer；
+        // ByteBlock.Start 3 poll；End 16 contains（assert 分支）＋88 offer。kill switch -Dmdc.ioPoolIsolation=0。
+        String ioPool = "zombie/mdc/IoPoolIsolation";
+        String cld = "java/util/concurrent/ConcurrentLinkedDeque";
+        Patcher.Site cldPoll = new Patcher.Site(Opcodes.INVOKEVIRTUAL, cld, "poll", "()Ljava/lang/Object;", ioPool, "poll");
+        Patcher.Site cldOffer = new Patcher.Site(Opcodes.INVOKEVIRTUAL, cld, "offer", "(Ljava/lang/Object;)Z", ioPool, "offer");
+        Patcher.Site cldContains = new Patcher.Site(Opcodes.INVOKEVIRTUAL, cld, "contains", "(Ljava/lang/Object;)Z", ioPool, "contains");
+        Patcher.ClassPatch bitHeader = new Patcher.ClassPatch("zombie/util/io/BitHeader");
+        Patcher.MethodOps getHeader = bitHeader.method("getHeader",
+                "(Lzombie/util/io/BitHeader$HeaderSize;Ljava/nio/ByteBuffer;Z)Lzombie/util/io/BitHeader$BitHeaderBase;");
+        getHeader.redirects.add(cldPoll);
+        getHeader.expectedHits = 4;
+        patches.add(bitHeader);
+        for (String kind : new String[]{"Byte", "Short", "Int", "Long"}) {
+            Patcher.ClassPatch hdr = new Patcher.ClassPatch("zombie/util/io/BitHeader$BitHeader" + kind);
+            Patcher.MethodOps release = hdr.method("release", "()V");
+            release.redirects.add(cldOffer);
+            release.expectedHits = 1;
+            patches.add(hdr);
+        }
+        Patcher.ClassPatch byteBlock = new Patcher.ClassPatch("zombie/core/utils/ByteBlock");
+        Patcher.MethodOps bbStart = byteBlock.method("Start",
+                "(Ljava/nio/ByteBuffer;Lzombie/core/utils/ByteBlock$Mode;)Lzombie/core/utils/ByteBlock;");
+        bbStart.redirects.add(cldPoll);
+        bbStart.expectedHits = 1;
+        Patcher.MethodOps bbEnd = byteBlock.method("End", "(Ljava/nio/ByteBuffer;Lzombie/core/utils/ByteBlock;)V");
+        bbEnd.redirects.add(cldContains);
+        bbEnd.redirects.add(cldOffer);
+        bbEnd.expectedHits = 2;
+        patches.add(byteBlock);
+
         return patches;
     }
 

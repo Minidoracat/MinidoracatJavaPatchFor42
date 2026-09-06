@@ -2028,6 +2028,93 @@ public final class SmokeCheck {
         failed += check("W23 helper 契約：委派 vanilla authClient 恰 1",
                 countExactCalls(gAuth, Opcodes.INVOKEVIRTUAL, swdbCls, "authClient", authDesc) == 1);
 
+        // ---- W25 序列化物件池執行緒隔離：BitHeader 四池＋ByteBlock 一池的 poll/offer/contains 全數改道 ----
+        String ioPool = "zombie/mdc/IoPoolIsolation";
+        String cld = "java/util/concurrent/ConcurrentLinkedDeque";
+        String bhCls = "zombie/util/io/BitHeader";
+        String bbCls = "zombie/core/utils/ByteBlock";
+        String pollDesc = "()Ljava/lang/Object;";
+        String objBoolDesc = "(Ljava/lang/Object;)Z";
+        String hPollDesc = "(L" + cld + ";)Ljava/lang/Object;";
+        String hObjBoolDesc = "(L" + cld + ";Ljava/lang/Object;)Z";
+        String getHeaderDesc = "(L" + bhCls + "$HeaderSize;Ljava/nio/ByteBuffer;Z)L" + bhCls + "$BitHeaderBase;";
+        ClassNode vBh = classNodeFromJar(jar, bhCls);
+        ClassNode pBh = classNode(distJava, bhCls);
+        MethodNode vGetHeader = methodFromJar(jar, bhCls, "getHeader", getHeaderDesc);
+        MethodNode pGetHeader = method(distJava, bhCls, "getHeader", getHeaderDesc);
+        // vanilla 前提：getHeader 內 CLD.poll 恰 4，且四個池欄位各讀 1（poll 的 receiver 就是它們）；
+        // class-wide poll 全在 getHeader（其他方法無 poll／offer 可漏改）
+        failed += check("W25 vanilla 前提：BitHeader.getHeader CLD.poll=4、pool_byte/short/int/long 各 getstatic 1；class-wide poll=4、offer=0",
+                countExactCalls(vGetHeader, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 4
+                && countFieldReads(vGetHeader, bhCls, "pool_byte") == 1
+                && countFieldReads(vGetHeader, bhCls, "pool_short") == 1
+                && countFieldReads(vGetHeader, bhCls, "pool_int") == 1
+                && countFieldReads(vGetHeader, bhCls, "pool_long") == 1
+                && classWideCalls(vBh, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 4
+                && classWideCalls(vBh, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 0);
+        failed += check("W25 手術後：getHeader 改道 x4、原 poll 歸零、真指令不變；getstatic 池欄位保留 x4（helper 吃 receiver 做 identity 分槽）",
+                countExactCalls(pGetHeader, Opcodes.INVOKESTATIC, ioPool, "poll", hPollDesc) == 4
+                && classWideCalls(pBh, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 0
+                && realInsnCount(pGetHeader) == realInsnCount(vGetHeader)
+                && countFieldReads(pGetHeader, bhCls, "pool_byte") + countFieldReads(pGetHeader, bhCls, "pool_short")
+                        + countFieldReads(pGetHeader, bhCls, "pool_int") + countFieldReads(pGetHeader, bhCls, "pool_long") == 4);
+        String[] hdrKinds = {"Byte", "Short", "Int", "Long"};
+        String[] hdrPools = {"pool_byte", "pool_short", "pool_int", "pool_long"};
+        for (int i = 0; i < hdrKinds.length; i++) {
+            String cls = bhCls + "$BitHeader" + hdrKinds[i];
+            MethodNode vHdrRel = methodFromJar(jar, cls, "release", "()V");
+            MethodNode pHdrRel = method(distJava, cls, "release", "()V");
+            failed += check("W25 " + hdrKinds[i] + ".release：vanilla 全序 reset→getstatic " + hdrPools[i]
+                            + "→aload_0→offer→pop；手術後 offer 改道 x1、原呼叫歸零、真指令不變",
+                    matchOpcodeSeq(vHdrRel, new int[]{Opcodes.ALOAD, Opcodes.INVOKEVIRTUAL, Opcodes.GETSTATIC,
+                            Opcodes.ALOAD, Opcodes.INVOKEVIRTUAL, Opcodes.POP, Opcodes.RETURN})
+                    && countFieldReads(vHdrRel, bhCls, hdrPools[i]) == 1
+                    && countExactCalls(vHdrRel, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 1
+                    && countExactCalls(pHdrRel, Opcodes.INVOKESTATIC, ioPool, "offer", hObjBoolDesc) == 1
+                    && countExactCalls(pHdrRel, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 0
+                    && realInsnCount(pHdrRel) == realInsnCount(vHdrRel));
+            // 全 jar 池欄位讀取普查：getHeader＋release＋debug_print.size 各 1＝3；多出來的就是
+            // TIS 新增的共用池消費者（會與私有池不一致），建置紅提醒重評
+            failed += check("W25 全 jar " + hdrPools[i] + " getstatic 普查=3（getHeader/release/debug_print）",
+                    jarWideFieldReadCensus(jar, Opcodes.GETSTATIC, bhCls, hdrPools[i]) == 3);
+        }
+        String bbStartDesc = "(Ljava/nio/ByteBuffer;L" + bbCls + "$Mode;)L" + bbCls + ";";
+        String bbEndDesc = "(Ljava/nio/ByteBuffer;L" + bbCls + ";)V";
+        ClassNode vBb = classNodeFromJar(jar, bbCls);
+        ClassNode pBb = classNode(distJava, bbCls);
+        MethodNode vBbStart = methodFromJar(jar, bbCls, "Start", bbStartDesc);
+        MethodNode vBbEnd = methodFromJar(jar, bbCls, "End", bbEndDesc);
+        MethodNode pBbStart = method(distJava, bbCls, "Start", bbStartDesc);
+        MethodNode pBbEnd = method(distJava, bbCls, "End", bbEndDesc);
+        failed += check("W25 vanilla 前提：ByteBlock.Start poll=1、End contains=1+offer=1；class-wide CLD poll/offer/contains 恰 1/1/1；全 jar pool_data_block getstatic=3",
+                countExactCalls(vBbStart, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 1
+                && countExactCalls(vBbEnd, Opcodes.INVOKEVIRTUAL, cld, "contains", objBoolDesc) == 1
+                && countExactCalls(vBbEnd, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 1
+                && classWideCalls(vBb, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 1
+                && classWideCalls(vBb, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 1
+                && classWideCalls(vBb, Opcodes.INVOKEVIRTUAL, cld, "contains", objBoolDesc) == 1
+                && jarWideFieldReadCensus(jar, Opcodes.GETSTATIC, bbCls, "pool_data_block") == 3);
+        failed += check("W25 手術後：ByteBlock Start 改道 x1、End 改道 x2、class-wide 原 CLD 呼叫歸零、真指令不變",
+                countExactCalls(pBbStart, Opcodes.INVOKESTATIC, ioPool, "poll", hPollDesc) == 1
+                && countExactCalls(pBbEnd, Opcodes.INVOKESTATIC, ioPool, "contains", hObjBoolDesc) == 1
+                && countExactCalls(pBbEnd, Opcodes.INVOKESTATIC, ioPool, "offer", hObjBoolDesc) == 1
+                && classWideCalls(pBb, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 0
+                && classWideCalls(pBb, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 0
+                && classWideCalls(pBb, Opcodes.INVOKEVIRTUAL, cld, "contains", objBoolDesc) == 0
+                && realInsnCount(pBbStart) == realInsnCount(vBbStart)
+                && realInsnCount(pBbEnd) == realInsnCount(vBbEnd));
+        // helper 契約：三個改道目標各恰一處委派 vanilla（off／分槽溢位路徑）、熱路徑零 NEW、零 DebugLog
+        MethodNode gPoll = method(distJava, ioPool, "poll", hPollDesc);
+        MethodNode gOffer = method(distJava, ioPool, "offer", hObjBoolDesc);
+        MethodNode gContains = method(distJava, ioPool, "contains", hObjBoolDesc);
+        failed += check("W25 helper 契約：poll/offer/contains 各委派 CLD 恰 1、零 NEW、零 DebugLog",
+                countExactCalls(gPoll, Opcodes.INVOKEVIRTUAL, cld, "poll", pollDesc) == 1
+                && countExactCalls(gOffer, Opcodes.INVOKEVIRTUAL, cld, "offer", objBoolDesc) == 1
+                && countExactCalls(gContains, Opcodes.INVOKEVIRTUAL, cld, "contains", objBoolDesc) == 1
+                && countOpcode(gPoll, Opcodes.NEW) + countOpcode(gOffer, Opcodes.NEW) + countOpcode(gContains, Opcodes.NEW) == 0
+                && countCallsToOwner(gPoll, "zombie/debug/DebugLog") + countCallsToOwner(gOffer, "zombie/debug/DebugLog")
+                        + countCallsToOwner(gContains, "zombie/debug/DebugLog") == 0);
+
         if (failed > 0) {
             System.exit(1);
         }

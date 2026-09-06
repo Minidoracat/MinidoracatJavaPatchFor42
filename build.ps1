@@ -88,6 +88,8 @@ $helperEntries = @(
     'zombie/core/MdcTimedActionProbe.class',
     'zombie/network/MdcAccountGate.class',
     'zombie/network/MdcAccountGate$Row.class',
+    'zombie/mdc/IoPoolIsolation.class',
+    'zombie/mdc/IoPoolIsolation$Local.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -311,6 +313,14 @@ java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzom
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
 java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
 Assert-Ok "MdcTimedActionProbeTest（off 文字別名，純直通）"
+
+Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
+# on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、
+# cap／分槽溢位／null 契約）；off＝三處全部回到 vanilla 共用池。測試自驗旗標，property 拼錯不得假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest
+Assert-Ok "IoPoolIsolationTest（on，出貨組態）"
+java "-Dmdc.ioPoolIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest off
+Assert-Ok "IoPoolIsolationTest（ioPoolIsolation=0 kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
