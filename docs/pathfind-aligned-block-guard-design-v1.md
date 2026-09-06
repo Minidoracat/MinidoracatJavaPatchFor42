@@ -5,7 +5,19 @@
 
 - 事故與證據：`MinidoracatServerAnalyze/reports/ops/2026-08-31-B42-pathfind-vehiclerect-pool-poisoning.md`
 - 目標 library：官方 `libPZPathFind64.so`（42.20.4，sha256 `0777dda6…21c4`）——**不修改、不散布**
-- 交付狀態：**已實作＋已通過合成測試；尚未部署正式服**（部署需使用者當次授權）
+- 交付狀態：**2026-09-06 19:38 已安裝正式服（使用者授權），生效待下次重啟**。當日觸發背景：
+  同族 native crash 一天 4 次（03:13／03:40／06:44 `malloc(): invalid size (unsorted)` abort；
+  19:04 SIGSEGV `__libc_free` on `PathfindNativeThread` in `findPath`——首次直接死在尋路執行緒），
+  加 8/31、9/3 共 6 次；AutoDrive MOD 上線前（7/30、8/23、8/24）同簽名已存在，排除為根因。
+  安裝紀錄：artifact sha `5dd7ceef…4de5`（WSL gcc 13.3／glibc 2.39 建置，85/85 合成測試；
+  正式服 `.so` 28/28 前提 PASS）、launcher 備份 `start-server.sh.pre-pfguard-20260906T113847Z`
+  （sha `9bfcb6a6…5957` → 新 `a5190841…3aaf`）、全鏈 dry-run 以 pzserver 身分 gate PASS。
+  **與 §6-2 第 4 點的一處刻意偏離**：wrapper 在 manifest mismatch／檔案缺失時**不再 exit 78 拒啟**，
+  改為印 `STARTUP DISARMED` 橫幅後以 vanilla（僅 libjsig 絕對路徑）啟動——正式服無人工視窗
+  （cron 更新＋monitor `*/10`），拒啟會把「未驗的新 `.so`」升級成「全服停機到有人看到」；
+  fail-closed 的語意是「絕不 preload 未驗 observer」，不是「不讓遊戲跑」。`PFG_DRY_RUN=1`
+  下 mismatch 仍 exit 78 供人工檢查。順帶效果：**libjsig 首次真正生效**（原 launcher 用裸檔名
+  ＋不存在的 `jre64/lib/amd64` 路徑，`/proc/pid/maps` 實測從未載入）。
 
 ## 1. 為什麼「觀測」是唯一正確的下一步
 
