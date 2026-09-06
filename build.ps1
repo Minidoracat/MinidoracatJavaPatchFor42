@@ -64,6 +64,7 @@ $helperEntries = @(
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
+    'zombie/mdc/ChunkRequestPacker.class',
     'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/ContainerCycleGuard$State.class',
     'zombie/mdc/ContainerAddCycleProbe.class',
@@ -151,8 +152,18 @@ java "-Dmdc.containerAddCycleProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\pr
 Assert-Ok "ContainerAddCycleProbeTest（off kill switch）"
 
 
-# 退役（2026-09-02）：[9b/10] W4-1 chunk 供給併包測試隨刀移除（42.20.3 官方 pending
-# 機制上線後效益≈0）。詳見 docs/patches.md 2p。
+Write-Host "[9b/10] chunk 供給併包（W4-1 v2）三模式行為驗證（獨立 JVM；模式是 static final）..."
+# observe＝預設出貨（佇列一個位元組都不動、只算 would-merge）；enforce＝真併包（守恆／
+# 上限 BATCH／重複放棄／順序／largeArea／預算閘／tick 重置）；off＝純 no-op。測試自驗
+# argv 與實際 mode 相符，property 名稱打錯會炸在測試裡，不會把 observe 版跑三遍假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest observe
+Assert-Ok "ChunkRequestPackerTest（observe，預設出貨模式）"
+java "-Dmdc.chunkPacker=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest enforce
+Assert-Ok "ChunkRequestPackerTest（enforce）"
+java "-Dmdc.chunkPacker=enforce" "-Dmdc.chunkPacker.batch=60" "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest enforce-nobudget
+Assert-Ok "ChunkRequestPackerTest（enforce 但 windowBudget=0＝不併包）"
+java "-Dmdc.chunkPacker=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest off
+Assert-Ok "ChunkRequestPackerTest（off kill switch）"
 
 Write-Host "[9c/10] 地圖格載入捕手（W6）行為驗證（含替身必拋負對照）＋kill switch..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest

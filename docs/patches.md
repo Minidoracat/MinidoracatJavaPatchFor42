@@ -874,12 +874,99 @@ STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會
 指向 `bytesAllocatedObservedLowMem`（effective 門檻 50MB 烘進 helper，橫幅與 stall 分類
 以實際生效值計），觀測與洩漏根治線全保留。
 
-## 2p. chunk 供給併包（W4-1，server）＋請求逾時 8s→15s（W4-2，client）
+## 2p. chunk 供給併包（W4-1 v2，server）＋請求逾時 8s→15s（W4-2，client，已撤刀）
 
-> **退役（2026-09-02）**：W4-1（`PlayerDownloadServer.removeOlderDuplicateRequests`
-> headCall）已移除。42.20.3 官方 pending 機制上線後 packed 只剩 47–82 次/session、
-> skip[short] 99.3%＝效益≈0，而本刀每次遊戲更新都要重驗 WorkerThread 互斥前提。
-> 以下分析全文保留供將來再評估。復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> **2026-09-07 復活為 v2（預設 observe）**。9/2 的退役（「packed 47–82/session、skip[short]
+> 99.3%＝效益≈0」）是誤判，翻案證據見 2p-1、v2 設計見 2p-2；v1 分析全文保留於 2p-v1。
+> v1 最後一版：2fda295。
+
+### 2p-0. 真正的供給模型（2026-09-06 22:50 實案，42.20.4 反編譯）
+
+**事故**：74 人在線、玩家 ping 9ms，公路高速直行時行進方向大片未載入黑區。server log 幀計數
+差分：22:49:30 4.86 fps → 22:50:00 **3.18** → 22:52:00 **2.69**，22:53 起 `Server is too busy`
+連發；該 session 零 `not generated`／零 `stayed outside`／零 `ChunkNotReady`（不是生成路徑）；
+該路段 chunk 檔 2–3 KB（`map/1425/109x.bin`），頻寬與 ping 不是瓶頸。
+
+**供給鏈**（行號為 42.20.4-20260826 快照）：
+1. client `IsoChunkMap.ProcessChunkPos`（:864-955）每幀在中心 chunk 改變時走一步
+   `LoadLeft/Right/Up/Down`，對整列 `chunkGridWidth` 個 chunk `LoadChunkForLater`→
+   `WorldStreamer.addJob(…, true)`（:344-374）串成同一條 `chunkHeadMain` 鏈；1080p 以上
+   `chunkGridWidth=19`（`CalcChunkWidth` :90-122，clamp 19）；載具內中心前移
+   `speedKmH/5` squares（:868-878）。
+2. `WorldStreamer.threadLoop`（:327-419）有 pending 時每 20ms 一輪，否則 140ms；`sendRequests`
+   （:108-145）非 largeArea 無在途上限，但有 `shouldSendChunk` 距離閘（:147-164，相對任一
+   已知玩家 `|dx|<10 && |dy|<10` chunk）；`updateMain`（:167-215）主執行緒一幀把全部 request
+   chain 合成最多一個 `RequestZipList` 封包。
+3. server `RequestZipListPacket.parse`（:45-69）每包配一個新 ccr（來自物件池），只在**同一包內**
+   滿 20（`ClientChunkRequest.isChunksFilled` :30-32）才換下一個，從不接到上一包未滿的 ccr。
+4. `GameServer` 主迴圈每幀對每連線呼叫一次 `PlayerDownloadServer.update()`（GameServer :1035-1052；
+   PlayerDownloadServer :212-254）：只在 `workerThread.ready` 時 `ccrWaiting.remove(0)` **一次**；
+   已載入 chunk 在主執行緒 `SaveLoadedChunk`（完整序列化）、未載入走 worker `SafeRead` 磁碟、
+   檔案不存在走 pending→生成→30s `ChunkNotReady`。worker `sendArray` 返回才 `ready=true`
+   （不等 ACK）。
+5. `SentChunkPacket` 每片 1000 bytes、`reliability=2`＝RELIABLE（**非** ordered）。
+6. client `IsoChunkMap.updateInternal`（:175-234）每幀整合 `1+floor(3q/19)` 個已到達 chunk。
+
+⇒ **每玩家供給上限＝主迴圈 fps × 一列**。3.2 fps × 19 ≈ 61 chunk/s；時速 100（若真 27.8
+squares/s）直行需 ~66、45° 斜行 ~93（√2 倍）；每批還要等下一幀（平均 +150ms，低谷 +700ms）。
+車內 auto-zoom 讓可見前端逼近視窗前緣：codex 推算 zoom 2.5＋駕車 pan 時從請求放行到黑列進
+畫面的餘裕只有 **0.26 s**（zoom 1 時 1.66 s）——不是「載不完」，是「晚幾百 ms 就露出來」。
+codex gpt-6-astra（ultra）對抗審查修正三點：斜行 √2 倍非 2 倍、`SentChunk` 非 ordered、儀表
+速度含 `getFakeSpeedModifier`（`120/min(SpeedLimit,120)`）可能高估實際車速；並指出 native
+send buffer 未量測、`shouldSendChunk` 距離閘可能讓 look-ahead 延後 ~0.7s 才送出。
+
+### 2p-1. v1 為什麼被誤退役（翻案證據）
+
+舊 helper 統計順序：`queue<2`→`skipShort`，再 `head.largeArea`→`skipLarge`，再
+`head.size()>=BATCH`→`skipFull`。BATCH=8 而一列就是 19 ⇒ 只要佇列 ≥2，隊首必 ≥8 ⇒ **永遠
+skipFull、從未併包**。9/1 21:21 session：`packed=82 skip[short=4,288,182 full=66,823
+budget=2,651] overrunTicks=2,405`——「佇列 ≥2 個 ccr」一個晚上發生近 7 萬次（每 tick 每連線
+一次呼叫，≈每幀 1.4–2.4 條連線處於積壓）；overrun 閘 150ms 以 10 fps 設計，3–5 fps 下幾乎
+每 tick 觸發（2,405 ≈ 2,651）。`skip[short]` 99.3% 是 74 連線×每 tick 全呼叫的分母稀釋，
+沒有資訊量。**「效益≈0」是刀沒開，不是需求不存在。教訓：退役前先確認刀有沒有真的開過。**
+
+### 2p-2. v2 設計（2026-09-07）
+
+- **批次上限突破 vanilla 20**：`chunks` 是無上限 ArrayList，消費端 `update()`／`sendArray`
+  依 `chunks.size()` 迴圈；20 只是 parse／pending 的分割門檻 ⇒ **不動 `isChunksFilled`**，
+  helper 直接把上限提高。預設 38＝兩列、`-Dmdc.chunkPacker.batch` clamp 1..60（三列）。
+- **overrun 閘預設停用**（`-Dmdc.chunkPacker.overrunMs=0`），改以每 tick 全域額外搬移預算
+  `-Dmdc.chunkPacker.windowBudget`（預設 200）節流主執行緒序列化；tick 邊界改在 `update()`
+  頭部偵測（每幀每連線必經，不依賴佇列 ≥2），gap 門檻 80ms。
+- **三態 `-Dmdc.chunkPacker`**：`0|off`／`1|enforce`／`2|observe`（預設）。observe 佇列一個
+  位元組都不動、只算 would-merge。
+- **三掛點（同一 `PlayerDownloadServer` ClassPatch）**：
+  1. `removeOlderDuplicateRequests()V` 頭部 headCall `packQueue`——ready 閘內、vanilla 去重之前
+     （與 v1 相同；掛點安全論證見 v1「W4-1 手術」段）。
+  2. `update()V` 頭部 headCall `onUpdate`——**閘外，只計數＋tick 邊界＋heartbeat，不碰 pds 任何
+     欄位**（閘外與 worker 共用 `bb/sb/bbw` 與 `cancelled` HashSet）。與 `readyCalls` 相減＝
+     ready=false（worker 跨幀）的比例。
+  3. `update()` 內唯一的 `IsoChunk.SaveLoadedChunk(Chunk,CRC32)V` 1:1 改道 `saveLoadedChunk`
+     （receiver 前置，例外原樣透傳給 vanilla 的 catch→`sendNotRequired`）：量主執行緒序列化耗時
+     ＝enforce 的代價。
+- **絕不拆 ready 閘**（codex 一致）：連塞多個 command 後 worker 每完成一個就 `ready=true`，
+  主執行緒會穿閘與正在跑的 worker 競爭 `bb/sb/bbw` 與 `cancelled`；「純磁碟 ccr 讓 worker
+  自行接續」不是可靠分類（已載入未落盤的內容必須主執行緒序列化）且是管線重設。
+- heartbeat 每 5 分鐘一行：`updates/ready/notReady`、`depth[0/1/2/3-4/5+/max]`、
+  `head[avgX10/max/full20]`（＝client 每包大小）、`would[pack/merge]`、`packed/merged`、
+  `skip[short/large/full/noSource/budget/dupAbort]`、`save[calls/avgUs/maxUs/tickMaxMs/ticks/>5/>20/>50ms]`、
+  `overrunTicks`、`anomalies`。
+- **驗證**：SmokeCheck——vanilla 前提（update 三個 `List.remove(I)`、1 dedupe、1 `SaveLoadedChunk`、
+  零 helper 呼叫；dedupe 全 class 僅被呼叫 1 次＝閘內事實）、兩 headCall 全序＋update 內零
+  `packQueue`、改道 x1 原呼叫歸零真指令 +2、dedupe 原體保留真指令 +2、三 public 欄位契約、
+  `isChunksFilled` 恰一個 `bipush 20` 且 `update`／`sendArray` 零 20 常數各 ≥1 `size()`
+  （TIS 若在消費端加硬上限即紅＝重評 BATCH）、helper `saveLoadedChunk` 零 catch。
+  行為測試四組態（observe／enforce／enforce+windowBudget=0／off；含真 `PlayerDownloadServer`
+  走 `packQueue` 的 mode 分流）：守恆、上限 BATCH、重複整次放棄（三情境）、largeArea、順序、
+  預算閘、tick 重置、深度統計。
+- **開 enforce 的判準**（一個晚峰後看 heartbeat）：`depth≥2` 佔 `ready` 的比例與 `would.merge`
+  顯著（＝真的有兩列以上在等）、`save.tickMaxMs` 在 3 fps 幀長（~300ms）的 10% 以內、
+  `notReady` 比例低（worker 沒有跨幀，併大批不會讓 ready=false 更久）。enforce 後驗收＝
+  `packed/merged` 上升、開車玩家黑邊回報下降、`anomalies` 恆 0、主迴圈 fps 不降。
+- **效益上限**：每幀交付 2–3 列 ⇒ 3.2 fps 下 120–180 chunk/s，臨界車速 ×2–3；直行單包
+  （佇列恆 ≤1）時收益為零——那時只剩主迴圈 fps 這個乘數。
+
+### 2p-v1. v1 分析（2026-08-13，全文保留）
 
 **根因**（八路鑑識＋對抗驗證；完整設計見 `docs/chunk-throughput-design-v1.md`）：
 vanilla 的 chunk 供給只跑到設計值的 15%——client 每幀送一包 `RequestZipList`（約 3 chunk）→
