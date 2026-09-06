@@ -307,3 +307,63 @@ python3 /home/pzserver/scripts/pfguard/pfguard_ring.py \
    （`operator new(0x28)` 的物件改成 guarded 映射），成本仍有界。
 3. 若 popman／MCD 才是 writer：那族的 native 邊界在 `libPZPopMan64.so`（帶完整 DWARF），
    要換的是 `mcd`/`popman` 的容器配置點，屬另案設計。
+
+## 9. 第一輪結果與第二輪（2026-09-07）
+
+### 9-1. 05:41 crash：observer 在場但沒抓到，原因已定案
+
+`hs_err_pid567642`：`PolygonalMap2::createVehicleClusters()+0x89`、`movups %xmm0,(%rbx)`、
+`RBX=0x30`、`si_addr=0x30`——與 8/31 **逐位元組同一簽名**（`VehicleRect::alloc()` 從被污染的
+池交出 `0x30`）。hs_err 自身在印 summary 時二次 SIGSEGV、native stack 逾時（heap 已壞），只剩
+11 KB；core 6.5 GB 已歸檔 NAS。
+
+core 重驗（`native-observer/analysis/core-{recheck,neigh,hlpool}-20260907.py`（位址綁定該 core），
+全用 `pfguard_ring.py` 的 stdlib core reader）：
+
+| 項目 | 8/31 | 9/7 |
+|---|---|---|
+| rect pool 剛 pop 的格位 | `0x30` | `0x30` |
+| 受害 cluster rect array | cap 4（0x30 chunk） | cap 16（0x90 chunk） |
+| 覆寫範圍 | `[array-8, array+8)` = `{ptr, 0x30}` | 同 |
+| 覆寫的 ptr 指向 | `0x60` chunk，首 qword `{0x3f1d, 0x46519a00}`（`Node`／`SearchNode` 形狀） | **`HLSearchNode` 物件（vptr = `vtable for HLSearchNode`+0x10，`0x80` chunk）** |
+| 受害 array 正下方 | `0x20` chunk、**在用**（`{ptr,0,0}`） | `0x20` chunk、**已 free 在 tcache**（safe-linked next=NULL、key） |
+| 受害 array 是否 guarded | — | **否**（glibc chunk，非 page-aligned） |
+| observer counters（core 內） | — | `guard_alloc=443,747`、`skip_capacity=1,380,923`（覆蓋率 24%）、`guard_live=4096` 釘死、`canary_violations=0`、`ownership_conflicts=0`；ring 最後 16k 筆 **100% 來自 `createVehicleClusters` 的暫時 local list** |
+
+三個結論：
+
+1. **寫入形狀**：兩次都是 16 bytes `{A*-search-node 指標, 0x30}` 寫在「受害 array 正下方那個
+   24-byte（`0x20` chunk）配置的 +24..+39」——即**把一個 24-byte 物件當成 ≥40 bytes 的型別寫欄位**
+   （型別混淆或對重切過的 chunk 的懸空寫）。8/31 的指標是低階 A*（`Node`/`SearchNode`）物件、
+   9/7 是高階 A*（`HLSearchNode`）物件 ⇒ writer 在 **A\* 搜尋層**（兩層共用 `AStar` 基底），
+   不在 vehicle cluster 程式碼；受害只是 heap 鄰居。
+2. **victim 這一族無法靠 per-block guard 覆蓋**：`VehicleCluster::merge` 把被併入的 cluster 從
+   `PolygonalMap2` 清單 `memmove` 掉、`count=0`，**從不 `release`**——cluster 物件與其 rect
+   array 每秒洩漏約 40 個（8/31 core：58 分鐘 131,959；9/7 core：4h04m 602,901；pool free 分別
+   427／183）。live 白名單 block 因此線性成長，4096 cap 開機 100 秒即飽和，之後新的 cluster
+   array **零覆蓋**（core 內 183 個 free-pool cluster 的 array 0/183 page-aligned）。這也是一個
+   可回報 TIS 的獨立 bug（每 6 小時重啟約 85 MB）。
+3. HL 兩個 pool（`HLSuccessor` 26,496／`HLSearchNode` 7,500）在崩潰時全數在 free pool、零垃圾
+   ⇒ HL pool 本身未被毒化；毒化只發生在 rect pool（經 `VisibilityGraph::release` 洗入）。
+
+### 9-2. 第二輪組態（2026-09-07 06:19 已裝、12:00 重啟生效）
+
+wrapper 改為 source 同目錄 `pfguard.env`（root:pzserver 0640；缺檔＝shim 預設）：
+
+- `MDC_PFGUARD_CALLERS`＝16 個 A\* 層的 `reallocate_aligned` caller（`HLAStar::findPath`／
+  `addChunkLevelAndAdjacentToList`×2／`setLowestCostSuccessor`／`getSuccessors`／`addSuccessor`×3、
+  `HLChunkLevel::init{Stairs,Regions,SlopedSurfaces}`、`SearchNode::getSuccessors`、
+  `VGAStar::getSearchNode`×3、`PolygonalMap2::findPathHighLevelThenLowLevel`）；全部 CALL 形狀、
+  皆在 dynsym（`native-observer/analysis/pfguard-{hl-callers,callers2}.sh` 普查）。**刻意拿掉**
+  `createVehicleCluster`／`merge`（受害族＋洩漏族）。
+- `MDC_PFGUARD_MAXBLOCKS=65536`（RSS 上界 ≈256 MB、VMA ≈+200k；`nodes_used` ≤ 81,920 < 262,144）、
+  `MDC_PFGUARD_QUARANTINE=16384`（`PFG_QUAR_MAX`，拉長 UAF 偵測窗）。
+- 命中假說：writer 若透過**過期的 A\* array 指標**寫入（realloc 搬走後仍寫舊 block）→ 舊 block 在
+  quarantine（PROT_NONE）→ 寫入指令當場 SIGSEGV；若是 live array 尾端小幅溢出 → canary（下次
+  realloc/free 時 `canary_violations`＋ring 指認）；跨頁溢出 → 當場 SIGSEGV。
+- **仍抓不到的情況**：writer 的壞指標來自 `operator new` 的 pool 物件（HLSearchNode／SearchNode／
+  Rb-tree node 等）而非 aligned array——那是 §8 第 2 條的路線（接管 pathfind 的 `operator new`／
+  `delete`，以 `dladdr` 限定 caller 在本 `.so`）。第二輪若再 miss，直接走這條。
+- 驗收：重啟後 banner `callers=16 maxblocks=65536 quarantine=16384`、`allowlist_matched` 位元
+  逐漸點亮、`skip_capacity` 增長率應趨近 0（否則 A\* 層 live 也超過 65536，再評估）、
+  `pages_mapped`／RSS／VMA、`PathfindNativeThread` CPU 對照第一輪 42%。

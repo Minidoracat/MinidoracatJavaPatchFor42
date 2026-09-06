@@ -38,6 +38,17 @@ if [[ "${PFG_DRY_RUN:-0}" == 1 ]]; then
     exit 0
 fi
 
+# Optional tuning (MDC_PFGUARD_* knobs) lives in a root-owned env file next to the observer,
+# so re-aiming the allowlist never means editing this wrapper. Missing file = shim defaults.
+tuning="${root}/pfguard.env"
+if [[ -r "${tuning}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "${tuning}"
+    set +a
+    printf '[mdc-pfguard] tuning loaded: %s\n' "${tuning}"
+fi
+
 printf '[mdc-pfguard] startup gate PASS: preloading %s\n' "${observer}"
 cd "${serverfiles}"
 preload="${observer}:${jsig}"
