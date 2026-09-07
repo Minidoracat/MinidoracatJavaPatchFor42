@@ -8,15 +8,15 @@
 
 | 內容 | 決定 | 理由 |
 |---|---|---|
-| **F1** `PZNetKahluaTableImpl.loadComponent` NPE（第三條「既不 Accept 也不 Reject」入口） | **在 topic 100905 回覆補充** | 同一症狀（永久卡 100%、queue 堵死）、同一機制家族（parse 階段參數解析失敗未被處理、無回覆）、同一建議修法（parse 對參數失敗要走 reject）。另開會被當重複帖合併。 |
-| **F2** `ActionManager.remove` 只比 byte id、跨玩家連帶取消 | **另開新帖**（Bug Reports） | 獨立缺陷：與參數解析無關，觸發者是「別的玩家」，修法在 `ActionManager`。目前是程式碼級證據；本文先寫成 code-level report，等 W10-E observe 有 `crossVictimsActive` 數據後補一段 Observed 再發，或先發並註明「reproduction data to follow」。 |
-| **F3** `IsoObject.getEntityNetID()` 由座標＋物件順位推導、client/server 不一致、地板固定 index 0 撞號 | **另開新帖**（Bug Reports，entity system） | 影響面不只 timed action：`GameEntityManager.checkEntityIDChange` 的 `expected null` 錯誤、A-R2 已報的 stale `entitySet`（Entity is already registered）都是同一族。F1 的 Root cause 段只引用它，細節放這帖。 |
+| **R1** `PZNetKahluaTableImpl.loadComponent` NPE（第三條「既不 Accept 也不 Reject」入口） | **在 topic 100905 回覆補充** | 同一症狀（永久卡 100%、queue 堵死）、同一機制家族（parse 階段參數解析失敗未被處理、無回覆）、同一建議修法（parse 對參數失敗要走 reject）。另開會被當重複帖合併。 |
+| **R2** `ActionManager.remove` 只比 byte id、跨玩家連帶取消 | **另開新帖**（Bug Reports） | 獨立缺陷：與參數解析無關，觸發者是「別的玩家」，修法在 `ActionManager`。目前是程式碼級證據；本文先寫成 code-level report，等 W10-E observe 有 `crossVictimsActive` 數據後補一段 Observed 再發，或先發並註明「reproduction data to follow」。 |
+| **R3** `IsoObject.getEntityNetID()` 由座標＋物件順位推導、client/server 不一致、地板固定 index 0 撞號 | **另開新帖**（Bug Reports，entity system） | 影響面不只 timed action：`GameEntityManager.checkEntityIDChange` 的 `expected null` 錯誤、A-R2 已報的 stale `entitySet`（Entity is already registered）都是同一族。R1 的 Root cause 段只引用它，細節放這帖。 |
 
-發文節奏：F1 先（回覆帖，最短）；F3 隔一天；F2 等 observe 數據（預計 1–2 天）再發。
+發文節奏：R1 先（回覆帖，最短）；R3 隔一天；R2 等 observe 數據（預計 1–2 天）再發。
 
 ---
 
-## F1. 回覆 topic 100905：第三條入口——`loadComponent` NPE
+## R1. 回覆 topic 100905：第三條入口——`loadComponent` NPE
 
 ### 中文摘要
 
@@ -29,6 +29,10 @@ W10 上線後 server 端仍每天數次到數十次 `Error with packet of type: 
 ### 建議板塊
 
 回覆到既有主題：https://theindiestone.com/forums/topic/100905-42204-mp-timed-actions-can-stall-permanently-at-100-and-block-the-whole-action-queue-when-a-packet-argument-deserializes-to-null-the-server-sends-neither-accept-nor-reject/
+
+### Title
+
+`[42.20.4] [MP] Follow-up to topic 100905 — third entry point: PZNetKahluaTableImpl.loadComponent NPE (reply, no new topic)`
 
 ### Body
 
@@ -79,7 +83,7 @@ We extended the server-side hotfix so that (a) a failure inside actionArgs.load 
 
 ---
 
-## F2. 新帖：`ActionManager.remove` 只比 byte id，跨玩家連帶取消
+## R2. 新帖：`ActionManager.remove` 只比 byte id，跨玩家連帶取消
 
 ### 中文摘要
 
@@ -156,7 +160,7 @@ Turning the server-side removal into "same id AND same playerId only" (our follo
 
 ---
 
-## F3. 新帖：IsoObject 的 entity net ID 由「座標＋清單順位」推導
+## R3. 新帖：IsoObject 的 entity net ID 由「座標＋清單順位」推導
 
 ### 中文摘要
 
