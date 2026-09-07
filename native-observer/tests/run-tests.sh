@@ -20,12 +20,13 @@ fail=0
 log=$(mktemp)
 trap 'rm -f "${log}"' EXIT
 
-# expect <name> <expected-exit-or-SIGNAME> <case> [env assignments...]
+# expect <name> <expected-exit-or-SIGNAME> <case[ arg]> [env assignments...]
 expect() {
     local name="$1" want="$2" case_name="$3"; shift 3
     local status=0
     # `if ! cmd` would make $? the status of the negation, not of the child.
-    env "$@" LD_PRELOAD="${shim}" "${cases}" "${case_name}" >"${log}" 2>&1 || status=$?
+    # shellcheck disable=SC2086  # "<case> <number>" is split on purpose
+    env "$@" LD_PRELOAD="${shim}" "${cases}" ${case_name} >"${log}" 2>&1 || status=$?
     local got
     if (( status > 128 )); then
         got="SIG$(kill -l $((status - 128)) 2>/dev/null || echo "?")"
@@ -225,6 +226,32 @@ expect zero-realloc 0 zero-realloc
 assert_log zero-realloc-freed 'guard_free=[1-9]'
 expect allowlist 0 allowlist
 assert_log allowlist-all-matched 'matched=0xf '
+
+echo
+echo "=== merge-release: an absorbed VehicleCluster goes back to the pool exactly once"
+expect merge-release 0 merge-release
+assert_log merge-moved 'MERGE dst_count=1 src_count=0 backptr_ok=1 pool_delta=1 lifo_returns_src=1'
+assert_log merge-counted 'merge_mode=1 merge_calls=1 merge_released=1 merge_skipped=0 merge_double_blocked=0 merge_set_full=0 cluster_alloc=3'
+assert_log merge-grow-guarded 'guard_alloc=2 '
+expect merge-double 0 "merge-release 3"
+assert_log merge-double-once 'pool_delta=1 '
+assert_log merge-double-blocked 'merge_calls=3 merge_released=1 merge_skipped=0 merge_double_blocked=2 '
+expect merge-off 0 merge-release MDC_PFGUARD_MERGE_RELEASE=0
+assert_log merge-off-vanilla-leak 'pool_delta=0 lifo_returns_src=0'
+assert_log merge-off-counted 'merge_mode=0 merge_calls=1 merge_released=0 merge_skipped=0 '
+expect merge-reuse 0 merge-reuse
+assert_log merge-reuse-lifo 'REUSE again_is_src=1 pool=1'
+assert_log merge-reuse-released-twice 'merge_released=2 merge_skipped=0 merge_double_blocked=0 '
+expect merge-self 0 merge-self
+assert_log merge-self-not-pooled 'SELF pool=0'
+assert_log merge-self-counted 'merge_released=0 merge_skipped=1 '
+expect merge-churn 0 "merge-churn 20000"
+assert_log merge-churn-ran 'CHURN rounds=20000 releases=[1-9][0-9]+ '
+assert_log merge-churn-pool-exact 'pool=([0-9]+) expected_pool=\1$'
+assert_log merge-churn-no-false-hit 'merge_double_blocked=0 merge_set_full=0 '
+expect merge-set-full 0 "merge-set-full 52"
+assert_log set-full-bounded 'SETFULL total=2100 pooled=2048 pool_after=1'
+assert_log set-full-counted 'merge_released=2049 merge_skipped=0 merge_double_blocked=0 merge_set_full=52 '
 
 echo
 echo "=== multithreaded state and cache safety"

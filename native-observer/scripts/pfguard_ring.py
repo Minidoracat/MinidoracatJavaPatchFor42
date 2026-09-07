@@ -45,8 +45,11 @@ COUNTER_FIELDS = (
     "skip_table_full", "canary_violations", "shrink_anomalies", "mmap_failures",
     "real_symbol_missing", "ra_cache_hit", "ra_cache_miss", "quarantine_failures",
     "nodes_used", "ownership_conflicts", "madvise_failures",
+    # v5 — VehicleCluster::merge wrapper
+    "merge_release_mode", "merge_calls", "merge_released", "merge_skipped_state",
+    "merge_double_release_blocked", "merge_set_full", "cluster_alloc_calls",
 )
-LAYOUT_VERSION = 4
+LAYOUT_VERSION = 5
 
 
 class Elf:

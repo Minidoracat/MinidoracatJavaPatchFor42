@@ -18,7 +18,9 @@ echo "== libmdcpfguard.so"
 # The interposed symbols must be exported, or LD_PRELOAD does nothing.
 # `grep -q` would SIGPIPE readelf and trip `pipefail`, so snapshot the table first.
 symbols="$(readelf -Ws "${out}/libmdcpfguard.so")"
-for symbol in _Z18reallocate_alignedPvmm _Z18deallocate_alignedPv mdc_pfguard_ring mdc_pfguard_counters; do
+for symbol in _Z18reallocate_alignedPvmm _Z18deallocate_alignedPv \
+              _ZN14VehicleCluster5mergeEPS_ _ZN14VehicleCluster5allocEv \
+              mdc_pfguard_ring mdc_pfguard_counters; do
     grep -q " DEFAULT .* ${symbol}$" <<<"${symbols}" \
         || { echo "FAIL: ${symbol} is not exported"; exit 1; }
 done

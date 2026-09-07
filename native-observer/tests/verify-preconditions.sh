@@ -78,10 +78,36 @@ check "DT_SONAME used by RTLD_NOLOAD resolver" "libPZPathFind64.so" \
     "$(sed -nE 's/.*\(SONAME\).*\[([^]]+)\].*/\1/p' <<<"${dynamic}")"
 
 dynsym="$(readelf --dyn-syms -W "${so}")"
-for symbol in _Z18reallocate_alignedPvmm _Z18deallocate_alignedPv; do
+for symbol in _Z18reallocate_alignedPvmm _Z18deallocate_alignedPv \
+              _ZN14VehicleCluster5mergeEPS_ _ZN14VehicleCluster7releaseEv _ZN14VehicleCluster5allocEv; do
     binding=$(awk -v s="${symbol}" '$8==s{print $5"/"$6}' <<<"${dynsym}" | head -1)
     check "dynamic binding of ${symbol}" "GLOBAL/DEFAULT" "${binding}"
 done
+
+# merge-release wrapper (shim layout v5) preconditions. The shim interposes
+# VehicleCluster::merge and ::alloc and calls the library's own ::release via dlsym, so all
+# three must stay preemptible PLT transfers from exactly the callers the design reasons
+# about: merge from createVehicleCluster only (the caller that already unlinked `src`),
+# release from VisibilityGraph::release only, alloc from createVehicleCluster (2 sites).
+check "VehicleCluster::merge@plt transfer sites" 1 "$(count_edges '_ZN14VehicleCluster5mergeEPS_@plt' "${raw}")"
+check "VehicleCluster::release@plt transfer sites" 1 "$(count_edges '_ZN14VehicleCluster7releaseEv@plt' "${raw}")"
+check "VehicleCluster::alloc@plt transfer sites" 2 "$(count_edges '_ZN14VehicleCluster5allocEv@plt' "${raw}")"
+check "direct VehicleCluster::merge transfers" 0 "$(count_edges '_ZN14VehicleCluster5mergeEPS_' "${raw}")"
+check "direct VehicleCluster::alloc transfers" 0 "$(count_edges '_ZN14VehicleCluster5allocEv' "${raw}")"
+create_body="$(objdump -d --disassemble='_ZN13PolygonalMap220createVehicleClusterEP11VehicleRectR9ArrayListIS1_ERS2_IP14VehicleClusterE' "${so}")"
+check "merge is called from createVehicleCluster" 1 \
+    "$(grep -Ec '[[:space:]]call[[:space:]].*<_ZN14VehicleCluster5mergeEPS_@plt>' <<<"${create_body}" || true)"
+check "alloc is called from createVehicleCluster (2 sites)" 2 \
+    "$(grep -Ec '[[:space:]]call[[:space:]].*<_ZN14VehicleCluster5allocEv@plt>' <<<"${create_body}" || true)"
+vg_release_body="$(objdump -d --disassemble='_ZN15VisibilityGraph7releaseEv' "${so}")"
+check "release is called from VisibilityGraph::release" 1 \
+    "$(grep -Ec '[[:space:]]call[[:space:]].*<_ZN14VehicleCluster7releaseEv@plt>' <<<"${vg_release_body}" || true)"
+# Layout the wrapper reads: merge ends by zeroing src->count at +0x0c (`movl $0x0,0xc(%reg)`).
+merge_body="$(objdump -d --disassemble='_ZN14VehicleCluster5mergeEPS_' "${so}")"
+check "merge zeroes src->count at +0x0c" 1 \
+    "$(grep -Ec 'movl[[:space:]]+\$0x0,0xc\(%r[a-z0-9]+\)' <<<"${merge_body}" || true)"
+check "merge grows dst through reallocate_aligned (align 8)" 1 \
+    "$(grep -Ec '[[:space:]]call[[:space:]].*<_Z18reallocate_alignedPvmm@plt>' <<<"${merge_body}" || true)"
 
 # dladdr(return_address) observes a dynamic symbol and needs a real CALL return address,
 # not merely an ELF-local .symtab entry or a tail JMP inherited from an upstream caller.
@@ -99,7 +125,7 @@ env_file="${PFG_ENV:-${here}/deploy/pfguard.env}"
 if [[ -r "${env_file}" ]]; then
     env_callers="$(sed -nE 's/^MDC_PFGUARD_CALLERS=([A-Za-z0-9_,]*)$/\1/p' "${env_file}" | tail -1)"
     IFS=',' read -r -a env_list <<<"${env_callers}"
-    check "pfguard.env caller count within PFG_MAX_CALLERS (16)" 1 "$(( ${#env_list[@]} <= 16 ? 1 : 0 ))"
+    check "pfguard.env caller count within PFG_MAX_CALLERS (32)" 1 "$(( ${#env_list[@]} <= 32 ? 1 : 0 ))"
     check "pfguard.env MDC_PFGUARD_CALLERS length within g_callers_env (2048)" 1 "$(( ${#env_callers} < 2048 ? 1 : 0 ))"
     for s in "${env_list[@]}"; do
         [[ -n "${s}" && -z "${expected_calls[$s]+x}" ]] && callers+=("${s}")
