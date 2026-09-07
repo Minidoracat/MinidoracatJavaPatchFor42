@@ -28,6 +28,7 @@ SRC = {
     "A": ROOT / "docs/report/2026-09-02-tis-reports-A.md",
     "B": ROOT / "docs/report/2026-09-02-tis-reports-B.md",
     "C": ROOT / "docs/report/2026-09-02-tis-reports-C.md",
+    "E": ROOT / "docs/report/2026-09-07-pathfind-vehiclecluster-leak-and-pool-poisoning-tis.md",
 }
 OUT = ROOT / "docs/report/forum-html"
 
