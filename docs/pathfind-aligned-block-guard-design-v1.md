@@ -395,20 +395,42 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
   core 腳本的 BASE／pool 偏移雖與 decompile 對得上，仍應核 NT_FILE 與 deque 游標（`start_cur-8`
   只適用未跨 deque 區塊的 pop）。
 
-### 9-4. 第三輪提案（需授權：含一個行為變更）
+### 9-4. 第三輪（2026-09-07 授權後實作；shim layout **v5**）
 
-1. **止血洩漏（行為變更）**：以 LD_PRELOAD 同名定義包裝 `VehicleCluster::merge`（全 `.so` 唯一 PLT
-   呼叫點 `createVehicleCluster`，GLOBAL/DEFAULT dynsym，實測可取代）：呼叫真 merge 後對被併入的
-   cluster 呼叫真 `VehicleCluster::release`（回池，array／cap 保留供 `init` 重用——這正是池的既有
-   語意）。安全依據：merge 前 `createVehicleCluster` 已把 src `memmove` 出清單、merge 內把 src 的
-   rect backpointer 全部改指 dst、`count=0`；graphs 在所有 cluster 建完後才建立 ⇒ src 無其他持有者。
-   風險：若存在未看見的別名 → 池內雙重出租；緩解＝release 前驗 `count==0` 且 src 不在清單，並計數。
-   效果：cluster 池 live 數回到「載入區車輛數」量級（393／824），guard_live 有界。
-2. **重瞄 victim 族**：allowlist＝`createVehicleCluster`＋`VehicleCluster::merge`（rect array 與
-   cluster list 的成長點）＋16 個 A\* caller；**排除 `createVehicleClusters`**（暫時 local list，
-   每輪 2 千多次配置只會佔 cap）。cap 維持 65536 觀察 `skip_capacity` 是否歸零。
-3. **不做**：`VehicleRect::alloc/release` 的值驗證（heap 已壞，只是把崩潰點推後、抹掉證據，設計 §4）；
+1. **止血洩漏（唯一的行為變更）**：shim 以 LD_PRELOAD 同名定義接管 `VehicleCluster::merge`
+   （全 `.so` 唯一 PLT 呼叫點＝`createVehicleCluster`，GLOBAL/DEFAULT dynsym）與
+   `VehicleCluster::alloc`（2 個 PLT 呼叫點，同一函式）；真實定義以 `RTLD_NOLOAD` handle 的
+   `dlsym` 取得（連同 `VehicleCluster::release`），三者任一缺失＝`real_symbol_missing`
+   → 首次呼叫 fail-fast，不自製替身。流程：呼叫真 merge → 若 `src!=NULL && src!=dst &&
+   src->count(+0x0c)==0` → 位址寫入 shim 私有集合（open addressing、backward-shift 刪除、
+   4096 槽、佔半即拒）→ 成功插入才呼叫真 `release(src)`（回池；array／cap 保留、`init` 只清
+   count＝池既有語意）；`alloc` 回傳的位址從集合移除。**集合的用途只有一個**：stale
+   backpointer（我們在追的那種損毀）可能讓同一 cluster 被 merge 兩次——第二次插入失敗就不
+   release，杜絕「池把同一物件租給兩個人」這個新失效模式。每條跳過路徑都有計數：
+   `merge_skipped_state`／`merge_double_release_blocked`／`merge_set_full`；`merge_calls`／
+   `merge_released`／`cluster_alloc_calls` 對帳。旋鈕 `MDC_PFGUARD_MERGE_RELEASE=0`（pfguard.env，
+   下次重啟生效）整段關閉＝回到 vanilla 洩漏。安全依據（42.20.4 反編譯逐行複核）：merge 前
+   `createVehicleCluster` 已把 src `memmove` 出 cluster 清單、merge 內把 src 每個 rect 的
+   backpointer 改指 dst、結尾無條件 `src->count=0`、merge 後 caller 不再觸碰 src；graphs 在所有
+   cluster 建完後才建立 ⇒ src 無其他持有者。
+2. **重瞄 victim 族**：`pfguard.env` allowlist＝`createVehicleCluster`＋`VehicleCluster::merge`
+   （rect array 的兩個成長點；洩漏止血後有界）＋原 16 個 A\* caller（有界診斷），共 18，
+   `PFG_MAX_CALLERS` 16→32；**排除 `createVehicleClusters`**（每輪暫時 list）。cap 維持 65536、
+   quarantine 16384。
+3. **驗證**：`run-tests.sh` 115/115（新增 merge-release／merge-double／merge-off／merge-reuse／
+   merge-self／merge-churn 20k 步含影子模型對帳／merge-set-full 2100：集合滿只跳過、alloc 排空後
+   恢復；threads 壓力改走真 merge 路徑），fake `.so` 以 42.20.4 語意實作 alloc／release／merge
+   （含 merge 內經 `reallocate_aligned@plt` 成長＝merge 仍是 allowlist caller）；
+   `verify-preconditions.sh` 91/91 對正式 `.so`（新增：三符號 GLOBAL/DEFAULT、merge/release/alloc
+   PLT 邊 1/1/2 且 direct 0、merge 只由 createVehicleCluster 呼叫、release 只由
+   `VisibilityGraph::release` 呼叫、merge 結尾 `movl $0x0,0xc(%reg)`、merge 內 realloc 恰 1）。
+4. **驗收（下次排程重啟後）**：橫幅 `v5 … callers=18 merge_release=1`；`pfguard_ring.py --pid`：
+   `merge_released≈merge_calls`、`merge_double_release_blocked=0`、`merge_set_full=0`、
+   `guard_live` 有界（不再釘在 cap）、`skip_capacity` 不再成長、`allowlist_matched` 含 bit 0/1、
+   anomalies 0；cluster 池 `total_alloc` 斜率塌陷。`merge_double_release_blocked>0` 本身就是
+   「stale backpointer 存在」的直接證據，要連同 ring 一起保存。
+5. **不做**：`VehicleRect::alloc/release` 的值驗證（heap 已壞，只是把崩潰點推後、抹掉證據，設計 §4）；
    行程內重建 native world（共用 arena 已污染）；Java 側限速 vehicle task（不改變 writer，dirty bit
    已合併重建）；`UseNativeCode=false`（dedicated 無效）。
-4. **平行**：向 TIS 回報兩個獨立缺陷（merge 洩漏＝有行號的確定 bug；rect pool 零驗證＋兩次同簽名
+6. **平行**：向 TIS 回報兩個獨立缺陷（merge 洩漏＝有行號的確定 bug；rect pool 零驗證＋兩次同簽名
    `0x30`），不宣稱 writer 已知。

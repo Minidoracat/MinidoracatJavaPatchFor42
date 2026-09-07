@@ -38,10 +38,10 @@
 #define PFG_NODES           262144u         /* hard cap on simultaneously guarded blocks */
 #define PFG_QUAR_MAX        16384u
 #define PFG_RA_CACHE        256u
-#define PFG_MAX_CALLERS     16
+#define PFG_MAX_CALLERS     32
 #define PFG_CANARY_BYTE     0xA5
 #define PFG_CANARY_WINDOW   64          /* bytes of slack painted/checked per block */
-#define PFG_LAYOUT_VERSION  4u
+#define PFG_LAYOUT_VERSION  5u          /* v5: merge-release counters appended */
 
 /* ASCII tags so the core reader can prove it found the right structures. */
 #define PFG_RING_MAGIC      0x4746504344444D55ULL  /* "UMDDCPFG" little-endian bytes */
@@ -125,6 +125,14 @@ struct pfg_counters {               /* field order is the reader's contract */
     uint64_t nodes_used;
     uint64_t ownership_conflicts;
     uint64_t madvise_failures;
+    /* v5 — VehicleCluster::merge wrapper (leak stop; see design §9-4) */
+    uint64_t merge_release_mode;        /* 0 off, 1 on (config read once at startup) */
+    uint64_t merge_calls;               /* real VehicleCluster::merge invocations seen */
+    uint64_t merge_released;            /* absorbed clusters we returned to the pool */
+    uint64_t merge_skipped_state;       /* src==dst / NULL / count!=0 after merge: not released */
+    uint64_t merge_double_release_blocked; /* src already in the pool by our hand: not released */
+    uint64_t merge_set_full;            /* tracking set saturated: release skipped (never unsafe) */
+    uint64_t cluster_alloc_calls;       /* VehicleCluster::alloc invocations seen */
 };
 
 /* Chained hash, never open-addressed: every guarded block gets a fresh mmap address, so
@@ -206,7 +214,21 @@ static const char *const PFG_DEFAULT_CALLERS[] = {
 
 static void *(*g_real_realloc)(void *, size_t, size_t);
 static void (*g_real_free)(void *);
+static void (*g_real_cluster_merge)(void *, void *);
+static void (*g_real_cluster_release)(void *);
+static void *(*g_real_cluster_alloc)(void);
+static int g_merge_release = 1;
 static pthread_once_t g_resolve_once = PTHREAD_ONCE_INIT;
+
+/* Clusters we pushed into the VehicleCluster pool that the pool has not lent out again.
+ * Keyed by object address; entries leave when VehicleCluster::alloc hands the address out.
+ * Purpose: a stale rect->cluster backpointer (the corruption we hunt) could name an
+ * absorbed cluster twice — releasing it twice would let the pool lend one object to two
+ * owners, manufacturing a *new* failure mode. Membership here blocks that. */
+#define PFG_MERGE_SET 4096u             /* power of two; > peak pooled clusters (~vehicles in loaded area) */
+static uintptr_t g_merge_set[PFG_MERGE_SET];
+static uint32_t g_merge_set_used;
+static pthread_mutex_t g_merge_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #define PFG_INC(field) __atomic_add_fetch(&mdc_pfguard_counters.field, 1, __ATOMIC_RELAXED)
 #define PFG_ADD(field, n) __atomic_add_fetch(&mdc_pfguard_counters.field, (uint64_t)(n), __ATOMIC_RELAXED)
@@ -280,8 +302,15 @@ static void pfg_resolve(void)
     if (handle != NULL) {
         g_real_realloc = (void *(*)(void *, size_t, size_t))dlsym(handle, "_Z18reallocate_alignedPvmm");
         g_real_free = (void (*)(void *))dlsym(handle, "_Z18deallocate_alignedPv");
+        /* dlsym on the library's own handle yields *its* definitions, not ours: the shim is
+         * not in libPZPathFind64's dependency tree, so these are the real pool functions. */
+        g_real_cluster_merge = (void (*)(void *, void *))dlsym(handle, "_ZN14VehicleCluster5mergeEPS_");
+        g_real_cluster_release = (void (*)(void *))dlsym(handle, "_ZN14VehicleCluster7releaseEv");
+        g_real_cluster_alloc = (void *(*)(void))dlsym(handle, "_ZN14VehicleCluster5allocEv");
     }
-    if (g_real_realloc == NULL || g_real_free == NULL)
+    if (g_real_realloc == NULL || g_real_free == NULL
+            || g_real_cluster_merge == NULL || g_real_cluster_release == NULL
+            || g_real_cluster_alloc == NULL)
         PFG_INC(real_symbol_missing);
 }
 
@@ -832,6 +861,119 @@ void pfg_deallocate_aligned(void *p)
                0, owned.user_size);
 }
 
+/* ------------------------------------------------------------------ merge-release (v5) */
+
+/* VehicleCluster layout (42.20.4, sha 0777dda6…; verified in the two production cores and
+ * the decompile): 0x18 bytes — +0x00 int level, +0x08 int capacity, +0x0c int count,
+ * +0x10 VehicleRect** array. The pool (ObjectPool<VehicleCluster>) is a std::deque<void*>
+ * of free objects; release() is a bare push, alloc() a bare pop, init() only zeroes count —
+ * the array/capacity ride along with the pooled object and are reused. */
+#define PFG_CLUSTER_COUNT_OFF 0x0c
+
+static uint32_t pfg_merge_slot(uintptr_t key)
+{
+    return (uint32_t)((key >> 4) * 0x9E3779B97F4A7C15ULL >> 52) & (PFG_MERGE_SET - 1);
+}
+
+/* returns 1 if inserted, 0 if already present, -1 if the set is full */
+static int pfg_merge_set_insert(uintptr_t key)
+{
+    if (g_merge_set_used >= PFG_MERGE_SET / 2)
+        return -1;
+    uint32_t i = pfg_merge_slot(key);
+    for (;;) {
+        if (g_merge_set[i] == key)
+            return 0;
+        if (g_merge_set[i] == 0) {
+            g_merge_set[i] = key;
+            g_merge_set_used++;
+            return 1;
+        }
+        i = (i + 1) & (PFG_MERGE_SET - 1);
+    }
+}
+
+/* Open addressing with linear probing needs backward-shift deletion to stay correct. */
+static void pfg_merge_set_remove(uintptr_t key)
+{
+    uint32_t i = pfg_merge_slot(key);
+    for (;;) {
+        if (g_merge_set[i] == 0)
+            return;
+        if (g_merge_set[i] == key)
+            break;
+        i = (i + 1) & (PFG_MERGE_SET - 1);
+    }
+    g_merge_set[i] = 0;
+    g_merge_set_used--;
+    uint32_t j = i;
+    for (;;) {
+        j = (j + 1) & (PFG_MERGE_SET - 1);
+        uintptr_t k = g_merge_set[j];
+        if (k == 0)
+            return;
+        uint32_t home = pfg_merge_slot(k);
+        /* move k back to i if its home slot lies (cyclically) at or before i */
+        if ((j > i && (home <= i || home > j)) || (j < i && home <= i && home > j)) {
+            g_merge_set[i] = k;
+            g_merge_set[j] = 0;
+            i = j;
+        }
+    }
+}
+
+void *pfg_vehicle_cluster_alloc(void) __asm__("_ZN14VehicleCluster5allocEv");
+void pfg_vehicle_cluster_merge(void *dst, void *src) __asm__("_ZN14VehicleCluster5mergeEPS_");
+
+void *pfg_vehicle_cluster_alloc(void)
+{
+    pthread_once(&g_resolve_once, pfg_resolve);
+    if (g_real_cluster_alloc == NULL)
+        pfg_fatal("real-cluster-alloc-symbol-missing", NULL, __builtin_return_address(0), 0, 0);
+    void *c = g_real_cluster_alloc();
+    PFG_INC(cluster_alloc_calls);
+    if (g_merge_release && c != NULL) {
+        pthread_mutex_lock(&g_merge_lock);
+        pfg_merge_set_remove((uintptr_t)c);
+        pthread_mutex_unlock(&g_merge_lock);
+    }
+    return c;
+}
+
+/* Vanilla merge moves every rect of `src` into `dst` (rewriting each rect's backpointer),
+ * sets src->count = 0 and returns — `src` was already memmove'd out of PolygonalMap2's
+ * cluster list by the single caller (createVehicleCluster) and no VisibilityGraph exists
+ * yet in this rebuild, so nothing references `src` afterwards: it is leaked (~40/s in
+ * production). We return it to the pool exactly like VisibilityGraph::release does for
+ * listed clusters. Every skip is counted; nothing here can make the vanilla path worse. */
+void pfg_vehicle_cluster_merge(void *dst, void *src)
+{
+    pthread_once(&g_resolve_once, pfg_resolve);
+    if (g_real_cluster_merge == NULL)
+        pfg_fatal("real-cluster-merge-symbol-missing", src, __builtin_return_address(0), 0, 0);
+    g_real_cluster_merge(dst, src);
+    PFG_INC(merge_calls);
+    if (!g_merge_release)
+        return;
+    if (src == NULL || src == dst || *(const int32_t *)((const char *)src + PFG_CLUSTER_COUNT_OFF) != 0) {
+        PFG_INC(merge_skipped_state);
+        return;
+    }
+    pthread_mutex_lock(&g_merge_lock);
+    int r = pfg_merge_set_insert((uintptr_t)src);
+    pthread_mutex_unlock(&g_merge_lock);
+    if (r < 0) {
+        PFG_INC(merge_set_full);
+        return;
+    }
+    if (r == 0) {
+        PFG_INC(merge_double_release_blocked);
+        return;
+    }
+    g_real_cluster_release(src);
+    PFG_INC(merge_released);
+}
+
 /* ------------------------------------------------------------------ lifecycle */
 
 static size_t pfg_env_size(const char *name, size_t fallback)
@@ -887,6 +1029,7 @@ __attribute__((constructor)) static void pfg_init(void)
     g_max_size = pfg_env_size("MDC_PFGUARD_MAXSIZE", 64 * 1024);
     g_canary_window = pfg_env_size("MDC_PFGUARD_CANARY", PFG_CANARY_WINDOW);
     g_max_blocks = pfg_env_size("MDC_PFGUARD_MAXBLOCKS", 4096);
+    g_merge_release = (int)pfg_env_size("MDC_PFGUARD_MERGE_RELEASE", 1) != 0;
 #ifdef PFG_TESTING
     g_test_fail_owned_map = (int)pfg_env_size("MDC_PFGUARD_TEST_FAIL_OWNED_MAP", 0);
 #endif
@@ -906,15 +1049,16 @@ __attribute__((constructor)) static void pfg_init(void)
     mdc_pfguard_counters.version = PFG_LAYOUT_VERSION;
     mdc_pfguard_counters.mode = (uint64_t)g_mode;
     mdc_pfguard_counters.whitelist_symbols = (uint64_t)g_ncallers;
+    mdc_pfguard_counters.merge_release_mode = (uint64_t)g_merge_release;
 
     char buf[512];
     int n = snprintf(buf, sizeof(buf),
                      "[mdc-pfguard] v%u mode=%d callers=%d maxsize=%zu maxblocks=%llu"
-                     " quarantine=%u canary=%zu ring=%u buckets=%u nodes=%u"
+                     " quarantine=%u canary=%zu ring=%u buckets=%u nodes=%u merge_release=%d"
                      " (guard active; detected corruption always aborts; config read once at startup)\n",
                      PFG_LAYOUT_VERSION, g_mode, g_ncallers, g_max_size,
                      (unsigned long long)g_max_blocks, g_quar_cap, g_canary_window,
-                     PFG_RING_CAP, PFG_BUCKETS, PFG_NODES);
+                     PFG_RING_CAP, PFG_BUCKETS, PFG_NODES, g_merge_release);
     pfg_write(STDERR_FILENO, buf, n);
 }
 
@@ -932,7 +1076,9 @@ void mdc_pfguard_dump(int fd)
                      " skip_table=%llu canary=%llu shrink=%llu mmap_fail=%llu"
                      " missing_real=%llu ra_hit=%llu ra_miss=%llu quar_fail=%llu"
                      " nodes_used=%llu matched=0x%llx ownership_conflicts=%llu"
-                     " madvise_fail=%llu ring_head=%llu\n",
+                     " madvise_fail=%llu ring_head=%llu"
+                     " merge_mode=%llu merge_calls=%llu merge_released=%llu merge_skipped=%llu"
+                     " merge_double_blocked=%llu merge_set_full=%llu cluster_alloc=%llu\n",
                      (unsigned long long)c->mode, (unsigned long long)c->whitelist_symbols,
                      (unsigned long long)c->guard_alloc, (unsigned long long)c->guard_free,
                      (unsigned long long)c->guard_live, (unsigned long long)c->guard_peak,
@@ -952,6 +1098,10 @@ void mdc_pfguard_dump(int fd)
                      (unsigned long long)c->allowlist_matched,
                      (unsigned long long)c->ownership_conflicts,
                      (unsigned long long)c->madvise_failures,
-                     (unsigned long long)mdc_pfguard_ring.head);
+                     (unsigned long long)mdc_pfguard_ring.head,
+                     (unsigned long long)c->merge_release_mode, (unsigned long long)c->merge_calls,
+                     (unsigned long long)c->merge_released, (unsigned long long)c->merge_skipped_state,
+                     (unsigned long long)c->merge_double_release_blocked,
+                     (unsigned long long)c->merge_set_full, (unsigned long long)c->cluster_alloc_calls);
     pfg_write(fd, buf, n);
 }

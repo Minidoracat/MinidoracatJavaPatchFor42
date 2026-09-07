@@ -23,7 +23,19 @@ void *cluster_grow(void *old, size_t new_size)
     __asm__("_ZN13PolygonalMap220createVehicleClusterEP11VehicleRectR9ArrayListIS1_ERS2_IP14VehicleClusterE");
 void *round_grow(void *old, size_t new_size) __asm__("_ZN13PolygonalMap221createVehicleClustersEv");
 void *unrelated_grow(void *old, size_t new_size) __asm__("_ZN8HLAStar48findPathEv");
-void *merge_grow(void *old, size_t new_size) __asm__("_ZN14VehicleCluster5mergeEPS_");
+/* VehicleCluster double (layout of 42.20.4: 0x18 bytes, count at +0x0c, array at +0x10). */
+struct cluster {
+    int32_t level;
+    int32_t pad;
+    int32_t capacity;
+    int32_t count;
+    void **array;
+};
+struct cluster *cluster_alloc(void) __asm__("_ZN14VehicleCluster5allocEv");
+void cluster_release(struct cluster *c) __asm__("_ZN14VehicleCluster7releaseEv");
+void cluster_merge(struct cluster *dst, struct cluster *src) __asm__("_ZN14VehicleCluster5mergeEPS_");
+size_t fake_cluster_pool_size(void);
+size_t fake_cluster_fresh(void);
 void *split_grow(void *old, size_t new_size)
     __asm__("_ZN15VisibilityGraph8trySplitEP4EdgeP11VehicleRectR9ArrayListIiE");
 /* Calling the helper directly: the caller symbol here is not on the allowlist either, so
@@ -388,18 +400,174 @@ static int case_mixed(void)
     return 0;
 }
 
+/* Gives `c` exactly one rect through the createVehicleCluster caller (allowlisted). */
+static void cluster_put_rect(struct cluster *c, void *rect)
+{
+    if (c->capacity == 0) {
+        c->array = cluster_grow(NULL, 4 * sizeof(void *));
+        c->capacity = 4;
+    }
+    c->array[c->count++] = rect;
+}
+
 static int case_allowlist(void)
 {
+    uint64_t rect[2] = {0, 0};
+    struct cluster *dst = cluster_alloc();
+    struct cluster *src = cluster_alloc();
+    cluster_put_rect(src, rect);
+    cluster_merge(dst, src);                 /* grows dst->array from inside merge */
     void *blocks[] = {
         round_grow(NULL, 32),
-        cluster_grow(NULL, 32),
-        merge_grow(NULL, 32),
         split_grow(NULL, 32),
+        src->array,
+        dst->array,
     };
     for (size_t i = 0; i < sizeof(blocks) / sizeof(blocks[0]); i++)
         fake_release(blocks[i]);
     report_counters();
     puts("OK allowlist");
+    return 0;
+}
+
+/* merge-release: the absorbed cluster must come back through the pool exactly once. */
+static int case_merge_release(int rounds)
+{
+    uint64_t rect[2] = {0, 0};
+    struct cluster *dst = cluster_alloc();
+    struct cluster *src = cluster_alloc();
+    cluster_put_rect(src, rect);
+    size_t before = fake_cluster_pool_size();
+    for (int i = 0; i < rounds; i++)
+        cluster_merge(dst, src);             /* round 2+: src is empty and already pooled */
+    size_t after = fake_cluster_pool_size();
+    struct cluster *again = cluster_alloc();
+    printf("MERGE dst_count=%d src_count=%d backptr_ok=%d pool_delta=%zu lifo_returns_src=%d\n",
+           dst->count, src->count, (void *)rect[0] == (void *)dst, after - before, again == src);
+    if (dst->capacity)
+        fake_release(dst->array);
+    if (src->capacity)
+        fake_release(src->array);
+    report_counters();
+    puts("OK merge-release");
+    return 0;
+}
+
+/* A pooled cluster that alloc() hands out again is a fresh owner: merging it a second
+ * time must release it a second time, not be mistaken for a double release. */
+static int case_merge_reuse(void)
+{
+    uint64_t rect[2] = {0, 0};
+    struct cluster *dst = cluster_alloc();
+    struct cluster *src = cluster_alloc();
+    cluster_put_rect(src, rect);
+    cluster_merge(dst, src);
+    struct cluster *again = cluster_alloc();    /* == src (LIFO); leaves the shim's set */
+    cluster_put_rect(again, rect);
+    cluster_merge(dst, again);
+    printf("REUSE again_is_src=%d pool=%zu\n", again == src, fake_cluster_pool_size());
+    if (dst->capacity)
+        fake_release(dst->array);
+    if (src->capacity)
+        fake_release(src->array);
+    report_counters();
+    puts("OK merge-reuse");
+    return 0;
+}
+
+/* src==dst is the one state vanilla could hand us where releasing would be wrong. */
+static int case_merge_self(void)
+{
+    struct cluster *dst = cluster_alloc();
+    cluster_merge(dst, dst);
+    printf("SELF pool=%zu\n", fake_cluster_pool_size());
+    report_counters();
+    puts("OK merge-self");
+    return 0;
+}
+
+/* Tracking-set churn: interleaved merges and allocs with a shadow model. A false
+ * "already present" shows as merge_double_blocked>0; a false "absent" (double release)
+ * shows as pool_size != releases - pool_hits. Deterministic LCG so failures replay. */
+static int case_merge_churn(int rounds)
+{
+    enum { HELD_MAX = 3000 };
+    static struct cluster *held[HELD_MAX];
+    static uint64_t rects[HELD_MAX][2];
+    int nheld = 0;
+    uint64_t seed = 0x9E3779B97F4A7C15ULL;
+    size_t releases = 0, allocs = 0;
+    struct cluster *sink = cluster_alloc();
+    allocs++;
+    for (int i = 0; i < rounds; i++) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        /* alternate 512-round phases: alloc-heavy (set drains) / merge-heavy (set fills) */
+        unsigned alloc_odds = ((i >> 9) & 1) ? 1 : 4;
+        int want_alloc = nheld < 16 || (nheld < HELD_MAX && (seed >> 33) % 5 < alloc_odds);
+        if (want_alloc) {
+            struct cluster *c = cluster_alloc();
+            allocs++;
+            held[nheld++] = c;
+        } else {
+            int pick = (int)((seed >> 40) % (uint64_t)nheld);
+            struct cluster *src = held[pick];
+            held[pick] = held[--nheld];
+            if (src->capacity == 0) {
+                src->array = malloc(sizeof(void *));
+                src->capacity = 1;
+            }
+            src->array[0] = rects[pick];
+            src->count = 1;
+            cluster_merge(sink, src);
+            releases++;
+            sink->count = 0;                 /* keep sink's array from growing forever */
+        }
+    }
+    size_t pool_hits = allocs - fake_cluster_fresh();
+    printf("CHURN rounds=%d releases=%zu allocs=%zu pool=%zu expected_pool=%zu\n",
+           rounds, releases, allocs, fake_cluster_pool_size(), releases - pool_hits);
+    if (sink->capacity)
+        fake_release(sink->array);
+    report_counters();
+    puts("OK merge-churn");
+    return 0;
+}
+
+/* Set saturation must skip (counted), never release, and recover once alloc drains it.
+ * Sources are allocated up front: merging straight after alloc would just recycle the
+ * same pooled object (LIFO) and never fill the set. */
+static int case_merge_set_full(int extra)
+{
+    enum { SET_HALF = 2048 };
+    int total = SET_HALF + extra;
+    struct cluster **srcs = calloc((size_t)total, sizeof(*srcs));
+    struct cluster *sink = cluster_alloc();
+    uint64_t rect[2] = {0, 0};
+    for (int i = 0; i < total; i++) {
+        srcs[i] = cluster_alloc();
+        srcs[i]->array = malloc(sizeof(void *));
+        srcs[i]->capacity = 1;
+    }
+    for (int i = 0; i < total; i++) {
+        srcs[i]->array[0] = rect;
+        srcs[i]->count = 1;
+        cluster_merge(sink, srcs[i]);
+        sink->count = 0;
+    }
+    size_t pooled = fake_cluster_pool_size();
+    for (size_t i = 0; i < pooled; i++)
+        cluster_alloc();                     /* drain: every entry leaves the set */
+    struct cluster *src = cluster_alloc();   /* fresh object (pool is empty) */
+    src->array = malloc(sizeof(void *));
+    src->capacity = 1;
+    src->array[0] = rect;
+    src->count = 1;
+    cluster_merge(sink, src);
+    printf("SETFULL total=%d pooled=%zu pool_after=%zu\n", total, pooled, fake_cluster_pool_size());
+    if (sink->capacity)
+        fake_release(sink->array);
+    report_counters();
+    puts("OK merge-set-full");
     return 0;
 }
 
@@ -412,16 +580,23 @@ struct thread_args {
 static void *thread_stress_worker(void *raw)
 {
     struct thread_args *args = raw;
+    uint64_t rect[2] = {0, 0};
     for (int i = 0; i < args->loops; i++) {
         void *a = cluster_grow(NULL, 32);
         void *b = round_grow(NULL, 64);
-        void *c = merge_grow(NULL, 96);
         void *d = split_grow(NULL, 128);
         void *plain = unrelated_grow(NULL, 32);
+        /* merge-release path under contention. Vanilla semantics: a cluster's array
+         * rides along with the pooled object, so nothing touches `src` after merge (the
+         * shim pooled it; another thread may already own it) and dst's array stays put. */
+        struct cluster *dst = cluster_alloc();
+        struct cluster *src = cluster_alloc();
+        cluster_put_rect(src, rect);
+        cluster_merge(dst, src);
+        cluster_release(dst);
         ((uint64_t *)a)[0] = (uint64_t)i;
         fake_release(a);
         fake_release(b);
-        fake_release(c);
         fake_release(d);
         fake_release(plain);
     }
@@ -622,6 +797,16 @@ int main(int argc, char **argv)
         return case_ownership_race(0);
     if (strcmp(name, "free-realloc") == 0)
         return case_ownership_race(1);
+    if (strcmp(name, "merge-release") == 0)
+        return case_merge_release(number > 0 ? number : 1);
+    if (strcmp(name, "merge-reuse") == 0)
+        return case_merge_reuse();
+    if (strcmp(name, "merge-self") == 0)
+        return case_merge_self();
+    if (strcmp(name, "merge-churn") == 0)
+        return case_merge_churn(number > 0 ? number : 20000);
+    if (strcmp(name, "merge-set-full") == 0)
+        return case_merge_set_full(number > 0 ? number : 52);
 
     fprintf(stderr, "unknown case: %s\n", name);
     return 64;
