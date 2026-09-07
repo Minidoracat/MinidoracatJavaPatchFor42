@@ -1967,6 +1967,76 @@ helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會�
 `protectedCall` 未攔 `RuntimeException` ＋ `processServer` 對錯物件設 state，四者疊起來就是
 「client 無限等待」。附 `ItemTransactionPacket` 作為同 codebase 的正確對照即可。
 
+### 2026-09-07 補記：W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回
+
+**現況校正**：W10 上線後正式服 `caught` 恆 0 而 `rejected` 每 session 0–13——Kahlua 的 pcall
+其實會吞下 Lua 建構子例外並回 `isSuccess()==false`（log 形態＝`KahluaThread.flushErrorMessage`
+印 Lua stack），vanilla 的 `action=null` 路徑本來就走得到；**真正讓 client 卡死的是缺陷 2**
+（回覆 state 寫錯），A 刀是主力、B 刀退為保險絲。2026-09-07 起 `reject sent` 行加
+`player=`／`reason=`，供統計與向受害玩家索取 client `console.txt`。
+
+**第三條靜默路徑（正式服 8/31–9/7 共 98 次，8/31 session 40、9/6 06:52 session 27）**：
+
+```
+ERROR: General ... at GameServer.mainLoopDealWithNetData > Error with packet of type: NetTimedAction for <steamid>
+java.lang.NullPointerException: Cannot invoke "GameEntity.getComponent(ComponentType)" because "gameEntity" is null
+    zombie.network.PZNetKahluaTableImpl.loadComponent(PZNetKahluaTableImpl.java:531)
+    zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:689)   ← sbyt 36（CraftBench）
+    zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:546)
+    zombie.core.NetTimedAction.parse(NetTimedAction.java:155)                  ← actionArgs.load，offset 68
+```
+
+`parse` 在 `protectedCall`（offset 167）**之前**就炸——B 刀掛點到不了、`processServer` 不執行、
+既不 Accept 也不 Reject，正是 B-R1 的原始症狀從另一個入口重現。9/6 10:40–10:51 同一玩家 6 次
+NPE 對上他 10:52 的回報「製作木炭讀條跑完卡著」，chat 裡其他玩家補充「鐵桶搬過就壞掉、其他製作台可以」。
+
+**為什麼 server 找不到那個鐵桶（netID 設計）**：`IsoObject.getEntityNetID()`（:5831-5848）
+
+```
+netID = x + (y << 16) + (z << 32) + (objectIndex << 40)      // objectIndex = square.getObjects().indexOf(this)；isFloor() 固定 0
+```
+
+不是登記的號碼，是**座標＋該格物件清單順位**算出來的；client/server 各自從自己那格的清單算。
+搬移（pickup→place）讓物件離開清單（index -1，netID -1）再插回（新順位）；兩端插回順序
+不同、或 chunk 重載後順序不同，client 算的號碼在 server 要嘛不存在（本刀的 NPE）、要嘛指到
+別的物件。server 端 `idToEntityMap` 只在 `getEntityNetID()` 被讀取時才重算（lazy），搬移後沒人
+讀它，登記簿裡還是舊號。另一種形態＝同格兩物件同號：地板固定 index 0，若該格 objects[0]
+是牆框，兩者撞號——W24 修好 `%ld` 格式後 `idToEntityMap(...)=WoodFloorLvl3:..., expected null
+(entity=WoodenWallFrame...)` 9/6 23:10 起已印出 7 行。**根治＝換一套兩端一致的穩定 ID，
+要改序列化格式、client 也要改，純 server loose class 做不到、也不該做**——只能回報 TIS。
+
+**手術（兩個 1:1 同形 redirect＋既有 B 刀改道點加旗標檢查；kill switch `-Dmdc.netTimedActionArgs=0`）**：
+
+| 刀 | 掛點 | 改道 | 效果 |
+|---|---|---|---|
+| D1 | `NetTimedAction.parse` 內唯一的 `PZNetKahluaTableImpl.load(ByteBufferReader,IConnection)V`（offset 68） | → `NetTimedActionGuard.loadArgs` | 攔 `RuntimeException`（NPE／BufferUnderflow／未知 sbyt）設 ThreadLocal 旗標；parse 照常走到 `protectedCall` 改道點，看到旗標**不呼叫 Lua 建構子**（`arguments[]` 不完整）直接回 LuaFail → vanilla `action=null` → A 刀 Reject → client `forceStop`。`Error` 穿透 |
+| D2 | `PZNetKahluaTableImpl.load(…,byte)` 內 sbyt 36 唯一的 `loadComponent(ByteBuffer,IConnection)`（offset 890） | → `NetTimedActionGuard.loadComponent` | 前四步複製 vanilla（getLong／getShort／GetEntity／getComponent，SmokeCheck 釘同構）；`GetEntity` 回 null 時解碼 netID 的座標、`ServerMap.getGridSquare(x,y,z)`、該格**恰好一個**帶該 component 的 IsoObject 才救回（並呼叫其 `getEntityNetID()` 讓 server map 對齊現況），否則設旗標 |
+
+D2 的三道門：座標合法（z≤63、index≤4096）、該格在**該連線玩家 12 格內**、候選唯一。距離門的
+理由：`InventoryItem.getEntityNetID()` 回 item id（int），與 IsoObject 在 z=0、index=0 的號碼
+落在同一個數值空間，誤解碼出來的座標散布全地圖，落在玩家 12 格內又恰好有一個同型 component
+的機率可忽略；CraftBench（ComponentType 19，flags=0）確實可掛在 item 上，所以這道門不能省。
+救回後的動作由 vanilla 照常 Accept／perform，玩家體感＝「搬過的鐵桶直接能用」；救不回＝有聲
+失敗（同 W10 語意，不猜）。`loadComponent` 是 `PZNetKahluaTableImpl.load` 的共用路徑
+（server command args 也走），D2 對所有使用者生效；旗標只在 `parse` 的 D1 先清、B 刀改道點消費，
+其他路徑不消費旗標也不受影響。
+
+**守門**：SmokeCheck 五條——(1) vanilla `parse` 內 `load` 恰 1 且**先於** `protectedCall`
+（「B 刀掛點到不了」的結構事實）；(2) vanilla `load(…,byte)` 內 `loadComponent` 恰 1、
+`loadComponent` 四步各 1 且零 IFNULL/IFNONNULL（**TIS 補 null 檢查時本條紅＝D2 撤刀訊號**）；
+(3) 手術後 parse `loadArgs` 改道 x1／原 load 歸零、`load(…,byte)` 改道 x1／原呼叫歸零／真指令不變；
+(4) helper 契約：`loadArgs` 委派 2（off 直通＋try 內）、catch 恰 1 且 RuntimeException；
+`loadComponent` 委派 vanilla 1（off 直通）＋自身 getLong/getShort/GetEntity 各 1；(5) 負對照：
+PZNetKahluaTableImpl 全 class `loadComponent` 呼叫恰少 1。行為測試 `NetTimedActionGuardTest`
+新增 `args-off` 組態：旗標流程、ctor 不被呼叫、netID 解碼、GetEntity 未命中且無連線玩家 → 旗標
+→ 拒絕、kill switch 下 NPE 原樣外傳。**座標救回命中路徑需真實 IsoGridSquare／IsoPlayer，測試 JVM
+無法建構，線上以 `component recovered` 行驗收。**
+
+**驗收**：`Error with packet of type: NetTimedAction` 歸零；heartbeat `argsFailed`／`argsRejected`／
+`componentMissing`／`componentRecovered` 四計數——`componentRecovered/componentMissing` 是「搬過的鐵桶
+直接救回」的比例、`argsRejected` 是仍要玩家重試的份額；`reject sent … player= reason=` 逐筆帶玩家名。
+`anomalies` 恆 0。
+
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
 
 **事故**：2026-08-23 19:25:45 起（W10 部署後第一晚，與 W10 無關——stack 全程不經
@@ -3188,6 +3258,57 @@ vanilla `remove`（會觸發 `GameServer`/`GameClient` class init）。
   無安全刀；R 非零 ⇒ 另案查連線生命週期。
 - 官方回報：B（server remove 不回包）與 C（-1 → 30 分鐘）各自成案，等本刀數據後補進
   `docs/report/` 的 TIS 回報（B-R1 更新＋兩份新報告）。
+
+### 2026-09-07 五天觀測結論＋W10-E 跨玩家 id 撞號連帶取消（observe）
+
+**三條路徑的份額（9/2 22:06 上線～9/7，逐 session heartbeat）**：
+
+| 路徑 | 數據 | 判讀 |
+|---|---|---|
+| C `negativeDuration` | ≈10% starts；type 全是動畫驅動合法 -1（ISWaitWhileGettingUp 15141、ISRackFirearm 5862、ISReloadWeaponAction 2516、ISChopTreeAction 1947、SkillRecoveryJournalAction 1072…），**零 ISHandcraftAction** | 立案時的 recipe-nil 假說沒發生；C 不是問題 |
+| B `interruptedAccepted` | ≈4–5% starts；old 幾乎全是本人的 ISWaitWhileGettingUp（10762）、ISEquipWeaponAction（1440，waitedMs≤2ms）、ISRestAction（271，主動中斷休息） | 沒有任何正 duration 製作在等了數秒後被打斷；**enforce 不開** |
+| R | `performFalse` 有（ISUnlockVehicleDoor 654、ISEquipWeaponAction 347、ISPickupAnimal 81、ISDestroyStuffAction 42…）vanilla 照送 Reject；`connNull` 恆 0 | 非卡死 |
+
+玩家卻仍在回報（9/4、9/5、9/6 ×2、9/7 民調），server 端的答案是 §2x 補記的 W10-D 路徑（log 有實證）
+與下面這條（程式碼實證、線上待觀測）。
+
+**W10-E：`ActionManager.remove` 只比 byte id，跨玩家連帶取消**（codex gpt-6-astra 對抗審查發現，
+javap 複核）：
+
+- `Action.lastId` 是 **各 client 自己的** static byte，1..255 循環（`Action.set:37-45`）——不同玩家
+  可同時持有相同 id。
+- server 端 `ActionManager.stop(Action)` 丟掉玩家身分，只呼叫 `remove(action.id, true)`（javap
+  offset 24）；server 分支的 `remove` 對整份 `actions` 只比 `t.id == id`（`lambda$remove$1` 只讀
+  `Action.id`）、逐一 `stop()`、**不回封包**。
+- 所有 server 端取消都經 `stop(Action)`：`stopPlayerActions`（新 Request 打斷舊動作）與
+  `GeneralActionPacket.processServer`（client 取消，offset 30）——單一掛點涵蓋全部。
+- 機制：乙送新 Request 時 `stopPlayerActions(乙)` 停掉乙**掛著的 -1 動作**（ISWaitWhileGettingUp
+  等在 server 端會掛到 30 分鐘或被打斷），若甲正在跑的製作與它同 id，甲的製作被一起無聲移除
+  ——甲永遠等不到 Done／Reject，而 W10-C 的打斷觀測只掃本人所以零指紋。推估每次 interrupt 命中率
+  ≈（同時 Accept 中的正 duration 動作數）/255，每 session `interruptedAccepted` 數百～1400 次
+  ⇒ 理論上每 session 數十次受害，型態正好是「間歇、server log 安靜」。**線上實證待本刀數據。**
+
+**手術**（掛在既存 `ActionManager` ClassPatch；`expectedHits=2`）：`stop(Action)` 頭部 headCall
+`MdcTimedActionProbe.onStop(Action)`（ThreadLocal 捕獲發起者）＋其內唯一的 `remove(BZ)V`
+改道 `removeById`（掃同 id、記「player ≠ 發起者」的 victim：type／state／duration／已等 ms／剩餘 ms、
+`active`（正 duration＝真受害）vs `anim(-1)`（掛著的動畫動作，client 早已完成，無害）；再原樣委派
+vanilla `remove`）。發起者可能是 `GeneralActionPacket.getAction()` 的臨時 copyFrom 物件，故以
+`playerId` 判同人而非 identity。heartbeat 加 `removeCalls/removeMultiHit/crossPlayerRemovals/
+crossVictimsActive/crossVictimsAnim`；逐筆 `crossPlayerRemove#` 行。沿用 `-Dmdc.timedActionProbe`
+三態（off 直通）。
+
+**enforce（另案，等數據）**：`removeById` 在有發起者時只移除發起者那一個物件（`actions.remove(initiator)`
+＋`stop()`＋emulator remove），不再照 id 掃。手術點已就位，enforce 只改 helper。
+
+**守門**：SmokeCheck 三條——vanilla `stop` 內 `remove=1`、`stopPlayerActions`／`GeneralActionPacket`
+零直接 `remove`、`lambda$remove$*` 恰 2 個且只讀 `Action.id` 零 `playerId`（**TIS 加 playerId 比對時
+紅＝撤刀**）；手術後 `stop` headCall 全序＋改道 x1／原呼叫歸零／真指令 +2；helper 委派 vanilla
+`remove` 恰 1。行為測試 `MdcTimedActionProbeTest` 三組態新增撞號案例（乙取消 → 甲＋丙 active
+victim；甲取消 → 乙 anim＋丙 active；無撞號零 cross；臨時發起者同 playerId 不算）。
+
+**驗收**：一個晚峰後 `crossVictimsActive` 若非零＝撞號實證 → 開 enforce 立案；`crossVictimsAnim`
+預期非零但無害。同時觀察玩家回報是否隨 W10-D 下降——兩刀同時上線，用 `reject sent reason=`
+（W10-D）與 `crossPlayerRemove#`（W10-E）分別對帳。
 ---
 
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）

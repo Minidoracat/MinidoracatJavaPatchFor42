@@ -1329,6 +1329,62 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKESTATIC, ntaGuardCls,
                         "write", writeHelperDesc) == 2);
 
+        // ---- W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回 ----
+        String netTableCls = "zombie/network/PZNetKahluaTableImpl";
+        String argsLoadDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String argsLoadHelperDesc = "(L" + netTableCls + ";Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String tableLoadByteDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;";
+        String loadCompDesc = "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;";
+        // vanilla 前提 (D1)：parse 內 actionArgs.load 恰 1，且在 protectedCall 之前——這就是
+        // 「B 刀掛點到不了」的結構事實（TIS 把參數解析包進 pcall 或搬到 ctor 之後時本條紅）。
+        failed += check("W10-D vanilla 前提：parse 內 PZNetKahluaTableImpl.load 恰 1 且先於 protectedCall",
+                countExactCalls(vNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 1
+                && firstCallIndex(vNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc)
+                        < firstCallIndex(vNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc));
+        // vanilla 前提 (D2)：load(…,byte) 內 loadComponent 恰 1；vanilla loadComponent 形狀＝
+        // getLong／getShort／GetEntity／getComponent 各 1、零 null 分支——helper 複製的前四步
+        // 與它同構。TIS 補上 null 檢查時本條紅＝D2 撤刀訊號。
+        MethodNode vTableLoadB = methodFromJar(jar, netTableCls, "load", tableLoadByteDesc);
+        MethodNode vLoadComp = methodFromJar(jar, netTableCls, "loadComponent", loadCompDesc);
+        failed += check("W10-D vanilla 前提：load(…,byte) 內 loadComponent 恰 1；loadComponent 四步各 1 且零 null 分支",
+                countExactCalls(vTableLoadB, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 1
+                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J") == 1
+                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getShort", "()S") == 1
+                && countExactCalls(vLoadComp, Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager", "GetEntity",
+                        "(J)Lzombie/entity/GameEntity;") == 1
+                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "zombie/entity/GameEntity", "getComponent",
+                        "(Lzombie/entity/ComponentType;)Lzombie/entity/Component;") == 1
+                && countOpcode(vLoadComp, Opcodes.IFNULL) == 0 && countOpcode(vLoadComp, Opcodes.IFNONNULL) == 0);
+        // 手術後：parse 的 load 改道 x1、原呼叫歸零（真指令不變由上方 W10 斷言鎖）；
+        // load(…,byte) 的 loadComponent 改道 x1、原呼叫歸零、真指令不變。
+        MethodNode pTableLoadB = method(distJava, netTableCls, "load", tableLoadByteDesc);
+        failed += check("W10-D 手術後：parse loadArgs 改道 x1、原 load 歸零；load(…,byte) loadComponent 改道 x1、原呼叫歸零、真指令不變",
+                countExactCalls(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "loadArgs", argsLoadHelperDesc) == 1
+                && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 0
+                && countExactCalls(pTableLoadB, Opcodes.INVOKESTATIC, ntaGuardCls, "loadComponent", loadCompDesc) == 1
+                && countExactCalls(pTableLoadB, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 0
+                && realInsnCount(pTableLoadB) == realInsnCount(vTableLoadB));
+        // helper 契約：loadArgs 委派原 load 恰 2（off 直通＋try 內）、catch 恰 1 且 RuntimeException；
+        // loadComponent 委派 vanilla 恰 1（off 直通）、自身 getLong/getShort/GetEntity 各 1（複製四步）。
+        MethodNode gLoadArgs = method(distJava, ntaGuardCls, "loadArgs", argsLoadHelperDesc);
+        MethodNode gLoadComp = method(distJava, ntaGuardCls, "loadComponent", loadCompDesc);
+        failed += check("W10-D helper 契約：loadArgs 委派 2／catch RuntimeException 恰 1；loadComponent 委派 1＋四步各 1",
+                countExactCalls(gLoadArgs, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 2
+                && gLoadArgs.tryCatchBlocks != null && gLoadArgs.tryCatchBlocks.size() == 1
+                && "java/lang/RuntimeException".equals(gLoadArgs.tryCatchBlocks.get(0).type)
+                && countExactCalls(gLoadComp, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 1
+                && countExactCalls(gLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J") == 1
+                && countExactCalls(gLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getShort", "()S") == 1
+                && countExactCalls(gLoadComp, Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager", "GetEntity",
+                        "(J)Lzombie/entity/GameEntity;") == 1);
+        // 負對照：PZNetKahluaTableImpl 全 class 的 loadComponent invokestatic 恰少 1（其餘方法未動）。
+        failed += check("W10-D 負對照：PZNetKahluaTableImpl 全 class loadComponent 呼叫恰少 1、改道恰 1",
+                classWideCalls(classNode(distJava, netTableCls), Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc)
+                        == classWideCalls(classNodeFromJar(jar, netTableCls), Opcodes.INVOKESTATIC, netTableCls,
+                                "loadComponent", loadCompDesc) - 1
+                && classWideCalls(classNode(distJava, netTableCls), Opcodes.INVOKESTATIC, ntaGuardCls,
+                        "loadComponent", loadCompDesc) == 1);
+
         // ---- W11 動物聲音排序活鎖捕手 ----
         String basCls = "zombie/characters/BaseAnimalSoundManager";
         String asgCls = "zombie/mdc/AnimalSortGuard";
@@ -2084,6 +2140,46 @@ public final class SmokeCheck {
                         "(Lzombie/core/network/ByteBufferWriter;)V") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
+
+        // ---- W10-E 跨玩家 id 撞號連帶取消觀測 ----
+        String actionCls = "zombie/core/Action";
+        String amStopDesc = "(L" + actionCls + ";)V";
+        // vanilla 前提（撞號存在理由）：stop(Action) 內 remove(BZ) 恰 1；stopPlayerActions 與
+        // GeneralActionPacket.processServer 都只經 stop（零直接 remove）＝單一掛點涵蓋全部取消路徑；
+        // remove 方法內的 lambda 只讀 Action.id、零 playerId（TIS 加 playerId 比對時本條紅＝撤刀）。
+        MethodNode vAmStop = methodFromJar(jar, amCls, "stop", amStopDesc);
+        MethodNode vAmStopAll = methodFromJar(jar, amCls, "stopPlayerActions", stopDesc);
+        MethodNode vGapProcess = methodFromJar(jar, "zombie/network/packets/GeneralActionPacket", "processServer", psDesc);
+        ClassNode vAmNode = classNodeFromJar(jar, amCls);
+        int removeLambdas = 0;
+        boolean removeLambdaIdOnly = true;
+        for (MethodNode m : vAmNode.methods) {
+            if (!m.name.startsWith("lambda$remove$")) {
+                continue;
+            }
+            removeLambdas++;
+            removeLambdaIdOnly &= countExactFields(m, Opcodes.GETFIELD, actionCls, "id", "B") == 1
+                    && countExactFields(m, Opcodes.GETFIELD, actionCls, "playerId",
+                            "Lzombie/network/fields/character/PlayerID;") == 0;
+        }
+        failed += check("W10-E vanilla 前提：stop 內 remove=1；stopPlayerActions/GeneralActionPacket 只經 stop；remove 的 lambda 只比 id",
+                countExactCalls(vAmStop, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1
+                && countExactCalls(vAmStopAll, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1
+                && countExactCalls(vAmStopAll, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
+                && countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1
+                && countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
+                && removeLambdas == 2 && removeLambdaIdOnly);
+        // 手術後：stop 頭部 headCall 全序＋remove 改道 x1、原呼叫歸零、真指令恰 +2。
+        MethodNode pAmStop = method(distJava, amCls, "stop", amStopDesc);
+        failed += check("W10-E 手術後：stop headCall 全序＋removeById 改道 x1、原 remove 歸零、真指令恰 +2",
+                headCallOk(pAmStop, taProbeCls, "onStop", amStopDesc)
+                && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, taProbeCls, "removeById", "(BZ)V") == 1
+                && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
+                && realInsnCount(pAmStop) == realInsnCount(vAmStop) + 2);
+        // helper 契約：removeById 委派 vanilla remove 恰 1（observe 不改移除語意）。
+        MethodNode gRemove = method(distJava, taProbeCls, "removeById", "(BZ)V");
+        failed += check("W10-E helper 契約：removeById 委派 ActionManager.remove 恰 1",
+                countExactCalls(gRemove, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1);
 
         // ---- W23 帳號上限登入期執法：兩個登入封包各改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla 恰 1 ----
         String swdbCls = "zombie/network/ServerWorldDatabase";
