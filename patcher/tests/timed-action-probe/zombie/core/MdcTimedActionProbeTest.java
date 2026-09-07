@@ -28,11 +28,15 @@ public final class MdcTimedActionProbeTest {
             default -> MdcTimedActionProbe.MODE_OBSERVE;
         };
         expect("property 與測試模式一致（" + want + "）", MdcTimedActionProbe.MODE == wantMode);
+        boolean wantScopePlayer = !(args.length > 1 && "scope-vanilla".equals(args[1]));
+        expect("actionRemoveScope 與 argv 一致（" + (wantScopePlayer ? "player" : "vanilla") + "）",
+                MdcTimedActionProbe.SCOPE_PLAYER == wantScopePlayer);
 
         testStart(wantMode);
         testInterrupt(wantMode);
         testPerform(wantMode);
         testCrossPlayerRemove(wantMode);
+        testScopedRemove(wantMode);
 
         if (failed != 0) {
             System.out.println("timed-action-probe FAIL " + failed + " 項");
@@ -250,6 +254,76 @@ public final class MdcTimedActionProbeTest {
             }
             expect("remove 觀測零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
         } finally {
+            queue.clear();
+        }
+    }
+
+    /**
+     * W10-E enforce：scope=player 時 removeById 只刪同 id＋同 playerId；取消已完成 id（清單內只有別人）
+     * ＝什麼都不刪；身分不明退回 vanilla；scope=vanilla 完全不接手。走 removeScopedForTest（不委派 vanilla）。
+     */
+    @SuppressWarnings("unchecked")
+    private static void testScopedRemove(int mode) {
+        Collection<Object> queue = (Collection<Object>) MdcTimedActionProbe.actionsQueueForTest();
+        if (queue == null) {
+            return;
+        }
+        queue.clear();
+        MdcTimedActionProbe.identityByIdForTest = true;
+        try {
+            byte sharedId = 66;
+            NetTimedActionPacket craft = newAction(30_000L);   // 甲的製作
+            craft.id = sharedId; craft.playerId.setID((short) 1); craft.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket idle = newAction(-1L);        // 乙掛著的 -1
+            idle.id = sharedId; idle.playerId.setID((short) 2); idle.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket idle2 = newAction(-1L);       // 乙的第二個同 id（理論上可存在）
+            idle2.id = sharedId; idle2.playerId.setID((short) 2); idle2.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket unrelated = newAction(5_000L);
+            unrelated.playerId.setID((short) 4);
+            queue.add(craft); queue.add(idle); queue.add(idle2); queue.add(unrelated);
+
+            long scoped0 = MdcTimedActionProbe.scopedRemovalsForTest();
+            long fb0 = MdcTimedActionProbe.scopeFallbacksForTest();
+
+            // 1. 乙 stopPlayerActions 路徑（發起者＝清單內真物件）：只刪乙的兩個，甲的製作與 unrelated 保留
+            boolean took = MdcTimedActionProbe.removeScopedForTest(idle, sharedId);
+            if (MdcTimedActionProbe.SCOPE_PLAYER) {
+                expect("scope=player：接手、乙的同 id 兩筆被刪、甲的製作保留、不同 id 保留",
+                        took && queue.contains(craft) && queue.contains(unrelated)
+                        && !queue.contains(idle) && !queue.contains(idle2) && queue.size() == 2
+                        && MdcTimedActionProbe.scopedRemovalsForTest() == scoped0 + 1);
+            } else {
+                expect("scope=vanilla：不接手、清單不動", !took && queue.size() == 4
+                        && MdcTimedActionProbe.scopedRemovalsForTest() == scoped0);
+            }
+
+            // 2. GeneralActionPacket 路徑（臨時物件、同 playerId、server 已無該 id 的自己動作）：什麼都不刪
+            NetTimedActionPacket ghost = newAction(5_000L);
+            ghost.id = sharedId; ghost.playerId.setID((short) 3);   // 丙取消一個已完成的 id 66
+            int before = queue.size();
+            took = MdcTimedActionProbe.removeScopedForTest(ghost, sharedId);
+            if (MdcTimedActionProbe.SCOPE_PLAYER) {
+                expect("scope=player：取消已完成的 id → 接手且零移除（vanilla 在此會刪甲的製作）",
+                        took && queue.size() == before && queue.contains(craft));
+            } else {
+                expect("scope=vanilla：不接手", !took && queue.size() == before);
+            }
+
+            // 3. 身分不明（seam 關閉＝getPlayer()==null）→ 不接手（退回 vanilla）
+            MdcTimedActionProbe.identityByIdForTest = false;
+            took = MdcTimedActionProbe.removeScopedForTest(ghost, sharedId);
+            expect("身分不明：不接手（退回 vanilla）", !took && queue.contains(craft));
+            MdcTimedActionProbe.identityByIdForTest = true;
+
+            // 4. 甲自己取消自己的製作 → 只刪甲的
+            took = MdcTimedActionProbe.removeScopedForTest(craft, sharedId);
+            if (MdcTimedActionProbe.SCOPE_PLAYER) {
+                expect("scope=player：發起者自己的動作被刪、其他保留", took && !queue.contains(craft) && queue.contains(unrelated));
+            }
+            expect("scope 路徑零 fallback、零 anomalies",
+                    MdcTimedActionProbe.scopeFallbacksForTest() == fb0 && MdcTimedActionProbe.anomaliesForTest() == 0);
+        } finally {
+            MdcTimedActionProbe.identityByIdForTest = false;
             queue.clear();
         }
     }

@@ -2178,8 +2178,20 @@ public final class SmokeCheck {
                 && realInsnCount(pAmStop) == realInsnCount(vAmStop) + 2);
         // helper 契約：removeById 委派 vanilla remove 恰 1（observe 不改移除語意）。
         MethodNode gRemove = method(distJava, taProbeCls, "removeById", "(BZ)V");
-        failed += check("W10-E helper 契約：removeById 委派 ActionManager.remove 恰 1",
+        failed += check("W10-E helper 契約：removeById 委派 ActionManager.remove 恰 1（scope=vanilla／身分不明的退路）",
                 countExactCalls(gRemove, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1);
+        // enforce 形狀：vanilla server 分支＝removeAll → 逐筆 Action.stop() → AnimEventEmulator.remove；
+        // helper 的 removeScoped 複製這三步各恰 1，且 vanilla remove 內這三步也各恰 1（複製依據）。
+        String emuCls = "zombie/network/server/AnimEventEmulator";
+        String emuRemoveDesc = "(L" + ntaCls + ";)V";
+        MethodNode gScoped = method(distJava, taProbeCls, "removeScoped", "(L" + actionCls + ";B)Z");
+        failed += check("W10-E enforce 形狀：vanilla remove 內 Action.stop=1／AnimEventEmulator.remove=1；removeScoped 複製三步各 1、零 vanilla remove 委派",
+                countExactCalls(vAmRemove, Opcodes.INVOKEVIRTUAL, actionCls, "stop", "()V") == 1
+                && countExactCalls(vAmRemove, Opcodes.INVOKEVIRTUAL, emuCls, "remove", emuRemoveDesc) == 1
+                && countExactCalls(gScoped, Opcodes.INVOKEVIRTUAL, actionCls, "stop", "()V") == 1
+                && countExactCalls(gScoped, Opcodes.INVOKEVIRTUAL, emuCls, "remove", emuRemoveDesc) == 1
+                && countCalls(gScoped, "java/util/Collection", "removeAll") == 1
+                && countExactCalls(gScoped, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0);
 
         // ---- W23 帳號上限登入期執法：兩個登入封包各改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla 恰 1 ----
         String swdbCls = "zombie/network/ServerWorldDatabase";

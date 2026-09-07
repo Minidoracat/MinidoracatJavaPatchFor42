@@ -3313,21 +3313,31 @@ vanilla `remove`）。發起者可能是 `GeneralActionPacket.getAction()` 的�
 crossVictimsActive/crossVictimsAnim`；逐筆 `crossPlayerRemove#` 行。沿用 `-Dmdc.timedActionProbe`
 三態（off 直通）。
 
-**enforce（另案，等數據）**：`removeById` 在有發起者時只移除發起者那一個物件（`actions.remove(initiator)`
-＋`stop()`＋emulator remove），不再照 id 掃。手術點已就位，enforce 只改 helper。**條件（codex 對抗審查
-補充）**：`GeneralActionPacket` 路徑的 `stop(act)` 收到的是 `getAction()` 的臨時 copyFrom 物件，不是
-queue 內那個 Action，且 `setReject()` 只設 id/state——enforce 必須用 `processServer` 的 authenticated
-`connection → player + id` 定位 victim，不能靠 packet 物件 identity 或其預設 `playerId`。
+**enforce（2026-09-07 晚間定罪後同日上線；獨立開關 `-Dmdc.actionRemoveScope`＝`1|player` 預設／
+`0|vanilla`，不綁 W10-C 的 `timedActionProbe` 三態）**：`removeById` 在發起者身分明確
+（`initiator.playerId.getPlayer() != null`——`stopPlayerActions` 給的是清單內真物件，`GeneralActionPacket`
+的臨時物件在 `copyFrom` 時 `set(player)`，player 為 null 早在 copyFrom 就 NPE 到不了這裡）時，只移除
+「同 id **且** 同 `playerId`」的動作，複製 vanilla server 分支的三步（`removeAll` → 逐筆 `stop()` →
+`AnimEventEmulator.remove`），**不再委派 vanilla**；清單內沒有自己的同 id 動作（98% 的案例＝取消
+已完成的 id）就什麼都不刪。`removeAll` 之前的任何失敗退回 vanilla（`scopeFallbacks++`），之後不再退回
+（否則 vanilla 會把剛保住的他人動作刪掉），`stop()` 失敗只計 `anomalies`。**不用 `actions.remove(initiator)`
+identity 移除**的理由（codex 對抗審查補充）：`GeneralActionPacket` 路徑的 `stop(act)` 收到的是
+`getAction()` 的臨時 copyFrom 物件，不是 queue 內那個 Action——只能靠 playerId＋id 定位。onlineID 0 是
+合法值（`ConnectCoopPacket`：`slot*4+playerIndex`），故身分門不用 id 而用 player 物件。observe 行
+在 enforce 下印 `action=spared(scope=player)`；heartbeat 加 `scopedRemovals`／`scopeFallbacks`（應恆 0）。
 
-**守門**：SmokeCheck 三條——vanilla `stop` 內 `remove=1`、`stopPlayerActions`／`GeneralActionPacket`
+**守門**：SmokeCheck 四條——vanilla `stop` 內 `remove=1`、`stopPlayerActions`／`GeneralActionPacket`
 零直接 `remove`、`lambda$remove$*` 恰 2 個且只讀 `Action.id` 零 `playerId`（**TIS 加 playerId 比對時
-紅＝撤刀**）；手術後 `stop` headCall 全序＋改道 x1／原呼叫歸零／真指令 +2；helper 委派 vanilla
-`remove` 恰 1。行為測試 `MdcTimedActionProbeTest` 三組態新增撞號案例（乙取消 → 甲＋丙 active
-victim；甲取消 → 乙 anim＋丙 active；無撞號零 cross；臨時發起者同 playerId 不算）。
+紅＝撤刀**）；手術後 `stop` headCall 全序＋改道 x1／原呼叫歸零／真指令 +2；helper `removeById` 委派
+vanilla `remove` 恰 1（退路）；enforce 形狀＝vanilla `remove` 內 `Action.stop`／`AnimEventEmulator.remove`
+各 1 且 `removeScoped` 複製三步各 1、零 vanilla 委派。行為測試 `MdcTimedActionProbeTest` 四組態
+（observe／enforce／off／observe＋`actionRemoveScope=0`）：撞號 victim 分類、scope=player 只刪同玩家
+（乙的兩筆刪、甲的製作與不同 id 保留）、取消已完成 id 零移除、身分不明退回 vanilla、scope=vanilla 不接手
+（測試 seam `identityByIdForTest`：測試 JVM 建不出 IsoPlayer）。
 
-**驗收**：一個晚峰後 `crossVictimsActive` 若非零＝撞號實證 → 開 enforce 立案；`crossVictimsAnim`
-預期非零但無害。同時觀察玩家回報是否隨 W10-D 下降——兩刀同時上線，用 `reject sent reason=`
-（W10-D）與 `crossPlayerRemove#`（W10-E）分別對帳。
+**驗收**：重啟後 `crossVictimsActive` 仍會計數（它量的是「vanilla 會刪的他人動作」），但逐筆行應全為
+`spared(scope=player)`、`scopedRemovals` 隨 `removeCalls` 上升、`scopeFallbacks=0`、`anomalies=0`；
+玩家「讀條走滿不完成」回報應大幅下降。W10-D 用 `reject sent reason=`／`component recovered` 另行對帳。
 ---
 
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
