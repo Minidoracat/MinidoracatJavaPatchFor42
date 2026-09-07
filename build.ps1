@@ -326,6 +326,8 @@ java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzom
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
 java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
 Assert-Ok "MdcTimedActionProbeTest（off 文字別名，純直通）"
+java "-Dmdc.actionRemoveScope=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe scope-vanilla
+Assert-Ok "MdcTimedActionProbeTest（observe＋actionRemoveScope=0，W10-E enforce 關閉＝vanilla 全表刪除）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、

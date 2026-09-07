@@ -1,7 +1,9 @@
 package zombie.core;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 
 import zombie.GameTime;
 import zombie.characters.IsoPlayer;
@@ -12,6 +14,7 @@ import zombie.network.GameServer;
 import zombie.network.PacketTypes;
 import zombie.network.fields.character.PlayerID;
 import zombie.network.packets.NetTimedActionPacket;
+import zombie.network.server.AnimEventEmulator;
 
 /**
  * W10-C 卡讀條第二波觀測刀（立案 2026-08-28、落地 2026-09-02；docs/patches.md 2aj）。放在 {@code zombie.core}
@@ -68,6 +71,10 @@ public final class MdcTimedActionProbe {
     static final int MODE_OBSERVE = 2;
 
     static final int MODE = parseMode();
+    /** W10-E enforce：{@code -Dmdc.actionRemoveScope}＝{@code 1|player}（預設）只刪同玩家／{@code 0|vanilla} 照 id 掃全表。獨立於 MODE。 */
+    static final boolean SCOPE_PLAYER = parseScope();
+    /** 測試 seam：測試 JVM 建不出 IsoPlayer，允許以 playerId 的 id 當身分（正式碼永遠 false）。 */
+    static boolean identityByIdForTest;
 
     private static final long WINDOW_NS = 10_000_000_000L;
     private static final int WINDOW_CAP = 20;
@@ -98,6 +105,8 @@ public final class MdcTimedActionProbe {
     private static long crossPlayerRemovals;
     private static long crossVictimsActive;
     private static long crossVictimsAnim;
+    private static long scopedRemovals;
+    private static long scopeFallbacks;
     private static long logged;
     private static long suppressed;
     private static long anomalies;
@@ -282,13 +291,25 @@ public final class MdcTimedActionProbe {
         }
     }
 
+    /**
+     * W10-E：{@code ActionManager.stop(Action)} 內唯一 {@code remove(BZ)V} 的改道目標。
+     * observe 簿記後，{@code -Dmdc.actionRemoveScope} 為 player（預設）且發起者身分明確時，
+     * 只移除「同 id 且同 playerId」的動作（複製 vanilla server 分支的三步：removeAll／stop／
+     * emulator remove），不再照 id 掃全表；身分不明或 scope=vanilla 才委派 vanilla。
+     */
     public static void removeById(byte id, boolean cancelled) {
+        Action initiator = CURRENT_STOP.get();
+        CURRENT_STOP.set(null);
+        boolean canScope = SCOPE_PLAYER && identityKnown(initiator);
         if (MODE != MODE_OFF) {
             try {
-                inspectRemove(id, cancelled);
+                inspectRemove(initiator, id, cancelled, canScope);
             } catch (RuntimeException e) {
                 anomalies++;
             }
+        }
+        if (canScope && removeScoped(initiator, id)) {
+            return;
         }
         ActionManager.remove(id, cancelled);
     }
@@ -298,18 +319,73 @@ public final class MdcTimedActionProbe {
         if (MODE == MODE_OFF) {
             return;
         }
-        CURRENT_STOP.set(initiator);
         try {
-            inspectRemove(id, cancelled);
+            inspectRemove(initiator, id, cancelled, SCOPE_PLAYER && identityKnown(initiator));
         } catch (RuntimeException e) {
             anomalies++;
         }
     }
 
-    private static void inspectRemove(byte id, boolean cancelled) {
+    /** 測試入口：只跑 scope=player 的精準移除（不委派 vanilla）；回傳是否接手。 */
+    static boolean removeScopedForTest(Action initiator, byte id) {
+        return SCOPE_PLAYER && identityKnown(initiator) && removeScoped(initiator, id);
+    }
+
+    /** 發起者身分：GeneralActionPacket 的臨時物件在 copyFrom 時 set 了 player；stopPlayerActions 的是清單內真物件。 */
+    private static boolean identityKnown(Action initiator) {
+        try {
+            return initiator != null && initiator.playerId != null
+                    && (initiator.playerId.getPlayer() != null || identityByIdForTest);
+        } catch (RuntimeException e) {
+            anomalies++;
+            return false;
+        }
+    }
+
+    /**
+     * 只移除同 id＋同 playerId 的動作。removeAll 之前的任何失敗回 false（退回 vanilla）；
+     * removeAll 之後不再退回（否則 vanilla 會把剛保住的他人動作刪掉），stop 失敗只計 anomalies。
+     */
+    private static boolean removeScoped(Action initiator, byte id) {
+        List<Action> mine = new ArrayList<>();
+        Collection<?> actions;
+        try {
+            actions = actionsQueue();
+            if (actions == null) {
+                scopeFallbacks++;
+                return false;
+            }
+            short pid = initiator.playerId.getID();
+            for (Object o : actions) {
+                if (o instanceof Action a && a.id == id && a.playerId.getID() == pid) {
+                    mine.add(a);
+                }
+            }
+        } catch (RuntimeException e) {
+            anomalies++;
+            scopeFallbacks++;
+            return false;
+        }
+        scopedRemovals++;
+        if (mine.isEmpty()) {
+            return true;   // 取消的是 server 已完成的 id（98% 的案例）：vanilla 在此會刪別人的，正確語意是什麼都不做
+        }
+        actions.removeAll(mine);
+        for (Action a : mine) {
+            try {
+                a.stop();
+            } catch (RuntimeException e) {
+                anomalies++;
+            }
+            if (a instanceof NetTimedAction nta) {
+                AnimEventEmulator.getInstance().remove(nta);
+            }
+        }
+        return true;
+    }
+
+    private static void inspectRemove(Action initiator, byte id, boolean cancelled, boolean canScope) {
         removeCalls++;
-        Action initiator = CURRENT_STOP.get();
-        CURRENT_STOP.set(null);
         Collection<?> actions = actionsQueue();
         if (actions == null || actions.isEmpty()) {
             return;
@@ -346,7 +422,7 @@ public final class MdcTimedActionProbe {
                         + " waitedMs=" + (now - victim.startTime)
                         + " remainingMs=" + (victim.endTime - now)
                         + " kind=" + (anim ? "anim(-1)" : "active")
-                        + " action=silent-drop(vanilla)"
+                        + " action=" + (canScope ? "spared(scope=player)" : "silent-drop(vanilla)")
                         + " suppressed=" + suppressed + ".");
             }
         }
@@ -419,8 +495,9 @@ public final class MdcTimedActionProbe {
 
     private static void showBanner() {
         bannerShown = true;
-        DebugLog.log(TAG + " 首次生效 mode=" + MODE
+        DebugLog.log(TAG + " 首次生效 mode=" + MODE + " scope=" + (SCOPE_PLAYER ? "player" : "vanilla")
                 + "（-Dmdc.timedActionProbe=0|off/1|enforce(打斷時補送 Reject)/2|observe 預設；"
+                + "-Dmdc.actionRemoveScope=1|player 預設(取消只刪同玩家)/0|vanilla；"
                 + "觀測 negativeDuration/interrupted/performFalse/connNull/crossPlayerRemove）.");
     }
 
@@ -444,10 +521,26 @@ public final class MdcTimedActionProbe {
                     + " removeCalls=" + removeCalls + " removeMultiHit=" + removeMultiHit
                     + " crossPlayerRemovals=" + crossPlayerRemovals
                     + " crossVictimsActive=" + crossVictimsActive + " crossVictimsAnim=" + crossVictimsAnim
+                    + " scopedRemovals=" + scopedRemovals + " scopeFallbacks=" + scopeFallbacks
                     + " logged=" + logged + " suppressed=" + suppressed
-                    + " anomalies=" + anomalies + " mode=" + MODE + ".");
+                    + " anomalies=" + anomalies + " mode=" + MODE + " scope=" + (SCOPE_PLAYER ? "player" : "vanilla") + ".");
         } catch (RuntimeException e) {
             anomalies++;
+        }
+    }
+
+    private static boolean parseScope() {
+        String raw = System.getProperty("mdc.actionRemoveScope");
+        if (raw == null) {
+            return true;
+        }
+        switch (raw.trim()) {
+            case "0":
+            case "vanilla":
+            case "off":
+                return false;
+            default:
+                return true;
         }
     }
 
@@ -522,6 +615,14 @@ public final class MdcTimedActionProbe {
 
     static long crossVictimsAnimForTest() {
         return crossVictimsAnim;
+    }
+
+    static long scopedRemovalsForTest() {
+        return scopedRemovals;
+    }
+
+    static long scopeFallbacksForTest() {
+        return scopeFallbacks;
     }
 
     static long anomaliesForTest() {
