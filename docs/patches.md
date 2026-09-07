@@ -3298,7 +3298,10 @@ crossVictimsActive/crossVictimsAnim`；逐筆 `crossPlayerRemove#` 行。沿用 
 三態（off 直通）。
 
 **enforce（另案，等數據）**：`removeById` 在有發起者時只移除發起者那一個物件（`actions.remove(initiator)`
-＋`stop()`＋emulator remove），不再照 id 掃。手術點已就位，enforce 只改 helper。
+＋`stop()`＋emulator remove），不再照 id 掃。手術點已就位，enforce 只改 helper。**條件（codex 對抗審查
+補充）**：`GeneralActionPacket` 路徑的 `stop(act)` 收到的是 `getAction()` 的臨時 copyFrom 物件，不是
+queue 內那個 Action，且 `setReject()` 只設 id/state——enforce 必須用 `processServer` 的 authenticated
+`connection → player + id` 定位 victim，不能靠 packet 物件 identity 或其預設 `playerId`。
 
 **守門**：SmokeCheck 三條——vanilla `stop` 內 `remove=1`、`stopPlayerActions`／`GeneralActionPacket`
 零直接 `remove`、`lambda$remove$*` 恰 2 個且只讀 `Action.id` 零 `playerId`（**TIS 加 playerId 比對時
