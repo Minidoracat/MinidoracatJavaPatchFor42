@@ -10,7 +10,8 @@ import zombie.network.packets.NetTimedActionPacket;
  * W10-C MdcTimedActionProbe 行為驗證（獨立 JVM；MODE 是 static final，三組態由 build.ps1
  * 分開驅動並以 argv 自驗）。放在 zombie.core 以直讀 Action 的 protected 欄位。
  * 覆蓋：(C) 負 duration 記錄、(B) 打斷偵測（Accept 才算／同 id 重送分流／enforce 補送
- * 在無連線時安全跳過／原委派仍執行使 action 被移除）、(R) perform false 分佈、off 純直通。
+ * 在無連線時安全跳過／原委派仍執行使 action 被移除）、(R) perform false 分佈、
+ * (W10-E) 同 id 撞號 victim 分類（active／anim、同人不算、發起者為臨時物件）、off 純直通。
  */
 public final class MdcTimedActionProbeTest {
 
@@ -31,6 +32,7 @@ public final class MdcTimedActionProbeTest {
         testStart(wantMode);
         testInterrupt(wantMode);
         testPerform(wantMode);
+        testCrossPlayerRemove(wantMode);
 
         if (failed != 0) {
             System.out.println("timed-action-probe FAIL " + failed + " 項");
@@ -156,6 +158,100 @@ public final class MdcTimedActionProbeTest {
                     && MdcTimedActionProbe.performFalseForTest() == false0 + 1);
         }
         expect("perform 路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
+    }
+
+    /**
+     * W10-E：同 id 撞號。清單內甲（player 1）正 duration Accept 製作、乙（player 2）掛著的 -1
+     * 動作、丙（player 3）同 id 的正 duration——乙 stop 自己的動作時 vanilla remove 會把三個都刪。
+     * 走偵測入口不委派 vanilla remove（同 testInterrupt 的理由）。
+     */
+    @SuppressWarnings("unchecked")
+    private static void testCrossPlayerRemove(int mode) {
+        Collection<Object> queue = (Collection<Object>) MdcTimedActionProbe.actionsQueueForTest();
+        if (queue == null) {
+            return;
+        }
+        queue.clear();
+        try {
+            byte sharedId = 77;
+            NetTimedActionPacket craft = newAction(30_000L);
+            craft.id = sharedId;
+            craft.playerId.setID((short) 1);
+            craft.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket idle = newAction(-1L);
+            idle.id = sharedId;
+            idle.playerId.setID((short) 2);
+            idle.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket other = newAction(5_000L);
+            other.id = sharedId;
+            other.playerId.setID((short) 3);
+            other.state = Transaction.TransactionState.Accept;
+            NetTimedActionPacket unrelated = newAction(5_000L);   // 不同 id，不得被算進去
+            unrelated.playerId.setID((short) 4);
+            queue.add(craft);
+            queue.add(idle);
+            queue.add(other);
+            queue.add(unrelated);
+
+            long calls0 = MdcTimedActionProbe.removeCallsForTest();
+            long cross0 = MdcTimedActionProbe.crossPlayerRemovalsForTest();
+            long active0 = MdcTimedActionProbe.crossVictimsActiveForTest();
+            long anim0 = MdcTimedActionProbe.crossVictimsAnimForTest();
+
+            // 乙取消自己的 idle 動作 → 甲的製作與丙的正 duration 是 victim（2 active、0 anim）
+            MdcTimedActionProbe.inspectRemoveForTest(idle, sharedId, true);
+            if (mode == MdcTimedActionProbe.MODE_OFF) {
+                expect("off：remove 觀測零計數", MdcTimedActionProbe.removeCallsForTest() == calls0
+                        && MdcTimedActionProbe.crossPlayerRemovalsForTest() == cross0);
+            } else {
+                expect("撞號：乙取消 → crossPlayerRemovals+1、active victim 恰 +2（甲的製作＋丙）、anim victim +0",
+                        MdcTimedActionProbe.removeCallsForTest() == calls0 + 1
+                        && MdcTimedActionProbe.crossPlayerRemovalsForTest() == cross0 + 1
+                        && MdcTimedActionProbe.crossVictimsActiveForTest() == active0 + 2
+                        && MdcTimedActionProbe.crossVictimsAnimForTest() == anim0);
+            }
+
+            // 甲取消自己的製作 → 乙的 -1 是 anim victim（+1）、丙是 active victim（+1）
+            long cross1 = MdcTimedActionProbe.crossPlayerRemovalsForTest();
+            long active1 = MdcTimedActionProbe.crossVictimsActiveForTest();
+            long anim1 = MdcTimedActionProbe.crossVictimsAnimForTest();
+            MdcTimedActionProbe.inspectRemoveForTest(craft, sharedId, true);
+            if (mode != MdcTimedActionProbe.MODE_OFF) {
+                expect("撞號：甲取消 → crossPlayerRemovals+1、anim victim +1（乙的 -1）、active victim +1（丙）",
+                        MdcTimedActionProbe.crossPlayerRemovalsForTest() == cross1 + 1
+                        && MdcTimedActionProbe.crossVictimsAnimForTest() == anim1 + 1
+                        && MdcTimedActionProbe.crossVictimsActiveForTest() == active1 + 1);
+            }
+
+            // 無撞號：只有發起者自己持有該 id → 零 cross
+            queue.clear();
+            NetTimedActionPacket solo = newAction(5_000L);
+            solo.playerId.setID((short) 9);
+            solo.state = Transaction.TransactionState.Accept;
+            queue.add(solo);
+            queue.add(unrelated);
+            long cross2 = MdcTimedActionProbe.crossPlayerRemovalsForTest();
+            long calls2 = MdcTimedActionProbe.removeCallsForTest();
+            MdcTimedActionProbe.inspectRemoveForTest(solo, solo.id, true);
+            if (mode != MdcTimedActionProbe.MODE_OFF) {
+                expect("無撞號：removeCalls+1、crossPlayerRemovals 不變",
+                        MdcTimedActionProbe.removeCallsForTest() == calls2 + 1
+                        && MdcTimedActionProbe.crossPlayerRemovalsForTest() == cross2);
+            }
+
+            // 發起者是臨時物件（GeneralActionPacket.getAction 的 copyFrom 產物）：以 playerId 判同人，不算 victim
+            NetTimedActionPacket ghost = newAction(5_000L);
+            ghost.id = solo.id;
+            ghost.playerId.setID((short) 9);
+            long cross3 = MdcTimedActionProbe.crossPlayerRemovalsForTest();
+            MdcTimedActionProbe.inspectRemoveForTest(ghost, solo.id, true);
+            if (mode != MdcTimedActionProbe.MODE_OFF) {
+                expect("臨時發起者同 playerId：不算 victim", MdcTimedActionProbe.crossPlayerRemovalsForTest() == cross3);
+            }
+            expect("remove 觀測零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
+        } finally {
+            queue.clear();
+        }
     }
 
     private static void expect(String what, boolean ok) {

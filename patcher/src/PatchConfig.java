@@ -639,6 +639,18 @@ public final class PatchConfig {
         // 兩刀是「與」關係：只有 B → Reject 送出去仍是 Request state；只有 A → parse 就
         // 已中斷、processServer 根本沒被呼叫。kill switch 分離以便二分定位：
         // -Dmdc.netTimedActionGuard=0（B）／-Dmdc.netTimedActionState=0（A）。
+        // ---- W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回（2026-09-07；docs/patches.md 2x 補記）----
+        // 正式服 8/31–9/7 共 98 次「Error with packet of type: NetTimedAction」，stack 全是
+        // PZNetKahluaTableImpl.loadComponent:531 的 NPE（GameEntityManager.GetEntity 回 null 不檢查）
+        // ← load:689 ← load:546 ← NetTimedAction.parse:155——在 protectedCall（offset 167）之前的
+        // actionArgs.load（offset 68）就炸，B 刀掛點到不了、processServer 不執行、不回包＝永久卡。
+        // 情境＝搬過的鐵桶／製作台當 craftBench：IsoObject.getEntityNetID() 是
+        // x+(y<<16)+(z<<32)+(objectIndex<<40) 算出來的，client/server 各算各的、server map lazy。
+        // (D1) parse 內 actionArgs.load 1:1 改道 → helper 攔 RuntimeException 設 ThreadLocal 旗標，
+        //      B 刀改道點看到旗標直接回 LuaFail（不呼叫 Lua ctor）→ vanilla action=null → A 刀 Reject。
+        // (D2) PZNetKahluaTableImpl.load(…,byte) 內 sbyt 36 的 loadComponent 1:1 改道 → GetEntity null
+        //      時解碼座標、到該格找恰一個帶該 component 的 IsoObject 救回（玩家 12 格內＋唯一候選），
+        //      救不回設旗標。kill switch -Dmdc.netTimedActionArgs=0（D1+D2 一起）。
         String ntaGuard = "zombie/mdc/NetTimedActionGuard";
         Patcher.ClassPatch nta = new Patcher.ClassPatch("zombie/core/NetTimedAction");
         Patcher.MethodOps ntaParse = nta.method("parse",
@@ -648,8 +660,22 @@ public final class PatchConfig {
                 "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
                         + "Lse/krka/kahlua/integration/LuaReturn;",
                 ntaGuard, "protectedCall"));
-        ntaParse.expectedHits = 1;   // parse 內唯一（getDuration/start/stop/perform 的同名呼叫不在此方法）
+        ntaParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/PZNetKahluaTableImpl", "load",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                ntaGuard, "loadArgs"));
+        ntaParse.expectedHits = 2;   // protectedCall（offset 167）＋ actionArgs.load（offset 68）各唯一
         patches.add(nta);
+
+        Patcher.ClassPatch netTable = new Patcher.ClassPatch("zombie/network/PZNetKahluaTableImpl");
+        Patcher.MethodOps netTableLoad = netTable.method("load",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;");
+        netTableLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/network/PZNetKahluaTableImpl", "loadComponent",
+                "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;",
+                ntaGuard, "loadComponent"));
+        netTableLoad.expectedHits = 1;   // sbyt 36（CraftBench）唯一呼叫點（javap offset 890）
+        patches.add(netTable);
 
         Patcher.ClassPatch ntaPkt = new Patcher.ClassPatch("zombie/network/packets/NetTimedActionPacket");
         Patcher.MethodOps ntaProcess = ntaPkt.method("processServer",
@@ -692,6 +718,17 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoPlayer;)Lzombie/core/raknet/UdpConnection;",
                 taProbe, "connectionOf"));
         amUpdate.expectedHits = 3;   // perform 1 ＋ getConnectionFromPlayer 2（Done/Reject 分支）
+        // ---- W10-E 跨玩家 id 撞號連帶取消觀測（2026-09-07，codex 對抗審查發現；observe）----
+        // Action.lastId 是各 client 自己的 1..255 循環；server 端 stop(Action) 丟掉玩家身分只呼叫
+        // remove(action.id, true)（javap offset 24），而 server 分支 remove 對整份清單只比 t.id == id
+        // ——乙打斷自己掛著的 -1 動作時，甲同 id 的製作被一起無聲移除。stopPlayerActions 與
+        // GeneralActionPacket（client 取消，offset 30）都經 stop(Action)，所以 headCall 捕獲發起者
+        // ＋改道其內唯一的 remove(BZ) 即涵蓋全部取消路徑。observe 記 victim；enforce 另案等數據。
+        Patcher.MethodOps amStop = actionManager.method("stop", "(Lzombie/core/Action;)V");
+        amStop.headCall = new Patcher.HeadCall(taProbe, "onStop", "(Lzombie/core/Action;)V");
+        amStop.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/core/ActionManager", "remove", "(BZ)V", taProbe, "removeById"));
+        amStop.expectedHits = 2;   // headCall 1 ＋ remove 改道 1
         patches.add(actionManager);
 
         // ---- W11 動物聲音排序活鎖捕手（2026-08-23 晚間事故；docs/patches.md 2y）----

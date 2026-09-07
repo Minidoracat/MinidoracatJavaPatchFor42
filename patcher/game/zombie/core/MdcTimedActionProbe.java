@@ -42,7 +42,16 @@ import zombie.network.packets.NetTimedActionPacket;
  *       {@code Action.perform()}（恰 1）記 true/false 分佈，redirect
  *       {@code GameServer.getConnectionFromPlayer}（恰 2：Done／Reject 分支）記 null 次數
  *       （null＝封包不送）。</li>
- * </ul>
+ *   <li><b>W10-E 跨玩家 id 撞號連帶取消（2026-09-07，codex 對抗審查發現；observe）</b>：
+ *       {@code Action.lastId} 是各 client 自己的 1..255 循環（{@code Action.set:37-45}），
+ *       不同玩家可同時持有相同 id；server 端 {@code ActionManager.stop(Action)} 丟掉玩家身分只
+ *       呼叫 {@code remove(action.id, true)}，而 server 分支的 {@code remove} 對整份清單只比
+ *       {@code t.id == id}（:189）——乙打斷自己掛著的 -1 動作時，甲同 id 的製作被一起無聲移除，
+ *       甲永遠等不到 Done／Reject。所有 server 端取消（{@code stopPlayerActions}、
+ *       {@code GeneralActionPacket} 的 client 取消）都經 {@code stop(Action)}，故 headCall 捕獲
+ *       發起 action＋redirect 其內唯一的 {@code remove(BZ)} 就涵蓋全部。observe 記每個「被移除
+ *       者 ≠ 發起者」的 victim（player／type／state／已等 ms／剩餘 ms／是否正 duration）；enforce
+ *       （另案，等數據）＝只移除發起者那一個物件。</li>
  *
  * <p>例外紀律：簿記 catch RuntimeException（anomalies++，不擋 vanilla）；vanilla 委派在 try 外
  * 原樣上拋；LinkageError 外逃 fail-fast。enforce 補送 Reject 走 vanilla 同一組 API，任何
@@ -69,6 +78,8 @@ public final class MdcTimedActionProbe {
 
     /** processServer 進入時捕獲的 Request（供 stopPlayerActions 判同 id 重送與記新動作型別）。 */
     private static final ThreadLocal<NetTimedActionPacket> CURRENT_REQUEST = new ThreadLocal<>();
+    /** ActionManager.stop(Action) 進入時捕獲的發起 action（供 remove 改道判 victim）。 */
+    private static final ThreadLocal<Action> CURRENT_STOP = new ThreadLocal<>();
 
     // 主迴圈單寫（封包處理與 ActionManager.update 都在主迴圈）；觀測刀容忍罕見交錯。
     private static long starts;
@@ -82,6 +93,11 @@ public final class MdcTimedActionProbe {
     private static long performFalse;
     private static long connLookups;
     private static long connNull;
+    private static long removeCalls;
+    private static long removeMultiHit;
+    private static long crossPlayerRemovals;
+    private static long crossVictimsActive;
+    private static long crossVictimsAnim;
     private static long logged;
     private static long suppressed;
     private static long anomalies;
@@ -256,6 +272,96 @@ public final class MdcTimedActionProbe {
         return connection;
     }
 
+    // ---- 觀測點 W10-E：ActionManager.stop(Action) 頭部捕獲＋其內 remove(BZ) 改道 ----
+
+    public static void onStop(Action action) {
+        try {
+            CURRENT_STOP.set(action);
+        } catch (RuntimeException e) {
+            anomalies++;
+        }
+    }
+
+    public static void removeById(byte id, boolean cancelled) {
+        if (MODE != MODE_OFF) {
+            try {
+                inspectRemove(id, cancelled);
+            } catch (RuntimeException e) {
+                anomalies++;
+            }
+        }
+        ActionManager.remove(id, cancelled);
+    }
+
+    /** 測試入口：只跑撞號偵測、不委派 vanilla remove（會觸發 GameServer/GameClient class init）。 */
+    static void inspectRemoveForTest(Action initiator, byte id, boolean cancelled) {
+        if (MODE == MODE_OFF) {
+            return;
+        }
+        CURRENT_STOP.set(initiator);
+        try {
+            inspectRemove(id, cancelled);
+        } catch (RuntimeException e) {
+            anomalies++;
+        }
+    }
+
+    private static void inspectRemove(byte id, boolean cancelled) {
+        removeCalls++;
+        Action initiator = CURRENT_STOP.get();
+        CURRENT_STOP.set(null);
+        Collection<?> actions = actionsQueue();
+        if (actions == null || actions.isEmpty()) {
+            return;
+        }
+        int hits = 0;
+        boolean cross = false;
+        long now = GameTime.getServerTimeMills();
+        for (Object o : actions) {
+            if (!(o instanceof Action victim) || victim.id != id) {
+                continue;
+            }
+            hits++;
+            if (initiator == null || victim == initiator
+                    || victim.playerId.getID() == initiator.playerId.getID()) {
+                continue;
+            }
+            if (!cross) {
+                cross = true;
+                crossPlayerRemovals++;
+            }
+            boolean anim = victim.duration < 0L;
+            if (anim) {
+                crossVictimsAnim++;
+            } else {
+                crossVictimsActive++;
+            }
+            if (allowLine()) {
+                DebugLog.log(TAG + " crossPlayerRemove#" + crossPlayerRemovals
+                        + " id=" + id + " cancelled=" + cancelled
+                        + " initiator=" + playerName(initiator) + "/" + typeOf(initiator)
+                        + " victim=" + playerName(victim) + "/" + typeOf(victim)
+                        + " state=" + victim.state
+                        + " duration=" + victim.duration
+                        + " waitedMs=" + (now - victim.startTime)
+                        + " remainingMs=" + (victim.endTime - now)
+                        + " kind=" + (anim ? "anim(-1)" : "active")
+                        + " action=silent-drop(vanilla)"
+                        + " suppressed=" + suppressed + ".");
+            }
+        }
+        if (hits > 1) {
+            removeMultiHit++;
+        }
+    }
+
+    private static String typeOf(Action action) {
+        if (action == null) {
+            return "?";
+        }
+        return action instanceof NetTimedAction nta ? nta.type : action.getClass().getSimpleName();
+    }
+
     // ---- 內部 ----
 
     private static Collection<?> actionsQueue() {
@@ -279,7 +385,15 @@ public final class MdcTimedActionProbe {
         }
     }
 
+    /** 供 zombie.mdc.NetTimedActionGuard 的 reject log 使用（Action 是 package-private，只能從本 package 讀 playerId）。 */
+    public static String playerNameOf(NetTimedAction action) {
+        return playerName(action);
+    }
+
     private static String playerName(Action action) {
+        if (action == null) {
+            return "?";
+        }
         try {
             IsoPlayer p = action.playerId.getPlayer();
             return p == null ? "?" : p.getUsername();
@@ -307,7 +421,7 @@ public final class MdcTimedActionProbe {
         bannerShown = true;
         DebugLog.log(TAG + " 首次生效 mode=" + MODE
                 + "（-Dmdc.timedActionProbe=0|off/1|enforce(打斷時補送 Reject)/2|observe 預設；"
-                + "觀測 negativeDuration/interrupted/performFalse/connNull）.");
+                + "觀測 negativeDuration/interrupted/performFalse/connNull/crossPlayerRemove）.");
     }
 
     /** heartbeat：每 256 個 start 檢查一次時鐘、60s 一行。 */
@@ -327,6 +441,9 @@ public final class MdcTimedActionProbe {
                     + " rejectsSkippedNoConn=" + rejectsSkippedNoConn
                     + " performCalls=" + performCalls + " performFalse=" + performFalse
                     + " connLookups=" + connLookups + " connNull=" + connNull
+                    + " removeCalls=" + removeCalls + " removeMultiHit=" + removeMultiHit
+                    + " crossPlayerRemovals=" + crossPlayerRemovals
+                    + " crossVictimsActive=" + crossVictimsActive + " crossVictimsAnim=" + crossVictimsAnim
                     + " logged=" + logged + " suppressed=" + suppressed
                     + " anomalies=" + anomalies + " mode=" + MODE + ".");
         } catch (RuntimeException e) {
@@ -389,6 +506,22 @@ public final class MdcTimedActionProbe {
 
     static long connNullForTest() {
         return connNull;
+    }
+
+    static long removeCallsForTest() {
+        return removeCalls;
+    }
+
+    static long crossPlayerRemovalsForTest() {
+        return crossPlayerRemovals;
+    }
+
+    static long crossVictimsActiveForTest() {
+        return crossVictimsActive;
+    }
+
+    static long crossVictimsAnimForTest() {
+        return crossVictimsAnim;
     }
 
     static long anomaliesForTest() {
