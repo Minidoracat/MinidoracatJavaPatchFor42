@@ -3288,6 +3288,22 @@ javap 複核）：
   ≈（同時 Accept 中的正 duration 動作數）/255，每 session `interruptedAccepted` 數百～1400 次
   ⇒ 理論上每 session 數十次受害，型態正好是「間歇、server log 安靜」。**線上實證待本刀數據。**
 
+**2026-09-07 晚間實證（4 session／6 小時）**：`crossPlayerRemovals` 1438、`crossVictimsActive` **706**、
+92 位不同玩家受害；製作／閱讀／搬移 ≥20 秒的動作被刪約 250 筆（最冤：一個 150 秒製作連續四次在剩
+2–22 秒時被刪，玩家隨後退出遊戲）。**發起端 96% 集中在 7 個帳號**、各自每分鐘 2–6 個取消封包、且
+初版假設的「乙打斷自己掛著的 -1」只佔 3 筆——**1435 筆是 `GeneralActionPacket`（client 取消封包）**。
+更關鍵的是 `removeMultiHit`（同 id 命中 >1）只有 6 次：98% 的 cross 事件裡清單內**只有 victim、沒有
+發起者自己的動作**＝client 取消的是一個 server **已經完成移除**的 id。機制在
+`IsoGameCharacter.updateInternal:8986-9006`：client 每幀先算 `valid = act.valid()`；server 先 perform
+並把世界狀態同步過來（草除了、樹倒了、蛋撿了、地板鋪了）→ client 端 Lua `isValid()` 那一幀變 false
+→ `!valid` **跳過 `act.update()`**（`isDone→forceComplete` 在裡面，永遠沒機會）→ 直接 `act.stop()` →
+`ActionManager.remove(id,true)` → 送取消封包 → server `getAction()` 找不到 → 臨時物件 → `stop()` →
+`remove(id)` 全表掃 → 只可能刪到別人。所以「高頻完成短動作」的玩家（除草、砍樹、撿蛋、餵水、
+DAAO 批次製作）就是掃射者——三位發起端的 client log 證實只是正常高頻活動（除草 443 格／90 分鐘、
+砍樹＋撿蛋、鋪地），無 mod 錯誤、無異常訊息；client log 沒有 Action 層 debug，看不到取消封包本身。
+enforce（只刪同 playerId）會讓這類取消變成 no-op，正是正確語意（vanilla 的 client 分支本來就只該
+取消自己的）。
+
 **手術**（掛在既存 `ActionManager` ClassPatch；`expectedHits=2`）：`stop(Action)` 頭部 headCall
 `MdcTimedActionProbe.onStop(Action)`（ThreadLocal 捕獲發起者）＋其內唯一的 `remove(BZ)V`
 改道 `removeById`（掃同 id、記「player ≠ 發起者」的 victim：type／state／duration／已等 ms／剩餘 ms、

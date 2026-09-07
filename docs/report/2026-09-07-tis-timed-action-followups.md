@@ -130,7 +130,7 @@ Root cause (42.20.4, decompiled + javap on the shipped jar)
 
 4. Every server-side cancel goes through stop(): NetTimedActionPacket.processServer calls ActionManager.stopPlayerActions(playerId) before starting a new request (lines 70-72), and GeneralActionPacket.processServer calls ActionManager.stop (javap offset 30).
 
-5. Animation-driven actions (getDuration() == -1, e.g. ISWaitWhileGettingUp, reloading, chopping) stay Accepted on the server for up to AnimEventEmulator.getDurationMax() = 30 minutes, because the client completes them locally and only sends a cancel when it stops them. So at any moment many players have such an action parked in the server list. When one of those players starts a new action, stopPlayerActions stops the parked one, and remove() takes everything with that id - including another player's crafting action that is genuinely in progress.
+5. The dominant trigger is the client's own cancel packet for an action the server has ALREADY completed. IsoGameCharacter.updateInternal (8986-9006) evaluates `valid = act.valid()` at the top of every frame; when the server performs an action and the resulting world change reaches the client first (grass removed, tree felled, egg taken, floor placed), the Lua isValid() of the still-queued client action turns false in that frame, `act.update()` is skipped (so the isDone -> forceComplete path inside LuaTimedActionNew.update never runs), and the action goes straight to `act.stop()` -> ActionManager.remove(id, true) -> GeneralActionPacket(reject). On the server that id no longer exists for this player (it was Done and cleared), GeneralActionPacket.processServer's getAction() builds a temporary object, stop() calls remove(id, true), and the only actions left in the list with that id belong to OTHER players - which are then removed. Every player doing quick repetitive actions (clearing grass, chopping, collecting eggs, watering animals, batch crafting) therefore sprays cancels across the whole id space. A secondary trigger is a new request stopping the sender's own parked animation-driven (-1) action via stopPlayerActions - same remove(id) path.
 
 Client-side consequence
 -----------------------
@@ -142,9 +142,16 @@ Suggested fix
 - Alternatively allocate ids on the server.
 - Independently: send a Reject when the server removes an Accepted action, so the client can recover.
 
-Observed
---------
-[To be filled from the observe counters: number of cross-player removals per session and how many of the victims were positive-duration (crafting) actions.]
+Observed (dedicated server, 42.20.4, 2026-09-07 15:56-22:16, 4 sessions, 60-90 concurrent players)
+---------------------------------------------------------------------------------------------------
+We instrumented ActionManager.stop/remove on our server (observe only, no behaviour change) and logged every removal whose victim belongs to a different player than the sender:
+- 1438 cross-player removals in ~6 hours; 706 of the victims were positive-duration actions still waiting for the server to complete them (ISHandcraftAction 27% of those, ISPetAnimal, ISReadABook, ISMoveablesAction, BuildAction, ISEatFoodAction ...); 92 distinct players affected; rate grew from 70/h to 145/h with player count.
+- 1435 of 1438 came through GeneralActionPacket (client cancel), 3 through stopPlayerActions.
+- In 98% of the cases the sender's own action was no longer in the list (removeAll matched only other players' entries) - i.e. the cancel was for an id the server had already completed, exactly the sequence in item 5.
+- Worst single case: one player's 150-second crafting action was removed four times in a row with 2-22 seconds remaining, by cancels from unrelated players; the player eventually quit.
+- Senders are simply the most active players (one was clearing grass, one chopping trees / collecting eggs, one placing floors); no mod errors or abnormal traffic in their client logs.
+
+Turning the server-side removal into "same id AND same playerId only" (our follow-up patch) reduces these to zero by construction; we will report the after-numbers once it has run for a day.
 ```
 
 ---
