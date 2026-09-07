@@ -91,7 +91,7 @@ echo
 echo "=== clean workload: no false positives"
 
 echo
-echo "=== persistent startup SHA gate"
+echo "=== persistent startup gate: PASS / DISARMED / tuning parse (behavioural, via a fake game binary)"
 gate_root="$(mktemp -d)"
 gate_server="${gate_root}/serverfiles"
 gate_install="${gate_root}/pfguard"
@@ -99,28 +99,51 @@ mkdir -p "${gate_server}/linux64" "${gate_server}/jre64/lib" "${gate_install}"
 printf 'pathfind-v1' >"${gate_server}/linux64/libPZPathFind64.so"
 printf 'observer-v1' >"${gate_install}/libmdcpfguard.so"
 printf 'jsig-v1' >"${gate_server}/jre64/lib/libjsig.so"
+# The fake game prints exactly what it was launched with; the tests assert on that, not on log text.
+printf '#!/bin/sh\nprintf "FAKE-GAME preload=%%s args=%%s A=%%s B=%%s\\n" "$LD_PRELOAD" "$*" "${MDC_PFGUARD_CALLERS:-unset}" "${MDC_PFGUARD_MAXBLOCKS:-unset}"\n' >"${gate_server}/ProjectZomboid64"
+chmod +x "${gate_server}/ProjectZomboid64"
+printf '# comment\n\nMDC_PFGUARD_CALLERS=_ZN1aEv,_ZN1bEv\r\nMDC_PFGUARD_MAXBLOCKS=65536\n' >"${gate_install}/pfguard.env"
 sha256sum "${gate_server}/linux64/libPZPathFind64.so" \
-          "${gate_install}/libmdcpfguard.so" >"${gate_install}/manifest.sha256"
-if PFG_ROOT="${gate_install}" PFG_SERVERFILES="${gate_server}" PFG_DRY_RUN=1 \
-   "${root}/deploy/run-with-pfguard.sh" >"${log}" 2>&1 \
-   && grep -q 'startup gate PASS' "${log}"; then
-    echo "PASS  startup gate accepts exact hashes"
-    pass=$((pass + 1))
-else
-    echo "FAIL  startup gate exact-hash path"
-    fail=$((fail + 1))
-fi
+          "${gate_install}/libmdcpfguard.so" "${gate_install}/pfguard.env" >"${gate_install}/manifest.sha256"
+gate_run() { # dry|exec, then extra env assignments
+    local mode=$1; shift
+    status=0
+    if [[ "${mode}" == dry ]]; then
+        env "$@" PFG_ROOT="${gate_install}" PFG_SERVERFILES="${gate_server}" PFG_DRY_RUN=1 \
+            "${root}/deploy/run-with-pfguard.sh" -servername pz -x 'a b' >"${log}" 2>&1 || status=$?
+    else
+        env "$@" PFG_ROOT="${gate_install}" PFG_SERVERFILES="${gate_server}" \
+            "${root}/deploy/run-with-pfguard.sh" -servername pz -x 'a b' >"${log}" 2>&1 || status=$?
+    fi
+}
+gate_check() { # name, want-status, regex
+    if [[ "${status}" == "$2" ]] && grep -qE "$3" "${log}"; then
+        echo "PASS  $1"; pass=$((pass + 1))
+    else
+        printf 'FAIL  %s (status=%s)\n' "$1" "${status}"; sed 's/^/      | /' "${log}"; fail=$((fail + 1))
+    fi
+}
+gate_run dry;  gate_check "gate dry-run PASS with 2 tuning entries" 0 'startup gate PASS.*tuning entries: 2'
+gate_run exec; gate_check "gate exec: observer+jsig preloaded, tuning exported, args intact" 0 \
+    "FAKE-GAME preload=${gate_install}/libmdcpfguard.so:${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b A=_ZN1aEv,_ZN1bEv B=65536"
+gate_run exec LD_PRELOAD="/x/libmdcpfguard.so:/y/other.so"; gate_check "gate exec: inherited LD_PRELOAD keeps foreign entries, drops any observer entry" 0 \
+    "FAKE-GAME preload=${gate_install}/libmdcpfguard.so:${gate_server}/jre64/lib/libjsig.so:/y/other.so "
+printf 'MDC_PFGUARD_MAXBLOCKS=65536\nrm -rf /\n' >"${gate_install}/pfguard.env"
+sha256sum "${gate_server}/linux64/libPZPathFind64.so" \
+          "${gate_install}/libmdcpfguard.so" "${gate_install}/pfguard.env" >"${gate_install}/manifest.sha256"
+gate_run dry;  gate_check "gate dry-run: malformed tuning line -> DISARMED exit 78" 78 'STARTUP DISARMED: tuning line rejected'
+gate_run exec; gate_check "gate exec: malformed tuning -> vanilla launch, jsig only, args intact, nothing exported" 0 \
+    "FAKE-GAME preload=${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b A=unset B=unset"
+printf 'MDC_PFGUARD_MAXBLOCKS=65536\n' >"${gate_install}/pfguard.env"   # edited after manifest => mismatch
+gate_run dry;  gate_check "gate dry-run: edited tuning fails the manifest -> DISARMED exit 78" 78 'STARTUP DISARMED: SHA mismatch'
+sha256sum "${gate_server}/linux64/libPZPathFind64.so" \
+          "${gate_install}/libmdcpfguard.so" "${gate_install}/pfguard.env" >"${gate_install}/manifest.sha256"
 printf 'updated-game' >"${gate_server}/linux64/libPZPathFind64.so"
-status=0
-PFG_ROOT="${gate_install}" PFG_SERVERFILES="${gate_server}" PFG_DRY_RUN=1 \
-    "${root}/deploy/run-with-pfguard.sh" >"${log}" 2>&1 || status=$?
-if [[ "${status}" == 78 ]] && grep -q 'STARTUP FATAL.*SHA mismatch' "${log}"; then
-    echo "PASS  startup gate rejects game updates"
-    pass=$((pass + 1))
-else
-    echo "FAIL  startup gate mismatch path (status=${status})"
-    fail=$((fail + 1))
-fi
+gate_run dry;  gate_check "gate dry-run: game update -> DISARMED exit 78" 78 'STARTUP DISARMED: SHA mismatch'
+gate_run exec LD_PRELOAD="${gate_install}/libmdcpfguard.so"; gate_check "gate exec: game update -> vanilla launch even if the environment carries the observer" 0 \
+    "FAKE-GAME preload=${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b A=unset"
+rm -f "${gate_install}/libmdcpfguard.so"
+gate_run exec; gate_check "gate exec: observer missing -> vanilla launch" 0 "FAKE-GAME preload=${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b"
 rm -rf "${gate_root}"
 expect clean 0 clean
 assert_log clean-guarded 'guard_alloc=[1-9]'

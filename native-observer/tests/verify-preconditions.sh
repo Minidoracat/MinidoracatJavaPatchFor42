@@ -85,22 +85,40 @@ done
 
 # dladdr(return_address) observes a dynamic symbol and needs a real CALL return address,
 # not merely an ELF-local .symtab entry or a tail JMP inherited from an upstream caller.
-callers=(
-    _ZN13PolygonalMap221createVehicleClustersEv
-    _ZN13PolygonalMap220createVehicleClusterEP11VehicleRectR9ArrayListIS1_ERS2_IP14VehicleClusterE
-    _ZN14VehicleCluster5mergeEPS_
-    _ZN15VisibilityGraph8trySplitEP4EdgeP11VehicleRectR9ArrayListIiE
+# The list under test is what production actually preloads: MDC_PFGUARD_CALLERS from
+# deploy/pfguard.env (round 2+), plus the shim's built-in defaults (used when no env is deployed).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+declare -A expected_calls=(
+    [_ZN13PolygonalMap221createVehicleClustersEv]=1
+    [_ZN13PolygonalMap220createVehicleClusterEP11VehicleRectR9ArrayListIS1_ERS2_IP14VehicleClusterE]=7
+    [_ZN14VehicleCluster5mergeEPS_]=1
+    [_ZN15VisibilityGraph8trySplitEP4EdgeP11VehicleRectR9ArrayListIiE]=3
 )
-expected_calls=(1 7 1 3)
-for i in "${!callers[@]}"; do
-    symbol="${callers[$i]}"
+callers=("${!expected_calls[@]}")
+env_file="${PFG_ENV:-${here}/deploy/pfguard.env}"
+if [[ -r "${env_file}" ]]; then
+    env_callers="$(sed -nE 's/^MDC_PFGUARD_CALLERS=([A-Za-z0-9_,]*)$/\1/p' "${env_file}" | tail -1)"
+    IFS=',' read -r -a env_list <<<"${env_callers}"
+    check "pfguard.env caller count within PFG_MAX_CALLERS (16)" 1 "$(( ${#env_list[@]} <= 16 ? 1 : 0 ))"
+    check "pfguard.env MDC_PFGUARD_CALLERS length within g_callers_env (2048)" 1 "$(( ${#env_callers} < 2048 ? 1 : 0 ))"
+    for s in "${env_list[@]}"; do
+        [[ -n "${s}" && -z "${expected_calls[$s]+x}" ]] && callers+=("${s}")
+    done
+else
+    echo "note: no ${env_file}; verifying shim defaults only"
+fi
+for symbol in "${callers[@]}"; do
     present=$(awk -v s="${symbol}" '$8==s{c++} END{print c+0}' <<<"${dynsym}")
-    check "allowlisted dynamic symbol: ${symbol:0:35}" 1 "$((present > 0 ? 1 : 0))"
+    check "allowlisted dynamic symbol: ${symbol:0:40}" 1 "$((present > 0 ? 1 : 0))"
     body="$(objdump -d --disassemble="${symbol}" "${so}")"
     calls=$(grep -Ec '[[:space:]]call[[:space:]].*<_Z18reallocate_alignedPvmm@plt>' <<<"${body}" || true)
     jumps=$(grep -Ec '[[:space:]]jmp[[:space:]].*<_Z18reallocate_alignedPvmm@plt>' <<<"${body}" || true)
-    check "allowlisted realloc CALL count: ${symbol:0:25}" "${expected_calls[$i]}" "${calls}"
-    check "allowlisted realloc JMP count: ${symbol:0:26}" 0 "${jumps}"
+    if [[ -n "${expected_calls[$symbol]+x}" ]]; then
+        check "allowlisted realloc CALL count: ${symbol:0:30}" "${expected_calls[$symbol]}" "${calls}"
+    else
+        check "allowlisted realloc CALL count >=1: ${symbol:0:30}" 1 "$((calls >= 1 ? 1 : 0))"
+    fi
+    check "allowlisted realloc JMP count: ${symbol:0:31}" 0 "${jumps}"
 done
 
 echo
