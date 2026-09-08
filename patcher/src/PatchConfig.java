@@ -619,42 +619,15 @@ public final class PatchConfig {
         sctAddM.expectedHits = 4;   // crc32 同形替換 ×1 ＋ 租用/配 buffer/例外歸還改道 ×3
         patches.add(sctIso);
 
-        // ---- W10 卡讀條根治（2026-08-23；玩家實測「讀條走滿卻不完成」；docs/patches.md 2x）----
-        // 兩個 vanilla 缺陷疊乘，皆位於 server-only 路徑（client 端 vanilla 已有完整處理，
-        // 故玩家不需安裝任何東西）：
-        // (1) NetTimedAction.parse 以 protectedCall 重建 Lua action，而參數中的 InventoryItem
-        //     由 PZNetKahluaTableImpl.loadInventoryItem 在「容器或 item 查不到」時靜默回 null。
-        //     該 null 直接成為 Lua 建構子參數，建構子首行就索引它（ISEatFoodAction.lua:298
-        //     item:getContainer()／ISReadABook.lua:492 item:getSkillTrained()／
-        //     ISMoveablesAction.lua:308 item:getWorldSprite()）→ Kahlua 拋 RuntimeException，
-        //     穿過名為 protected 的 protectedCall，一路到 GameServer.mainLoopDealWithNetData
-        //     被 catch 吞掉 → processServer 從未執行 → 既不回 Accept 也不回 Reject。
-        //     vanilla 本來就寫好了失敗處理（!result.isSuccess() → action=null; return），
-        //     只是例外繞過了它——B 刀就是讓那條既有路徑真正被走到。
-        // (2) processServer 對中間物件 act 設 state 卻用 this.write 送出（javap：offset
-        //     81／142 皆 aload_0），this.state 恆為 Request → 該方法的 initial Request
-        //     rejection 無法讓 client 的 ActionManager.isRejected 成立。已接受 action 在
-        //     ActionManager.update 中因 perform()==false 產生的後續 Reject 從正確 action
-        //     物件序列化，不受影響；ItemTransactionPacket.processServer 也是寫對的對照。
-        // 兩刀是「與」關係：只有 B → Reject 送出去仍是 Request state；只有 A → parse 就
-        // 已中斷、processServer 根本沒被呼叫。kill switch 分離以便二分定位：
-        // -Dmdc.netTimedActionGuard=0（B）／-Dmdc.netTimedActionState=0（A）。
-        // ---- W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回（2026-09-07；docs/patches.md 2x 補記）----
-        // 正式服 8/31–9/7 共 98 次「Error with packet of type: NetTimedAction」，stack 全是
-        // PZNetKahluaTableImpl.loadComponent:531 的 NPE（GameEntityManager.GetEntity 回 null 不檢查）
-        // ← load:689 ← load:546 ← NetTimedAction.parse:155——在 protectedCall（offset 167）之前的
-        // actionArgs.load（offset 68）就炸，B 刀掛點到不了、processServer 不執行、不回包＝永久卡。
-        // 情境＝搬過的鐵桶／製作台當 craftBench：IsoObject.getEntityNetID() 是
-        // x+(y<<16)+(z<<32)+(objectIndex<<40) 算出來的，client/server 各算各的、server map lazy。
-        // (D1) parse 內 actionArgs.load 1:1 改道 → helper 攔 RuntimeException 設 ThreadLocal 旗標，
-        //      B 刀改道點看到旗標直接回 LuaFail（不呼叫 Lua ctor）→ vanilla action=null → A 刀 Reject。
-        // (D2) PZNetKahluaTableImpl.load(…,byte) 內 sbyt 36 的 loadComponent 1:1 改道 → GetEntity null
-        //      時解碼座標、到該格找恰一個帶該 component 的 IsoObject 救回（玩家 12 格內＋唯一候選），
-        //      救不回設旗標。kill switch -Dmdc.netTimedActionArgs=0（D1+D2 一起）。
+        // W10：只補正初始 Reject 的 state，並保留 Lua 建構子例外保險絲。
+        // W10-D：解析範圍限定在 NetTimedAction.parse；失敗清空 partial args，
+        // 再由既有 action=null 路徑拒絕。不得在共用 table decoder 猜測替代物件。
+        // beginParse 將失敗原因綁定本次封包，避免殘留至下一包。
         String ntaGuard = "zombie/mdc/NetTimedActionGuard";
         Patcher.ClassPatch nta = new Patcher.ClassPatch("zombie/core/NetTimedAction");
         Patcher.MethodOps ntaParse = nta.method("parse",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        ntaParse.headCall = new Patcher.HeadCall(ntaGuard, "beginParse", "(Lzombie/core/NetTimedAction;)V");
         ntaParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "se/krka/kahlua/integration/LuaCaller", "protectedCall",
                 "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
@@ -664,18 +637,8 @@ public final class PatchConfig {
                 "zombie/network/PZNetKahluaTableImpl", "load",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
                 ntaGuard, "loadArgs"));
-        ntaParse.expectedHits = 2;   // protectedCall（offset 167）＋ actionArgs.load（offset 68）各唯一
+        ntaParse.expectedHits = 3;   // beginParse＋protectedCall＋actionArgs.load
         patches.add(nta);
-
-        Patcher.ClassPatch netTable = new Patcher.ClassPatch("zombie/network/PZNetKahluaTableImpl");
-        Patcher.MethodOps netTableLoad = netTable.method("load",
-                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;");
-        netTableLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
-                "zombie/network/PZNetKahluaTableImpl", "loadComponent",
-                "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;",
-                ntaGuard, "loadComponent"));
-        netTableLoad.expectedHits = 1;   // sbyt 36（CraftBench）唯一呼叫點（javap offset 890）
-        patches.add(netTable);
 
         Patcher.ClassPatch ntaPkt = new Patcher.ClassPatch("zombie/network/packets/NetTimedActionPacket");
         Patcher.MethodOps ntaProcess = ntaPkt.method("processServer",
@@ -683,7 +646,7 @@ public final class PatchConfig {
         ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/network/packets/NetTimedActionPacket", "write",
                 "(Lzombie/core/network/ByteBufferWriter;)V", ntaGuard, "write"));
-        ntaProcess.expectedHits = 4;   // W10 write 改道 2 ＋ W10-C headCall 1 ＋ stopPlayerActions 改道 1
+        ntaProcess.expectedHits = 3;   // W10 write 改道 2 ＋ W10-C stopPlayerActions 改道 1
         // ---- W10-C 卡讀條第二波觀測（立案 2026-08-28、落地 2026-09-02；docs/patches.md 2aj）----
         // W10 後玩家仍回報「讀條走滿不完成」（製作/做奶油/拆除，間歇、排隊多條卡一條），兩份
         // client log 在卡住當下零 error 零 Reject。反編譯定案三條 W10 未覆蓋、server log 零指紋
@@ -698,8 +661,6 @@ public final class PatchConfig {
         //     null 次數（null＝Done/Reject 不送）。
         // kill switch：-Dmdc.timedActionProbe（2|observe 預設／1|enforce 補送 Reject／0|off）。
         String taProbe = "zombie/core/MdcTimedActionProbe";
-        ntaProcess.headCall = new Patcher.HeadCall(taProbe, "onProcessServer",
-                "(Lzombie/network/packets/NetTimedActionPacket;)V");
         ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/core/ActionManager", "stopPlayerActions",
                 "(Lzombie/network/fields/character/PlayerID;)V", taProbe, "stopPlayerActions"));
@@ -718,18 +679,26 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoPlayer;)Lzombie/core/raknet/UdpConnection;",
                 taProbe, "connectionOf"));
         amUpdate.expectedHits = 3;   // perform 1 ＋ getConnectionFromPlayer 2（Done/Reject 分支）
-        // ---- W10-E 跨玩家 id 撞號連帶取消觀測（2026-09-07，codex 對抗審查發現；observe）----
-        // Action.lastId 是各 client 自己的 1..255 循環；server 端 stop(Action) 丟掉玩家身分只呼叫
-        // remove(action.id, true)（javap offset 24），而 server 分支 remove 對整份清單只比 t.id == id
-        // ——乙打斷自己掛著的 -1 動作時，甲同 id 的製作被一起無聲移除。stopPlayerActions 與
-        // GeneralActionPacket（client 取消，offset 30）都經 stop(Action)，所以 headCall 捕獲發起者
-        // ＋改道其內唯一的 remove(BZ) 即涵蓋全部取消路徑。observe 記 victim；enforce 另案等數據。
+        // W10-E：stop 捕獲原 action；removeById 只取消已驗證 owner 的同 id。
+        // 網路身分由下面的 processServer bridge 提供，不信任 GeneralActionPacket 的預設 playerId=0。
         Patcher.MethodOps amStop = actionManager.method("stop", "(Lzombie/core/Action;)V");
         amStop.headCall = new Patcher.HeadCall(taProbe, "onStop", "(Lzombie/core/Action;)V");
         amStop.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/core/ActionManager", "remove", "(BZ)V", taProbe, "removeById"));
         amStop.expectedHits = 2;   // headCall 1 ＋ remove 改道 1
         patches.add(actionManager);
+
+        // 在授權、解析、一致性與反作弊檢查之後綁定實際連線；helper 用 finally 恢復上下文。
+        // INVOKEINTERFACE(5 bytes)→INVOKESTATIC(3 bytes)，淨堆疊不變，ASM 依 Label 重定位 frames。
+        Patcher.ClassPatch packetDispatch = new Patcher.ClassPatch("zombie/network/PacketTypes$PacketType");
+        Patcher.MethodOps dispatch = packetDispatch.method("onServerPacket",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;)V");
+        dispatch.redirects.add(new Patcher.Site(Opcodes.INVOKEINTERFACE,
+                "zombie/network/packets/INetworkPacket", "processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                taProbe, "processServer"));
+        dispatch.expectedHits = 1;
+        patches.add(packetDispatch);
 
         // ---- W11 動物聲音排序活鎖捕手（2026-08-23 晚間事故；docs/patches.md 2y）----
         // BaseAnimalSoundManager 的比較器每次 compare 現場重算 listener 距離，且手寫 >/< 三態

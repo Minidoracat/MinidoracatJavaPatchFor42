@@ -187,9 +187,8 @@ Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不�
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
 
-Write-Host "[9g/10] 卡讀條根治（W10）行為驗證＋兩個 kill switch（獨立 JVM；旗標是 static final）..."
-# 三個模式都必須真的跑過：both 是出貨組態，兩個 off 各自是緊急降級路徑——
-# 事故當下才第一次跑降級路徑是不可接受的。測試自驗 argv 與實際旗標相符。
+Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸（四組態，獨立 JVM）..."
+# 出貨、Lua 保險絲關閉、Reject 補正關閉、參數守衛關閉；每組皆自驗旗標。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest
 Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
 java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest guard-off
@@ -317,17 +316,16 @@ Assert-Ok "FaceObjectGuardTest（on，出貨組態）"
 java "-Dmdc.faceObjectGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest off
 Assert-Ok "FaceObjectGuardTest（faceObjectGuard=0 kill switch）"
 
-Write-Host "[9s/10] 卡讀條第二波觀測（W10-C）三組態行為驗證（獨立 JVM）..."
-# observe＝預設出貨（負 duration／打斷／performFalse 純記錄）；enforce＝打斷時補送 Reject（無連線安全跳過）；
-# off＝三點純直通。三個 static-final 組態都真跑並自驗 MODE，property 拼錯不得假綠。
+Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
+# 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe
 Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
 java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest enforce
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
 java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
-Assert-Ok "MdcTimedActionProbeTest（off 文字別名，純直通）"
+Assert-Ok "MdcTimedActionProbeTest（觀測 off，取消隔離仍有效）"
 java "-Dmdc.actionRemoveScope=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe scope-vanilla
-Assert-Ok "MdcTimedActionProbeTest（observe＋actionRemoveScope=0，W10-E enforce 關閉＝vanilla 全表刪除）"
+Assert-Ok "MdcTimedActionProbeTest（actionRemoveScope=0，明示回原版取消行為）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、

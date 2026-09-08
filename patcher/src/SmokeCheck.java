@@ -465,8 +465,8 @@ public final class SmokeCheck {
                 && countConstThen(killed, 10.0f, -1) == 2
                 && countConstThen(killed, 30.0f, -1) == 0);
 
-        // 42.20：consistency log 的新家是 interface default method；anticheat 的 warn 留在
-        // PacketTypes$PacketType.onServerPacket，該 class 已不在 manifest，完全不經我方程式碼。
+        // 42.20：consistency log 位於 interface default method；W10-E 雖接管 PacketType 的
+        // 最後派送，anticheat warn／sync 仍須保持原版，於下方 dispatch 斷言直接驗證。
         MethodNode inconsistent = method(distJava, "zombie/network/packets/INetworkPacket",
                 "logInconsistentPacket", "(Lzombie/network/IConnection;Lzombie/network/PacketTypes$PacketType;)V");
         failed += check("consistency log 改道恰一次且原 warn 歸零",
@@ -474,8 +474,6 @@ public final class SmokeCheck {
                         "(Lzombie/debug/DebugType;Ljava/lang/String;[Ljava/lang/Object;)V") == 1
                 && countExactCalls(inconsistent, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType", "warn",
                         "(Ljava/lang/String;[Ljava/lang/Object;)V") == 0);
-        failed += check("未把 PacketTypes$PacketType 一起出貨（anticheat warn 保持原版路徑）",
-                !Files.exists(distJava.resolve("zombie/network/PacketTypes$PacketType.class")));
 
         // 退役（2026-09-02）：登入／join 卡頓量測的全部結構斷言（LoginPacket 三個 DB
         // wrapper、CreatePlayerPacket 四個重活、REJOIN_TOTAL／REJOIN_LOAD_CHARACTER）。
@@ -1284,15 +1282,16 @@ public final class SmokeCheck {
 
         // 手術後：兩處改道、原呼叫歸零、真指令數不變（1:1 同形替換）
         MethodNode pNtaParse = method(distJava, ntaCls, "parse", ntaParseDesc);
-        failed += check("W10 手術後：parse 改道 x1、原 protectedCall 歸零、真指令數不變",
-                countExactCalls(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "protectedCall", pcHelperDesc) == 1
+        failed += check("W10/D 手術後：parse headCall＋protectedCall 改道 x1、原呼叫歸零、真指令恰 +2",
+                headCallOk(pNtaParse, ntaGuardCls, "beginParse", "(L" + ntaCls + ";)V")
+                && countExactCalls(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "protectedCall", pcHelperDesc) == 1
                 && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 0
-                && realInsnCount(pNtaParse) == realInsnCount(vNtaParse));
+                && realInsnCount(pNtaParse) == realInsnCount(vNtaParse) + 2);
         MethodNode pNtaProcess = method(distJava, ntaPktCls, "processServer", psDesc);
-        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數恰 +2（W10-C headCall）",
+        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數不變",
                 countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, ntaGuardCls, "write", writeHelperDesc) == 2
                 && countExactCalls(pNtaProcess, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0
-                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess) + 2);
+                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess));
 
         // helper 契約 1：catch 型別鎖定 RuntimeException——Error（SOE／OOM）必須穿透，
         // 與 W6 同紀律。放寬成 Throwable 會把致命錯誤變成「靜默 reject」。
@@ -1329,61 +1328,26 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKESTATIC, ntaGuardCls,
                         "write", writeHelperDesc) == 2);
 
-        // ---- W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回 ----
+        // W10-D：只在本次 NetTimedAction.parse 內處理參數解析失敗，不改共用 table decoder。
         String netTableCls = "zombie/network/PZNetKahluaTableImpl";
         String argsLoadDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
         String argsLoadHelperDesc = "(L" + netTableCls + ";Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
-        String tableLoadByteDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;";
-        String loadCompDesc = "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;";
-        // vanilla 前提 (D1)：parse 內 actionArgs.load 恰 1，且在 protectedCall 之前——這就是
-        // 「B 刀掛點到不了」的結構事實（TIS 把參數解析包進 pcall 或搬到 ctor 之後時本條紅）。
-        failed += check("W10-D vanilla 前提：parse 內 PZNetKahluaTableImpl.load 恰 1 且先於 protectedCall",
+        failed += check("W10-D vanilla：parse 的 load 恰 1 且先於 ctor，解析沒有自身 catch",
                 countExactCalls(vNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 1
                 && firstCallIndex(vNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc)
-                        < firstCallIndex(vNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc));
-        // vanilla 前提 (D2)：load(…,byte) 內 loadComponent 恰 1；vanilla loadComponent 形狀＝
-        // getLong／getShort／GetEntity／getComponent 各 1、零 null 分支——helper 複製的前四步
-        // 與它同構。TIS 補上 null 檢查時本條紅＝D2 撤刀訊號。
-        MethodNode vTableLoadB = methodFromJar(jar, netTableCls, "load", tableLoadByteDesc);
-        MethodNode vLoadComp = methodFromJar(jar, netTableCls, "loadComponent", loadCompDesc);
-        failed += check("W10-D vanilla 前提：load(…,byte) 內 loadComponent 恰 1；loadComponent 四步各 1 且零 null 分支",
-                countExactCalls(vTableLoadB, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 1
-                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J") == 1
-                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getShort", "()S") == 1
-                && countExactCalls(vLoadComp, Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager", "GetEntity",
-                        "(J)Lzombie/entity/GameEntity;") == 1
-                && countExactCalls(vLoadComp, Opcodes.INVOKEVIRTUAL, "zombie/entity/GameEntity", "getComponent",
-                        "(Lzombie/entity/ComponentType;)Lzombie/entity/Component;") == 1
-                && countOpcode(vLoadComp, Opcodes.IFNULL) == 0 && countOpcode(vLoadComp, Opcodes.IFNONNULL) == 0);
-        // 手術後：parse 的 load 改道 x1、原呼叫歸零（真指令不變由上方 W10 斷言鎖）；
-        // load(…,byte) 的 loadComponent 改道 x1、原呼叫歸零、真指令不變。
-        MethodNode pTableLoadB = method(distJava, netTableCls, "load", tableLoadByteDesc);
-        failed += check("W10-D 手術後：parse loadArgs 改道 x1、原 load 歸零；load(…,byte) loadComponent 改道 x1、原呼叫歸零、真指令不變",
+                        < firstCallIndex(vNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc)
+                && vNtaParse.tryCatchBlocks.isEmpty());
+        failed += check("W10-D：loadArgs 改道恰 1、原 load 歸零、beginParse 先於 loadArgs",
                 countExactCalls(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "loadArgs", argsLoadHelperDesc) == 1
                 && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 0
-                && countExactCalls(pTableLoadB, Opcodes.INVOKESTATIC, ntaGuardCls, "loadComponent", loadCompDesc) == 1
-                && countExactCalls(pTableLoadB, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 0
-                && realInsnCount(pTableLoadB) == realInsnCount(vTableLoadB));
-        // helper 契約：loadArgs 委派原 load 恰 2（off 直通＋try 內）、catch 恰 1 且 RuntimeException；
-        // loadComponent 委派 vanilla 恰 1（off 直通）、自身 getLong/getShort/GetEntity 各 1（複製四步）。
+                && firstCallIndex(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "beginParse", "(L" + ntaCls + ";)V")
+                        < firstCallIndex(pNtaParse, Opcodes.INVOKESTATIC, ntaGuardCls, "loadArgs", argsLoadHelperDesc));
         MethodNode gLoadArgs = method(distJava, ntaGuardCls, "loadArgs", argsLoadHelperDesc);
-        MethodNode gLoadComp = method(distJava, ntaGuardCls, "loadComponent", loadCompDesc);
-        failed += check("W10-D helper 契約：loadArgs 委派 2／catch RuntimeException 恰 1；loadComponent 委派 1＋四步各 1",
-                countExactCalls(gLoadArgs, Opcodes.INVOKEVIRTUAL, netTableCls, "load", argsLoadDesc) == 2
-                && gLoadArgs.tryCatchBlocks != null && gLoadArgs.tryCatchBlocks.size() == 1
-                && "java/lang/RuntimeException".equals(gLoadArgs.tryCatchBlocks.get(0).type)
-                && countExactCalls(gLoadComp, Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc) == 1
-                && countExactCalls(gLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J") == 1
-                && countExactCalls(gLoadComp, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getShort", "()S") == 1
-                && countExactCalls(gLoadComp, Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager", "GetEntity",
-                        "(J)Lzombie/entity/GameEntity;") == 1);
-        // 負對照：PZNetKahluaTableImpl 全 class 的 loadComponent invokestatic 恰少 1（其餘方法未動）。
-        failed += check("W10-D 負對照：PZNetKahluaTableImpl 全 class loadComponent 呼叫恰少 1、改道恰 1",
-                classWideCalls(classNode(distJava, netTableCls), Opcodes.INVOKESTATIC, netTableCls, "loadComponent", loadCompDesc)
-                        == classWideCalls(classNodeFromJar(jar, netTableCls), Opcodes.INVOKESTATIC, netTableCls,
-                                "loadComponent", loadCompDesc) - 1
-                && classWideCalls(classNode(distJava, netTableCls), Opcodes.INVOKESTATIC, ntaGuardCls,
-                        "loadComponent", loadCompDesc) == 1);
+        failed += check("W10-D：loadArgs 只攔 RuntimeException，Error 不降級",
+                !gLoadArgs.tryCatchBlocks.isEmpty()
+                && gLoadArgs.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+        failed += check("W10-D2 退役：共用 table class 不出貨",
+                !Files.exists(distJava.resolve(netTableCls + ".class")));
 
         // ---- W11 動物聲音排序活鎖捕手 ----
         String basCls = "zombie/characters/BaseAnimalSoundManager";
@@ -2107,11 +2071,9 @@ public final class SmokeCheck {
                 countExactCalls(vAmUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 1
                 && countExactCalls(vAmUpdate, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
                         "getConnectionFromPlayer", connDesc) == 2);
-        // 手術後：processServer 頭部 headCall 全序＋stopPlayerActions 改道 1（W10 write 改道 2 由
-        // 上方 W10 斷言鎖定）；start 尾部 tailCall；update 改道 3、原呼叫歸零、真指令不變。
-        failed += check("W10-C 手術後：processServer headCall 全序＋stopPlayerActions 改道 x1、原呼叫歸零",
-                headCallOk(pNtaProcess, taProbeCls, "onProcessServer", "(L" + ntaPktCls + ";)V")
-                && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, taProbeCls, "stopPlayerActions", stopDesc) == 1
+        // Request 上下文沿用 W10-E dispatch；本方法只保留 stopPlayerActions 與 W10 write 改道。
+        failed += check("W10-C 手術後：stopPlayerActions 改道 x1、原呼叫歸零",
+                countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, taProbeCls, "stopPlayerActions", stopDesc) == 1
                 && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 0);
         MethodNode pNtaStart = method(distJava, ntaCls, "start", "()V");
         failed += check("W10-C 手術後：start 尾部 aload_0→onStart（RETURN 前）、真指令恰 +2",
@@ -2141,12 +2103,10 @@ public final class SmokeCheck {
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
 
-        // ---- W10-E 跨玩家 id 撞號連帶取消觀測 ----
+        // W10-E：取消的 owner 由封包派送連線取得；server 內部停止只信任佇列 action 實例。
         String actionCls = "zombie/core/Action";
         String amStopDesc = "(L" + actionCls + ";)V";
-        // vanilla 前提（撞號存在理由）：stop(Action) 內 remove(BZ) 恰 1；stopPlayerActions 與
-        // GeneralActionPacket.processServer 都只經 stop（零直接 remove）＝單一掛點涵蓋全部取消路徑；
-        // remove 方法內的 lambda 只讀 Action.id、零 playerId（TIS 加 playerId 比對時本條紅＝撤刀）。
+        // 原版取消仍只比 byte id；官方改用 owner 範圍時必須重估撤刀。
         MethodNode vAmStop = methodFromJar(jar, amCls, "stop", amStopDesc);
         MethodNode vAmStopAll = methodFromJar(jar, amCls, "stopPlayerActions", stopDesc);
         MethodNode vGapProcess = methodFromJar(jar, "zombie/network/packets/GeneralActionPacket", "processServer", psDesc);
@@ -2176,22 +2136,80 @@ public final class SmokeCheck {
                 && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, taProbeCls, "removeById", "(BZ)V") == 1
                 && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
                 && realInsnCount(pAmStop) == realInsnCount(vAmStop) + 2);
-        // helper 契約：removeById 委派 vanilla remove 恰 1（observe 不改移除語意）。
         MethodNode gRemove = method(distJava, taProbeCls, "removeById", "(BZ)V");
-        failed += check("W10-E helper 契約：removeById 委派 ActionManager.remove 恰 1（scope=vanilla／身分不明的退路）",
+        failed += check("W10-E：原版 remove 只保留一個明示 off 退路",
                 countExactCalls(gRemove, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1);
-        // enforce 形狀：vanilla server 分支＝removeAll → 逐筆 Action.stop() → AnimEventEmulator.remove；
-        // helper 的 removeScoped 複製這三步各恰 1，且 vanilla remove 內這三步也各恰 1（複製依據）。
-        String emuCls = "zombie/network/server/AnimEventEmulator";
-        String emuRemoveDesc = "(L" + ntaCls + ";)V";
-        MethodNode gScoped = method(distJava, taProbeCls, "removeScoped", "(L" + actionCls + ";B)Z");
-        failed += check("W10-E enforce 形狀：vanilla remove 內 Action.stop=1／AnimEventEmulator.remove=1；removeScoped 複製三步各 1、零 vanilla remove 委派",
-                countExactCalls(vAmRemove, Opcodes.INVOKEVIRTUAL, actionCls, "stop", "()V") == 1
-                && countExactCalls(vAmRemove, Opcodes.INVOKEVIRTUAL, emuCls, "remove", emuRemoveDesc) == 1
-                && countExactCalls(gScoped, Opcodes.INVOKEVIRTUAL, actionCls, "stop", "()V") == 1
-                && countExactCalls(gScoped, Opcodes.INVOKEVIRTUAL, emuCls, "remove", emuRemoveDesc) == 1
-                && countCalls(gScoped, "java/util/Collection", "removeAll") == 1
-                && countExactCalls(gScoped, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0);
+
+        String packetTypeCls = "zombie/network/PacketTypes$PacketType";
+        String networkPacketCls = "zombie/network/packets/INetworkPacket";
+        String dispatchDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;)V";
+        String dispatchHelperDesc = "(L" + networkPacketCls + ";" + psDesc.substring(1);
+        MethodNode vDispatch = methodFromJar(jar, packetTypeCls, "onServerPacket", dispatchDesc);
+        MethodNode pDispatch = method(distJava, packetTypeCls, "onServerPacket", dispatchDesc);
+        failed += check("W10-E 負對照：anticheat warn 不經 LogFilter，兩個 sync 出口保留",
+                countCalls(vDispatch, "zombie/debug/DebugType", "warn") == 1
+                && countCalls(pDispatch, "zombie/debug/DebugType", "warn") == 1
+                && countCalls(pDispatch, "zombie/mdc/LogFilter", "warnFmt") == 0
+                && countCalls(vDispatch, networkPacketCls, "sync") == 2
+                && countCalls(pDispatch, networkPacketCls, "sync") == 2);
+        failed += check("W10-E dispatch：原版唯一 processServer，在授權、parse、一致性與反作弊檢查之後",
+                countExactCalls(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) == 1
+                && countCalls(vDispatch, "zombie/network/PacketTypes$PacketAuthorization", "isAuthorized") == 1
+                && countCalls(vDispatch, networkPacketCls, "parseServer") == 1
+                && countCalls(vDispatch, networkPacketCls, "isConsistent") == 1
+                && countCalls(vDispatch, "zombie/network/anticheats/AntiCheat", "isValid") == 1
+                && firstCallIndex(vDispatch, Opcodes.INVOKESTATIC, "zombie/network/PacketTypes$PacketAuthorization",
+                        "isAuthorized", "(Lzombie/core/raknet/UdpConnection;L" + packetTypeCls + ";)Z")
+                        < firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc)
+                && firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "parseServer", dispatchDesc)
+                        < firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc)
+                && firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls,
+                        "isConsistent", "(Lzombie/network/IConnection;)Z")
+                        < firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc)
+                && firstCallIndex(vDispatch, Opcodes.INVOKEVIRTUAL, "zombie/network/anticheats/AntiCheat",
+                        "isValid", "(Lzombie/core/raknet/UdpConnection;L" + networkPacketCls + ";)Z")
+                        >= 0
+                && firstCallIndex(vDispatch, Opcodes.INVOKEVIRTUAL, "zombie/network/anticheats/AntiCheat",
+                        "isValid", "(Lzombie/core/raknet/UdpConnection;L" + networkPacketCls + ";)Z")
+                        < firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc));
+        failed += check("W10-E dispatch：receiver-first bridge 恰 1、原呼叫歸零、真指令數不變",
+                countExactCalls(pDispatch, Opcodes.INVOKESTATIC, taProbeCls, "processServer", dispatchHelperDesc) == 1
+                && countExactCalls(pDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) == 0
+                && realInsnCount(pDispatch) == realInsnCount(vDispatch));
+        MethodNode gDispatch = method(distJava, taProbeCls, "processServer", dispatchHelperDesc);
+        failed += check("W10-E dispatch：保留原封包虛擬派送並以 finally 收尾",
+                countExactCalls(gDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) >= 1
+                && gDispatch.tryCatchBlocks.stream().anyMatch(t -> t.type == null));
+        String clientDispatchDesc = "(Lzombie/core/network/ByteBufferReader;)V";
+        failed += check("W10-E 負對照：client 派送方法不改動",
+                realInsnCount(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))
+                        == realInsnCount(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc)));
+
+        String generalPacketCls = "zombie/network/packets/GeneralActionPacket";
+        MethodNode vSetReject = methodFromJar(jar, generalPacketCls, "setReject", "(B)V");
+        failed += check("W10-E 原版 wire 缺口：setReject 只寫 id/state，沒有發送者身分",
+                realInsnCount(vSetReject) == 7
+                && countExactFields(vSetReject, Opcodes.PUTFIELD, generalPacketCls, "id", "B") == 1
+                && countExactFields(vSetReject, Opcodes.PUTFIELD, generalPacketCls, "state", tsCls) == 1);
+        boolean generalStopsPacket = false;
+        for (AbstractInsnNode in : vGapProcess.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
+                    && amCls.equals(mi.owner) && "stop".equals(mi.name) && amStopDesc.equals(mi.desc)
+                    && prevReal(in) instanceof VarInsnNode receiver
+                    && receiver.getOpcode() == Opcodes.ALOAD && receiver.var == 0) {
+                generalStopsPacket = true;
+            }
+        }
+        failed += check("W10-E 原版 GeneralAction 取消直接傳 this", generalStopsPacket);
+        for (String cancelPacket : new String[]{"BuildActionPacket", "FishingActionPacket", "NetTimedActionPacket"}) {
+            MethodNode cancel = methodFromJar(jar, "zombie/network/packets/" + cancelPacket, "processServer", psDesc);
+            failed += check("W10-E 取消來源：" + cancelPacket + " 恰一個 ActionManager.stop",
+                    countExactCalls(cancel, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
+        }
+        failed += check("W10-E 全 jar census：stop=5、remove=4、stopPlayerActions=1，防止漏掉新取消入口",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 5
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 4
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1);
 
         // ---- W23 帳號上限登入期執法：兩個登入封包各改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla 恰 1 ----
         String swdbCls = "zombie/network/ServerWorldDatabase";
