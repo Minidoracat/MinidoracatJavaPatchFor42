@@ -1,218 +1,183 @@
-# TIS 官方論壇回報草稿 — 卡讀條後續（2026-09-07）
+# TIS 官方論壇回報草稿 — 卡讀條後續（2026-09-07；2026-09-08 校正）
 
-> 用途：延續 2026-09-02 Batch B 的 R1（forum topic 100905，「Timed actions can stall permanently at 100%…」）。
-> 三份內容的 root cause 均以 42.20.4 反編譯（`pz-decompiled-reference/snapshots/42.20.4-20260826`）
-> 與 42.20.4 jar 的 `javap` 核對過，行號為 42.20.4 行號。發文前確認不含玩家名／SteamID／主機資訊／實際座標。
+**提交狀態：本檔 R1–R3 全部尚未提交。** 已提交的是 2026-09-02 的既有報告（包含 B-R1／topic 100905），本輪不改那些歷史紀錄，也未對外發文。
 
-## 0. 補充舊帖還是另開？（評估）
+證據分級：原版 jar／反編譯的控制流、真類別的隔離重現、正式服觀測分開寫。舊 W10-E 把取消封包解析出的 `playerId` 當成發送者，這個前提已被真 wire 否證；舊草稿的「98% 已完成後取消」「少數帳號發起」「保護成功率」及逐玩家歸因全部撤回。`duration=-1` 也不代表無害。
 
-| 內容 | 決定 | 理由 |
+## 0. 投稿安排
+
+| 內容 | 建議位置 | 狀態與邊界 |
 |---|---|---|
-| **R1** `PZNetKahluaTableImpl.loadComponent` NPE（第三條「既不 Accept 也不 Reject」入口） | **在 topic 100905 回覆補充** | 同一症狀（永久卡 100%、queue 堵死）、同一機制家族（parse 階段參數解析失敗未被處理、無回覆）、同一建議修法（parse 對參數失敗要走 reject）。另開會被當重複帖合併。 |
-| **R2** `ActionManager.remove` 只比 byte id、跨玩家連帶取消 | **另開新帖**（Bug Reports） | 獨立缺陷：與參數解析無關，觸發者是「別的玩家」，修法在 `ActionManager`。目前是程式碼級證據；本文先寫成 code-level report，等 W10-E observe 有 `crossVictimsActive` 數據後補一段 Observed 再發，或先發並註明「reproduction data to follow」。 |
-| **R3** `IsoObject.getEntityNetID()` 由座標＋物件順位推導、client/server 不一致、地板固定 index 0 撞號 | **另開新帖**（Bug Reports，entity system） | 影響面不只 timed action：`GameEntityManager.checkEntityIDChange` 的 `expected null` 錯誤、A-R2 已報的 stale `entitySet`（Entity is already registered）都是同一族。R1 的 Root cause 段只引用它，細節放這帖。 |
-
-發文節奏：R1 先（回覆帖，最短）；R3 隔一天；R2 等 observe 數據（預計 1–2 天）再發。
+| R1：`loadComponent` 失敗發生在 Lua 建構子之前，整個 request 無回覆 | 回覆既有 topic 100905 | 草稿；只證明解析失敗與拒絕出口，不聲稱搬移物件已被安全救回 |
+| R2：取消 wire 沒有正確 owner，server 又以全域 byte id 移除 | 新 Bug Reports 主題 | 草稿；以 wire／queue 重現為主，不使用舊錯誤身分觀測統計 |
+| R3：IsoObject entity ID 依清單順位、地板固定 0 | 獨立 entity 系統主題 | 草稿；程式碼機制與觀測相符，不宣稱每起 CraftBench miss 或 ECS stale membership 都由它造成 |
 
 ---
 
-## R1. 回覆 topic 100905：第三條入口——`loadComponent` NPE
+## R1. 回覆 topic 100905：`loadComponent` 在建構子之前中斷 request
 
 ### 中文摘要
 
-W10 上線後 server 端仍每天數次到數十次 `Error with packet of type: NetTimedAction`，stack 固定在
-`PZNetKahluaTableImpl.loadComponent:531`：`GameEntityManager.GetEntity(netID)` 回 null 沒檢查就
-`getComponent` → NPE。位置在 `NetTimedAction.parse` 的 `this.actionArgs.load(...)`（比原帖的
-`protectedCall` 更早），所以 parse 中斷、`processServer` 不執行、client 永久卡——與原帖同症狀、不同入口。
-觸發情境：用「搬過的」鐵桶／製作台當 CraftBench 製作。8 天 98 次。
+正式服曾記錄 `PZNetKahluaTableImpl.loadComponent` 對不存在的 entity 解參考，NPE 穿過 `NetTimedAction.parse`，使 `processServer` 根本沒有執行。這是既有「不回 Accept／Reject」問題的另一個入口，不是 Lua 建構子內的例外。
+
+本輪保留 D1：在該 request 的解析範圍內處理失敗、清掉半成品參數、不呼叫建構子、走正確 Reject。**D2 座標救回已撤除**：附近唯一同型 component 不足以證明就是原物件；共用 decoder 也會影響 `StatePacket` 等非動作路徑。
 
 ### 建議板塊
 
-回覆到既有主題：https://theindiestone.com/forums/topic/100905-42204-mp-timed-actions-can-stall-permanently-at-100-and-block-the-whole-action-queue-when-a-packet-argument-deserializes-to-null-the-server-sends-neither-accept-nor-reject/
+回覆既有主題：https://theindiestone.com/forums/topic/100905-42204-mp-timed-actions-can-stall-permanently-at-100-and-block-the-whole-action-queue-when-a-packet-argument-deserializes-to-null-the-server-sends-neither-accept-nor-reject/
 
 ### Title
 
-`[42.20.4] [MP] Follow-up to topic 100905 — third entry point: PZNetKahluaTableImpl.loadComponent NPE (reply, no new topic)`
+`[42.20.4] [MP] Follow-up to topic 100905 — component deserialization can abort the request before the Lua constructor`
 
 ### Body
 
 ```text
-Follow-up: a third entry point into the same "neither Accept nor Reject" stall, this time before the Lua constructor is even reached.
+Follow-up to the existing report: another entry point into the same missing Accept/Reject response occurs before the Lua constructor is called.
 
-After deploying our server-side hotfix for the two defects above, the server log kept showing a different failure on the same packet type, 98 times in 8 days (up to 40 per session):
-
-  ERROR: General ... at GameServer.mainLoopDealWithNetData > Error with packet of type: NetTimedAction for <steamid>
-  java.lang.NullPointerException: Cannot invoke "zombie.entity.GameEntity.getComponent(zombie.entity.ComponentType)" because "gameEntity" is null
-      zombie.network.PZNetKahluaTableImpl.loadComponent(PZNetKahluaTableImpl.java:531)
-      zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:689)
-      zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:546)
-      zombie.core.NetTimedAction.parse(NetTimedAction.java:155)
-      zombie.network.packets.INetworkPacket.parseServer(INetworkPacket.java:55)
-      zombie.network.PacketTypes$PacketType.onServerPacket(PacketTypes.java:967)
-      zombie.network.GameServer.mainLoopDealWithNetData(GameServer.java:1612)
-
-Root cause (42.20.4)
---------------------
-1. PZNetKahluaTableImpl.loadComponent (lines 500-505) dereferences the result of GameEntityManager.GetEntity without a null check:
-
-     long gameEntityNetID = input.getLong();
-     short componentID = input.getShort();
-     GameEntity gameEntity = GameEntityManager.GetEntity(gameEntityNetID);
-     return gameEntity.getComponent(ComponentType.FromId(componentID));   // NPE when the entity is unknown
-
-   loadResource (lines 492-498) has the same shape.
-
-2. The call sits inside NetTimedAction.parse at `this.actionArgs.load(b, connection)` (line 148 in source, javap offset 68), i.e. BEFORE the protectedCall that the original report is about (offset 167). The exception leaves parse, processServer is never called, and GameServer.mainLoopDealWithNetData swallows it. Client side this is indistinguishable from the original defect: the action parks at 100% forever and the queue is blocked.
-
-3. Why the entity is unknown on the server - IsoObject.getEntityNetID (IsoObject.java:5831-5848) derives the net ID from the object's position in its square:
-
-     newID = x + (y << 16) + (z << 32) + (objectIndex << 40)     // objectIndex = square.getObjects().indexOf(this); floors always use 0
-
-   Client and server each compute this from their own square.getObjects() order, and the server-side idToEntityMap entry is only refreshed when getEntityNetID() happens to be called again. Picking up and placing a craft bench (a metal drum in the cases we traced) removes and re-inserts the IsoObject, so its index - and therefore its ID - changes; if the two sides do not end up with the same order, the ID the client sends does not exist on the server (this NPE) or resolves to a different object. Players describe exactly that: "a drum that has been moved cannot be used for crafting until relog, other benches work". I will file the ID derivation itself as a separate report since it affects more than timed actions.
-
-Suggested fix
--------------
-- loadComponent / loadResource: null-check GetEntity and return null (or throw a typed exception that parse converts into the existing `action = null` path) instead of NPE.
-- NetTimedAction.parse: treat any failure while loading actionArgs the same way as a failed constructor call, so processServer runs and the client receives a Reject.
-- Longer term: give IsoObject a net ID that does not depend on list order (see the separate report).
-
-Observed after our follow-up hotfix
------------------------------------
-We extended the server-side hotfix so that (a) a failure inside actionArgs.load is turned into a Reject reply, and (b) when GetEntity misses, the server decodes the coordinates embedded in the ID and, if exactly one IsoObject on that square within reach of the requesting player carries the requested component, uses it (and refreshes its map entry). Counters and logs available on request.
-```
-
----
-
-## R2. 新帖：`ActionManager.remove` 只比 byte id，跨玩家連帶取消
-
-### 中文摘要
-
-`Action.lastId` 是各 client 自己的 static byte（1..255 循環），不同玩家可同時持有相同 id。server
-端 `ActionManager.stop(Action)` 丟掉玩家身分只呼叫 `remove(action.id, true)`，而 server 分支的
-`remove` 對整份清單只比 `t.id == id`、不回封包。乙送新 Request 時 `processServer` 先
-`stopPlayerActions(乙)`，停掉乙掛著的動畫型動作（duration -1，server 端會掛到 30 分鐘），若甲正在跑的
-製作與它同 id，甲的製作被一起無聲移除——甲永遠等不到 Done／Reject。`GeneralActionPacket`（client 取消）
-走同一條 `stop`。程式碼級證據完整；線上 victim 數據由 observe patch 收集中，發文時補 Observed 段。
-
-### 建議板塊
-
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/?do=add
-tags：multiplayer, dedicated server, timed-action, stuck
-
-### Title
-
-`[42.20.4] [MP] ActionManager.remove matches server-side actions by byte id only — cancelling one player's action silently removes any other player's action with the same id (ids are per-client, 1..255)`
-
-### Body
-
-```text
-Version: [42.20.4]
-Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64, LinuxGSM, OpenJDK 25 + ZGC, 254 slots; evening peaks 60–95 concurrent players]
-Mods: [~80 workshop mods on the production server; the defect is in vanilla Java (class/method references below)]
-Save: [Not save-specific]
-
-Summary
--------
-Server-side action ids are not unique across players, but ActionManager removes actions by id alone. Whenever a player's action is stopped on the server (new request replacing an old one, or an explicit cancel), every other player's action that happens to carry the same byte id is removed too - silently, with no Done/Reject sent. The victim's client waits forever: progress bar parked at 100%, queue blocked, only a relog helps. On a busy server this is a plausible steady source of "stuck progress bar" reports that leaves no server-side trace.
-
-Root cause (42.20.4, decompiled + javap on the shipped jar)
------------------------------------------------------------
-1. Action.set (Action.java:37-45): `this.id = lastId++` where lastId is a static byte of the *client* JVM. Each client counts 1..255 independently, so two players can hold the same id at the same time.
-
-2. ActionManager.stop (ActionManager.java:51-54; javap offset 24) discards the player identity:
-
-     public static void stop(Action action) { ... remove(action.id, true); }
-
-3. ActionManager.remove, server branch (ActionManager.java:188-199):
-
-     List<Action> transactionForDelete = actions.stream().filter(t -> t.id == id).collect(...);
-     actions.removeAll(transactionForDelete);
-     for (Action action : transactionForDelete) { action.stop(); ... }
-
-   The filter compares only id (lambda$remove$1 reads Action.id and nothing else). No packet is sent on this branch.
-
-4. Every server-side cancel goes through stop(): NetTimedActionPacket.processServer calls ActionManager.stopPlayerActions(playerId) before starting a new request (lines 70-72), and GeneralActionPacket.processServer calls ActionManager.stop (javap offset 30).
-
-5. The dominant trigger is the client's own cancel packet for an action the server has ALREADY completed. IsoGameCharacter.updateInternal (8986-9006) evaluates `valid = act.valid()` at the top of every frame; when the server performs an action and the resulting world change reaches the client first (grass removed, tree felled, egg taken, floor placed), the Lua isValid() of the still-queued client action turns false in that frame, `act.update()` is skipped (so the isDone -> forceComplete path inside LuaTimedActionNew.update never runs), and the action goes straight to `act.stop()` -> ActionManager.remove(id, true) -> GeneralActionPacket(reject). On the server that id no longer exists for this player (it was Done and cleared), GeneralActionPacket.processServer's getAction() builds a temporary object, stop() calls remove(id, true), and the only actions left in the list with that id belong to OTHER players - which are then removed. Every player doing quick repetitive actions (clearing grass, chopping, collecting eggs, watering animals, batch crafting) therefore sprays cancels across the whole id space. A secondary trigger is a new request stopping the sender's own parked animation-driven (-1) action via stopPlayerActions - same remove(id) path.
-
-Client-side consequence
+Observed server failure
 -----------------------
-The victim's LuaTimedActionNew waits for ActionManager.isDone/isRejected (LuaTimedActionNew.java:93-98); neither ever becomes true because the server never sent a reply and the entry is still in the client's list. Same dead end as in topic 100905.
+Our dedicated server has recorded this exception while parsing NetTimedAction packets:
+
+     java.lang.NullPointerException: Cannot invoke "zombie.entity.GameEntity.getComponent(zombie.entity.ComponentType)" because "gameEntity" is null
+         at zombie.network.PZNetKahluaTableImpl.loadComponent(...)
+         at zombie.network.PZNetKahluaTableImpl.load(...)
+         at zombie.core.NetTimedAction.parse(...)
+
+Code path in the 42.20.4 jar
+--------------------------
+- loadComponent reads an entity net ID and a component type, then dereferences GameEntityManager.GetEntity(netID) without checking whether the entity exists. loadResource has the same unguarded entity lookup shape.
+- NetTimedAction.parse calls actionArgs.load before LuaCaller.protectedCall. An exception here never reaches the constructor-failure handling.
+- PacketType.onServerPacket does not call processServer when parseServer throws. The outer network loop logs the exception, but no Accept or Reject is sent for that request.
+- This reaches the unanswered-request condition described in topic 100905. It does not prove that every reported stuck action has this cause.
+
+Local reproduction and mitigation boundary
+-----------------------------------------
+An isolated harness using the real jar classes serialized a missing component reference into a request. The original shared table decoder throws; a request-scoped guard can clear partial arguments, skip the Lua constructor, and serialize a Reject carrying the same action/player identifiers. A subsequent valid request on the reused packet still parses normally.
+
+We are keeping the shared table decoder unchanged. We are not substituting another nearby object when an entity lookup fails: even a unique nearby component is not proof of the original object's identity. This mitigation makes a failed request explicit; it does not repair craft-bench identity or prove that the client has received the reply.
 
 Suggested fix
 -------------
-- Make the server-side identity (playerId, id) instead of id alone: stop(Action) should remove that Action instance (or filter on id AND playerId), and GeneralActionPacket should pass the connection's player.
-- Alternatively allocate ids on the server.
-- Independently: send a Reject when the server removes an Accepted action, so the client can recover.
-
-Observed (dedicated server, 42.20.4, 2026-09-07 15:56-22:16, 4 sessions, 60-90 concurrent players)
----------------------------------------------------------------------------------------------------
-We instrumented ActionManager.stop/remove on our server (observe only, no behaviour change) and logged every removal whose victim belongs to a different player than the sender:
-- 1438 cross-player removals in ~6 hours; 706 of the victims were positive-duration actions still waiting for the server to complete them (ISHandcraftAction 27% of those, ISPetAnimal, ISReadABook, ISMoveablesAction, BuildAction, ISEatFoodAction ...); 92 distinct players affected; rate grew from 70/h to 145/h with player count.
-- 1435 of 1438 came through GeneralActionPacket (client cancel), 3 through stopPlayerActions.
-- In 98% of the cases the sender's own action was no longer in the list (removeAll matched only other players' entries) - i.e. the cancel was for an id the server had already completed, exactly the sequence in item 5.
-- Worst single case: one player's 150-second crafting action was removed four times in a row with 2-22 seconds remaining, by cancels from unrelated players; the player eventually quit.
-- Senders are simply the most active players (one was clearing grass, one chopping trees / collecting eggs, one placing floors); no mod errors or abnormal traffic in their client logs.
-
-Turning the server-side removal into "same id AND same playerId only" (our follow-up patch) reduces these to zero by construction; we will report the after-numbers once it has run for a day.
+- Give unresolved component/resource references an explicit failure result or typed exception.
+- Handle that failure at the timed-action request boundary, without passing incomplete arguments to the Lua constructor.
+- Send the existing Reject response with the correct state and identifiers.
+- Investigate why the referenced entity is missing separately; do not guess a replacement object from coordinates alone.
 ```
 
 ---
 
-## R3. 新帖：IsoObject 的 entity net ID 由「座標＋清單順位」推導
+## R2. 新帖：取消封包身分缺口＋全域 byte id 移除
 
 ### 中文摘要
 
-`IsoObject.getEntityNetID()` 不是登記的 ID，而是 `x + (y<<16) + (z<<32) + (objectIndex<<40)`
-現算，index 來自 `square.getObjects().indexOf(this)`，地板固定 0。三個後果：(1) 搬移／重載後 index
-變、ID 變；(2) client 與 server 各算各的，順序不同就對不上（F1 的 NPE，或指到別的物件）；(3) 同格
-地板與 objects[0] 撞號——`checkEntityIDChange` 印出 `idToEntityMap(<id>)=WoodFloorLvl3..., expected
-null (entity=WoodenWallFrame...)`（該 log 在 42.20.4 因 `%ld` 格式字串本來印不出來，見先前回報）。
-與 A-R2（stale entitySet）同族。
+`GeneralActionPacket.setReject` 只寫 action id／state，不寫 `PlayerID`；真 wire 的 player id 是預設 `0`、index 是 `-1`。server 因此解析成目前 onlineID 0 的玩家或 null，**不是發送者**。`processServer` 直接 `stop(this)`，沒有 `getAction/copyFrom` 補正。
+
+原版 `ActionManager.remove` 又只以 byte id 掃整份 server queue。真正修正必須從已認證連線取得 owner，不能只比封包中的 `playerId`；server 內部停止則可使用確定的 queue 實例。另須防止 typed cancel 的前後副作用繞過範圍守衛。
 
 ### 建議板塊
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/?do=add
-tags：multiplayer, dedicated server, entity
 
 ### Title
 
-`[42.20.4] [MP] IsoObject entity net IDs are derived from the object's index in its square — moving an object changes its ID, client and server can disagree, and floors collide with objects[0]`
+`[42.20.4] [MP] GeneralAction cancellation sends default player identity, while ActionManager removes server actions globally by byte id`
 
 ### Body
 
 ```text
 Version: [42.20.4]
 Mode: [Multiplayer]
-Server settings: [Dedicated, Linux x86_64, LinuxGSM, OpenJDK 25 + ZGC, 254 slots]
-Mods: [~80 workshop mods; the defect is in vanilla Java (class/method references below)]
+Server settings: [Dedicated server]
+Mods: [Production reports came from a modded server; the wire and queue behaviour below were reproduced with the shipped Java classes in an isolated harness]
 Save: [Not save-specific]
 
 Summary
 -------
-GameEntity net IDs for IsoObjects are computed, not assigned:
+Action ids are allocated independently by each client JVM, but server-side ActionManager.remove matches only the byte id across the whole queue. A cancellation from one connection can therefore remove another connection's action without sending that other client Done or Reject.
 
-  IsoObject.getEntityNetID (IsoObject.java:5831-5848)
-     newID = x + (y << 16) + (z << 32) + (objectIndex << 40)
-     objectIndex = this.isFloor() ? 0 : square.getObjects().indexOf(this)
+The GeneralAction cancellation packet does not supply a usable sender identity either. Checking its decoded playerId is not a safe fix.
 
-The ID is recomputed lazily whenever getEntityNetID() is called and the index changed (checkEntityIDChange moves the idToEntityMap entry). This has three observable consequences on a dedicated server.
+Wire reproduction with the shipped classes
+-----------------------------------------
+Construct GeneralActionPacket, call setReject((byte)66), then write it with ByteBufferWriter. The payload is:
 
-1. The ID is not stable. Picking an object up and placing it again removes it from and re-inserts it into square.getObjects(), so its index and ID change. Any packet argument that references the object by net ID (PZNetKahluaTableImpl.saveComponent / loadComponent, saveResource / loadResource) is only valid as long as both sides agree on the list order.
+     42 00 00 00 ff
+     action id = 66; state = Reject (ordinal 0); player onlineID = 0; playerIndex = -1
 
-2. Client and server compute the ID independently from their own square.getObjects(). After a move, a chunk reload, or any difference in insertion order, the client's ID may not exist on the server - GameEntityManager.GetEntity returns null and PZNetKahluaTableImpl.loadComponent throws NPE (98 occurrences in 8 days on our server, reported as a follow-up in topic 100905) - or it may resolve to a different object on the same square. Players see it as "a craft bench that has been moved cannot be used until relog".
+GeneralActionPacket.setReject writes only id and state. The remaining fields retain their defaults. On the server, PlayerID.parsePlayer uses the global player map when playerIndex is -1, so the decoded player is whoever currently has onlineID 0, or null if no such player is connected. Neither result identifies the connection that sent the packet.
 
-3. Floors always use index 0, but so does whatever object happens to be at objects[0] of a square that has no floor at index 0. checkEntityIDChange then logs:
+GeneralActionPacket.processServer calls ActionManager.stop(this) directly. It does not call getAction or copyFrom to obtain the sender's queued action.
 
-     idToEntityMap(<id>)=WoodFloorLvl3:carpentry_02_56:...IsoThumpable@..., expected null (entity=WoodenWallFrame:carpentry_02_101:...)
+Queue reproduction
+------------------
+Put accepted actions belonging to two different connections into the server queue with the same action byte id. Dispatch a GeneralAction cancellation from one connection. In the original server removal path, both actions are selected because the predicate compares only the action id. The server branch stops/removes them without replying to the other client.
 
-   (Note: in 42.20.4 this log line never prints because the format string uses `%ld`, which java.util.Formatter rejects with UnknownFormatConversionException - reported separately. We patched the format string to obtain the lines above.)
+Action.set uses a per-client static byte and skips zero: there are 255 reusable values, including negative values in Java's signed representation. These ids are not globally unique across connections, and split-screen players share one client JVM counter.
 
-The same family of symptoms was reported earlier as "Entity is already registered" from IsoChunk.doLoadGridsquare with stale EngineEntityManager.entitySet entries (topic 100893).
+Additional scope hazards
+------------------------
+- NetTimedActionPacket's Reject branch calls getAction/copyFrom before stop. A foreign player header can change another queued action's state to Reject before an owner-filtered remove runs; ActionManager.update then deletes it on the next tick.
+- Request headers also need verification: PlayerID can resolve playerIndex to the sender's local connection player while retaining a different wire onlineID. Existing getAction and stopPlayerActions lookups use that numeric ID.
+- FishingActionPacket can process bobber-update flags after its Reject/stop branch. Its getLuaTable uses ActionManager.getPlayer(actionId), another global id-only lookup. Keeping another owner's action in the queue must not turn that owner into the cancellation's Lua-event player.
 
 Suggested fix
 -------------
-- Give IsoObject a persistent per-object ID (assigned once, saved with the object, sent to clients), and use it for network references instead of the (x, y, z, index) composite.
-- Until then: refresh the server-side map entry when an object is re-inserted into a square (register/unregister on add/remove) and null-check GetEntity in loadComponent/loadResource so a mismatch degrades into a rejected action rather than a dropped packet.
+- Derive network cancellation ownership from the authenticated UdpConnection and its actual players, not GeneralAction's default fields.
+- Verify request player identity and numeric onlineID before existing-action lookups or mutations.
+- Scope cancellation before typed-packet pre/post side effects; preserve other owners' state as well as their queue entries.
+- For server-internal stops, remove the actual queued Action instance rather than every action with the same byte id.
+- Keep cleanup complete for every removed action, even if one stop callback throws.
+
+Evidence limits
+---------------
+Earlier owner-attribution telemetry used the decoded GeneralAction player and is invalid. We are not using those sender counts, alleged post-completion percentages, or player-specific attributions in this report. The wire and isolated queue reproductions above establish the defect; they do not quantify its production frequency or prove that all stuck action reports share this cause.
+```
+
+---
+
+## R3. 新帖：IsoObject entity ID 依座標與清單順位推導
+
+### 中文摘要
+
+`getEntityNetID` 的非地板 index 來自 `getObjectIndex()`，地板強制 0，並於讀取時更新 map。這是可驗證的身分不穩定／碰撞機制；現有 CraftBench miss 與 ID collision 診斷符合此風險，但不能把個別事件或 stale ECS membership 的完整根因都直接定為此式。
+
+### 建議板塊
+
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/?do=add
+
+### Title
+
+`[42.20.4] [MP] IsoObject entity net IDs depend on square-list position, with floors forced to index zero`
+
+### Body
+
+```text
+Version: [42.20.4]
+Mode: [Multiplayer]
+Server settings: [Dedicated server]
+Mods: [Production observations came from a modded server; the ID derivation below is vanilla Java]
+Save: [Not save-specific]
+
+Code-level identity risk
+-----------------------
+IsoObject.getEntityNetID derives the identifier from square coordinates and an object-list index:
+
+     index = isFloor() ? 0 : getObjectIndex()
+     netID = x + (y << 16) + (z << 32) + (index << 40)
+
+The method updates GameEntityManager's map when its cached ID/index needs recomputing. Removing and reinserting an object can change its list position and therefore its ID. Client and server compute their own values from their own object lists; this is not an independently assigned object identity.
+
+Two distinct objects at the same coordinates can also receive the same composite ID if one is a floor forced to index 0 and the other occupies objects[0]. Whether that arrangement is the cause of a particular collision still requires the corresponding square state.
+
+Related observations, not a complete causal reconstruction
+--------------------------------------------------------
+Our server has seen unresolved component references in NetTimedAction.parse, and idToEntityMap diagnostics naming a floor where a wall-frame entity was expected. Those observations are consistent with unstable or colliding identity, but we have not captured both sides' object lists for each failure. We are not claiming this explains every unresolved reference or the separate stale ECS-membership problem.
+
+Suggested investigation
+-----------------------
+- Check client/server identity agreement through pickup, placement, chunk reload and object-list changes.
+- Check forced floor index 0 against other objects occupying that index, and verify map invalidation when an object is removed or replaced.
+- Consider an identity independent of list position, with explicit lifecycle rules on both peers.
+- Reject unresolved action references explicitly rather than choosing a nearby substitute object.
 ```

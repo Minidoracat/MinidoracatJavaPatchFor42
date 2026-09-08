@@ -1967,75 +1967,45 @@ helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會�
 `protectedCall` 未攔 `RuntimeException` ＋ `processServer` 對錯物件設 state，四者疊起來就是
 「client 無限等待」。附 `ItemTransactionPacket` 作為同 codebase 的正確對照即可。
 
-### 2026-09-07 補記：W10-D 參數反序列化失敗的有聲化＋CraftBench 座標救回
+### 2026-09-08 校正：W10-D 僅處理 request 解析失敗，撤除 D2 座標救回
 
-**現況校正**：W10 上線後正式服 `caught` 恆 0 而 `rejected` 每 session 0–13——Kahlua 的 pcall
-其實會吞下 Lua 建構子例外並回 `isSuccess()==false`（log 形態＝`KahluaThread.flushErrorMessage`
-印 Lua stack），vanilla 的 `action=null` 路徑本來就走得到；**真正讓 client 卡死的是缺陷 2**
-（回覆 state 寫錯），A 刀是主力、B 刀退為保險絲。2026-09-07 起 `reject sent` 行加
-`player=`／`reason=`，供統計與向受害玩家索取 client `console.txt`。
+正式服曾記錄 `NetTimedAction` 封包在 `PZNetKahluaTableImpl.loadComponent` 拋 NPE：
+`GameEntityManager.GetEntity(netID)` 回 null 後仍直接 `getComponent`。這發生在
+`NetTimedAction.parse` 的 `actionArgs.load`，早於 Lua 建構子；例外離開 parse 後，原版不會
+執行 `processServer`，因此沒有 Accept／Reject。這是 W10 原始兩刀以外的另一個入口。
+已有 Lua pcall 失敗則可能本來就回 `isSuccess()==false`；不能把所有卡讀條都歸因於 B 刀的
+`RuntimeException` 捕手，也不能把 `caught=0` 當成沒有其他故障。
 
-**第三條靜默路徑（正式服 8/31–9/7 共 98 次，8/31 session 40、9/6 06:52 session 27）**：
+**本輪保留 D1、撤除 D2**：
 
-```
-ERROR: General ... at GameServer.mainLoopDealWithNetData > Error with packet of type: NetTimedAction for <steamid>
-java.lang.NullPointerException: Cannot invoke "GameEntity.getComponent(ComponentType)" because "gameEntity" is null
-    zombie.network.PZNetKahluaTableImpl.loadComponent(PZNetKahluaTableImpl.java:531)
-    zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:689)   ← sbyt 36（CraftBench）
-    zombie.network.PZNetKahluaTableImpl.load(PZNetKahluaTableImpl.java:546)
-    zombie.core.NetTimedAction.parse(NetTimedAction.java:155)                  ← actionArgs.load，offset 68
-```
+| 邊界 | 現行行為 |
+|---|---|
+| `NetTimedAction.parse` 頭部 | `beginParse(this)` 清上一包原因，將上下文綁在本次 packet |
+| 該方法唯一的 `actionArgs.load` | `loadArgs` 只在有效 parse 上下文且 `args && stateFix` 時攔 `RuntimeException`，清空半成品參數並留下失敗原因；`Error` 穿透 |
+| 既有 `protectedCall` 改道 | 有解析失敗原因就不呼叫 Lua 建構子，回失敗結果，讓 vanilla 設 `action=null` |
+| W10-A `write` 改道 | `action=null` 時序列化正確 Reject；原因只供同一 packet 使用，並在 write **之前**取用即清，write 拋錯也不留殘餘 |
+| 共用 `PZNetKahluaTableImpl` | 完全不改、不出貨 loose class；`StatePacket` 等其他使用者維持原版 |
 
-`parse` 在 `protectedCall`（offset 167）**之前**就炸——B 刀掛點到不了、`processServer` 不執行、
-既不 Accept 也不 Reject，正是 B-R1 的原始症狀從另一個入口重現。9/6 10:40–10:51 同一玩家 6 次
-NPE 對上他 10:52 的回報「製作木炭讀條跑完卡著」，chat 裡其他玩家補充「鐵桶搬過就壞掉、其他製作台可以」。
+`-Dmdc.netTimedActionArgs=0` 關 D；`-Dmdc.netTimedActionState=0` 關 A 時 D 也直通。
+沒有正確 Reject 出口就不得吞解析例外。B 刀的 `netTimedActionGuard` 開關仍獨立。
+這只涵蓋 `actionArgs.load` 的失敗，不是整個 `parse` 的萬用 catch。
 
-**為什麼 server 找不到那個鐵桶（netID 設計）**：`IsoObject.getEntityNetID()`（:5831-5848）
+**D2 撤除理由**：舊版把 netID 解成座標，挑玩家附近唯一帶相同 component 的物件。距離與唯一性
+都無法證明它就是原物件；原目標消失後，另一件物品仍可能通過。且改道位於共用 decoder，
+影響面超過 timed action。故刪除整個 `loadComponent`／座標救回入口，不保留 fallback。
+本刀讓失敗變得明確，**不修復搬移過的製作台身分，也不保證重試一定成功**。
 
-```
-netID = x + (y << 16) + (z << 32) + (objectIndex << 40)      // objectIndex = square.getObjects().indexOf(this)；isFloor() 固定 0
-```
+**驗證**：真 jar 類別的缺 component request → partial args 清空 → 建構子不執行 →
+回覆 bytes 為同 action/player id 的 Reject；同一 packet 隨後解析正常請求不受污染。
+另驗缺 parse 上下文時仍原樣拋錯、原因不跨 packet、write 例外清狀態、`Error` 穿透。
+四組態＝出貨／B off／A off／D off。共用 decoder 負對照仍拋原版 NPE，不會選替代物件。
 
-不是登記的號碼，是**座標＋該格物件清單順位**算出來的；client/server 各自從自己那格的清單算。
-搬移（pickup→place）讓物件離開清單（index -1，netID -1）再插回（新順位）；兩端插回順序
-不同、或 chunk 重載後順序不同，client 算的號碼在 server 要嘛不存在（本刀的 NPE）、要嘛指到
-別的物件。server 端 `idToEntityMap` 只在 `getEntityNetID()` 被讀取時才重算（lazy），搬移後沒人
-讀它，登記簿裡還是舊號。另一種形態＝同格兩物件同號：地板固定 index 0，若該格 objects[0]
-是牆框，兩者撞號——W24 修好 `%ld` 格式後 `idToEntityMap(...)=WoodFloorLvl3:..., expected null
-(entity=WoodenWallFrame...)` 9/6 23:10 起已印出 7 行。**根治＝換一套兩端一致的穩定 ID，
-要改序列化格式、client 也要改，純 server loose class 做不到、也不該做**——只能回報 TIS。
+**線上判讀**：`argsFailed` 是被處理的解析失敗、`argsRejected` 是跳過建構子的次數；
+`reject serialized cause=` 只證明回覆已序列化，**不是 client 已收到／動作已恢復的證據**。
+解析失敗 log 列 `connectionPlayers`，不把同機多人連線的第一位玩家冒充發送者；
+`anomalies` 應為 0。新版本的正式服驗收尚未完成，不宣稱修後成功率。
 
-**手術（兩個 1:1 同形 redirect＋既有 B 刀改道點加旗標檢查；kill switch `-Dmdc.netTimedActionArgs=0`）**：
-
-| 刀 | 掛點 | 改道 | 效果 |
-|---|---|---|---|
-| D1 | `NetTimedAction.parse` 內唯一的 `PZNetKahluaTableImpl.load(ByteBufferReader,IConnection)V`（offset 68） | → `NetTimedActionGuard.loadArgs` | 攔 `RuntimeException`（NPE／BufferUnderflow／未知 sbyt）設 ThreadLocal 旗標；parse 照常走到 `protectedCall` 改道點，看到旗標**不呼叫 Lua 建構子**（`arguments[]` 不完整）直接回 LuaFail → vanilla `action=null` → A 刀 Reject → client `forceStop`。`Error` 穿透 |
-| D2 | `PZNetKahluaTableImpl.load(…,byte)` 內 sbyt 36 唯一的 `loadComponent(ByteBuffer,IConnection)`（offset 890） | → `NetTimedActionGuard.loadComponent` | 前四步複製 vanilla（getLong／getShort／GetEntity／getComponent，SmokeCheck 釘同構）；`GetEntity` 回 null 時解碼 netID 的座標、`ServerMap.getGridSquare(x,y,z)`、該格**恰好一個**帶該 component 的 IsoObject 才救回（並呼叫其 `getEntityNetID()` 讓 server map 對齊現況），否則設旗標 |
-
-D2 的三道門：座標合法（z≤63、index≤4096）、該格在**該連線玩家 12 格內**、候選唯一。距離門的
-理由：`InventoryItem.getEntityNetID()` 回 item id（int），與 IsoObject 在 z=0、index=0 的號碼
-落在同一個數值空間，誤解碼出來的座標散布全地圖，落在玩家 12 格內又恰好有一個同型 component
-的機率可忽略；CraftBench（ComponentType 19，flags=0）確實可掛在 item 上，所以這道門不能省。
-救回後的動作由 vanilla 照常 Accept／perform，玩家體感＝「搬過的鐵桶直接能用」；救不回＝有聲
-失敗（同 W10 語意，不猜）。`loadComponent` 是 `PZNetKahluaTableImpl.load` 的共用路徑
-（server command args 也走），D2 對所有使用者生效；旗標只在 `parse` 的 D1 先清、B 刀改道點消費，
-其他路徑不消費旗標也不受影響。
-
-**守門**：SmokeCheck 五條——(1) vanilla `parse` 內 `load` 恰 1 且**先於** `protectedCall`
-（「B 刀掛點到不了」的結構事實）；(2) vanilla `load(…,byte)` 內 `loadComponent` 恰 1、
-`loadComponent` 四步各 1 且零 IFNULL/IFNONNULL（**TIS 補 null 檢查時本條紅＝D2 撤刀訊號**）；
-(3) 手術後 parse `loadArgs` 改道 x1／原 load 歸零、`load(…,byte)` 改道 x1／原呼叫歸零／真指令不變；
-(4) helper 契約：`loadArgs` 委派 2（off 直通＋try 內）、catch 恰 1 且 RuntimeException；
-`loadComponent` 委派 vanilla 1（off 直通）＋自身 getLong/getShort/GetEntity 各 1；(5) 負對照：
-PZNetKahluaTableImpl 全 class `loadComponent` 呼叫恰少 1。行為測試 `NetTimedActionGuardTest`
-新增 `args-off` 組態：旗標流程、ctor 不被呼叫、netID 解碼、GetEntity 未命中且無連線玩家 → 旗標
-→ 拒絕、kill switch 下 NPE 原樣外傳。**座標救回命中路徑需真實 IsoGridSquare／IsoPlayer，測試 JVM
-無法建構，線上以 `component recovered` 行驗收。**
-
-**驗收**：`Error with packet of type: NetTimedAction` 歸零；heartbeat `argsFailed`／`argsRejected`／
-`componentMissing`／`componentRecovered` 四計數——`componentRecovered/componentMissing` 是「搬過的鐵桶
-直接救回」的比例、`argsRejected` 是仍要玩家重試的份額；`reject sent … player= reason=` 逐筆帶玩家名。
-`anomalies` 恆 0。
+TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**尚未提交**。
 
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
 
@@ -3192,11 +3162,11 @@ DismantleAllAtOnce（wid 3761218629）一次排入 15 條 handcraft action，是
   分支，但 Done／Reject 兩分支各自 `GameServer.getConnectionFromPlayer`（恰 2），回 null
   ＝**封包不送**（同樣零 log）。量 `perform` true/false 分佈與 connection null 次數。
 
-### 手術（1 headCall＋1 redirect＋1 tailCall＋3 redirect；全部純線性、真指令 +2/+2/±0）
+### 手術（1 redirect＋1 tailCall＋3 redirect；Request 上下文共用 W10-E dispatch）
 
 | 目標 | 手術 | 語意 |
 |---|---|---|
-| `NetTimedActionPacket.processServer`（掛在 W10 既存 ClassPatch；`expectedHits` 2→4） | headCall `MdcTimedActionProbe.onProcessServer(packet)`＋`invokestatic ActionManager.stopPlayerActions` → `MdcTimedActionProbe.stopPlayerActions` | headCall 以 ThreadLocal 捕獲當前 Request（判同 id、記新動作型別）；redirect 先掃 `ActionManager.actions` 同玩家 Accept 中的舊動作（type／已等 ms／剩餘 ms／新 Request type／判定），再**原樣委派** vanilla |
+| `NetTimedActionPacket.processServer`（掛在 W10 既存 ClassPatch；總 `expectedHits=3`） | `ActionManager.stopPlayerActions` → `MdcTimedActionProbe.stopPlayerActions` | Request 取自 W10-E dispatch 上下文；先觀測同 owner 的 Accept 舊動作，再委派 vanilla 停止流程。不再另插 headCall |
 | `NetTimedAction.start()V`（掛在 W10 既存 `nta` ClassPatch；`expectedHits=1`） | **TailCall**（每個 RETURN 前 `aload_0; invokestatic onStart(NetTimedAction)V`；單一 RETURN offset 57） | `setTimeData` 之後讀 `duration`／`endTime`，負值逐筆列出（type／name／player／endTimeDeltaMs） |
 | `ActionManager.update()V`（**新 ClassPatch**；`expectedHits=3`） | `Action.perform()Z` → `perform(Action)Z`；`GameServer.getConnectionFromPlayer` ×2 → `connectionOf` | 1:1 同形；先委派 vanilla 再簿記 |
 
@@ -3228,21 +3198,19 @@ Reject 分支（:87-96）的形狀——`state=Reject` → `startPacket` → `Ne
   該條紅＝撤刀訊號）。
 - vanilla (C)：`start` 內 `RETURN=1`、`setTimeData=1`；`setTimeData` 內 `getDurationMax=1`。
 - vanilla (R)：`update` 內 `perform=1`、`getConnectionFromPlayer=2`。
-- 手術後：`processServer` headCall 全序＋`stopPlayerActions` 改道 x1／原呼叫歸零（W10 斷言同步
-  改為真指令恰 +2）；`start` 尾部 `aload_0→onStart`（`tailCallOk`：每個 RETURN 前兩條＋呼叫數
+- 手術後：`processServer` 的 `stopPlayerActions` 改道 x1／原呼叫歸零，真指令數不變；
+  `start` 尾部 `aload_0→onStart`（`tailCallOk`：每個 RETURN 前兩條＋呼叫數
   ＝RETURN 數）、真指令恰 +2；`update` 改道 1+2、原呼叫歸零、真指令不變。
 - helper 契約：三委派各恰 1；`sendReject` 內 `write=1／doPacket=1／send=1`（補送形狀釘死）。
 
-### 行為測試（`MdcTimedActionProbeTest`，獨立 JVM 三組態：observe／`=1`／`=off`）
+### 行為測試（`MdcTimedActionProbeTest`，獨立 JVM 四組態）
 
-`onStart` 正 2000ms 與 -1 各一（負值恰 +1、endTimeDelta＝durationMax）；反射注入
-`ActionManager.actions`：Accept 中舊動作被不同 id 的新 Request 打斷 ⇒ `interruptedAccepted+1`、
-Request 態不算、同 id ⇒ `sameIdResend+1` 且 enforce 不補送；enforce 無玩家／連線 ⇒
-`rejectsSkippedNoConn+1`、零 sent、state 未改；`perform` true/false 與 `connectionOf` null 計數；
-off 三點全零；全組態 `anomalies=0`。測試坑（家族通則）：`main` 首行 `RandStandard.INSTANCE.init()`
-（`GameTime.getServerTimeMills → GameClient → ServerOptions → Rand` 靜態鏈）；vanilla 只在 client
-`sendAction` 分配 `Action.id`，測試須顯式給不同 id；打斷偵測走 `inspectInterruptedForTest` 不委派
-vanilla `remove`（會觸發 `GameServer`/`GameClient` class init）。
+observe／enforce／觀測 off 均保持 connection scope；另跑 `actionRemoveScope=0` 的原版負對照。
+B 測試透過真 dispatch 上下文與實際 `stopPlayerActions`／`ActionManager.stop` 驗
+Accept 才計數、同 id 重送不補 Reject、尚無登錄連線時安全跳過補送；不再使用 production setter
+或直接呼叫私有觀測器。start 的正／負 duration、perform false、取消與錯誤邊界見下方 W10-E。
+測試先播種 Rand、以真 IsoPlayer／UdpConnection 的最小欄位初始化避免載入完整世界；
+`GameServer.server=true`，因此 scope off 真的會執行原版 server 移除，不以 no-op 當負對照。
 
 ### 部署與觀測（驗收）
 
@@ -3259,86 +3227,72 @@ vanilla `remove`（會觸發 `GameServer`/`GameClient` class init）。
 - 官方回報：B（server remove 不回包）與 C（-1 → 30 分鐘）各自成案，等本刀數據後補進
   `docs/report/` 的 TIS 回報（B-R1 更新＋兩份新報告）。
 
-### 2026-09-07 五天觀測結論＋W10-E 跨玩家 id 撞號連帶取消（observe）
+### 2026-09-08 校正：W10-E 以真實連線隔離取消
 
-**三條路徑的份額（9/2 22:06 上線～9/7，逐 session heartbeat）**：
+**先撤回舊歸因**：9/7 observe 與初版 `scope=player` 都把 GeneralAction 解析出的 `playerId`
+當成發送者。真 wire 已否證這個前提，因此舊 `1438`／`706` 分類、`98% 已完成後取消`、
+「少數帳號發起」與 `spared(scope=player)` 成功論全部不可再作為跨玩家受害數或修復證據。
+負 duration 也不等於無害。既有 W10-C 觀測只顯示當時未見 recipe-nil 製作型 -1 等情境，
+不能排除其他未觀察到的卡讀條機制。
 
-| 路徑 | 數據 | 判讀 |
-|---|---|---|
-| C `negativeDuration` | ≈10% starts；type 全是動畫驅動合法 -1（ISWaitWhileGettingUp 15141、ISRackFirearm 5862、ISReloadWeaponAction 2516、ISChopTreeAction 1947、SkillRecoveryJournalAction 1072…），**零 ISHandcraftAction** | 立案時的 recipe-nil 假說沒發生；C 不是問題 |
-| B `interruptedAccepted` | ≈4–5% starts；old 幾乎全是本人的 ISWaitWhileGettingUp（10762）、ISEquipWeaponAction（1440，waitedMs≤2ms）、ISRestAction（271，主動中斷休息） | 沒有任何正 duration 製作在等了數秒後被打斷；**enforce 不開** |
-| R | `performFalse` 有（ISUnlockVehicleDoor 654、ISEquipWeaponAction 347、ISPickupAnimal 81、ISDestroyStuffAction 42…）vanilla 照送 Reject；`connNull` 恆 0 | 非卡死 |
+**原版缺陷（真 jar／真 wire）**：
 
-玩家卻仍在回報（9/4、9/5、9/6 ×2、9/7 民調），server 端的答案是 §2x 補記的 W10-D 路徑（log 有實證）
-與下面這條（程式碼實證、線上待觀測）。
+- `Action.id` 是各 client JVM 自己循環使用的 **255 個非零 byte**；不同連線會撞號，同機多人
+  共用同一個計數器。Java 表示包含負數，不是整數 1–255。
+- `GeneralActionPacket.setReject` 只寫 id/state。action id 66 的真序列化 bytes 為
+  `42 00 00 00 ff`：Reject ordinal 0、player onlineID 0、playerIndex -1。
+  server 於 index=-1 時查全域 player map，結果是目前的 0 號玩家或 null，**不是發送者**。
+- `GeneralActionPacket.processServer` 直接 `ActionManager.stop(this)`，沒有 `getAction/copyFrom`。
+  原版 `stop` 又只把 byte id 傳給 `remove`；server 分支對整份 queue 只比 id、停止命中者、
+  不向其他 client 回 Done／Reject。
+- 只在 `remove` 過濾 owner 還不夠：`NetTimedActionPacket` 的 Reject 會先 `getAction/copyFrom`
+  改旁人 state；Fishing Reject 後仍可按全域 id 產生旁人的 Lua event。Request 的數字
+  onlineID 與連線 slot 解析出的 player 也可能不一致，必須在查改既有 action 前驗證。
 
-**W10-E：`ActionManager.remove` 只比 byte id，跨玩家連帶取消**（codex gpt-6-astra 對抗審查發現，
-javap 複核）：
+**現行手術與信任邊界**：
 
-- `Action.lastId` 是 **各 client 自己的** static byte，1..255 循環（`Action.set:37-45`）——不同玩家
-  可同時持有相同 id。
-- server 端 `ActionManager.stop(Action)` 丟掉玩家身分，只呼叫 `remove(action.id, true)`（javap
-  offset 24）；server 分支的 `remove` 對整份 `actions` 只比 `t.id == id`（`lambda$remove$1` 只讀
-  `Action.id`）、逐一 `stop()`、**不回封包**。
-- 所有 server 端取消都經 `stop(Action)`：`stopPlayerActions`（新 Request 打斷舊動作）與
-  `GeneralActionPacket.processServer`（client 取消，offset 30）——單一掛點涵蓋全部。
-- 機制：乙送新 Request 時 `stopPlayerActions(乙)` 停掉乙**掛著的 -1 動作**（ISWaitWhileGettingUp
-  等在 server 端會掛到 30 分鐘或被打斷），若甲正在跑的製作與它同 id，甲的製作被一起無聲移除
-  ——甲永遠等不到 Done／Reject，而 W10-C 的打斷觀測只掃本人所以零指紋。推估每次 interrupt 命中率
-  ≈（同時 Accept 中的正 duration 動作數）/255，每 session `interruptedAccepted` 數百～1400 次
-  ⇒ 理論上每 session 數十次受害，型態正好是「間歇、server log 安靜」。**線上實證待本刀數據。**
+1. `PacketTypes$PacketType.onServerPacket` 最後唯一的 `INetworkPacket.processServer` 改道至
+   `MdcTimedActionProbe.processServer`。原授權、parse、一致性、anticheat、warn／sync 全保留；
+   receiver-first static bridge 只替換最後派送，ASM 重新定位原 labels。
+2. Action 封包以 ThreadLocal 綁定**真正的 connection 與 packet**，`finally` 恢復上一層；
+   可重入且例外後不殘留。W10-C Request 診斷共用這份上下文，已刪舊 `onProcessServer`
+   headCall／`CURRENT_REQUEST`／測試注入 setter。
+3. Request 先驗 owner 物件確實屬於該連線，以及 wire onlineID 等於該 owner 的 onlineID。
+   不一致即拒絕派送，不能先 `copyFrom` 或向旁人補 Reject。
+4. Reject 在原 packet method 的前後副作用之前直接進 scoped `stop`。候選必須同 action id，
+   且其 owner **以物件 identity 屬於 connection.players**；不相信 packet 中的預設 owner，
+   不以缺席／過期玩家的相同數字 id 認領。
+5. 沒有 packet 上下文的 server 內部停止，只移除傳入的確定 queue 實例。封包缺連線、
+   空 players、非 queue 實例等身分不明情況均不刪除，**不 fallback 全表**。
+6. 先移出本連線整批命中者再逐一 `stop`／清 emulator，避免重入重刪。某筆失敗仍完成其餘
+   已移出者的收尾，最後重拋首個例外並保留後續 suppressed 例外，不靜默吞錯。
 
-**2026-09-07 晚間實證（4 session／6 小時）**：`crossPlayerRemovals` 1438、`crossVictimsActive` **706**、
-92 位不同玩家受害；製作／閱讀／搬移 ≥20 秒的動作被刪約 250 筆（最冤：一個 150 秒製作連續四次在剩
-2–22 秒時被刪，玩家隨後退出遊戲）。**發起端 96% 集中在 7 個帳號**、各自每分鐘 2–6 個取消封包、且
-初版假設的「乙打斷自己掛著的 -1」只佔 3 筆——**1435 筆是 `GeneralActionPacket`（client 取消封包）**。
-更關鍵的是 `removeMultiHit`（同 id 命中 >1）只有 6 次：98% 的 cross 事件裡清單內**只有 victim、沒有
-發起者自己的動作**＝client 取消的是一個 server **已經完成移除**的 id。機制在
-`IsoGameCharacter.updateInternal:8986-9006`：client 每幀先算 `valid = act.valid()`；server 先 perform
-並把世界狀態同步過來（草除了、樹倒了、蛋撿了、地板鋪了）→ client 端 Lua `isValid()` 那一幀變 false
-→ `!valid` **跳過 `act.update()`**（`isDone→forceComplete` 在裡面，永遠沒機會）→ 直接 `act.stop()` →
-`ActionManager.remove(id,true)` → 送取消封包 → server `getAction()` 找不到 → 臨時物件 → `stop()` →
-`remove(id)` 全表掃 → 只可能刪到別人。所以「高頻完成短動作」的玩家（除草、砍樹、撿蛋、餵水、
-DAAO 批次製作）就是掃射者——三位發起端的 client log 證實只是正常高頻活動（除草 443 格／90 分鐘、
-砍樹＋撿蛋、鋪地），無 mod 錯誤、無異常訊息；client log 沒有 Action 層 debug，看不到取消封包本身。
-enforce（只刪同 playerId）會讓這類取消變成 no-op，正是正確語意（vanilla 的 client 分支本來就只該
-取消自己的）。
+`-Dmdc.actionRemoveScope` 預設開啟，橫幅為 `scope=connection`；只有 `0|off|vanilla`
+回原版整表移除。與 `-Dmdc.timedActionProbe` 的 observe/enforce/off 獨立；
+關觀測不會關取消保護。W10-C enforce 的 interrupted 掃描同樣受 connection 範圍約束。
 
-**手術**（掛在既存 `ActionManager` ClassPatch；`expectedHits=2`）：`stop(Action)` 頭部 headCall
-`MdcTimedActionProbe.onStop(Action)`（ThreadLocal 捕獲發起者）＋其內唯一的 `remove(BZ)V`
-改道 `removeById`（掃同 id、記「player ≠ 發起者」的 victim：type／state／duration／已等 ms／剩餘 ms、
-`active`（正 duration＝真受害）vs `anim(-1)`（掛著的動畫動作，client 早已完成，無害）；再原樣委派
-vanilla `remove`）。發起者可能是 `GeneralActionPacket.getAction()` 的臨時 copyFrom 物件，故以
-`playerId` 判同人而非 identity。heartbeat 加 `removeCalls/removeMultiHit/crossPlayerRemovals/
-crossVictimsActive/crossVictimsAnim`；逐筆 `crossPlayerRemove#` 行。沿用 `-Dmdc.timedActionProbe`
-三態（off 直通）。
+**回歸閉環**：四個獨立審查反例先重現失敗，再由同一組測試通過：NetTimedAction typed Reject
+於下幀刪旁人、Fishing Reject＋bobber flag 產生旁人事件資料、Request 數字 id／owner
+不一致覆寫旁人、首筆 stop 例外漏掉後續 emulator。另驗 GeneralAction 真 write→parse 的
+0 號在線／離線、同機多人、重送同 id、無 own match、未知連線、stale owner、server 內部
+identity、重入與 nested context；scope off 負對照**真的刪掉雙方同 id**。
+測試使用真遊戲類別及最小欄位初始化，不宣稱等同完整多人遊戲驗收。
 
-**enforce（2026-09-07 晚間定罪後同日上線；獨立開關 `-Dmdc.actionRemoveScope`＝`1|player` 預設／
-`0|vanilla`，不綁 W10-C 的 `timedActionProbe` 三態）**：`removeById` 在發起者身分明確
-（`initiator.playerId.getPlayer() != null`——`stopPlayerActions` 給的是清單內真物件，`GeneralActionPacket`
-的臨時物件在 `copyFrom` 時 `set(player)`，player 為 null 早在 copyFrom 就 NPE 到不了這裡）時，只移除
-「同 id **且** 同 `playerId`」的動作，複製 vanilla server 分支的三步（`removeAll` → 逐筆 `stop()` →
-`AnimEventEmulator.remove`），**不再委派 vanilla**；清單內沒有自己的同 id 動作（98% 的案例＝取消
-已完成的 id）就什麼都不刪。`removeAll` 之前的任何失敗退回 vanilla（`scopeFallbacks++`），之後不再退回
-（否則 vanilla 會把剛保住的他人動作刪掉），`stop()` 失敗只計 `anomalies`。**不用 `actions.remove(initiator)`
-identity 移除**的理由（codex 對抗審查補充）：`GeneralActionPacket` 路徑的 `stop(act)` 收到的是
-`getAction()` 的臨時 copyFrom 物件，不是 queue 內那個 Action——只能靠 playerId＋id 定位。onlineID 0 是
-合法值（`ConnectCoopPacket`：`slot*4+playerIndex`），故身分門不用 id 而用 player 物件。observe 行
-在 enforce 下印 `action=spared(scope=player)`；heartbeat 加 `scopedRemovals`／`scopeFallbacks`（應恆 0）。
+**新計數與驗收**：
 
-**守門**：SmokeCheck 四條——vanilla `stop` 內 `remove=1`、`stopPlayerActions`／`GeneralActionPacket`
-零直接 `remove`、`lambda$remove$*` 恰 2 個且只讀 `Action.id` 零 `playerId`（**TIS 加 playerId 比對時
-紅＝撤刀**）；手術後 `stop` headCall 全序＋改道 x1／原呼叫歸零／真指令 +2；helper `removeById` 委派
-vanilla `remove` 恰 1（退路）；enforce 形狀＝vanilla `remove` 內 `Action.stop`／`AnimEventEmulator.remove`
-各 1 且 `removeScoped` 複製三步各 1、零 vanilla 委派。行為測試 `MdcTimedActionProbeTest` 四組態
-（observe／enforce／off／observe＋`actionRemoveScope=0`）：撞號 victim 分類、scope=player 只刪同玩家
-（乙的兩筆刪、甲的製作與不同 id 保留）、取消已完成 id 零移除、身分不明退回 vanilla、scope=vanilla 不接手
-（測試 seam `identityByIdForTest`：測試 JVM 建不出 IsoPlayer）。
+- `ownedRemoved`＝實際移出 queue 的數量，不代表 Lua stop 全部成功；`sparedOther`＝每次取消
+  中保留的其他 owner 同 id 項目，可能重複計同一個動作，不是受害人數或成功率。
+- `cancelsHandled`、`noOwnedMatch`、`unknownRefused` 分開看；`unknownRefused` 也含不可信 Request。
+  `vanillaRemovals` 只在明示 off 路徑增加。未知身分 log 為 `untrustedAction`。
+- 逐筆行列真 `connection`／`connectionPlayers` 與 queue owner；多位同機玩家不硬猜其中一人。
+  `anomalies` 應為 0。必須另驗**本人合法取消仍有效**及玩家症狀，不能只看 spared 上升。
+- 本輪尚未取得新版正式服驗收。W10-D 的 Reject 序列化證據另行對帳，不混作 E 的成功樣本。
 
-**驗收**：重啟後 `crossVictimsActive` 仍會計數（它量的是「vanilla 會刪的他人動作」），但逐筆行應全為
-`spared(scope=player)`、`scopedRemovals` 隨 `removeCalls` 上升、`scopeFallbacks=0`、`anomalies=0`；
-玩家「讀條走滿不完成」回報應大幅下降。W10-D 用 `reject sent reason=`／`component recovered` 另行對帳。
----
+**部署邊界**：新 manifest 移除舊 `PZNetKahluaTableImpl.class`，新增 `PacketTypes$PacketType.class`，
+且刪掉舊 helper 入口。升級須使用舊 manifest 完整卸載，再安裝新包，與受控重啟放在同一個窗口；
+不能刪了舊檔後讓已載入舊 caller 的 JVM 繼續等待排程。未做正式服部署／重啟前，修正只存在於新產物。
+
+TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R2，**尚未提交**。
 
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
 
