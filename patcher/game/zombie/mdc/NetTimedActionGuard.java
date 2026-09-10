@@ -1,5 +1,6 @@
 package zombie.mdc;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicLong;
 
 import se.krka.kahlua.integration.LuaCaller;
@@ -136,7 +137,7 @@ public final class NetTimedActionGuard {
             args.wipe();
             PARSE_CAUSE.set(CAUSE_ARGS);
             long n = argsFailed.incrementAndGet();
-            reportArgsFailure(connection, e, n);
+            reportArgsFailure(args, b, connection, e, n);
         }
     }
 
@@ -216,17 +217,46 @@ public final class NetTimedActionGuard {
         }
     }
 
-    private static void reportArgsFailure(IConnection connection, RuntimeException e, long n) {
+    private static void reportArgsFailure(PZNetKahluaTableImpl args, ByteBufferReader reader,
+            IConnection connection, RuntimeException e, long n) {
         if (!allowLine()) {
             return;
         }
         try {
+            NetTimedAction packet = PARSE_OWNER.get();
             DebugType.General.printException(e, TAG + "args parse failed"
+                    + " type=" + MdcTimedActionProbe.safeName(packet == null ? null : packet.type)
+                    + " name=" + MdcTimedActionProbe.safeName(packet == null ? null : packet.name)
                     + " connectionPlayers=" + (connection instanceof UdpConnection udp
-                        ? MdcTimedActionProbe.connectionPlayers(udp) : "?") + " n=" + n, LogSeverity.Warning);
+                        ? MdcTimedActionProbe.connectionPlayers(udp) : "?")
+                    + componentReference(args, reader, e) + " n=" + n, LogSeverity.Warning);
         } catch (RuntimeException | LinkageError ignored) {
             anomalies.incrementAndGet();
         }
+    }
+
+    /**
+     * 只辨認原版 loadComponent 的 NPE；該方法依序消費 long＋short 後才解參考。
+     * SmokeCheck 鎖定十位元組佈局與無 catch 的上拋鏈；絕對讀取不改 reader 的 position/limit。
+     * stack 不明、其他 decoder 或自訂 table 一律不猜；netId 是 wire 值，不解碼成替代物件。
+     */
+    static String componentReference(PZNetKahluaTableImpl args, ByteBufferReader reader, RuntimeException failure) {
+        if (!(failure instanceof NullPointerException) || args == null
+                || args.getClass() != PZNetKahluaTableImpl.class || reader == null || reader.bb == null) {
+            return " componentRef=unavailable";
+        }
+        StackTraceElement[] stack = failure.getStackTrace();
+        if (stack.length == 0 || !"zombie.network.PZNetKahluaTableImpl".equals(stack[0].getClassName())
+                || !"loadComponent".equals(stack[0].getMethodName())) {
+            return " componentRef=unavailable";
+        }
+        ByteBuffer wire = reader.bb;
+        int end = wire.position();
+        if (end < Long.BYTES + Short.BYTES) {
+            return " componentRef=unavailable";
+        }
+        return " componentRef=wire netId=" + wire.getLong(end - Long.BYTES - Short.BYTES)
+                + " componentId=" + wire.getShort(end - Short.BYTES) + " readerPos=" + end;
     }
 
     /**

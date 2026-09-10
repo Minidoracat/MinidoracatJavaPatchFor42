@@ -1355,6 +1355,36 @@ public final class SmokeCheck {
         failed += check("W10-D2 退役：共用 table class 不出貨",
                 !Files.exists(distJava.resolve(netTableCls + ".class")));
 
+        // D1 診斷只能回讀已確定由 loadComponent 消費的 long＋short；不是猜 payload 內容。
+        String componentLoadDesc = "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;";
+        MethodNode componentLoad = methodFromJar(jar, netTableCls, "loadComponent", componentLoadDesc);
+        AbstractInsnNode[] componentWire = firstReal(componentLoad, 14);
+        failed += check("W10-D 診斷：loadComponent 恰先讀 long/short，再查 entity/type 並解參考，無其他 buffer 操作",
+                realInsnCount(componentLoad) == 14 && componentLoad.tryCatchBlocks.isEmpty()
+                && isVar(componentWire[0], Opcodes.ALOAD, 0)
+                && isCall(componentWire[1], Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J")
+                && isVar(componentWire[2], Opcodes.LSTORE, 2)
+                && isVar(componentWire[3], Opcodes.ALOAD, 0)
+                && isCall(componentWire[4], Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "getShort", "()S")
+                && isVar(componentWire[5], Opcodes.ISTORE, 4)
+                && isVar(componentWire[6], Opcodes.LLOAD, 2)
+                && isCall(componentWire[7], Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager",
+                        "GetEntity", "(J)Lzombie/entity/GameEntity;")
+                && isVar(componentWire[8], Opcodes.ASTORE, 5)
+                && isVar(componentWire[9], Opcodes.ALOAD, 5)
+                && isVar(componentWire[10], Opcodes.ILOAD, 4)
+                && isCall(componentWire[11], Opcodes.INVOKESTATIC, "zombie/entity/ComponentType",
+                        "FromId", "(S)Lzombie/entity/ComponentType;")
+                && isCall(componentWire[12], Opcodes.INVOKEVIRTUAL, "zombie/entity/GameEntity",
+                        "getComponent", "(Lzombie/entity/ComponentType;)Lzombie/entity/Component;")
+                && componentWire[13].getOpcode() == Opcodes.ARETURN);
+        failed += check("W10-D 診斷：parse 配置原版 table，上拋鏈沒有 catch/finally 改動 reader",
+                countNew(vNtaParse, netTableCls) == 1
+                && methodFromJar(jar, netTableCls, "load", argsLoadDesc).tryCatchBlocks.isEmpty()
+                && methodFromJar(jar, netTableCls, "load",
+                        "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;")
+                        .tryCatchBlocks.isEmpty());
+
         // ---- W11 動物聲音排序活鎖捕手 ----
         String basCls = "zombie/characters/BaseAnimalSoundManager";
         String asgCls = "zombie/mdc/AnimalSortGuard";

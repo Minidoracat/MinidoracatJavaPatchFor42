@@ -2,6 +2,7 @@ package zombie.mdc;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 
@@ -35,7 +36,7 @@ import zombie.network.packets.NetTimedActionPacket;
  */
 public final class NetTimedActionGuardTest {
 
-    /** 正式服的觸發情境：搬過的製作台，client 算出的 entity netID 在 server 查無此物。 */
+    /** 缺席元件參照；不預設它是搬移、登錄遺漏或其他身分問題造成。 */
     private static final long MISSING_NET_ID = 1_234_567_890L;
     private static final String ACTION_TYPE = "ISEatFoodAction";
     private static final byte SBYT_STRING = 1;
@@ -70,6 +71,7 @@ public final class NetTimedActionGuardTest {
         GameServer.IDToPlayerMap.put((short) 3, player);
 
         testVanillaDecoderUntouched();
+        testReferenceDiagnostics();
         ProbePacket reused = testMissingComponentPacket(argsActive);
         testCleanPacketAfterFailure(reused);
         testCauseBinding(argsActive);
@@ -104,6 +106,63 @@ public final class NetTimedActionGuardTest {
                 + "半成品條目照原版留著",
                 npe != null && raw.size() == 1
                 && "zombie.network.PZNetKahluaTableImpl".equals(npe.getStackTrace()[0].getClassName()));
+    }
+
+    /** 只讀真 decoder 已消費的欄位；不改 buffer，也不替其他 parser 的錯誤猜 netID。 */
+    private static void testReferenceDiagnostics() {
+        PZNetKahluaTableImpl args = newArgsTable();
+        ByteBufferReader reader = argsWire(true);
+        NullPointerException missing = missingComponent(args, reader);
+        int position = reader.bb.position();
+        int limit = reader.bb.limit();
+        ByteOrder order = reader.bb.order();
+        String detail = NetTimedActionGuard.componentReference(args, reader, missing);
+        expect("診斷記錄真 wire netID／componentId，沒有把它解碼成替代物件",
+                detail.contains("netId=" + MISSING_NET_ID)
+                && detail.contains("componentId=" + ComponentType.CraftBench.GetID()));
+        expect("診斷不改 reader position／limit／byte order",
+                reader.bb.position() == position && reader.bb.limit() == limit && reader.bb.order() == order);
+
+        ByteBuffer parent = ByteBuffer.allocateDirect(64);
+        parent.position(7);
+        ByteBuffer slice = parent.slice().order(ByteOrder.LITTLE_ENDIAN);
+        slice.position(3);
+        slice.putLong(MISSING_NET_ID).putShort(ComponentType.CraftBench.GetID()).put((byte) 0x5a);
+        slice.flip().position(3);
+        ByteBufferReader readOnly = new ByteBufferReader(slice.asReadOnlyBuffer().order(ByteOrder.LITTLE_ENDIAN));
+        NullPointerException viewFailure = null;
+        try {
+            PZNetKahluaTableImpl.loadComponent(readOnly.bb, null);
+        } catch (NullPointerException e) {
+            viewFailure = e;
+        }
+        String viewDetail = NetTimedActionGuard.componentReference(args, readOnly, viewFailure);
+        expect("direct／唯讀 slice 使用原 byte order，且保留下一個未消費 byte",
+                viewDetail.contains("netId=" + MISSING_NET_ID)
+                && viewDetail.contains("componentId=" + ComponentType.CraftBench.GetID())
+                && readOnly.bb.limit() == 14 && readOnly.bb.order() == ByteOrder.LITTLE_ENDIAN
+                && readOnly.bb.position() == 13 && readOnly.bb.get() == (byte) 0x5a);
+
+        expect("其他 NPE 不猜 netID",
+                !NetTimedActionGuard.componentReference(args, reader, new NullPointerException()).contains("netId="));
+        expect("自訂 table 不假設沿用原 decoder 的 buffer",
+                !NetTimedActionGuard.componentReference(
+                        new PZNetKahluaTableImpl(new LinkedHashMap<>()) {}, reader, missing).contains("netId="));
+        expect("截斷資料不回讀成識別碼",
+                !NetTimedActionGuard.componentReference(args, new ByteBufferReader(ByteBuffer.allocate(9)),
+                        missing).contains("netId="));
+        missing.setStackTrace(new StackTraceElement[0]);
+        expect("沒有 stack 的 fast-throw 例外不猜 netID",
+                !NetTimedActionGuard.componentReference(args, reader, missing).contains("netId="));
+    }
+
+    private static NullPointerException missingComponent(PZNetKahluaTableImpl args, ByteBufferReader reader) {
+        try {
+            args.load(reader, null);
+        } catch (NullPointerException failure) {
+            return failure;
+        }
+        throw new AssertionError("missing component must fail in vanilla decoder");
     }
 
     /**
