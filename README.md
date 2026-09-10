@@ -13,7 +13,7 @@ PZ 伺服器 classpath 為 `java/.` 優先於 `java/projectzomboid.jar`：同路
 bytecode 做「堆疊形狀不變」的呼叫改道／方法內常數替換，另有兩個窄範圍 null 頭部守衛，
 StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac 對遊戲 jar 編譯，隨 patch 出貨。
 
-## 內容（22 個 patched class、32 個 runtime class、33 處手術、43 個命中點）
+## 內容
 
 > **42.20.2 里程碑**：官方在此版收編了我方三組 patch——P5 IsoCell sidecar（官方伴生 Set）、
 > popman buffer 隔離（官方 readByteBuffer）、VehicleManager 512→256（官方改 per-connection
@@ -57,7 +57,11 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   render() 負對照＋targetAlpha guard 指紋雙鎖。另 W3-2（ECS memo）經 microbenchmark 實測
   為淨劣化而撤刀，記錄於設計文件。
 
-> 上表僅列到本節；2j~2n 的完整敘述見 docs/patches.md。
+- **雞舍同步 W26**：僅過濾雞舍 `update()` 內兩個自發同步點的遠端收件人；玩家操作、地圖初載、
+  蛋與孵化資料保持原版。登入、載具、傳送及不確定狀態保守放行；可用
+  `-Dmdc.hutchSyncGate=0` 回到原版廣播。詳見 [W26](docs/patches.md#2an-雞舍自發同步收件人過濾w26server預設-enforce)。
+
+> 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 
 逐項 javap 證據與安全論證：[docs/patches.md](docs/patches.md)；分析原始規格：[docs/specs/](docs/specs/)。
 

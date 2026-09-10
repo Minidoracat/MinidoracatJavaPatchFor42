@@ -1,4 +1,4 @@
-# build.ps1 — 建置 PZ 伺服器 loose-class patch
+﻿# build.ps1 — 建置 PZ 伺服器 loose-class patch
 # 需求：JDK 25（42.19 unstable jar 已是 class file v69）、lib/asm-*.jar 9.8、
 #       work/projectzomboid.jar（從目標伺服器拉取的權威 jar）
 $ErrorActionPreference = 'Stop'
@@ -91,6 +91,7 @@ $helperEntries = @(
     'zombie/network/MdcAccountGate$Row.class',
     'zombie/mdc/IoPoolIsolation.class',
     'zombie/mdc/IoPoolIsolation$Local.class',
+    'zombie/mdc/HutchSyncGate.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -258,6 +259,17 @@ java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzombo
 Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
 java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest off
 Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
+
+Write-Host "[9n2/10] 雞舍自發同步收件人過濾（W26）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
+# enforce＝預設出貨（真的過濾掉範圍外連線）；observe＝只量測 wouldSkip／wouldSkipBytes、
+# 照樣全量廣播；off＝純委派原版 sync。三個模式都必須真跑過：測試自驗 argv 與實際 MODE
+# 相符，property 名稱打錯會炸在測試裡，不會默默把 enforce 版跑三遍假綠。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest enforce
+Assert-Ok "HutchSyncGateTest（enforce，預設出貨模式）"
+java "-Dmdc.hutchSyncGate=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest observe
+Assert-Ok "HutchSyncGateTest（observe，只量測不過濾）"
+java "-Dmdc.hutchSyncGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest off
+Assert-Ok "HutchSyncGateTest（hutchSyncGate=0 kill switch，純委派）"
 
 Write-Host "[9o/10] 動物 LOS 節流閘（W18）七組態行為驗證（獨立 JVM）..."
 # observe＝預設出貨（自驗預設 N=2、size 採樣兩分支、錯誤契約：簿記 fail-open 恰一次委派＋

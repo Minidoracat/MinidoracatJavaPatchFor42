@@ -1622,6 +1622,215 @@ public final class SmokeCheck {
                 && countExactCalls(gForceInto, Opcodes.INVOKEVIRTUAL, hutchCls,
                         "tryRemoveAnimalFromWorld", "(L" + isoAnimalCls + ";)V") == 1);
 
+        // ---- W26 雞舍自發同步收件人過濾（IsoHutch.update 的兩個 sync）----
+        String hsgCls = "zombie/mdc/HutchSyncGate";
+        String tpCls = "zombie/network/packets/TeleportPacket";
+        String w26Iso = "zombie/iso/IsoObject";
+        String w26Udp = "zombie/core/raknet/UdpConnection";
+        String w26Pkt = "zombie/network/PacketTypes$PacketType";
+        String w26Pid = "zombie/network/fields/character/PlayerID";
+        String w26BbwDesc = "(Lzombie/core/network/ByteBufferWriter;)V";
+        String w26UpdDesc = "(L" + hutchCls + ";)V";
+        String w26TpHelperDesc = "(L" + w26Pid + ";Lzombie/core/network/ByteBufferWriter;)V";
+        String w26StartDesc = "()Lzombie/core/network/ByteBufferWriter;";
+        String w26SendDesc = "(Lzombie/network/IConnection;)V";
+        String w26SyncIsoDesc = "(ZBL" + w26Udp + ";Lzombie/core/network/ByteBufferReader;)V";
+        String w26UpdInsideDesc = "(L" + isoAnimalCls + ";Z)V";
+        String w26ReleaseDesc = "(Lzombie/iso/IsoGridSquare;L" + isoAnimalCls + ";)V";
+        String w26NestBoxDesc = "(L" + isoAnimalCls + ";)Z";
+        MethodNode vHutchUpd = methodFromJar(jar, hutchCls, "update", "()V");
+        MethodNode pHutchUpd = method(distJava, hutchCls, "update", "()V");
+        ClassNode vHutchNode = classNodeFromJar(jar, hutchCls);
+        ClassNode pHutchNode = classNode(distJava, hutchCls);
+        // vanilla 前提①：本刀只認 update 內那兩個「server 自發」sync——一個在 hutchDirt
+        // 累加之後（髒污即刻廣播），一個在 sendUpdate 分支內且先於 animalInsideSize 回寫
+        // （週期／隻數變動廣播）。語境是「哪些 sync 可以過濾收件人」的唯一依據。
+        failed += check("W26 vanilla：update 內 sync 恰 2，語境為 hutchDirt putfield 後／sendUpdate 分支內且 size 回寫前",
+                hutchSyncSites(vHutchUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V", hutchCls));
+        // 其餘 5 個 sync 包含操作、下蛋與動物狀態更新，一律不過濾。
+        // 總數＋逐方法分佈雙鎖，堵「舊點消失＋新點出現」互抵。
+        failed += check("W26 vanilla census：IsoHutch 全 class sync 恰 7（update 2／updateAnimalInside 2／releaseAnimal 1／addAnimalInNestBox 1／addAnimalInside 1）",
+                classWideCalls(vHutchNode, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 7
+                && countExactCalls(methodFromJar(jar, hutchCls, "updateAnimalInside", w26UpdInsideDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 2
+                && countExactCalls(methodFromJar(jar, hutchCls, "releaseAnimal", w26ReleaseDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1
+                && countExactCalls(methodFromJar(jar, hutchCls, "addAnimalInNestBox", w26NestBoxDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1
+                && countExactCalls(methodFromJar(jar, hutchCls, "addAnimalInside", addInsideDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1);
+        // vanilla 前提③：helper 重寫的是 sync()→sync(0)→syncIsoObject 的 server 廣播分支。
+        // client 分支在 server 分支之前（故 helper 必須先讓 GameClient.client 直通）、
+        // square/getObjectIndex 早退在兩者之前、每個分支恰一組 startPacket→doPacket→
+        // syncIsoObjectSend→send（共 3 組）、flagForHotSave 恰 1 且在所有 send 之後。
+        // 下方另鎖 server 非 remote 分支的完整指令形狀；上游變更時必須重驗。
+        MethodNode vIsoSync = methodFromJar(jar, w26Iso, "sync", "()V");
+        MethodNode vIsoSyncI = methodFromJar(jar, w26Iso, "sync", "(I)V");
+        MethodNode vSyncIso = methodFromJar(jar, w26Iso, "syncIsoObject", w26SyncIsoDesc);
+        failed += check("W26 vanilla 前提：sync()→sync(0)→syncIsoObject；廣播三組四步、hot-save 恰 1 且在最後、client 分支先於 server",
+                countExactCalls(vIsoSync, Opcodes.INVOKEVIRTUAL, w26Iso, "sync", "(I)V") == 1
+                && countExactCalls(vIsoSyncI, Opcodes.INVOKEVIRTUAL, w26Iso, "syncIsoObject", w26SyncIsoDesc) == 1
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc) == 3
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc) == 3
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "syncIsoObjectSend", w26BbwDesc) == 3
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc) == 3
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "flagForHotSave", "()V") == 1
+                && countExactCalls(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "getObjectIndex", "()I") == 1
+                && lastCallIndex(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc)
+                        < firstCallIndex(vSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "flagForHotSave", "()V")
+                && firstFieldIndex(vSyncIso, Opcodes.GETSTATIC, "zombie/network/GameClient", "client", "Z")
+                        < firstFieldIndex(vSyncIso, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z")
+                && hutchServerBroadcast(vSyncIso));
+
+        // 手術後：兩處在同一語境 1:1 改道、原 sync 歸零、真指令數不變。
+        failed += check("W26 patched：update 兩處同語境改道 x2、原 sync 歸零、真指令數不變",
+                hutchSyncSites(pHutchUpd, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc, hutchCls)
+                && countExactCalls(pHutchUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 0
+                && realInsnCount(pHutchUpd) == realInsnCount(vHutchUpd));
+        // 負對照：全 class sync 恰少 2、改道恰 2 且全在 update；操作觸發的 4 個 caller 逐一
+        // 保留原呼叫；全 class 真指令總數與 vanilla 相同（load 的 W17 改道亦 1:1），
+        // 且 load／save／syncIsoObjectSend／syncIsoObjectReceive 零 HutchSyncGate 呼叫
+        // ——初次載入、存檔與 wire 序列化都不在本刀範圍。
+        failed += check("W26 負對照：全 class sync 恰少 2、改道恰 2 全在 update、其餘 4 caller 原樣、真指令總數不變、load/save/sync 收發零 helper",
+                classWideCalls(pHutchNode, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V")
+                        == classWideCalls(vHutchNode, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") - 2
+                && classWideCalls(pHutchNode, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc) == 2
+                && countExactCalls(pHutchUpd, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc) == 2
+                && countExactCalls(method(distJava, hutchCls, "updateAnimalInside", w26UpdInsideDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 2
+                && countExactCalls(method(distJava, hutchCls, "releaseAnimal", w26ReleaseDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1
+                && countExactCalls(method(distJava, hutchCls, "addAnimalInNestBox", w26NestBoxDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1
+                && countExactCalls(method(distJava, hutchCls, "addAnimalInside", addInsideDesc),
+                        Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 1
+                && classRealInsnCount(pHutchNode) == classRealInsnCount(vHutchNode)
+                && countCallsToOwner(pHutchLoad, hsgCls) == 0
+                && countCallsToOwner(method(distJava, hutchCls, "save", "(Ljava/nio/ByteBuffer;Z)V"), hsgCls) == 0
+                && countCallsToOwner(method(distJava, hutchCls, "syncIsoObjectSend", w26BbwDesc), hsgCls) == 0
+                && countCallsToOwner(method(distJava, hutchCls, "syncIsoObjectReceive",
+                        "(Lzombie/core/network/ByteBufferReader;)V"), hsgCls) == 0);
+        // 通用廣播本體只被 W1 的 println 抑噪改道碰過（1:1）；本刀不得在 IsoObject 留下任何
+        // 呼叫，四步廣播與 hot-save 的形狀也必須與 vanilla 逐項相同——否則「只改誰收、不改
+        // 怎麼送」的承諾就破了，其他上萬個 IsoObject 的 wire 一起被牽動。
+        MethodNode pSyncIso = method(distJava, w26Iso, "syncIsoObject", w26SyncIsoDesc);
+        ClassNode pIsoObjNode = classNode(distJava, w26Iso);
+        failed += check("W26 負對照：IsoObject 全 class 零 HutchSyncGate 改道、syncIsoObject 四步／hot-save 與 vanilla 同、sync 鏈真指令數不變",
+                classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc) == 0
+                && classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, hsgCls,
+                        "writeTeleportPlayer", w26TpHelperDesc) == 0
+                && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc) == 3
+                && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc) == 3
+                && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "syncIsoObjectSend", w26BbwDesc) == 3
+                && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc) == 3
+                && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "flagForHotSave", "()V") == 1
+                && realInsnCount(pSyncIso) == realInsnCount(vSyncIso)
+                && realInsnCount(method(distJava, w26Iso, "sync", "()V")) == realInsnCount(vIsoSync)
+                && realInsnCount(method(distJava, w26Iso, "sync", "(I)V")) == realInsnCount(vIsoSyncI));
+
+        // helper 契約①：被選中的連線仍走原版四步（startPacket→doPacket→syncIsoObjectSend→send）
+        // 各恰 1；直通委派涵蓋 off/非 server/client/子類、簿記故障、無效物件。
+        // hot-save 必須在 send 之後（收件人全被過濾也不能漏存），且不得再觸發通用廣播。
+        MethodNode gSyncUpd = method(distJava, hsgCls, "syncUpdate", w26UpdDesc);
+        failed += check("W26 helper：原版四步各 1、vanilla 委派 3（off/子類・簿記故障・無效物件）、flagForHotSave 1 且在 send 後、零 IsoObject 廣播",
+                countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc) == 1
+                && countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc) == 1
+                && countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "syncIsoObjectSend", w26BbwDesc) == 1
+                && countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc) == 1
+                && countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "sync", "()V") == 3
+                && countExactCalls(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "flagForHotSave", "()V") == 1
+                && firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc)
+                        < firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc)
+                && firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc)
+                        < firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "syncIsoObjectSend", w26BbwDesc)
+                && firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "syncIsoObjectSend", w26BbwDesc)
+                        < firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc)
+                && lastCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc)
+                        < firstCallIndex(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls, "flagForHotSave", "()V")
+                && countCallsToOwner(gSyncUpd, w26Iso) == 0);
+        // 只有新增的範圍判定可 fail-open；送包例外仍由原 caller 處理。
+        // 實際失敗行為另由 HutchSyncGateTest 的序列化／送出失敗案例驗證。
+        failed += check("W26 helper：shouldSend 在 try 內恰 1、四步送包零 try 保護、catch 型別全為 RuntimeException",
+                callsInsideTryRange(gSyncUpd, Opcodes.INVOKESTATIC, hsgCls, "shouldSend",
+                        "(L" + w26Udp + ";FF)Z") == 1
+                && callsInsideTryRange(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc) == 0
+                && callsInsideTryRange(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc) == 0
+                && callsInsideTryRange(gSyncUpd, Opcodes.INVOKEVIRTUAL, hutchCls,
+                        "syncIsoObjectSend", w26BbwDesc) == 0
+                && callsInsideTryRange(gSyncUpd, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc) == 0
+                && gSyncUpd.tryCatchBlocks != null && !gSyncUpd.tryCatchBlocks.isEmpty()
+                && gSyncUpd.tryCatchBlocks.stream()
+                        .allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+        // 幾何、載具／noclip／teleport 與全域降級由行為測試驗證，不釘 helper 私有欄位讀取次數。
+        String mapPutDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        // helper 契約④：豁免名單必須是 weak-key（強引用會把退役角色永久釘在堆上、豁免永不
+        // 到期）且自帶同步（writeTeleportPlayer 的公開入口可能不在世界更新緒）；
+        // 全 class 只有一個寫入點＝送出 teleport，判定端恰 1 次 containsKey。
+        MethodNode gHsgClinit = method(distJava, hsgCls, "<clinit>", "()V");
+        failed += check("W26 helper：EXEMPT＝WeakHashMap＋synchronizedMap 各 1、全 class put 恰 1（唯一寫入＝送出 teleport）、containsKey 恰 1",
+                countNew(gHsgClinit, "java/util/WeakHashMap") == 1
+                && countExactCalls(gHsgClinit, Opcodes.INVOKESTATIC, "java/util/Collections",
+                        "synchronizedMap", "(Ljava/util/Map;)Ljava/util/Map;") == 1
+                && classWideCalls(classNode(distJava, hsgCls), Opcodes.INVOKEINTERFACE,
+                        "java/util/Map", "put", mapPutDesc) == 1
+                && classWideCalls(classNode(distJava, hsgCls), Opcodes.INVOKEINTERFACE,
+                        "java/util/Map", "containsKey", "(Ljava/lang/Object;)Z") == 1);
+
+        // ---- W26-2 teleport 豁免掛點（TeleportPacket.write 的唯一 PlayerID.write）----
+        // vanilla 前提：write 只有一個 PlayerID.write，且在 3 個 putFloat 之前（wire 順序）。
+        MethodNode vTpWrite = methodFromJar(jar, tpCls, "write", w26BbwDesc);
+        MethodNode pTpWrite = method(distJava, tpCls, "write", w26BbwDesc);
+        String putFloatDesc = "(F)V";
+        String w26Bbw = "zombie/core/network/ByteBufferWriter";
+        failed += check("W26-2 vanilla：TeleportPacket.write PlayerID.write 恰 1 且先於 3 個 putFloat",
+                countExactCalls(vTpWrite, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 1
+                && countExactCalls(vTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc) == 3
+                && lastCallIndex(vTpWrite, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc)
+                        < firstCallIndex(vTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc));
+        // 手術後：改道 1、原呼叫歸零、真指令數不變、XYZ 三個 putFloat 仍在改道之後（wire 不變）。
+        failed += check("W26-2 patched：write 改道 x1、原 PlayerID.write 歸零、真指令不變、XYZ putFloat 仍在其後",
+                countExactCalls(pTpWrite, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
+                && countExactCalls(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 0
+                && realInsnCount(pTpWrite) == realInsnCount(vTpWrite)
+                && countExactCalls(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc) == 3
+                && lastCallIndex(pTpWrite, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc)
+                        < firstCallIndex(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc));
+        // 負對照：全 class PlayerID.write 恰少 1、改道恰 1（只此一處）、真指令總數不變；
+        // parse（wire 的對稱另一半）逐項未動——豁免簿記不得改變任何線路位元。
+        ClassNode vTpNode = classNodeFromJar(jar, tpCls);
+        ClassNode pTpNode = classNode(distJava, tpCls);
+        String tpParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        failed += check("W26-2 負對照：全 class PlayerID.write 恰少 1、改道恰 1、真指令總數不變、parse 未被改動",
+                classWideCalls(pTpNode, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc)
+                        == classWideCalls(vTpNode, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) - 1
+                && classWideCalls(pTpNode, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
+                && classRealInsnCount(pTpNode) == classRealInsnCount(vTpNode)
+                && realInsnCount(method(distJava, tpCls, "parse", tpParseDesc))
+                        == realInsnCount(methodFromJar(jar, tpCls, "parse", tpParseDesc))
+                && countExactCalls(method(distJava, tpCls, "parse", tpParseDesc),
+                        Opcodes.INVOKEVIRTUAL, w26Pid, "parse", tpParseDesc) == 1);
+        // 豁免簿記與原 ID 寫入的例外邊界不能混合；全域降級由故障後的收件行為驗證。
+        MethodNode gWriteTp = method(distJava, hsgCls, "writeTeleportPlayer", w26TpHelperDesc);
+        failed += check("W26-2 helper：PlayerID.write 委派 1 且在 try 外、RETURN 恰 1、catch 僅 RuntimeException、put 1",
+                countExactCalls(gWriteTp, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 1
+                && callsInsideTryRange(gWriteTp, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 0
+                && countOpcode(gWriteTp, Opcodes.RETURN) == 1
+                && gWriteTp.tryCatchBlocks != null && !gWriteTp.tryCatchBlocks.isEmpty()
+                && gWriteTp.tryCatchBlocks.stream()
+                        .allMatch(t -> "java/lang/RuntimeException".equals(t.type))
+                && countExactCalls(gWriteTp, Opcodes.INVOKEINTERFACE,
+                        "java/util/Map", "put", mapPutDesc) == 1);
+
+        MethodNode vPidSet = methodFromJar(jar, w26Pid, "set", "(Lzombie/characters/IsoPlayer;)V");
+        MethodNode vPidGet = methodFromJar(jar, w26Pid, "getPlayer", "()Lzombie/characters/IsoPlayer;");
+        AbstractInsnNode[] vPidGetBody = firstReal(vPidGet, 3);
+        failed += check("W26-2 身分前提：PlayerID.set 保存原 player 實例，getPlayer 直接回傳而非依 ID 反查",
+                countExactFields(vPidSet, Opcodes.PUTFIELD, w26Pid, "player", "Lzombie/characters/IsoPlayer;") == 1
+                && realInsnCount(vPidGet) == 3
+                && isVar(vPidGetBody[0], Opcodes.ALOAD, 0)
+                && isField(vPidGetBody[1], Opcodes.GETFIELD, w26Pid, "player", "Lzombie/characters/IsoPlayer;")
+                && vPidGetBody[2].getOpcode() == Opcodes.ARETURN);
+
         // ---- W18 動物 LOS 節流閘 ----
         String algCls = "zombie/mdc/AnimalLosGate";
         // vanilla 前提：updateInternal 內 updateLOS 呼叫恰 1（掛點）；updateLOS 本體
@@ -3189,6 +3398,120 @@ public final class SmokeCheck {
                         dataOwner, "setPreferredHutchPosition", "(I)V") < put
                 && put < backlink && backlink < hutchPosition
                 && hutchPosition < itemId && itemId < tryRemove;
+    }
+
+    /**
+     * W26 兩個「server 自發」sync 的語境全序（vanilla 與手術後同形，只差 opcode／target）：
+     *   site1：PUTFIELD hutchDirt → ALOAD0 → call    （髒污累加後的即刻廣播）
+     *   site2：GETFIELD sendUpdate → IFEQ → ALOAD0 → call，且唯一的 PUTFIELD
+     *          animalInsideSize 在其後             （週期／隻數變動廣播）
+     * 只數命中數擋不住「數量對但改到 updateAnimalInside 等操作觸發的 sync」——那些一律
+     * 不過濾收件人。TIS 搬走髒污累加、拆掉 sendUpdate 分支、或把 size 回寫移到 sync 之前，
+     * 本條就紅：「哪些 sync 可以過濾」的前提沒了，必須重估而非改命中數放行。
+     */
+    static boolean hutchSyncSites(MethodNode m, int opcode, String owner, String name,
+                                  String desc, String hutchOwner) {
+        ArrayList<AbstractInsnNode> sites = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (isCall(in, opcode, owner, name, desc)) {
+                sites.add(in);
+            }
+        }
+        if (sites.size() != 2) {
+            return false;
+        }
+        for (AbstractInsnNode site : sites) {
+            if (!isVar(prevReal(site), Opcodes.ALOAD, 0)) {
+                return false;
+            }
+        }
+        AbstractInsnNode dirty = prevReal(prevReal(sites.get(0)));
+        AbstractInsnNode branch = prevReal(prevReal(sites.get(1)));
+        return isField(dirty, Opcodes.PUTFIELD, hutchOwner, "hutchDirt", "F")
+                && branch != null && branch.getOpcode() == Opcodes.IFEQ
+                && isField(prevReal(branch), Opcodes.GETFIELD, hutchOwner, "sendUpdate", "Z")
+                && countExactFields(m, Opcodes.PUTFIELD, hutchOwner, "animalInsideSize", "B") == 1
+                && lastCallIndex(m, opcode, owner, name, desc)
+                        < firstFieldIndex(m, Opcodes.PUTFIELD, hutchOwner, "animalInsideSize", "B");
+    }
+
+    /** helper 複製的 server 非 remote 分支；忽略 frames/行號，保留接收者與 buffer slot 關係。 */
+    static boolean hutchServerBroadcast(MethodNode method) {
+        AbstractInsnNode start = null;
+        for (AbstractInsnNode in : method.instructions) {
+            if (isField(in, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z")) {
+                start = in;
+                break;
+            }
+        }
+        if (start == null || !(nextReal(start) instanceof JumpInsnNode server)
+                || server.getOpcode() != Opcodes.IFEQ) {
+            return false;
+        }
+        ArrayList<AbstractInsnNode> code = new ArrayList<>();
+        for (AbstractInsnNode in = start; in != null && in != server.label; in = in.getNext()) {
+            if (in.getOpcode() >= 0) code.add(in);
+        }
+        if (code.size() != 29 || !isVar(code.get(2), Opcodes.ILOAD, 1)
+                || !(code.get(3) instanceof JumpInsnNode remote) || remote.getOpcode() != Opcodes.IFNE
+                || remote.label != server.label
+                || !(code.get(7) instanceof VarInsnNode iterator) || iterator.getOpcode() != Opcodes.ASTORE
+                || !(code.get(14) instanceof VarInsnNode connection) || connection.getOpcode() != Opcodes.ASTORE
+                || !(code.get(17) instanceof VarInsnNode writer) || writer.getOpcode() != Opcodes.ASTORE
+                || !(code.get(10) instanceof JumpInsnNode empty) || empty.getOpcode() != Opcodes.IFEQ
+                || !(code.get(27) instanceof JumpInsnNode again) || again.getOpcode() != Opcodes.GOTO
+                || !(code.get(28) instanceof JumpInsnNode done) || done.getOpcode() != Opcodes.GOTO) {
+            return false;
+        }
+        String udp = "zombie/core/raknet/UdpConnection";
+        String packet = "zombie/network/PacketTypes$PacketType";
+        String buffer = "(Lzombie/core/network/ByteBufferWriter;)V";
+        return isField(code.get(4), Opcodes.GETSTATIC, "zombie/network/GameServer", "udpEngine",
+                        "Lzombie/core/raknet/UdpEngine;")
+                && isField(code.get(5), Opcodes.GETFIELD, "zombie/core/raknet/UdpEngine", "connections", "Ljava/util/List;")
+                && isCall(code.get(6), Opcodes.INVOKEINTERFACE, "java/util/List", "iterator", "()Ljava/util/Iterator;")
+                && isVar(code.get(8), Opcodes.ALOAD, iterator.var)
+                && isCall(code.get(9), Opcodes.INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z")
+                && isVar(code.get(11), Opcodes.ALOAD, iterator.var)
+                && isCall(code.get(12), Opcodes.INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;")
+                && code.get(13) instanceof TypeInsnNode cast && cast.getOpcode() == Opcodes.CHECKCAST && cast.desc.equals(udp)
+                && isVar(code.get(15), Opcodes.ALOAD, connection.var)
+                && isCall(code.get(16), Opcodes.INVOKEVIRTUAL, udp, "startPacket", "()Lzombie/core/network/ByteBufferWriter;")
+                && isField(code.get(18), Opcodes.GETSTATIC, packet, "SyncIsoObject", "L" + packet + ";")
+                && isVar(code.get(19), Opcodes.ALOAD, writer.var)
+                && isCall(code.get(20), Opcodes.INVOKEVIRTUAL, packet, "doPacket", buffer)
+                && isVar(code.get(21), Opcodes.ALOAD, 0)
+                && isVar(code.get(22), Opcodes.ALOAD, writer.var)
+                && isCall(code.get(23), Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "syncIsoObjectSend", buffer)
+                && isField(code.get(24), Opcodes.GETSTATIC, packet, "SyncIsoObject", "L" + packet + ";")
+                && isVar(code.get(25), Opcodes.ALOAD, connection.var)
+                && isCall(code.get(26), Opcodes.INVOKEVIRTUAL, packet, "send", "(Lzombie/network/IConnection;)V")
+                && nextReal(empty.label) == code.get(28)
+                && nextReal(again.label) == code.get(8)
+                && isVar(nextReal(done.label), Opcodes.ALOAD, 0)
+                && isCall(nextReal(nextReal(done.label)), Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject",
+                        "flagForHotSave", "()V");
+    }
+
+    /** 方法內 NEW 指定型別的次數（W26：豁免名單必須是 WeakHashMap，強引用＝角色永不退役）。 */
+    static int countNew(MethodNode m, String type) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof TypeInsnNode ti && ti.getOpcode() == Opcodes.NEW
+                    && ti.desc.equals(type)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 全 class 真指令總數（1:1 手術的整類鎖：任何方法被多改一條都會露出來）。 */
+    static int classRealInsnCount(ClassNode cls) {
+        int count = 0;
+        for (MethodNode m : cls.methods) {
+            count += realInsnCount(m);
+        }
+        return count;
     }
 
     static int countExactFields(MethodNode method, int opcode, String owner, String name, String desc) {
