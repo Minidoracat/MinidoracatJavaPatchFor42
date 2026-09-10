@@ -347,6 +347,10 @@ Assert-Ok "IoPoolIsolationTest（on，出貨組態）"
 java "-Dmdc.ioPoolIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest off
 Assert-Ok "IoPoolIsolationTest（ioPoolIsolation=0 kill switch）"
 
+Write-Host "[9u/10] RequestData ACK 邊界與正常傳送（W27）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.RequestDataAckTest
+Assert-Ok "RequestDataAckTest（空佇列、未知連線、重複 ACK、完整傳送與例外穿透）"
+
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
 Assert-Ok "FastIdentityArrayRemovalBenchmark"
