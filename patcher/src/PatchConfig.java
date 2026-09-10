@@ -1098,5 +1098,68 @@ public final class PatchConfig {
         return patches;
     }
 
+    /** 所有自家 client 模組共用的 Lua bridge、重置與啟動狀態顯示。 */
+    public static List<Patcher.ClassPatch> clientCore() {
+        List<Patcher.ClassPatch> patches = new ArrayList<>();
+        String runtime = "zombie/mdc/MdcPatchRuntime";
+        Patcher.ClassPatch exposer = new Patcher.ClassPatch("zombie/Lua/LuaManager$Exposer");
+        Patcher.MethodOps expose = exposer.method("exposeAll", "()V");
+        expose.tailCall = new Patcher.TailCall(runtime, "register",
+                "(Lzombie/Lua/LuaManager$Exposer;)V");
+        expose.expectedHits = 1;
+        patches.add(exposer);
+
+        Patcher.ClassPatch core = new Patcher.ClassPatch("zombie/core/Core");
+        Patcher.MethodOps reset = core.method("ResetLua", "(Ljava/lang/String;Ljava/lang/String;)V");
+        reset.headCall = new Patcher.HeadCall(runtime, "onLuaReset", "(Lzombie/core/Core;)V");
+        reset.expectedHits = 1;
+        Patcher.MethodOps render = core.method("EndFrameUI", "()V");
+        render.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/core/logger/ExceptionLogger", "render", "()V", runtime, "renderEndFrameUI"));
+        render.expectedHits = 1;
+        patches.add(core);
+        return patches;
+    }
+
+    /**
+     * 只改 Java→VM 的單一層，避開 protectedCall[]→pcall[] 的包裝層重複計時。
+     * 15 個逐方法命中點；不改 Lua VM 的 OP_CALL，也不改外部數百個 caller。
+     */
+    public static List<Patcher.ClassPatch> clientProfiler() {
+        Patcher.ClassPatch caller = new Patcher.ClassPatch("se/krka/kahlua/integration/LuaCaller");
+        String thread = "Lse/krka/kahlua/vm/KahluaThread;";
+        String object = "Ljava/lang/Object;";
+        String array = "[Ljava/lang/Object;";
+        String bool = "Ljava/lang/Boolean;";
+        luaBridgeSite(caller, "pcall", "(" + thread + object + array + ")" + array,
+                "pcall", "(" + object + array + ")" + array);
+        luaBridgeSite(caller, "pcall", "(" + thread + object + object + ")" + array,
+                "pcall", "(" + object + array + ")" + array);
+        for (int count = 1; count <= 3; count++) {
+            String args = object.repeat(count);
+            String outer = "(" + thread + object + args + ")";
+            String inner = "(" + object + args + ")";
+            luaBridgeSite(caller, "pcallvoid", outer + "V", "pcallvoid", inner + "V");
+            luaBridgeSite(caller, "protectedCallVoid", outer + "V", "pcallvoid", inner + "V");
+            luaBridgeSite(caller, "protectedCallBoolean", outer + bool, "pcallBoolean", inner + bool);
+            if (count > 1) {
+                luaBridgeSite(caller, "pcallBoolean", outer + bool, "pcallBoolean", inner + bool);
+            }
+        }
+        luaBridgeSite(caller, "pcallvoid", "(" + thread + object + array + ")V",
+                "pcallvoid", "(" + object + array + ")V");
+        luaBridgeSite(caller, "pcallBoolean", "(" + thread + object + array + ")" + bool,
+                "pcallBoolean", "(" + object + array + ")" + bool);
+        return List.of(caller);
+    }
+
+    private static void luaBridgeSite(Patcher.ClassPatch caller, String method, String descriptor,
+                                      String target, String targetDescriptor) {
+        Patcher.MethodOps op = caller.method(method, descriptor);
+        op.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "se/krka/kahlua/vm/KahluaThread",
+                target, targetDescriptor, "zombie/mdc/MdcProfilerHooks", target));
+        op.expectedHits = 1;
+    }
+
     private PatchConfig() {}
 }

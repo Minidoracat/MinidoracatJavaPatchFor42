@@ -1,6 +1,7 @@
 work/
 dist/
 dist-client/
+dist-client-modular/
 output/
 *.class
 .omc/

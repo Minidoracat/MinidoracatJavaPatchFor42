@@ -19,6 +19,45 @@ public final class LoadCheck {
                 Class.forName(cls, false, cl);
                 System.out.println("load OK  " + cls);
             }
+            if (args.length == 4 && (args[3].equals("client-core") || args[3].equals("client-profiler"))) {
+                if (args[3].equals("client-core")) {
+                    Class<?> runtime = Class.forName("zombie.mdc.MdcPatchRuntime", false, cl);
+                    runtime.getMethod("register", Class.forName("zombie.Lua.LuaManager$Exposer", false, cl));
+                    runtime.getMethod("onLuaReset", Class.forName("zombie.core.Core", false, cl));
+                    runtime.getMethod("renderEndFrameUI");
+                    Class<?> bridge = Class.forName("zombie.mdc.MdcLuaBridge", false, cl);
+                    for (String name : new String[]{"patchStatus", "stop"}) bridge.getMethod(name);
+                    bridge.getMethod("start", double.class, String.class);
+                    bridge.getMethod("snapshot", double.class);
+                    bridge.getMethod("begin", String.class);
+                    bridge.getMethod("finish", double.class);
+                }
+                Class<?> hooks = Class.forName("zombie.mdc.MdcProfilerHooks", false, cl);
+                Class<?> thread = Class.forName("se.krka.kahlua.vm.KahluaThread", false, cl);
+                int psf = java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC;
+                for (String name : new String[]{"pcallvoid", "pcallBoolean"}) {
+                    for (Class<?>[] suffix : new Class<?>[][]{
+                            {Object.class}, {Object.class, Object.class},
+                            {Object.class, Object.class, Object.class}, {Object[].class}}) {
+                        Class<?>[] params = new Class<?>[suffix.length + 2];
+                        params[0] = thread;
+                        params[1] = Object.class;
+                        System.arraycopy(suffix, 0, params, 2, suffix.length);
+                        var method = hooks.getMethod(name, params);
+                        Class<?> expected = name.equals("pcallvoid") ? void.class : Boolean.class;
+                        if (method.getReturnType() != expected || (method.getModifiers() & psf) != psf) {
+                            throw new NoSuchMethodException("MdcProfilerHooks." + name);
+                        }
+                    }
+                }
+                var pcall = hooks.getMethod("pcall", thread, Object.class, Object[].class);
+                if (pcall.getReturnType() != Object[].class || (pcall.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("MdcProfilerHooks.pcall");
+                }
+                System.out.println(args[3] + " helper 簽名與 " + lines.size() + " 個 class 連結驗證通過");
+                return;
+            }
+
 
             boolean clientMode = args.length == 4
                     && (args[3].equals("client") || args[3].equals("client-lowmem"));

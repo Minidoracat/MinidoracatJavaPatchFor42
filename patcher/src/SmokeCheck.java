@@ -43,6 +43,12 @@ public final class SmokeCheck {
     public static void main(String[] args) throws Exception {
         Path distJava = Path.of(args[0]);
         Path jar = Path.of(args[1]);
+        if (args.length > 2 && (args[2].equals("client-core") || args[2].equals("client-profiler"))) {
+            ClientModuleCheck.verify(distJava, jar, args[2]);
+            System.out.println(args[2] + " 模組掛點驗證全數通過");
+            return;
+        }
+
 
         if (args.length > 2 && (args[2].equals("client") || args[2].equals("client-lowmem"))) {
             if (clientChecks(distJava, jar, args[2].equals("client-lowmem")) > 0) {

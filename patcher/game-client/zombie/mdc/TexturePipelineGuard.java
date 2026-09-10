@@ -80,6 +80,7 @@ public final class TexturePipelineGuard {
         long bytes = DirectBufferAllocator.getBytesAllocated();
         try {
             if (!announced) {
+                MdcPatchRuntime.observeClientFixes();
                 PatchInfo.announceOnce();     // 版本橫幅（冪等；單機也會經過此路徑）
                 DebugLog.log("[MinidoracatJavaPatch][TexPipelineGuard] active vanillaLimitBytes="
                         + VANILLA_LIMIT_BYTES + " effectiveLimitBytes=" + effectiveLimit);

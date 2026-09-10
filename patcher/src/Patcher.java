@@ -422,19 +422,22 @@ public final class Patcher {
     }
 
     public static void main(String[] args) throws Exception {
-        boolean clientMode = args.length == 4
-                && (args[3].equals("client") || args[3].equals("client-lowmem"));
-        if (args.length != 3 && !clientMode) {
-            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest 輸出路徑> [client|client-lowmem]");
+        if (args.length != 3 && args.length != 4) {
+            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest> [client|client-lowmem|client-core|client-profiler]");
             System.exit(2);
         }
         Path jarPath = Path.of(args[0]);
         Path outDir = Path.of(args[1]);
         Path manifestPath = Path.of(args[2]);
 
-        List<ClassPatch> patches = clientMode
-                ? PatchConfig.client(args[3].equals("client-lowmem"))
-                : PatchConfig.all();
+        List<ClassPatch> patches = switch (args.length == 4 ? args[3] : "server") {
+            case "server" -> PatchConfig.all();
+            case "client" -> PatchConfig.client(false);
+            case "client-lowmem" -> PatchConfig.client(true);
+            case "client-core" -> PatchConfig.clientCore();
+            case "client-profiler" -> PatchConfig.clientProfiler();
+            default -> throw new IllegalArgumentException("未知 patch 集合: " + args[3]);
+        };
         List<String> manifest = new ArrayList<>();
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
 
