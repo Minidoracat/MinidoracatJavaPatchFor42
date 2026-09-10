@@ -1,0 +1,84 @@
+[
+  {
+    "id": "legacy-client-v3.0-standard",
+    "modules": [
+      "client-fixes-standard"
+    ],
+    "jarSha256": "80e405a4bfc42f6072e75b3735f458a6514143da011d3226007ded305a442f44",
+    "files": [
+      {
+        "path": "zombie/mdc/TexturePipelineGuard.class",
+        "sha256": "309a1ec3c09564f0571fdb7008af99fc0f4f853fc635815a20c31ea9b3d20ac8"
+      },
+      {
+        "path": "zombie/core/textures/MinidoracatTextureLeakGuard.class",
+        "sha256": "ef6dba710d367f689b761d490408b65fcd5d2d6e6974c253153fe04dd891d2ee"
+      },
+      {
+        "path": "zombie/mdc/ChunkStreamObserver.class",
+        "sha256": "29ed5b62794c71503a15f533770eb181bbcb27407b9494a1b2c2a75a804655d3"
+      },
+      {
+        "path": "zombie/mdc/PatchInfo.class",
+        "sha256": "36ee9ab3e07a95cb0d823ea4fa55673fefc32113b46387d5a45018122eb4ce2b"
+      },
+      {
+        "path": "zombie/core/textures/TextureIDAssetManager.class",
+        "sha256": "9663abf67645210237101c4a98cd6b49420720047bfdb47f4ea79bc71fcbb52e"
+      },
+      {
+        "path": "zombie/core/textures/ImageData.class",
+        "sha256": "3a509cb979255166f75d226c44892782d0130d40b20c3afd27cdf9d4bfae0aa4"
+      },
+      {
+        "path": "zombie/core/textures/TextureID.class",
+        "sha256": "dfd7060a68217cc8e38d1b9b31df7efdf645bdb5cbad11ca886ff1fee0d869f8"
+      },
+      {
+        "path": "zombie/iso/WorldStreamer.class",
+        "sha256": "02862bade878fb07839b9df939362ea681b0d8c2333a6e0a52c2bc40150b7105"
+      }
+    ]
+  },
+  {
+    "id": "legacy-client-v3.0-lowmem",
+    "modules": [
+      "client-fixes-lowmem"
+    ],
+    "jarSha256": "80e405a4bfc42f6072e75b3735f458a6514143da011d3226007ded305a442f44",
+    "files": [
+      {
+        "path": "zombie/mdc/TexturePipelineGuard.class",
+        "sha256": "309a1ec3c09564f0571fdb7008af99fc0f4f853fc635815a20c31ea9b3d20ac8"
+      },
+      {
+        "path": "zombie/core/textures/MinidoracatTextureLeakGuard.class",
+        "sha256": "ef6dba710d367f689b761d490408b65fcd5d2d6e6974c253153fe04dd891d2ee"
+      },
+      {
+        "path": "zombie/mdc/ChunkStreamObserver.class",
+        "sha256": "29ed5b62794c71503a15f533770eb181bbcb27407b9494a1b2c2a75a804655d3"
+      },
+      {
+        "path": "zombie/mdc/PatchInfo.class",
+        "sha256": "e0f1a6cb49ce24e2f19c2d34e788db33dfc1c471338efd0f9ea25743cb26cfbf"
+      },
+      {
+        "path": "zombie/core/textures/TextureIDAssetManager.class",
+        "sha256": "d738a4c37b06cdb4606138a5342feb307cb2c7d6967a644e88aaedf348438e89"
+      },
+      {
+        "path": "zombie/core/textures/ImageData.class",
+        "sha256": "3a509cb979255166f75d226c44892782d0130d40b20c3afd27cdf9d4bfae0aa4"
+      },
+      {
+        "path": "zombie/core/textures/TextureID.class",
+        "sha256": "dfd7060a68217cc8e38d1b9b31df7efdf645bdb5cbad11ca886ff1fee0d869f8"
+      },
+      {
+        "path": "zombie/iso/WorldStreamer.class",
+        "sha256": "02862bade878fb07839b9df939362ea681b0d8c2333a6e0a52c2bc40150b7105"
+      }
+    ]
+  }
+]

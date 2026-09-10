@@ -95,6 +95,35 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
    `radius * 0.05F`，同時新增了 `fleeDistance = radius * 3.0F + 20.0F`——方法內仍剛好有一個
    `20.0f`，舊座標會**通過守門卻改到逃跑距離**。每次更新都該重跑語境確認，不能只看命中數。
 
+## 客戶端模組化安裝包
+
+`build-client.ps1` 只建置 client 產物，不安裝、不啟動遊戲，也不寫入 server manifest：
+未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.20.4-0.1.0.zip`。
+
+| 模組 | 用途 |
+|---|---|
+| `core` | 共用 Lua bridge、安裝指紋驗證、主選單啟動狀態；依賴它的模組會自動帶入 |
+| `profiler` | Java→Lua callback 計時、具名區段、CSV／metadata／JFR 匯出；搭配獨立的 `MinidoracatDevProfilerFor42` 介面 MOD |
+| `client-fixes-standard` | 既有貼圖管線修復與 chunk 串流觀測，使用較高貼圖門檻 |
+| `client-fixes-lowmem` | 同一組修復，保留原版 50 MiB 門檻；與 standard 互斥 |
+
+關閉遊戲後解壓完整套件，執行 `Install-Patches.bat` 選擇模組。
+`Uninstall-Patches.bat` 可只移除所選模組；仍被其他模組依賴的 core 會保留。
+安裝前驗證遊戲 jar、payload 與安裝記錄；重新安裝可修復已記錄的模組，未記錄的外來 class 拒裝，
+卸載不刪內容已變動的檔案。中斷交易只依 SHA 辨認完整的交易前／後影像；無法辨認就保留現況與備份。
+SHA 不是數位簽章，安裝器不防範同一使用者同時偽造檔案與管理記錄。
+可辨識的舊版修復包會遷移並保留原變體；無法辨識的舊檔須先用原包的 `uninstall.bat` 處理。
+
+啟動面板分開顯示「已安裝」與「本次 JVM 已觀察到 hook」；前者不代表後者。
+分析器只記錄使用者啟動的本機 capture，不上傳，也不相容第三方 ZombieBuddy API。
+遊戲更新前須移除 loose class，且**不可在 JVM 執行中卸載**。
+管理器執行交易或等待確認時會獨占鎖定遊戲 exe；此時啟動遊戲會被系統拒絕，先結束管理器再啟動。
+啟動驗證若仍發現 journal，會回報不相容並要求先用管理器復原，不把半套 payload 當成成功安裝。
+
+驗證指令：`build-client.ps1`，接著單獨執行
+`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`。
+安裝器測試會檢查 Java 行程，勿與 Java 建置或遊戲啟動同時執行。
+
 ## ☕ 支持作者
 
 MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服器與 MOD 開發上。
@@ -109,7 +138,7 @@ MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服�
   素材之著作權均屬 The Indie Stone 所有。
 - 本 repo **不散布任何遊戲二進位檔案**。所有手術都在使用者自己合法取得的
   `projectzomboid.jar` 上進行，jar 需自備；本專案只提供 patcher、helper 原始碼與安裝腳本。
-- **修改遊戲檔案風險自負。** 伺服器端 `bash uninstall.sh`、客戶端 `uninstall.bat` 可完整還原
-  原版；安裝前請自行備份。
+- **修改遊戲檔案風險自負。** 伺服器端 `bash uninstall.sh`、客戶端 `Uninstall-Patches.bat`
+  可移除對應模組；舊版客戶端包使用其原附 `uninstall.bat`。安裝前請自行備份。
 - **每次 PZ 更新後都必須重新建置與驗證**。命中數守門擋得住座標漂移，擋不住語境漂移
   （見上方 SOP 第 3 點）——未重新驗證前，切勿把舊 patch 套到新版遊戲上。

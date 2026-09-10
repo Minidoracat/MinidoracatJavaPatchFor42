@@ -494,15 +494,16 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**:獨立 `build-client.ps1` → `work\out-client`＋`dist-client\`
-(不進 server manifest;server build 十步全綠回歸驗證過)。安裝機制:client
-`ProjectZomboid64.json` classpath 為 `[".", "projectzomboid.jar"]`,遊戲目錄優先於
-jar,loose class 直接 shadow。**玩家安裝走 fail-closed `install.bat`**(建置時注入
-SHA:先驗 jar SHA-256=42.20.0、再驗目標位置無其他 loose patch 衝突,通過才從
-`patch-files\` 複製並回驗兩檔 SHA);移除走 `uninstall.bat`(逐檔比對 SHA 確認
-ownership 才刪,非本 patch 版本一律不動並以非零 exit 報警;Steam 驗證檔案完整性
-**不會**移除非 depot 的 loose file,不可當移除手段)。僅供受影響玩家個人測試,
-不得散布;遊戲版本更新後 install.bat 會自動拒裝,既裝者須先 uninstall。
+**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、
+`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.20.4-0.1.0.zip`，
+不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，
+由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
+`core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），
+驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；
+保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。
+舊版包只有整組指紋吻合才遷移，否則須先使用舊包 `uninstall.bat`。
+Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。
+所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
 **驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
 waitFileTask 恰一個 getBytesAllocated＋恰一個 52428800L,PZ 改寫時建置失敗)、
