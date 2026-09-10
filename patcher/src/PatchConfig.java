@@ -800,7 +800,26 @@ public final class PatchConfig {
                 "(Lzombie/characters/animals/IsoAnimal;Z)Z",
                 "zombie/mdc/HutchLoadGuard", "addInside"));
         hutchLoad.expectedHits = 1;
+
+        // W26：只過濾 update 內髒污變化與週期/size 變化的兩個自發 sync。
+        // 操作、remote relay、初次 load/save 與 W17 保持原版；不改 IsoObject 的通用廣播。
+        String hutchSyncGate = "zombie/mdc/HutchSyncGate";
+        Patcher.MethodOps hutchUpdate = hutch.method("update", "()V");
+        hutchUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/objects/IsoHutch", "sync", "()V", hutchSyncGate, "syncUpdate"));
+        hutchUpdate.expectedHits = 2;
         patches.add(hutch);
+
+        // Server 送出 teleport 後，client 新位置可能早於 server 位置回報；先豁免該角色。
+        // 掛在 wire 身分寫入漏斗，既不改 PlayerID/XYZ，也不猜測轉場完成時間。
+        Patcher.ClassPatch hutchTeleport = new Patcher.ClassPatch("zombie/network/packets/TeleportPacket");
+        Patcher.MethodOps hutchTeleportWrite = hutchTeleport.method("write",
+                "(Lzombie/core/network/ByteBufferWriter;)V");
+        hutchTeleportWrite.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/fields/character/PlayerID", "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V", hutchSyncGate, "writeTeleportPlayer"));
+        hutchTeleportWrite.expectedHits = 1;
+        patches.add(hutchTeleport);
 
         // ---- W19 車輛永久移除授權守衛 observe（2026-08-28 立案；docs/patches.md 2ag）----
         // vanilla Commands.remove（VehicleCommands.lua:359-366）無權限檢查直呼

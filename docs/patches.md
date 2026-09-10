@@ -3490,6 +3490,79 @@ helper 不認識任何欄位名：以傳入的池實例做 identity 分槽（每
   （目前無週期行，需要時用 jcmd／測試存取器）。
 - W25 生效後再重估 worker 4→8（屆時才是真 CPU 擴展）。不歸這刀管的殘餘：worker 結束後主執行緒
   0.4–0.7s RUNNABLE（`ServerPlayerDB`／visited／`GameEntityManager.Save` 那串）。
+
+---
+
+## 2an. 雞舍自發同步收件人過濾（W26，server，預設 enforce）
+
+### 問題與手術範圍（2026-09-09）
+
+`IsoHutch.update()` 內有兩處 `sync()`：髒污增加，以及週期／舍內數量變化；
+後者使用 3.5 秒計時器。原版沿 `sync()` → `sync(0)` → `IsoObject.syncIsoObject`
+對全部連線重複序列化並傳送雞舍狀態，包含巢箱內每顆蛋的完整資料。
+遠端 client 尚未載入該格時，`GameClient.SyncIsoObject` 直接丟棄這份更新。
+
+- 在既有 W17 的同一個 `IsoHutch` ClassPatch 內，將 `update()` 兩個呼叫同形改道
+  `HutchSyncGate.syncUpdate`；不新增第二份 ClassPatch 覆蓋 W17。
+- **只改這兩個呼叫**：`updateAnimalInside` 等其他四個 caller 的五處 `sync()` 全部保留；
+  不改通用 `IsoObject` 廣播、玩家操作／remote relay、地圖初載或存檔格式。
+- 仍依原連線順序執行 `startPacket` → `doPacket` → 原 `syncIsoObjectSend` → `send`；
+  不切割、快取或重寫蛋資料。所有收件人都被略過時，仍執行原 `flagForHotSave()`。
+- off、非 dedicated 路徑、雞舍子類及無效物件回原 `sync()`；序列化／送包例外不被 helper
+  catch，保留原版中斷順序。新增範圍檢查若拋 RuntimeException，只讓該連線保守直通。
+
+### 收件邊界與傳送過渡期
+
+僅對可信奇數 `chunkGridWidth ∈ {13,15,17,19}` 過濾。半徑取 **整窗寬 `W*8` squares**，
+不是 W13 的共同半寬下界；以所有四個 player slot 的 server 實體位置與原版 `RelevantTo`
+位置取聯集，任一在窗內就送。這不是 client loaded-set 的精確判定，而是刻意寬裕的遠距排除。
+
+未 fullyConnected、clamp／偶數寬度、換角或 split-screen 加入中的 `connectArea`、
+缺失／非有限位置、死亡／無所在格、未知 slot 等狀態一律放行。任一角色目前在載具內或
+noclip，也讓整條連線放行。
+
+**傳送不能靠短 TTL 猜轉場完成。** 另將 `TeleportPacket.write` 的唯一 `PlayerID.write`
+同形改道 `writeTeleportPlayer`：送出前把原角色實例記進同步保護的 weak-key map，
+該角色本次生命週期保留全量雞舍廣播。身分不是 online ID，換角後不會把豁免帶給新實例；
+map 也不保留已失去其他參照的角色。沒有額外 ACK、loaded-set 或背景執行緒。
+
+傳送簿記若拋 RuntimeException，設 `disabled=true`，整把雞舍過濾回原廣播；原
+`PlayerID.write` 仍在 catch 外原樣執行。`LinkageError` 等 Error 不被吞掉。
+代價是被傳送過的角色仍收遠端更新；不以更激進的排除交換漏送風險。
+
+### 模式與觀測
+
+`-Dmdc.hutchSyncGate`：未設定＝`1`／`enforce`，`2`／`observe` 只記判定但照送，
+`0`／`off` 回原版；未知值保守落到 observe。**需重啟才套用模式**。
+
+首次有效同步及每 5 分鐘輸出 `[MinidoracatJavaPatch][HutchSync]` 累計值：
+
+- `calls`＝有效雞舍同步次數；`considered/sent/skipped`＝逐連線考慮／實際送出／略過次數。
+- `wouldSkip`＝符合排除條件的連線次數。`sentBytes` 是實際序列化並送出的 PZ packet bytes，
+  **不含 RakNet／UDP 開銷，也不是 client 收到的證據**。
+- `wouldSkipBytes` 只在 observe 真正寫出被判定可省的封包時累加；enforce 不序列化被排除者，
+  因此此值為 0 不代表沒有節省。
+- `passthrough/exempt`＝不確定／豁免判定次數；`scopeErrors/logErrors` 應為 0、
+  `disabled` 應為 false。off 不輸出本刀 heartbeat。
+
+### 守門與驗收
+
+SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、同形手術前後真指令數、
+原版 server 廣播分支與 helper 四步順序／hot-save、其餘 caller 和 load/save/收發負對照；
+另外鎖 TeleportPacket 的唯一 PlayerID 寫入、原 ID write 在 catch 外、XYZ／parse 不變，
+以及 `PlayerID.set/getPlayer` 保留同一角色實例的前提。TIS 更動這些前提時必須重新評估。
+
+本機 enforce／observe／off 三個獨立 JVM 驗證：窗界與位置聯集、split-screen、
+不可信狀態／載具／noclip／傳送豁免、移近後收到最新狀態、零收件人仍 hot-save、
+受精蛋資料與原版逐位元相同、序列化與送包例外外逃、簿記失敗後持續直通。
+另以拋棄式程式直接跑 dist 的 `IsoHutch.update` 兩掛點及 `TeleportPacket.write`：
+原版會向遠端多送而失敗，手術後近端照收、遠端略過、傳送後即使 server 位置未變仍收到。
+完整 build 與兩輪安裝往返通過；**這些不是實際玩家端 UI 驗收**。
+
+線上驗收需另外確認：正確包已載入、mode=1、上述異常指標為零、`skipped` 確實增加；
+再對照雞舍 `SyncIsoObject` 的封包流量，以及靠近／重入地圖、開關門、取蛋與傳送後的同步。
+不能由 `skipped` 比例直接宣稱相同比例的全服頻寬或 FPS 改善。
+
 ---
 
 ## 3. 部署後驗證清單
