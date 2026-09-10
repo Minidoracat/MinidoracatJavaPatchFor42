@@ -2006,6 +2006,14 @@ helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會�
 解析失敗 log 列 `connectionPlayers`，不把同機多人連線的第一位玩家冒充發送者；
 `anomalies` 應為 0。新版本的正式服驗收尚未完成，不宣稱修後成功率。
 
+**2026-09-10 精準診斷**：解析失敗行另列 action `type/name`；只有原版
+`loadComponent` 本身拋 NPE、table 是原版實例且 buffer 已讀滿 long＋short 時，才以
+絕對讀取記錄 `componentRef=wire netId=… componentId=… readerPos=…`。
+其餘回 `componentRef=unavailable`，包含沒有 stack 的 fast-throw、自訂 table 與截斷資料。
+不改 buffer position／limit／byte order，不查找或替換任何 entity／component，也不改 Reject 行為。
+SmokeCheck 鎖住原 decoder 十位元組欄位順序與無 catch 的回傳鏈；真 decoder 測試涵蓋
+heap／direct、唯讀 slice、不同 byte order 與未知例外。**wire 身分不是目前世界物件存在的證據**。
+
 TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**尚未提交**。
 
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
