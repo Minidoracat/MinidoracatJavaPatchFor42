@@ -977,6 +977,14 @@ public final class PatchConfig {
         bbEnd.expectedHits = 2;
         patches.add(byteBlock);
 
+        // ---- W27 RequestData ACK 佇列邊界（空佇列／連線已移除時不再 get(size)）----
+        Patcher.ClassPatch requestData = new Patcher.ClassPatch("zombie/network/RequestDataManager");
+        Patcher.MethodOps ack = requestData.method("ACKWasReceived",
+                "(Lzombie/network/packets/RequestDataPacket$RequestID;Lzombie/core/raknet/UdpConnection;I)V");
+        ack.intComparison = new Patcher.IntComparisonChange(Opcodes.IF_ICMPGT, Opcodes.IF_ICMPGE);
+        ack.expectedHits = 1;
+        patches.add(requestData);
+
         return patches;
     }
 

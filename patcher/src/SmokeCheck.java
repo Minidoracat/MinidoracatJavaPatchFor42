@@ -2532,6 +2532,31 @@ public final class SmokeCheck {
                 && countCallsToOwner(gPoll, "zombie/debug/DebugLog") + countCallsToOwner(gOffer, "zombie/debug/DebugLog")
                         + countCallsToOwner(gContains, "zombie/debug/DebugLog") == 0);
 
+        // W27：只換 ACK 迴圈的整數比較；保留正常查找、RequestID 比對與 sendData。
+        String requestDataCls = "zombie/network/RequestDataManager";
+        String ackDesc = "(Lzombie/network/packets/RequestDataPacket$RequestID;Lzombie/core/raknet/UdpConnection;I)V";
+        MethodNode vAck = methodFromJar(jar, requestDataCls, "ACKWasReceived", ackDesc);
+        MethodNode pAck = method(distJava, requestDataCls, "ACKWasReceived", ackDesc);
+        AbstractInsnNode[] ackPrefix = firstReal(vAck, 13);
+        failed += check("W27 vanilla：i=0；i 與 requests.size 比較後 get(i)，唯一 IF_ICMPGT 跳到查找結束",
+                realInsnCount(vAck) >= 13
+                && ackPrefix[2].getOpcode() == Opcodes.ICONST_0
+                && isVar(ackPrefix[3], Opcodes.ISTORE, 5)
+                && isVar(ackPrefix[4], Opcodes.ILOAD, 5)
+                && isVar(ackPrefix[5], Opcodes.ALOAD, 0)
+                && isField(ackPrefix[6], Opcodes.GETFIELD, requestDataCls, "requests", "Ljava/util/ArrayList;")
+                && isCall(ackPrefix[7], Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I")
+                && ackPrefix[8] instanceof JumpInsnNode boundary && boundary.getOpcode() == Opcodes.IF_ICMPGT
+                && isVar(nextReal(boundary.label), Opcodes.ALOAD, 4)
+                && isVar(ackPrefix[9], Opcodes.ALOAD, 0)
+                && isField(ackPrefix[10], Opcodes.GETFIELD, requestDataCls, "requests", "Ljava/util/ArrayList;")
+                && isVar(ackPrefix[11], Opcodes.ILOAD, 5)
+                && isCall(ackPrefix[12], Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;")
+                && countOpcode(vAck, Opcodes.IF_ICMPGT) == 1 && countOpcode(vAck, Opcodes.IF_ICMPGE) == 0);
+        failed += check("W27 patched：僅 IF_ICMPGT→IF_ICMPGE；其餘指令、跳轉目的地、frames/maxs 全同",
+                methodText(vAck).replace("IF_ICMPGT ", "IF_ICMPGE ").equals(methodText(pAck))
+                && countOpcode(pAck, Opcodes.IF_ICMPGT) == 0 && countOpcode(pAck, Opcodes.IF_ICMPGE) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -3719,6 +3744,14 @@ public final class SmokeCheck {
             }
         }
         return out;
+    }
+
+    static String methodText(MethodNode method) {
+        var textifier = new org.objectweb.asm.util.Textifier();
+        method.accept(new org.objectweb.asm.util.TraceMethodVisitor(textifier));
+        var output = new java.io.StringWriter();
+        textifier.print(new java.io.PrintWriter(output));
+        return output.toString();
     }
 
     /** 方法內「真指令」總數（1:1 替換的手術後必須與 vanilla 相同）。 */

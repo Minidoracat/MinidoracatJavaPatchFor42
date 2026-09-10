@@ -3566,6 +3566,24 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 
 ---
 
+## 2ao. RequestData ACK 迴圈邊界（W27，server）
+
+`RequestDataManager.ACKWasReceived` 用 `i <= requests.size()` 逐項查找連線；
+空佇列或查無該連線時必定存取 `get(size)` 而拋 `IndexOutOfBoundsException`。
+修正只把該方法唯一的 `IF_ICMPGT` 改成 `IF_ICMPGE`，即 `<=` 改 `<`。
+指令長度、堆疊、branch target、frames 不變，逐方法命中恰 1，沒有 runtime helper。
+
+未更動 RequestID 比對、ACK 協定、傳送窗口、資料內容、連線生命週期，也不攔截傳送例外。
+這是已完成／已移除請求之遲到 ACK 的邊界修正，**不是製作卡讀條或整體下載管線重設**。
+不另加 runtime 開關；回退使用既有整包 uninstall，且不得在 JVM 執行中刪除 helper。
+
+**驗證**：原版真類別在空佇列重現越界；修正後測試空佇列、未知連線、錯誤 RequestID、
+有效 ACK 續傳 `packSize + 17` bytes 的逐位元對帳、完成後重複 ACK，以及原送出例外 identity。
+SmokeCheck 同時鎖住 `i=0 → i/size 比較 → get(i)` 語境，並比對整個方法只有該 opcode 改變。
+官方改掉此迴圈時須重新評估撤刀，不得放寬守門硬套。
+
+---
+
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
