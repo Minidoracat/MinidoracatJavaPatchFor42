@@ -2587,6 +2587,106 @@ public final class SmokeCheck {
                 methodText(vAck).replace("IF_ICMPGT ", "IF_ICMPGE ").equals(methodText(pAck))
                 && countOpcode(pAck, Opcodes.IF_ICMPGT) == 0 && countOpcode(pAck, Opcodes.IF_ICMPGE) == 1);
 
+        // W28：addZombieStanding／addZombieMoving 的 n_addZombie fallback 納入既有 saveLock。
+        // 承重面有三層：(1) vanilla 必須真的是「native x1、saveLock x0」——缺口消失就代表 TIS 自己補了，
+        // 這刀要重評而不是默默疊一層重入；(2) patched 只能是那一個呼叫換名，其餘指令／跳轉／frames
+        // 逐字相同；(3) 已在鎖內的三個既有 n_addZombie 呼叫點與 updateMain／save／stop 一個位元都不准動。
+        String zpmCls = "zombie/popman/ZombiePopulationManager";
+        String addLockCls = "zombie/mdc/PopManAddLock";
+        String nAddDesc = "(FFFBIIII)V";
+        String reentrantLock = "java/util/concurrent/locks/ReentrantLock";
+        String vanillaNAdd = "INVOKESTATIC " + zpmCls + ".n_addZombie " + nAddDesc;
+        String patchedNAdd = "INVOKESTATIC " + addLockCls + ".addZombie " + nAddDesc;
+        ClassNode pZpm = classNode(distJava, zpmCls);
+        String[] addNames = {"addZombieStanding", "addZombieMoving"};
+        String[] addDescs = {
+            "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;)V",
+            "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;II)V",
+        };
+        for (int i = 0; i < addNames.length; i++) {
+            MethodNode vFall = methodFromJar(jar, zpmCls, addNames[i], addDescs[i]);
+            MethodNode pFall = method(distJava, zpmCls, addNames[i], addDescs[i]);
+            failed += check("W28 vanilla 前提：" + addNames[i] + " n_addZombie=1 且 saveLock 讀取=0（缺口本體）",
+                    countExactCalls(vFall, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 1
+                    && countFieldReads(vFall, zpmCls, "saveLock") == 0);
+            failed += check("W28 手術後：" + addNames[i] + " 改道 helper x1、原 n_addZombie 歸零、不自行碰 saveLock；"
+                            + "除該呼叫換名外指令／跳轉／frames/maxs 逐字相同",
+                    countExactCalls(pFall, Opcodes.INVOKESTATIC, addLockCls, "addZombie", nAddDesc) == 1
+                    && countExactCalls(pFall, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 0
+                    && countFieldReads(pFall, zpmCls, "saveLock") == 0
+                    && realInsnCount(pFall) == realInsnCount(vFall)
+                    && methodText(vFall).replace(vanillaNAdd, patchedNAdd).equals(methodText(pFall)));
+        }
+        // 全 jar 呼叫點普查：5＝兩個 fallback＋removeChunkFromWorld x2＋virtualizeZombie x1。
+        // 數量改變就重評範圍；單靠數量不能判斷新增呼叫點是否持鎖。
+        failed += check("W28 全 jar n_addZombie 呼叫點=5；patched class 內原呼叫剩 3（已在 saveLock 內者）、改道恰 2",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 5
+                && classWideCalls(pZpm, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 3
+                && classWideCalls(pZpm, Opcodes.INVOKESTATIC, addLockCls, "addZombie", nAddDesc) == 2);
+        failed += check("W28 n_addZombie 本身仍是 private static native 同 desc（不動 jar 公開面；helper 走 privateLookupIn）",
+                pZpm.methods.stream().anyMatch(m -> m.name.equals("n_addZombie") && m.desc.equals(nAddDesc)
+                        && (m.access & Opcodes.ACC_NATIVE) != 0 && (m.access & Opcodes.ACC_PRIVATE) != 0
+                        && (m.access & Opcodes.ACC_STATIC) != 0));
+        String[] untouchedNames = {"removeChunkFromWorld", "virtualizeZombie", "updateMain", "save", "stop"};
+        String[] untouchedDescs = {"(Lzombie/iso/IsoChunk;)V", "(Lzombie/characters/IsoZombie;)V", "()V", "()V", "()V"};
+        for (int i = 0; i < untouchedNames.length; i++) {
+            failed += check("W28 未改動：" + untouchedNames[i] + " bytecode 與 vanilla 逐字相同",
+                    methodText(methodFromJar(jar, zpmCls, untouchedNames[i], untouchedDescs[i]))
+                            .equals(methodText(method(distJava, zpmCls, untouchedNames[i], untouchedDescs[i]))));
+        }
+        // helper 契約：鎖只包原生委派、例外不可被吃（finally 解鎖仍成立）、熱路徑零配置。
+        MethodNode pAddLock = method(distJava, addLockCls, "addZombie", nAddDesc);
+        failed += check("W28 helper 契約：lock x1 且在 try 外、invokeExact x1 且在 try 內、unlock>=1、"
+                        + "只有 catch-all（finally）無具型 catch 吞例外、零 NEW",
+                countExactCalls(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "lock", "()V") == 1
+                && callsInsideTryRange(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "lock", "()V") == 0
+                && countCalls(pAddLock, "java/lang/invoke/MethodHandle", "invokeExact") == 1
+                && callsInsideTryRange(pAddLock, Opcodes.INVOKEVIRTUAL,
+                        "java/lang/invoke/MethodHandle", "invokeExact", nAddDesc) == 1
+                && countExactCalls(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "unlock", "()V") >= 1
+                && pAddLock.tryCatchBlocks.stream().allMatch(t -> t.type == null)
+                && countOpcode(pAddLock, Opcodes.NEW) == 0);
+
+        // W29：接收入口整包驗證；依賴的上游協定一變就重驗，不猜新格式。
+        String animalIngress = "zombie/mdc/AnimalUpdateGuard";
+        String netDataDesc = "(Lzombie/network/ZomboidNetData;)V";
+        String ingressDesc = "(L" + packetTypeCls + ";" + dispatchDesc.substring(1);
+        MethodNode vNetData = methodFromJar(jar, gsCls, "mainLoopDealWithNetData", netDataDesc);
+        MethodNode pNetData = method(distJava, gsCls, "mainLoopDealWithNetData", netDataDesc);
+        failed += check("W29 原版入口：全 jar 恰一個 onServerPacket，位於 GameServer 網路處理方法",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, packetTypeCls, "onServerPacket", dispatchDesc) == 1
+                && countExactCalls(vNetData, Opcodes.INVOKEVIRTUAL, packetTypeCls, "onServerPacket", dispatchDesc) == 1);
+        failed += check("W29 改道：單一接收呼叫替換；其他指令、frames、例外處理與封包回收完全保留",
+                countExactCalls(pNetData, Opcodes.INVOKESTATIC, animalIngress, "onServerPacket", ingressDesc) == 1
+                && countExactCalls(pNetData, Opcodes.INVOKEVIRTUAL, packetTypeCls, "onServerPacket", dispatchDesc) == 0
+                && methodText(vNetData).replace("INVOKEVIRTUAL " + packetTypeCls + ".onServerPacket " + dispatchDesc,
+                        "INVOKESTATIC " + animalIngress + ".onServerPacket " + ingressDesc).equals(methodText(pNetData)));
+        MethodNode gIngress = method(distJava, animalIngress, "onServerPacket", ingressDesc);
+        failed += check("W29 正常委派：原 onServerPacket 恰一次、不捕獲其例外、入口零配置且不自行踢人",
+                countExactCalls(gIngress, Opcodes.INVOKEVIRTUAL, packetTypeCls, "onServerPacket", dispatchDesc) == 1
+                && gIngress.tryCatchBlocks.isEmpty()
+                && countOpcode(gIngress, Opcodes.NEW) == 0
+                && countCalls(gIngress, "zombie/core/raknet/UdpConnection", "forceDisconnect") == 0);
+        // 固定共用 wire 實作及兩個側別宣告；TIS 修改時人工判定是否撤刀或更新契約。
+        String[][] animalProtocol = {
+            {"zombie/network/packets/character/AnimalUpdatePacket", "ece2b020d7a0d2b08ca17698e7eb97c21eac970038f52067e6e16859d58b8c7a"},
+            {"zombie/network/packets/character/AnimalUpdateReliablePacket", "a2c8af71ae6830949782b1c4b3015b4c1cb0dd0e0dc54b4d6a218bbc00d89634"},
+            {"zombie/network/packets/character/AnimalUpdateUnreliablePacket", "434737708d5db2a36d5f4652c4c3ec8ecd68ff12d477b37c6210d9b73323729c"},
+        };
+        try (ZipFile protocolJar = new ZipFile(jar.toFile())) {
+            java.security.MessageDigest protocolSha = java.security.MessageDigest.getInstance("SHA-256");
+            for (String[] entry : animalProtocol) {
+                byte[] original = protocolJar.getInputStream(protocolJar.getEntry(entry[0] + ".class")).readAllBytes();
+                failed += check("W29 上游協定及側別未漂移：" + entry[0],
+                        java.util.HexFormat.of().formatHex(protocolSha.digest(original)).equals(entry[1]));
+                failed += check("W29 不覆寫動物同步協定類別：" + entry[0],
+                        !Files.exists(distJava.resolve(entry[0] + ".class")));
+            }
+        }
+        failed += check("W29 client 接收入口不改動",
+                methodText(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc))
+                        .equals(methodText(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))));
+
         if (failed > 0) {
             System.exit(1);
         }

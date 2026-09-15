@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.Stack;
 
+import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.characters.IsoZombie;
 import zombie.characters.animals.AnimalDefinitions;
@@ -42,11 +43,13 @@ public final class AnimalLosScanTest {
 
     private static void testObserve() throws Exception {
         TestAnimal a = animal(cell(new LinkedHashSet<>()));
+        IsoZombie previous = zombie(1.0F, 0.0F);
+        a.spotted.add(previous);
+        a.spottedChr = previous;
         AnimalLosScan.updateLOS(a);
         require(a.vanillaCalls == 1, "observe 必須直通一次");
-        require(AnimalLosScan.callsForTest() == 1, "observe calls=1");
-        require(AnimalLosScan.elapsedNsForTest() >= 0, "observe elapsed 非負");
-        require(AnimalLosScan.sumObjectsForTest() == 0, "空 list size=0");
+        require(a.spotted.equals(List.of(previous)) && a.spottedChr == previous,
+                "observe wrapper 不得清除 vanilla 原有感知狀態");
     }
 
     private static void testOn() throws Exception {
@@ -70,10 +73,6 @@ public final class AnimalLosScanTest {
         require(b.lastAlerted == 0.0F, "遠距 fast skip 必須把負 lastAlerted clamp 回0");
         require(a.spottedChr == null, "遠距 fast skip 必須重放 spottedChr=null");
         require(b.spottedCalls == 1 && b.lastOther == near, "近距殭屍必須 delegate 一次");
-        require(AnimalLosScan.animalsScannedForTest() == 1, "scanned=1");
-        require(AnimalLosScan.fastSkippedForTest() == 1, "fastSkipped=1");
-        require(AnimalLosScan.delegatedForTest() == 1, "delegated=1");
-        require(AnimalLosScan.fallbacksForTest() == 0, "成功路徑 fallback=0");
 
 
         initRandForGameStatics();
@@ -118,36 +117,85 @@ public final class AnimalLosScanTest {
         TestPlayer invisible = player(100.0F, 0.0F, true, false);
         invA.spottedChr = invisible;
         invA.cell = cell(new LinkedHashSet<>(List.of(invisible)));
-        long fastBefore = AnimalLosScan.fastSkippedForTest();
         AnimalLosScan.updateLOS(invA);
         require(invA.spottedChr == invisible, "隱形玩家 pair 應零效果，不清 spottedChr");
         require(invB.spottedCalls == 0, "隱形玩家不得 delegate");
-        require(AnimalLosScan.fastSkippedForTest() == fastBefore, "隱形玩家不得算 fast skip");
 
-        // 每 pair live threshold：第一個 delegate 將 spottingDist 10→100；後一個距50必須
-        // 依新 threshold=102 delegate。若 Scan 每隻只讀一次，第二 pair 會被錯誤 fast-skip。
-        TestAnimal liveA = animal(null);
-        TestBehavior liveB = new TestBehavior(liveA);
-        liveB.mutateSpottingDist = true;
-        liveA.behavior = liveB;
-        IsoZombie trigger = zombie(1.0F, 0.0F);
-        IsoZombie afterMutation = zombie(50.0F, 0.0F);
-        liveA.cell = cell(new LinkedHashSet<>(List.of(trigger, afterMutation)));
-        long liveFastBefore = AnimalLosScan.fastSkippedForTest();
-        AnimalLosScan.updateLOS(liveA);
-        require(liveB.spottedCalls == 2 && liveB.lastOther == afterMutation,
-                "spottingDist 動態改大後，後一 pair 必須 live 讀並 delegate");
-        require(AnimalLosScan.fastSkippedForTest() == liveFastBefore,
-                "動態 threshold pair 不得使用舊 gate fast-skip");
+        testMixedTargetsPreservePerceptionOrder();
+        testLiveSpottingDistanceAffectsNextTarget();
+        testNullEntryStopsScanWithoutFallback();
 
         // 前置取值失敗：spotted.clear 前 fail-open，恰一次 vanilla、無 double scan。
         TestAnimal fallback = animal(null);
         fallback.behavior = b;
-        long fbBefore = AnimalLosScan.fallbacksForTest();
         AnimalLosScan.updateLOS(fallback);
         require(fallback.vanillaCalls == 1, "null cell fallback 恰一次 vanilla");
-        require(AnimalLosScan.fallbacksForTest() == fbBefore + 1, "fallback 計數+1");
-        require(AnimalLosScan.anomaliesForTest() == 0, "anomalies=0");
+    }
+
+    private static void testMixedTargetsPreservePerceptionOrder() throws Exception {
+        TestAnimal a = animal(null);
+        PerceptionBehavior b = new PerceptionBehavior(a);
+        b.lastAlerted = -1.0F;
+        a.behavior = b;
+        IsoMovingObject ignoredNear = alloc(IsoMovingObject.class);
+        setMovingState(ignoredNear, 1.0F, 0.0F, alloc(IsoGridSquare.class));
+        IsoMovingObject ignoredFar = alloc(IsoMovingObject.class);
+        setMovingState(ignoredFar, 100.0F, 0.0F, alloc(IsoGridSquare.class));
+        TestAnimal otherAnimal = animal(null);
+        setMovingState(otherAnimal, 0.0F, 0.0F, alloc(IsoGridSquare.class));
+        TestPlayer first = player(2.0F, 0.0F, false, false);
+        IsoZombie middle = zombie(1.0F, 0.0F);
+        TestPlayer last = player(3.0F, 0.0F, false, false);
+        a.spotted.add(ignoredNear);
+        a.cell = cell(new LinkedHashSet<>(List.of(
+                ignoredNear, first, a, otherAnimal, middle, last, ignoredFar)));
+
+        AnimalLosScan.updateLOS(a);
+
+        require(a.spotted.equals(List.of(first, a, middle, last)),
+                "清除舊感知後，self 與有效玩家/殭屍必須保留 objectList 原序且排除其他動物/物件");
+        require(a.spottedChr == last, "最後有效 target 必須保留為 consumer 的感知對象");
+        require(b.lastAlerted == -1.0F, "非目標物件不得重放 spotted 前綴或 clamp lastAlerted");
+    }
+
+    private static void testLiveSpottingDistanceAffectsNextTarget() throws Exception {
+        TestAnimal a = animal(null);
+        PerceptionBehavior b = new PerceptionBehavior(a);
+        b.mutateSpottingDist = true;
+        a.behavior = b;
+        IsoZombie trigger = zombie(1.0F, 0.0F);
+        IsoZombie afterMutation = zombie(50.0F, 0.0F);
+        a.cell = cell(new LinkedHashSet<>(List.of(trigger, afterMutation)));
+
+        AnimalLosScan.updateLOS(a);
+
+        require(a.spotted.equals(List.of(trigger, afterMutation)) && a.spottedChr == afterMutation,
+                "前一 target 將 spottingDist 10→100 後，後一距50 target 必須依 live threshold 更新感知");
+    }
+
+    private static void testNullEntryStopsScanWithoutFallback() throws Exception {
+        TestAnimal a = animal(null);
+        a.behavior = new PerceptionBehavior(a);
+        IsoZombie before = zombie(1.0F, 0.0F);
+        TestPlayer after = player(2.0F, 0.0F, false, false);
+        Set<IsoMovingObject> objects = new LinkedHashSet<>();
+        objects.add(a);
+        objects.add(before);
+        objects.add(null);
+        objects.add(after);
+        a.cell = cell(objects);
+        boolean threw = false;
+
+        try {
+            AnimalLosScan.updateLOS(a);
+        } catch (NullPointerException expected) {
+            threw = true;
+        }
+
+        require(threw, "null entry 必須原樣拋出 NPE，不得被種類排除吞掉");
+        require(a.spotted.equals(List.of(a, before)) && a.spottedChr == before,
+                "null 前的感知效果必須保留，null 後的有效 target 不得繼續執行");
+        require(a.vanillaCalls == 0, "掃描段 NPE 不得 fallback 造成 double scan");
     }
 
     private static TestAnimal animal(IsoCell cell) throws Exception {
@@ -245,6 +293,16 @@ public final class AnimalLosScanTest {
             if (mutateSpottingDist && spottedCalls == 1) {
                 testParent.adef.spottingDist = 100;
             }
+        }
+    }
+
+    /** 模擬 spotted consumer 發布感知結果；不改既有 A/B fixture 的預設行為。 */
+    static class PerceptionBehavior extends TestBehavior {
+        PerceptionBehavior(TestAnimal parent) { super(parent); }
+        @Override public void spotted(IsoMovingObject other, boolean forced, float dist) {
+            super.spotted(other, forced, dist);
+            testParent.spotted.add(other);
+            testParent.spottedChr = (IsoGameCharacter) other;
         }
     }
 

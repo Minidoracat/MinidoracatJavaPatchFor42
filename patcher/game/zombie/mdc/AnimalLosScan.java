@@ -35,6 +35,9 @@ import zombie.vehicles.BaseVehicle;
  * 幾何上不可能 spotted 的遠距 pair；邊界帶與近距 pair 全額 delegate 給
  * {@link AnimalSpottedPrefilter}（W3-3 現行路徑原樣）。
  *
+ * <p>非目標種類先於座標與距離計算排除；仍按原 Set 順序全掃，不快取候選清單。
+ * null 保留原讀取例外，self 與有效目標的所有作用順序不變。
+ *
  * <p><b>行為承諾：與現行（W3-3 後）bit-exact，含 RNG 流</b>（設計 §4.3 七條等價性義務）：
  * (A) 安全域內（t ≤ 65536）0.25F 裕度 ≥ 32 ULP 輾壓 d²/sqrt/g² 的合計舍入誤差 ⟹ fast skip
  * 觸發 ⟹ prefilter 必走 skip 路徑，前綴逐句重放（{@code spottedChr=null}＋{@code lastAlerted}
@@ -160,6 +163,11 @@ public final class AnimalLosScan {
                 spotted.add(o);
                 continue;
             }
+            boolean isZ = o instanceof IsoZombie;
+            boolean isP = !isZ && o instanceof IsoPlayer && !(o instanceof IsoAnimal);
+            if (!isZ && !isP && o != null) {
+                continue; // 非目標先排除；null 仍由下方原讀取拋出，不靜默吞掉。
+            }
             float ox = o.getX();
             float oy = o.getY();
             float oz = o.getZ();
@@ -172,11 +180,6 @@ public final class AnimalLosScan {
             // 次序前移：無效果 skip 之間合法重排（§4.3-C）
             if (o.getCurrentSquare() == null) {
                 continue;
-            }
-            boolean isZ = o instanceof IsoZombie;
-            boolean isP = !isZ && o instanceof IsoPlayer && !(o instanceof IsoAnimal);
-            if (!isZ && !isP) {
-                continue; // 非殭屍非玩家：vanilla 零效果
             }
             // W3-3 must-keep：spottingDist 每個 spotted 候選 pair live 讀；mod 可在前一 pair
             // 的 spotted() 內改值。讀取/計算異常＝本 pair 禁用 fast path、全額 delegate。
@@ -297,31 +300,8 @@ public final class AnimalLosScan {
         return calls;
     }
 
-    static long elapsedNsForTest() {
-        return elapsedNs;
-    }
-
-    static long sumObjectsForTest() {
-        return sumObjects;
-    }
-
-    static long animalsScannedForTest() {
-        return animalsScanned;
-    }
-
-    static long fastSkippedForTest() {
-        return fastSkipped;
-    }
-
     static long delegatedForTest() {
         return delegated;
     }
 
-    static long fallbacksForTest() {
-        return fallbacks;
-    }
-
-    static long anomaliesForTest() {
-        return anomalies;
-    }
 }

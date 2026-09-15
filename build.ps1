@@ -46,7 +46,7 @@ javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist\java" `
 Assert-Ok "javac runtime helpers"
 
 Write-Host "[3/10] 編譯全部行為測試與 benchmark..."
-javac -encoding UTF-8 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" -d "$R\work\out" `
+javac -encoding UTF-8 -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" -d "$R\work\out" `
     (Get-ChildItem "$R\patcher\tests" -Recurse -Filter *.java).FullName
 Assert-Ok "javac tests"
 
@@ -92,6 +92,8 @@ $helperEntries = @(
     'zombie/mdc/IoPoolIsolation.class',
     'zombie/mdc/IoPoolIsolation$Local.class',
     'zombie/mdc/HutchSyncGate.class',
+    'zombie/mdc/PopManAddLock.class',
+    'zombie/mdc/AnimalUpdateGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -350,6 +352,20 @@ Assert-Ok "IoPoolIsolationTest（ioPoolIsolation=0 kill switch）"
 Write-Host "[9u/10] RequestData ACK 邊界與正常傳送（W27）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.RequestDataAckTest
 Assert-Ok "RequestDataAckTest（空佇列、未知連線、重複 ACK、完整傳送與例外穿透）"
+
+Write-Host "[9v/10] PopMan 缺格回退補鎖（W28）互斥、例外解鎖與停用對照..."
+java -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" PopManAddLockTest "$R\dist\java" "$R\work\projectzomboid.jar" on
+Assert-Ok "PopManAddLockTest（on，兩條真 caller 與例外解鎖）"
+java "-Dmdc.popmanAddLock=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" PopManAddLockTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+Assert-Ok "PopManAddLockTest（off，原 native 委派仍執行）"
+
+Write-Host "[9w/10] 動物同步接收驗證（W29）與原版回退對照..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest enforce
+Assert-Ok "AnimalUpdateGuardTest（預設 enforce，真接收入口、狀態保護、限頻與紀錄故障）"
+java "-Dmdc.animalUpdateGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest off
+Assert-Ok "AnimalUpdateGuardTest（off，原版危險行為對照）"
+java "-Dmdc.animalUpdateGuard=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest unknown
+Assert-Ok "AnimalUpdateGuardTest（未知值仍 enforce）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -2840,8 +2840,36 @@ RuntimeException（log 故障不外逃、不擋主流程、不再讓 forward 被
   **加速比 ≈1.25×（> 1.1× 門檻），保留 on**；`fastSkipped` 26.2G／`delegated` 9.2M
   （pair 級 99.96% 走 fast path）、`fallbacks=0`、`anomalies=0`、Gate `forwarded` ≈ Scan
   `calls` 對帳成立。**但 pair 級 99.96% 只換來 ~25%**＝迴圈本體（`Set` 迭代＋instanceof
-  ＋距離平方，≈35ns/pair × ~1136 pair/call）是底線；再往下只能換資料來源（W18 B 方案：
-  zombie/player 專用清單取代 `getObjectList()` 全掃），另案。
+  ＋距離平方，≈35ns/pair × ~1136 pair/call）仍有固定成本。當時判為下一步須換資料來源；
+  2026-09-11 覆核發現非目標的純取值／計算仍可再提前排除，先採下方較小修改。
+
+### 2026-09-11：非目標種類提前排除
+
+只把 `AnimalLosScan.updateLOS` 原有的「非殭屍、非玩家」排除移到 self 分支之後、
+XYZ／高度／距離平方／所在格讀取之前。`IsoAnimal` 繼承 `IsoPlayer`，所以排除其他動物的
+條件不可刪；null 則仍落到原 `getX()` 拋 NPE，不被新 `instanceof` 判定靜默略過。
+原版相關 getter 為純欄位讀取；不承諾涵蓋任意第三方 Java 子類在 getter 中加入的副作用。
+
+physics／vehicle／grapple-only／self 順序不動；有效目標走訪順序、每 pair 即時
+`spottingDist`、`lastAlerted` 前綴與既有 Rand 路徑不動。Gate 與 Scan 模式不改，
+不提高 N、不削減視力或聽覺，也沒有新增快取、執行緒、旋鈕或 bytecode 掛點。
+**仍是原 Set 全掃**；省掉的是無效候選的逐物件工作，不宣稱已實作專用候選清單。
+
+驗證沿用 off／observe／on 三模式，補混合物件與 self 的有效結果原序、前一個目標修改
+視距後下一個目標仍即時可見，以及 null 前綴保留／後綴中斷。相同行為案例在舊 helper
+與新 helper 均通過；不為了量速度斷言某個 getter 應被呼叫幾次。
+
+本機拋棄式 A/B 以同 JVM 兩個隔離 helper、同一真 `HashSet` 的 4,800 個物件，
+五個 JVM 樣本、各 11 輪交替量測；每側暖機 10,000 次，先排除首次 heartbeat。
+每輪在計時外對帳 fast/delegate/fallback/anomaly／原版委派與 consumer 效果，避免
+把錯走 fallback 或漏做有效工作量成加速。非目標占 25%／50%／75% 的合成負載分別約
+**1.4–1.5×／1.7–1.8×／2.7–2.9×**；全為有效目標時近乎持平。兩側每次掃描配置量同為
+32 bytes（原 Set iterator），未新增逐物件配置。
+
+這是固定物件清單的**本機合成負載結果，不是正式服 FPS 或視線耗時的改善比例**。
+正式部署仍須獨立切換，再用既有 Scan timing、相近 objectList 規模與負載驗收；
+`fallbacks/anomalies` 應為 0，N 與有效判定保持不變。不因本機加速就混入候選快取方案。
+
 ---
 
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
@@ -3589,6 +3617,60 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 有效 ACK 續傳 `packSize + 17` bytes 的逐位元對帳、完成後重複 ACK，以及原送出例外 identity。
 SmokeCheck 同時鎖住 `i=0 → i/size 比較 → get(i)` 語境，並比對整個方法只有該 opcode 改變。
 官方改掉此迴圈時須重新評估撤刀，不得放寬守門硬套。
+
+---
+
+## 2ap. PopMan 缺格生成與背景存檔互斥（W28，server，預設 on）
+
+`ZombiePopulationManager.addZombieStanding`／`addZombieMoving` 在方格未載入時直接呼叫
+`n_addZombie`，卻沒有取得既有 `saveLock`；背景 `processPendingSaveCells` 在該鎖內執行
+`n_saveRealZombies`／`n_saveCell`，兩側可並行改動同一 native 物件池。
+真 jar 的五個 `n_addZombie` 呼叫中，另三個位於已持鎖的 `removeChunkFromWorld`／`virtualizeZombie`。
+
+**事故證據與界線**：core 證實 `ObjectPool<popman::Zombie*>::clear` 對相鄰兩格中的同一指標
+連續 delete，觸發 `double free`；Main／worker 兩池均有重複指標，且存在跨池共用。
+core 沒有重複入池當下的執行時序，故不能宣稱本次兩處缺鎖已解釋所有損毀來源；
+這是已確認競態缺口的根因修復，不是在停止流程吞例外或去重 free。
+
+**手術**：僅將上述兩個 fallback 的 native 呼叫同形改道到 `PopManAddLock.addZombie`，
+沿用同一 `saveLock`，只在 native 呼叫周圍 `lock`／`finally unlock`。
+快取的 private `MethodHandle` 保留原 native 名稱、可見性與 descriptor；解析失敗明確外傳，
+原生 `Throwable` 原物件穿透。其他方法、存檔格式、停止流程與官方 native library 不改。
+代價是兩個 fallback 遇到背景存檔持鎖時必須等待；不新增鎖或改變原有鎖順序。
+
+`-Dmdc.popmanAddLock=0`／`off` 停用補鎖，但仍委派原 native；未設定預設 on，需重啟生效。
+`[MinidoracatJavaPatch][PopManAddLock] lock=true` 於 helper 首次初始化印出，
+不是保證每次開機立即出現，也不代表歷史 crash 已經重現並排除。
+
+**驗證**：SmokeCheck 鎖五處 native 呼叫普查、兩處精確改道、其餘方法及 frames/maxs 不變。
+`PopManAddLockTest` 以真 caller／真鎖／真 helper，僅替換 native body 與最小世界 fixture，
+驗證 on 互斥、off／vanilla 無互斥、三類例外原物件與解鎖，以及重入後持有數不變。
+移除 lock 或 unlock 的隔離 mutant 均立即失敗而不掛住。
+這些回歸證明 Java 互斥契約，**不等於重播真 native 物件池損毀**；線上仍須觀察後續存檔與停止事件。
+
+---
+
+## 2aq. 動物同步接收驗證（W29，server，預設 enforce）
+
+強化伺服器端驗證：不合法的動物同步請求在修改任何遊戲狀態前整包拒絕；
+正常請求保留既有授權、解析與處理流程。可靠／不可靠兩種同步都涵蓋，
+不改客戶端或傳輸格式，玩家不需安裝額外檔案。
+
+手術只在既有 `GameServer` ClassPatch 加入一個接收呼叫改道至 `AnimalUpdateGuard`。
+不在原版解析後才攔截，以免共用封包物件的殘留狀態繼續被處理；拒絕不拋普通例外，
+也不自行踢人或封鎖帳號。正常及非目標封包的原版例外仍原樣穿透。
+
+`-Dmdc.animalUpdateGuard=0`／`off` 回原版；未設定及未知值均 enforce，沒有 observe 模式，
+需重啟生效。**關閉會重新暴露已確認的驗證缺口**，不應只為了減少紀錄而關閉。
+只有拒絕時輸出 `[MinidoracatJavaPatch][AnimalUpdateGuard]` Warning，每個 60 秒窗最多三行；
+`blocked` 為拒絕總數、`suppressed` 為限頻略過的紀錄、`logErrors` 為紀錄路徑例外。
+紀錄故障不會放行請求；不保存 raw payload 或玩家名稱，也不由單筆紀錄推定動機。
+
+**驗證**：原版真接收入口的狀態保護反例失敗；新包保留雞舍及巢箱成員資格，
+涵蓋正常 client writer、buffer 邊界、共用封包狀態、明示回退、未知設定、限頻及真 logger 故障。
+SmokeCheck 鎖唯一接收入口、精確同形改道、上游協定指紋與 client 入口不變。
+本機完整建置與兩輪隔離安裝／移除通過；不代表已部署或已證明歷史動物遺失的原因，
+也不會自動復原既有存檔。
 
 ---
 
