@@ -1,10 +1,9 @@
 # IsoAnimal.updateLOS 迴圈殼優化 — 設計 v1（2026-08-29 observe 落地）
 
-> 狀態：**W18-2 observe 已實作並通過全建置**。原草案 callsite redirect 方案因 W18
-> AnimalLosGate 已佔用同一 callsite，依 `docs/animal-los-gate-design-v1.md` §5 銜接條款改為
-> 「Gate forward 時 delegate 給 Scan」，不新增 bytecode 手術。峰值證據由 W18 60 張@66人
-> 補齊（updateLOS 41.7%）；Gate enforce 後正式服 counter 換算殘餘疑似 >8%，但是否開 on
-> 仍以 observe `ms/s`＋高峰 jstack 雙管道互驗為準（§4.6），不得以手算直接出貨。
+> 狀態：**W18-2 on 已於 2026-09-02 驗收保留**。原草案 callsite redirect 方案因 W18
+> AnimalLosGate 已佔用同一 callsite，改為「Gate forward 時 delegate 給 Scan」，不新增手術。
+> **2026-09-11** 再將非目標種類提前排除，仍全掃原 Set，不做候選快取、不改 N 或有效順序；
+> 本機 A/B 與驗收界線見 [patches.md §2af](patches.md#2af-動物-los-節流閘w18server預設-observe)。
 > 基準已重驗至 42.20.4（jar SHA `80e405a4…442f44`）。
 
 ## 0. 摘要
@@ -274,7 +273,7 @@ fps 與 too-busy 頻率為輔助觀測。峰值/離峰批補齊後更新全時�
   updateLOS 演算法語意（v2 範疇）；client 側零改動。
 - 部署位置：僅 server manifest（`PatchConfig.all()`）；與 client 2 刀無交集。
 
-## 7. 現況與下一閘
+## 7. 歷史驗收與後續更新
 
 1. **已完成**：42.20.4 updateLOS 本體逐句重驗；`AnimalLosScan` observe/on/off helper；
    Gate forward delegate；SmokeCheck 語境指紋/caller census/helper 契約；三模式行為測試；
@@ -283,3 +282,7 @@ fps 與 too-busy 頻率為輔助觀測。峰值/離峰批補齊後更新全時�
    與高峰 jstack ≥60 份的 updateLOS 佔比交叉對帳。
 3. **on＝獨立 canary**：不得與其他行為變更同批；以 objectList 平均大小校正 A/B，若實測
    加速比 ≤1.1× 即撤回 observe。on 生效後另驗 AnimalSpotted 計數歸屬變化與 anomalies=0。
+
+以上為 2026-08-29 首發閘門；on 已於 2026-09-02 驗收。2026-09-11 的種類提前排除
+保留此版的 live-threshold／前綴／例外語意，另以混合物件、self 原序及 null 中斷驗證；
+本機同清單 A/B 通過後再獨立部署，不把合成比例外推為正式服收益。詳見 patches.md §2af。

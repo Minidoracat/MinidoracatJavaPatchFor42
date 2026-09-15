@@ -985,6 +985,31 @@ public final class PatchConfig {
         ack.expectedHits = 1;
         patches.add(requestData);
 
+        // W28：兩個缺格 fallback 漏 saveLock，會與背景 cell snapshot 共用 native pool。
+        // 只改道 native 呼叫；既有三個持鎖呼叫與 save/stop 不動。關機 core 的確切交織未重建。
+        Patcher.ClassPatch popMan = new Patcher.ClassPatch("zombie/popman/ZombiePopulationManager");
+        Patcher.Site nAddZombie = new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/popman/ZombiePopulationManager", "n_addZombie", "(FFFBIIII)V",
+                "zombie/mdc/PopManAddLock", "addZombie");
+        Patcher.MethodOps addStanding = popMan.method("addZombieStanding",
+                "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;)V");
+        addStanding.redirects.add(nAddZombie);
+        addStanding.expectedHits = 1;
+        Patcher.MethodOps addMoving = popMan.method("addZombieMoving",
+                "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;II)V");
+        addMoving.redirects.add(nAddZombie);
+        addMoving.expectedHits = 1;
+        patches.add(popMan);
+
+        // W29：動物同步接收驗證；在既有 GameServer ClassPatch 上整包攔截，不改共用 wire 類別。
+        Patcher.MethodOps animalIngress = gameServer.method("mainLoopDealWithNetData",
+                "(Lzombie/network/ZomboidNetData;)V");
+        animalIngress.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/PacketTypes$PacketType", "onServerPacket",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;)V",
+                "zombie/mdc/AnimalUpdateGuard", "onServerPacket"));
+        animalIngress.expectedHits = 1;
+
         return patches;
     }
 
