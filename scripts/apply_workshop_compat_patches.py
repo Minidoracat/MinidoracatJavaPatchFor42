@@ -131,8 +131,8 @@ TEMPORARY_PHASES = ("active", "retiring", "retired")
 PSR_LIFECYCLE = {
     "patch": PSR_SCAN_PATCH,
     "workshop_id": "3725311427",
-    "pinned_revision": 1789388341,
-    "pinned_modversion": "6.6.7",
+    "pinned_revision": 1789544087,
+    "pinned_modversion": "6.6.8",
     "state_tool": "minidoracat-psr-temporary",
     "state_name": "psr-temporary-state.json",
     "backup_name": "psr-powerbank-original.lua",
