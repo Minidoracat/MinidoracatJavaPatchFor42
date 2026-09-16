@@ -15,3 +15,5 @@ temp/
 dist-client-lowmem/
 native-observer/out/
 private/
+.agents/
+__pycache__/
