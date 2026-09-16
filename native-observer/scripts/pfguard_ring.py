@@ -3,6 +3,8 @@
 
     pfguard_ring.py --core core.12345 --shim out/libmdcpfguard.so [--limit 200]
     pfguard_ring.py --pid 12345      --shim out/libmdcpfguard.so [--limit 200]
+    pfguard_ring.py --core core.12345 --shim out/libmdcpfguard.so \
+                    --hs-err hs_err_pid12345.log     # core without an NT_FILE note
 
 The ledger lives in the shim's static storage, so it is present in any core the JVM
 dumps. Only the standard library is used, so this runs anywhere python3 does.
@@ -11,8 +13,11 @@ dumps. Only the standard library is used, so this runs anywhere python3 does.
 from __future__ import annotations
 
 import argparse
+import bisect
+import re
 import struct
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 RING_MAGIC = 0x4746504344444D55
@@ -21,7 +26,16 @@ EVENT_FORMAT = "<QQQQQQIIIHH"
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
 RING_HEADER_FORMAT = "<QIIQQ24x"
 RING_HEADER_SIZE = struct.calcsize(RING_HEADER_FORMAT)
+NT_PRSTATUS = 1
+NT_PRPSINFO = 3
 NT_FILE = 0x46494C45
+PRPSINFO_PID = 24          # elf_prpsinfo.pr_pid on x86_64
+PRSTATUS_PID = 32          # elf_prstatus.pr_pid on x86_64
+PN_XNUM = 0xFFFF           # e_phnum escape: real count lives in section 0's sh_info
+SHN_XINDEX = 0xFFFF
+MAPS_LINE = re.compile(
+    r"^([0-9a-fA-F]+)-([0-9a-fA-F]+)\s+[-rwxsp]{4}\s+([0-9a-fA-F]+)\s+"
+    r"[0-9a-fA-F]+:[0-9a-fA-F]+\s+\d+\s+(/\S.*?)\s*$")
 
 OPS = {
     1: "GUARD_ALLOC",
@@ -55,27 +69,60 @@ LAYOUT_VERSION = 5
 class Elf:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.data = path.read_bytes() if path.stat().st_size < (64 << 20) else None
-        self.handle = path.open("rb")
+        self.size = path.stat().st_size
+        self.data = path.read_bytes() if self.size < (64 << 20) else None
+        self.handle = path.open("rb") if self.data is None else None
         header = self._read(0, 64)
-        if header[:4] != b"\x7fELF" or header[4] != 2:
-            raise ValueError(f"{path}: not a 64-bit ELF")
+        if header[:4] != b"\x7fELF" or header[4] != 2 or header[5] != 1:
+            raise ValueError(f"{path}: not a little-endian 64-bit ELF")
         (self.e_phoff, self.e_shoff) = struct.unpack_from("<QQ", header, 32)
         (self.e_phentsize, self.e_phnum, self.e_shentsize, self.e_shnum, self.e_shstrndx) = \
             struct.unpack_from("<HHHHH", header, 54)
+        self._resolve_extended()
+
+    def _resolve_extended(self) -> None:
+        """ELF64 escapes its 16-bit header counters through section header 0."""
+        if not self.e_shoff:
+            if self.e_phnum == PN_XNUM:
+                raise ValueError(f"{self.path}: e_phnum is PN_XNUM but there is no section table")
+            return
+        if self.e_shentsize and self.e_shentsize < 64:
+            raise ValueError(f"{self.path}: e_shentsize {self.e_shentsize} is too small for ELF64")
+        section0 = struct.unpack_from("<IIQQQQIIQQ", self._read(self.e_shoff, 64), 0)
+        if self.e_phnum == PN_XNUM:
+            self.e_phnum = section0[7]          # sh_info
+        if self.e_shnum == 0:
+            self.e_shnum = section0[5]          # sh_size
+        if self.e_shstrndx == SHN_XINDEX:
+            self.e_shstrndx = section0[6]       # sh_link
 
     def _read(self, offset: int, size: int) -> bytes:
+        if offset < 0 or size < 0:
+            raise ValueError(f"{self.path}: bad read request of {size} bytes at {offset}")
+        if offset > self.size or size > self.size - offset:
+            raise ValueError(f"{self.path}: truncated read of {size} bytes at {offset:#x} "
+                             f"(file is {self.size} bytes)")
         if self.data is not None:
-            return self.data[offset:offset + size]
-        self.handle.seek(offset)
-        return self.handle.read(size)
+            chunk = self.data[offset:offset + size]
+        else:
+            self.handle.seek(offset)
+            chunk = self.handle.read(size)
+        if len(chunk) != size:
+            raise ValueError(f"{self.path}: truncated read, wanted {size} bytes at {offset:#x}, "
+                             f"got {len(chunk)} (file is {self.size} bytes)")
+        return chunk
 
     def segments(self) -> list[tuple[int, int, int, int, int]]:
+        if not self.e_phnum:
+            return []
+        entsize = self.e_phentsize or 56
+        if entsize < 56:
+            raise ValueError(f"{self.path}: e_phentsize {entsize} is too small for ELF64")
+        table = self._read(self.e_phoff, self.e_phnum * entsize)
         result = []
         for index in range(self.e_phnum):
-            raw = self._read(self.e_phoff + index * self.e_phentsize, self.e_phentsize)
             p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = \
-                struct.unpack_from("<IIQQQQQQ", raw, 0)
+                struct.unpack_from("<IIQQQQQQ", table, index * entsize)
             result.append((p_type, p_offset, p_vaddr, p_filesz, p_memsz))
         return result
 
@@ -116,23 +163,85 @@ class Elf:
         raise KeyError(f"symbol {wanted} not found in {self.path}")
 
 
+def iter_notes(blob: bytes):
+    """Yield (type, desc) for every ELF note in a PT_NOTE payload."""
+    cursor = 0
+    while cursor + 12 <= len(blob):
+        namesz, descsz, ntype = struct.unpack_from("<III", blob, cursor)
+        desc_start = cursor + 12 + ((namesz + 3) & ~3)
+        desc_end = desc_start + descsz
+        if desc_end > len(blob):
+            raise ValueError("truncated ELF note")
+        yield ntype, blob[desc_start:desc_end]
+        cursor = desc_start + ((descsz + 3) & ~3)
+    if any(blob[cursor:]):
+        raise ValueError("truncated ELF note header")
+
+
+def decode_nt_file(desc: bytes) -> list[tuple[int, int, int, str]]:
+    """NT_FILE stores file offsets in units of the note's own page size."""
+    if len(desc) < 16:
+        raise ValueError(f"NT_FILE note is only {len(desc)} bytes")
+    count, page = struct.unpack_from("<QQ", desc, 0)
+    table = 16
+    strings = table + count * 24
+    if not page or strings > len(desc):
+        raise ValueError(f"NT_FILE note is malformed: count={count} page={page} "
+                         f"desc={len(desc)} bytes")
+    names = desc[strings:].split(b"\0")
+    entries = []
+    for index in range(count):
+        start, end, file_off = struct.unpack_from("<QQQ", desc, table + index * 24)
+        label = names[index].decode(errors="replace") if index < len(names) else ""
+        entries.append((start, end, file_off * page, label))
+    return entries
+
+
+def parse_hs_err_maps(text: str) -> list[tuple[int, int, int, str]]:
+    """Pick the /proc/self/maps dump hotspot prints under 'Dynamic libraries:'."""
+    entries = []
+    for line in text.splitlines():
+        match = MAPS_LINE.match(line)
+        if match:
+            start, end, offset, name = match.groups()
+            entries.append((int(start, 16), int(end, 16), int(offset, 16), name))
+    return entries
+
+
+def hs_err_pid(text: str) -> int | None:
+    match = re.search(r"^#.*\bpid=(\d+),", text, re.MULTILINE) or re.search(r"Process ID:\s*(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
 class Target:
     """Reads virtual memory from either a core file or a live process."""
 
-    def __init__(self, core: Path | None, pid: int | None) -> None:
+    def __init__(self, core: Path | None, pid: int | None, hs_err: Path | None = None) -> None:
         self.pid = pid
         self.core = None
         self.loads: list[tuple[int, int, int]] = []
         self.files: list[tuple[int, int, int, str]] = []
+        self.core_pids: set[int] = set()
+        self.core_tids: set[int] = set()
         if core is not None:
             self.core = Elf(core)
             for p_type, p_offset, p_vaddr, p_filesz, _memsz in self.core.segments():
                 if p_type == 1 and p_filesz:
                     self.loads.append((p_vaddr, p_filesz, p_offset))
-                elif p_type == 4:
-                    self.files.extend(self._parse_nt_file(p_offset, p_filesz))
+                elif p_type == 4 and p_filesz:
+                    for ntype, desc in iter_notes(self.core._read(p_offset, p_filesz)):
+                        if ntype == NT_FILE:
+                            self.files.extend(decode_nt_file(desc))
+                        elif ntype == NT_PRPSINFO and len(desc) >= PRPSINFO_PID + 4:
+                            self.core_pids.add(struct.unpack_from("<i", desc, PRPSINFO_PID)[0])
+                        elif ntype == NT_PRSTATUS and len(desc) >= PRSTATUS_PID + 4:
+                            self.core_tids.add(struct.unpack_from("<i", desc, PRSTATUS_PID)[0])
             self.loads.sort()
+            if hs_err is not None:
+                self._adopt_hs_err(hs_err)
         elif pid is not None:
+            if hs_err is not None:
+                raise ValueError("--hs-err only makes sense with --core")
             for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
                 parts = line.split(None, 5)
                 bounds = parts[0].split("-")
@@ -145,33 +254,38 @@ class Target:
             self.handle = open(f"/proc/{pid}/mem", "rb", buffering=0)
         else:
             raise ValueError("need --core or --pid")
+        self._starts = [vaddr for vaddr, _size, _offset in self.loads]
 
-    def _parse_nt_file(self, offset: int, size: int) -> list[tuple[int, int, int, str]]:
-        blob = self.core._read(offset, size)
-        cursor = 0
-        entries: list[tuple[int, int, int, str]] = []
-        while cursor + 12 <= len(blob):
-            namesz, descsz, ntype = struct.unpack_from("<III", blob, cursor)
-            name_start = cursor + 12
-            desc_start = name_start + ((namesz + 3) & ~3)
-            if ntype == NT_FILE and descsz >= 16:
-                count, _page = struct.unpack_from("<QQ", blob, desc_start)
-                table = desc_start + 16
-                strings = table + count * 24
-                names = blob[strings:desc_start + descsz].split(b"\0")
-                for index in range(count):
-                    start, end, file_off = struct.unpack_from("<QQQ", blob, table + index * 24)
-                    label = names[index].decode(errors="replace") if index < len(names) else ""
-                    entries.append((start, end, file_off, label))
-            cursor = desc_start + ((descsz + 3) & ~3)
-        return entries
+    def _adopt_hs_err(self, hs_err: Path) -> None:
+        """Borrow mappings from a hs_err log, but only after the pid checks out."""
+        if self.files:
+            print(f"note: core carries NT_FILE, ignoring {hs_err}", file=sys.stderr)
+            return
+        text = hs_err.read_text(encoding="utf-8", errors="replace")
+        log_pid = hs_err_pid(text)
+        if log_pid is None:
+            raise ValueError(f"{hs_err}: cannot tell which pid this log belongs to")
+        known = self.core_pids or self.core_tids
+        if not known:
+            raise ValueError(f"{self.core.path}: no PRPSINFO/PRSTATUS note to identify the "
+                             f"crashing pid, refusing to trust {hs_err}")
+        if log_pid not in known:
+            detail = (f"pid {sorted(self.core_pids)}" if self.core_pids
+                      else f"{len(self.core_tids)} thread id(s)")
+            raise ValueError(f"{hs_err} belongs to pid {log_pid} but the core reports {detail}")
+        self.files = parse_hs_err_maps(text)
+        if not self.files:
+            raise ValueError(f"{hs_err}: no 'Dynamic libraries' map lines found")
+        print(f"note: core has no NT_FILE, using {hs_err} maps for pid {log_pid} "
+              f"({len(self.files)} mappings)", file=sys.stderr)
 
     def read(self, address: int, size: int) -> bytes:
         if self.core is not None:
-            for vaddr, filesz, offset in self.loads:
-                rel = address - vaddr
-                if 0 <= rel and rel + size <= filesz:
-                    return self.core._read(offset + rel, size)
+            index = bisect.bisect_right(self._starts, address) - 1
+            if index >= 0:
+                vaddr, filesz, offset = self.loads[index]
+                if address - vaddr + size <= filesz:
+                    return self.core._read(offset + address - vaddr, size)
             raise ValueError(f"address {address:#x} not present in core")
         self.handle.seek(address)
         data = self.handle.read(size)
@@ -179,19 +293,55 @@ class Target:
             raise ValueError(f"short read at {address:#x}")
         return data
 
-    def load_bias(self, needle: str) -> int:
-        candidates = [
+    def load_bias(self, needle: str,
+                  verify: Callable[[int], bool | None] | None = None) -> int:
+        base = needle.rsplit("/", 1)[-1]
+        candidates = sorted({
             start - file_off for start, _end, file_off, name in self.files
-            if name.endswith(needle) or needle.endswith(name.split("/")[-1])
-        ]
+            if name == needle or name.rsplit("/", 1)[-1] == base
+        })
         if not candidates:
             raise KeyError(f"{needle} is not mapped in this target")
-        return min(candidates)
+        if verify is None:
+            return candidates[0]
+        unknown = 0
+        for bias in candidates:
+            outcome = verify(bias)
+            if outcome:
+                return bias
+            unknown += outcome is None
+        if unknown == len(candidates):
+            print(f"warning: {needle} identity pages absent; only ledger magic/layout can be checked",
+                  file=sys.stderr)
+            return candidates[0]
+        raise ValueError(f"{needle}: no mapping matches this binary "
+                         f"(checked {[hex(bias) for bias in candidates]})")
+
+
+def shim_verifier(elf: Elf, target: Target) -> Callable[[int], bool | None]:
+    """Confirm a candidate bias maps this exact binary: build id, else ELF header."""
+    note = next((section for section in elf.sections()
+                 if section["name"] == ".note.gnu.build-id" and section["addr"]), None)
+    where, want = ((note["addr"], elf._read(note["offset"], note["size"])) if note
+                   else (0, elf._read(0, 64)))
+
+    def verify(bias: int) -> bool | None:
+        try:
+            got = target.read(bias + where, len(want))
+        except (ValueError, OSError):
+            return None        # those pages are not in the dump — cannot tell
+        if got == want:
+            return True
+        if note is None and not got.startswith(b"\x7fELF"):
+            return None        # not mapped at file offset 0 — no build id, cannot tell
+        return False
+
+    return verify
 
 
 def decode(target: Target, shim: Path, limit: int) -> int:
     elf = Elf(shim)
-    bias = target.load_bias(shim.name)
+    bias = target.load_bias(shim.name, verify=shim_verifier(elf, target))
     ring_addr = bias + elf.symbol("mdc_pfguard_ring")
     counter_addr = bias + elf.symbol("mdc_pfguard_counters")
 
@@ -250,8 +400,13 @@ def main() -> int:
     source.add_argument("--pid", type=int)
     parser.add_argument("--shim", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--hs-err", dest="hs_err", type=Path,
+                        help="hs_err_pid<PID>.log whose maps replace a missing NT_FILE note "
+                             "(requires --core; the log's pid must match the core's)")
     args = parser.parse_args()
-    return decode(Target(args.core, args.pid), args.shim, args.limit)
+    if args.hs_err is not None and args.core is None:
+        parser.error("--hs-err only makes sense with --core")
+    return decode(Target(args.core, args.pid, args.hs_err), args.shim, args.limit)
 
 
 if __name__ == "__main__":
