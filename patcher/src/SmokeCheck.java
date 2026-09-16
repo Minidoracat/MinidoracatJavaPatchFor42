@@ -2687,6 +2687,67 @@ public final class SmokeCheck {
                 methodText(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc))
                         .equals(methodText(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))));
 
+        // W30/W31：不只數命中；原方法、lambda body、側別與 decoder 漂移即要求重新驗證。
+        String[][] batchContracts = {
+            {"zombie/iso/IsoCell", "addToProcessItems", "(Ljava/util/ArrayList;)V", "9b547926bc14eac8be90f8a26410a9e3ad94bf9fcd22fbf8162f4d196d001642"},
+            {"zombie/iso/IsoCell", "getProcessItems", "()Ljava/util/ArrayList;", "f6c0e6461595177a9375df8b012c71cb5d2f06a8ca1334384d2c3ea0d5d9dff7"},
+            {"zombie/iso/IsoCell", "getProcessItemsRemove", "()Ljava/util/Set;", "8ccf45d50f932a189a120dafd2336a3133a997d34ab71366e5304b5437d91476"},
+            {"zombie/network/GameServer", "transmitFishingData", "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V", "cd54af7a8028e0cc907519b83c052b8b2e8a19e3252dde6d57ea8a20af0e5a79"},
+            {"zombie/network/GameServer", "lambda$transmitFishingData$0", "(Lzombie/core/network/ByteBufferWriter;J)Z", "8c3b6ca114335016a4b5c54b90ba7652ae6ad0f4ac552aa2836186b9199bc098"},
+            {"zombie/network/GameServer", "lambda$transmitFishingData$1", "(Lzombie/core/network/ByteBufferWriter;JLzombie/iso/FishSchoolManager$ChumData;)Z", "ba5ea6e7ee000bab741ca9b8f4f95e3319b8f4c880e975cee234de9823865fdb"},
+            {"zombie/iso/FishSchoolManager", "updateSeed", "()V", "d6d51aa73ca10b7740ff2ffdebd3ff16d29d6a0f63aa308e025457390c3a8a34"},
+            {"zombie/iso/FishSchoolManager", "updateFishingData", "()V", "fda124bc8062a340a9e35c6524604f80e0b66face00822c5383ae32d445b13ab"},
+            {"zombie/iso/FishSchoolManager", "receiveFishingData", "(Lzombie/core/network/ByteBufferReader;)V", "68ad56da450290eddbe8bda78518468c512c6da54b290166207543b45d68e437"}
+        };
+        java.security.MessageDigest batchSha = java.security.MessageDigest.getInstance("SHA-256");
+        for (String[] contract : batchContracts) {
+            byte[] text = methodText(methodFromJar(jar, contract[0], contract[1], contract[2]))
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            failed += check("W30/W31 上游契約未漂移：" + contract[0] + "." + contract[1],
+                    java.util.HexFormat.of().formatHex(batchSha.digest(text)).equals(contract[3]));
+        }
+        String bulkHelper = "zombie/mdc/BulkItemRegistration";
+        String bulkDesc = "(Lzombie/iso/IsoCell;Ljava/util/ArrayList;)V";
+        MethodNode vBulk = methodFromJar(jar, icCls, "addItemsToProcessItems", "()V");
+        MethodNode pBulk = method(distJava, icCls, "addItemsToProcessItems", "()V");
+        failed += check("W30 IsoCell 維持 final，避免略過子類別覆寫與 getter 副作用",
+                (classNodeFromJar(jar, "zombie/iso/IsoCell").access & Opcodes.ACC_FINAL) != 0);
+        failed += check("W31 ByteBufferWriter 維持 final，無自訂 writer 回呼改變批次資料",
+                (classNodeFromJar(jar, "zombie/core/network/ByteBufferWriter").access & Opcodes.ACC_FINAL) != 0);
+        failed += check("W30 唯一批次呼叫同形改道，其他指令、frames 與例外處理保留",
+                countExactCalls(vBulk, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                        "addToProcessItems", "(Ljava/util/ArrayList;)V") == 1
+                && countExactCalls(pBulk, Opcodes.INVOKESTATIC, bulkHelper, "addToProcessItems", bulkDesc) == 1
+                && methodText(vBulk).replace(
+                        "INVOKEVIRTUAL zombie/iso/IsoCell.addToProcessItems (Ljava/util/ArrayList;)V",
+                        "INVOKESTATIC " + bulkHelper + ".addToProcessItems " + bulkDesc).equals(methodText(pBulk)));
+        failed += check("W30 不替換 IsoCell 類別或單件 API",
+                !Files.exists(distJava.resolve("zombie/iso/IsoCell.class"))
+                && classWideCalls(classNode(distJava, icCls), Opcodes.INVOKESTATIC,
+                        bulkHelper, "addToProcessItems", bulkDesc) == 1);
+        String fishCls = "zombie/iso/FishSchoolManager";
+        String fishHelper = "zombie/mdc/FishingDataBroadcast";
+        String fishDesc = "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V";
+        for (String caller : new String[]{"updateSeed", "updateFishingData"}) {
+            MethodNode original = methodFromJar(jar, fishCls, caller, "()V");
+            MethodNode patched = method(distJava, fishCls, caller, "()V");
+            failed += check("W31 " + caller + " 唯一廣播改道，側別、更新順序與 frames 保留",
+                    countExactCalls(original, Opcodes.INVOKESTATIC, gsCls, "transmitFishingData", fishDesc) == 1
+                    && countExactCalls(patched, Opcodes.INVOKESTATIC, fishHelper, "transmitFishingData", fishDesc) == 1
+                    && methodText(original).replace(
+                            "INVOKESTATIC " + gsCls + ".transmitFishingData " + fishDesc,
+                            "INVOKESTATIC " + fishHelper + ".transmitFishingData " + fishDesc).equals(methodText(patched)));
+        }
+        failed += check("W31 廣播入口全 jar 恰兩處，原方法保留供停用直通",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, gsCls, "transmitFishingData", fishDesc) == 2
+                && methodText(methodFromJar(jar, gsCls, "transmitFishingData", fishDesc))
+                        .equals(methodText(method(distJava, gsCls, "transmitFishingData", fishDesc))));
+        for (MethodNode original : classNodeFromJar(jar, fishCls).methods) {
+            if (original.name.equals("updateSeed") || original.name.equals("updateFishingData")) continue;
+            failed += check("W31 非目標方法不變：" + original.name + original.desc,
+                    methodText(original).equals(methodText(method(distJava, fishCls, original.name, original.desc))));
+        }
+
         if (failed > 0) {
             System.exit(1);
         }
