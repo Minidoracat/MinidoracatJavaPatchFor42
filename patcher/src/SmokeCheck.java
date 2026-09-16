@@ -2748,6 +2748,25 @@ public final class SmokeCheck {
                     methodText(original).equals(methodText(method(distJava, fishCls, original.name, original.desc))));
         }
 
+        // 聲音觀測只包既有已認證派送，不修改 wire class 或任何聲音／魚群方法。
+        String soundProbe = "zombie/network/packets/sound/MdcWorldSoundProbe";
+        String soundPacket = "zombie/network/packets/sound/WorldSoundPacket";
+        String soundDispatchDesc = "(L" + soundPacket
+                + ";Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        MethodNode observedDispatch = method(distJava, "zombie/core/MdcTimedActionProbe", "processServer",
+                "(Lzombie/network/packets/INetworkPacket;Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        failed += check("WorldSound 觀測只由既有派送器呼叫一次",
+                countExactCalls(observedDispatch, Opcodes.INVOKESTATIC, soundProbe,
+                        "processServer", soundDispatchDesc) == 1);
+        failed += check("WorldSound 原 wire class 未被覆蓋",
+                !Files.exists(distJava.resolve(soundPacket + ".class")));
+        failed += check("WorldSound 批次在既有主迴圈掛點收尾",
+                countExactCalls(method(distJava, wdCls, "tick", wdTickDesc),
+                        Opcodes.INVOKESTATIC, soundProbe, "onTick", "()V") == 1);
+        failed += check("WorldSound 進行中呼叫由既有看門狗取樣",
+                countExactCalls(method(distJava, wdCls, "dump", "(JI)V"),
+                        Opcodes.INVOKESTATIC, soundProbe, "describeActive", "()Ljava/lang/String;") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

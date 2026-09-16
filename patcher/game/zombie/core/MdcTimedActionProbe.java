@@ -15,6 +15,8 @@ import zombie.network.PacketTypes;
 import zombie.network.fields.character.PlayerID;
 import zombie.network.packets.INetworkPacket;
 import zombie.network.packets.NetTimedActionPacket;
+import zombie.network.packets.sound.MdcWorldSoundProbe;
+import zombie.network.packets.sound.WorldSoundPacket;
 import zombie.network.server.AnimEventEmulator;
 
 /**
@@ -293,7 +295,11 @@ public final class MdcTimedActionProbe {
                     return;
                 }
             }
-            packet.processServer(packetType, connection);
+            if (packet instanceof WorldSoundPacket sound) {
+                MdcWorldSoundProbe.processServer(sound, packetType, connection);
+            } else {
+                packet.processServer(packetType, connection);
+            }
         } finally {
             if (bind) {
                 if (previous == null) CURRENT_CONNECTION.remove();
