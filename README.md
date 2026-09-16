@@ -46,6 +46,9 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   unordered identity add/remove callsite，以 weak-key＋primitive sidecar index 把批次卸載的重複
   O(N) 搜尋改成常態 O(1)；碰撞、外部 mutation、ordered/equality/null 路徑都保留原版 fallback。
   （42.20.2 覆核：`EngineEntityManager`/`EntityBucket` 位元組未變，patch 續用。）
+- **聲音封包慢呼叫觀測**：記錄單包與同批累積耗時，並在既有凍結快照附上處理中的半徑與音量。
+  不改聲音、聽覺或魚群規則；`-Dmdc.worldSoundProbe=0`／`off` 可停用，需重啟。
+  範圍、限流與判讀方式見 [聲音觀測](docs/patches.md#2at-聲音封包慢呼叫觀測server預設-observe)。
 
 - **效能第三波 W3 三刀**（docs/wave3-design-v1.md v2；三稜鏡對抗審查＋獨立 code review 雙關）：
   (1) 殭屍 ownership 重選舉錯峰——`NetworkZombiePacker.updateAuth` 改道 tick 計數器節流，

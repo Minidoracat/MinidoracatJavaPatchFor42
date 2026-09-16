@@ -97,6 +97,7 @@ $helperEntries = @(
     'zombie/mdc/BulkItemRegistration.class',
     'zombie/mdc/BulkItemRegistration$1.class',
     'zombie/mdc/FishingDataBroadcast.class',
+    'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -387,6 +388,16 @@ java -Xverify:all "-Dmdc.fishingDataBroadcast=0" -cp "$R\work\out;$ASM_CP" Fishi
 Assert-Ok "FishingDataBroadcastTest（0，原版回退）"
 java -Xverify:all "-Dmdc.fishingDataBroadcast=off" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" off
 Assert-Ok "FishingDataBroadcastTest（off，文字別名）"
+
+Write-Host "[9z/10] 聲音封包純觀測：慢呼叫、同批累積與例外隔離..."
+java -Xverify:all "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest observe
+Assert-Ok "MdcWorldSoundProbeTest（observe，看門狗停用仍保留批次界線）"
+java -Xverify:all "-Dmdc.worldSoundProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest off
+Assert-Ok "MdcWorldSoundProbeTest（off，原版委派）"
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest unarmed
+Assert-Ok "MdcWorldSoundProbeTest（主迴圈武裝前維持原版）"
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest logthrow
+Assert-Ok "MdcWorldSoundProbeTest（真 logger 故障與原例外隔離）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

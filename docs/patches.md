@@ -3716,6 +3716,35 @@ ByteBufferWriter final，並確認 FishSchoolManager 其他方法未變。
 封包管線證據，不是多客戶端實機或正式服收益驗收。兩刀只加入 server 出包，
 完成本機出包不代表已部署；正式安裝／回退與重啟仍須遵循既有維護流程。
 
+## 2at. 聲音封包慢呼叫觀測（server，預設 observe）
+
+只在既有已認證封包派送器中包住 `WorldSoundPacket.processServer`；
+其他封包、授權／解析順序、原 wire class 與聲音／魚群資料不變。
+`MdcWorldSoundProbe` 與封包同 package，直接讀原始 radius／volume，不用反射。
+完整處理時間包含聲音建立、Lua 事件、魚群掃描及後續轉送；不能把總耗時直接當成其中一段。
+
+- `slowCall`：單包耗時至少 100ms，記原始半徑、音量、成功／失敗與觀測批次序號。
+- `slowBatch`：兩次 `ServerMap.preupdate` 掛點之間累積至少 100ms，
+  記筆數、總耗時、最大單包耗時與最大半徑；下一掛點結算，即使沒有後續聲音也不漏最後一批。
+  `batchSeq` 是觀測器自己的批次序號，不是原版 frame 號；結算行會晚於被量測的批次。
+- 兩類明細共用每 60 秒最多 3 行的額度；超額累計 `suppressed`。
+  有新觀測時每 300 秒輸出累計 heartbeat，含 calls／slow／failed／耗時／半徑／批次與 logErrors。
+  初次有呼叫後可立即輸出第一份 heartbeat。log 不記玩家名或座標。
+- 既有看門狗的凍結快照附上 in-flight 半徑、音量與持續時間，未返回的慢包也能留證。
+  volatile 發佈、reader acquire fence 與序號重驗避免跨封包拼接；累計欄位是診斷讀值，非原子快照。
+  不另開執行緒；看門狗停用不會停掉本觀測器的批次結算。
+
+主迴圈執行緒的最外層派送才計時；nested 的耗時包含在外層，不重複計算。
+武裝前及外來執行緒直通原版，分別計 unarmed／foreign。
+原方法恰好執行一次，不改參數、不 clamp、不重試。診斷 RuntimeException 只計 logErrors；
+Error 刻意 fail-fast，若診斷 Error 與原例外同時發生，仍可能由 finally 的 Error 取代原例外。
+`-Dmdc.worldSoundProbe=0`／`off` 停用，其餘值與未設定均 observe，需重啟。
+
+驗證包含完整建置／結構守門、observe／off／unarmed／真 logger 故障四組態，
+原 RuntimeException／Error 身分、巢套／外來執行緒、限流及無後續封包的批次結算。
+累積門檻以注入完成樣本避免 sleep 上界假設；另以真原版零半徑封包走整合派送煙霧。
+這些不是實際慢包的線上驗收；生效後須核對 banner，並把 slowCall／slowBatch 與同時段堆疊對照。
+
 ---
 
 ## 3. 部署後驗證清單

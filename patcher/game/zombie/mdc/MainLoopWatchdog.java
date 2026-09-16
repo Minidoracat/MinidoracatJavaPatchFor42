@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import zombie.debug.DebugLog;
 import zombie.network.ServerMap;
+import zombie.network.packets.sound.MdcWorldSoundProbe;
 
 /**
  * W15 主迴圈凍結看門狗（2026-08-24 兩波卡頓事件的觀測刀；docs/patches.md 2ac）。
@@ -117,6 +118,7 @@ public final class MainLoopWatchdog {
      */
     public static void tick(ServerMap unused) {
         PatchInfo.announceOnce();
+        MdcWorldSoundProbe.onTick();
         if (MODE == MODE_OFF) {
             return;
         }
@@ -218,7 +220,8 @@ public final class MainLoopWatchdog {
                 .append(dumpNo).append('/').append(MAX_DUMPS_PER_STALL)
                 .append("）ticks=").append(ticks)
                 .append(" state=").append(target.getState())
-                .append(" heapUsedMB=").append(usedMb).append('/').append(maxMb);
+                .append(" heapUsedMB=").append(usedMb).append('/').append(maxMb)
+                .append(" worldSound=").append(MdcWorldSoundProbe.describeActive());
         if (frames.length == 0) {
             sb.append("\n    (取不到 stack——執行緒可能整段在 native 中)");
         } else {
