@@ -98,6 +98,21 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
    `radius * 0.05F`，同時新增了 `fleeDistance = radius * 3.0F + 20.0F`——方法內仍剛好有一個
    `20.0f`，舊座標會**通過守門卻改到逃跑距離**。每次更新都該重跑語境確認，不能只看命中數。
 
+## Linux 主迴圈健康檢查（選用）
+
+`scripts/pz-health-watch.py` 與 loose-class 套件獨立，不會隨 `install.sh` 自動安裝。
+它透過本機 RCON 的唯讀 `players` 命令確認主迴圈確實回應，而非只檢查程序或 TCP。
+適用於 LinuxGSM 的 `pzserver` 使用者／實例；RCON 憑證直接讀取該實例設定，不列入命令列或日誌。
+
+- `--root <LinuxGSM根目錄> --check-only`：僅檢查，不執行重啟。
+- 自動恢復需以 root 執行，另外指定既有 `--update-lock` 與 `--flow-lock`，
+  並由既有 monitor 互斥鎖保護整次執行；請先完成唯讀檢查，再整合監控入口。
+- 啟動寬限 10 分鐘；連續三次命令查詢失敗才呼叫 LinuxGSM restart。
+  人工停服與維護鎖優先，恢復嘗試間隔至少 30 分鐘；認證或設定錯誤不觸發重啟。
+  這是故障恢復，不是記憶體洩漏修復；重啟命令完成也不代表遊戲已就緒。
+
+隔離回歸檢查：`python3 scripts/test_pz_health_watch.py`（Linux／WSL，不操作真實遊戲程序）。
+
 ## VFE 可退場暫時修補（選用）
 
 `scripts/apply_workshop_compat_patches.py --vfe-temporary <狀態目錄>` 只對已核對的
