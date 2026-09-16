@@ -1,0 +1,54 @@
+<!doctype html><html><head><meta charset="utf-8"><title>[42.20.4] [MP] Client kicked to main menu: IsoMetaCell.isoRooms HashMap raced between main loop and World Streamer thread (AIOOBE in recalculateBuildingAndRoomIDs)</title><style>body{font-family:sans-serif;max-width:900px;margin:2em auto;line-height:1.45}pre{background:#f4f4f4;padding:.6em;overflow:auto}table{border-collapse:collapse}td,th{border:1px solid #999;padding:.2em .5em}li{margin:.3em 0}</style></head><body>
+<p><em>Title (copy into the Title field):</em> [42.20.4] [MP] Client kicked to main menu: IsoMetaCell.isoRooms HashMap raced between main loop and World Streamer thread (AIOOBE in recalculateBuildingAndRoomIDs)</p><hr>
+<p>Version: [42.20.4]</p>
+<p>Mode: [Multiplayer — client side]</p>
+<p>Client: [Windows, bundled Java runtime]</p>
+<p>Server settings: [Dedicated multiplayer]</p>
+<p>Mods: [Modded session. No mod code appears on the reported exception stack; the identified shared-map accesses are in vanilla Java.]</p>
+<p>Save: [Existing MP save. The reported stack is in the update loop, not a save-writing path.]</p>
+<p><strong>Summary</strong></p>
+<p>Two threads share the same java.util.HashMap without any synchronisation:</p>
+<ul><li>Main loop: IsoRegions.update() -&gt; DataRoot.clientProcessBuildings() -&gt; WorldRegionToMetaGrid.addToMetaGrid() -&gt; recalculateBuildingAndRoomIDs(), which copies the values of the room map into a list, and does the same for the building map a few lines earlier.</li><li>"World Streamer" thread: WorldStreamer.threadLoop() -&gt; loadReceivedChunks() -&gt; DoChunk() -&gt; DoChunkAlways() -&gt; IsoChunk.LoadChunk() -&gt; LoadOrCreate() -&gt; LoadFromDisk()/LoadFromBuffer() -&gt; LoadFromDiskOrBuffer() -&gt; LoadFromDiskOrBufferInternal() -&gt; IsoChunk.getRoom(long) -&gt; IsoMetaGrid.getRoomByID, which lazily creates rooms and inserts them into the room map, also updating the building map for a new building.</li></ul>
+<p>HashMap.putVal links a new node before updating the recorded size. HashMap$Values.toArray allocates an array using that size and then walks the table. Without synchronization, a concurrent write can leave the array smaller than the number of values encountered:</p>
+<pre>java.lang.ArrayIndexOutOfBoundsException: Index 924 out of bounds for length 924</pre>
+<p>The exception escapes IsoWorld.update -&gt; IngameState.updateInternal, the state machine exits IngameState and the player is dumped to the main menu with no message. This stack is not a save-writing path; it does not establish whether all other session state was persisted.</p>
+<p><strong>Reproduction steps</strong></p>
+<p>The exact interleaving has not been reproduced deterministically.</p>
+<ol><li>Join a dedicated server.</li><li>Drive at high speed (60+ km/h, sustained) through a dense town so the World Streamer is continuously loading chunks with many rooms. Our affected cell had 924 IsoRoom instances at the time of the crash.</li><li>Keep driving until an IsoRegions buffer swap (clientProcessBuildings) coincides with a chunk load. Sustained driving is a suspected trigger, not a guaranteed reproduction or evidence that an auto-drive mod causes the underlying shared-map defect.</li></ol>
+<p><strong>Observed</strong></p>
+<p>Client console.txt (single occurrence in 27,101 lines; no Lua errors, no other exceptions in the session):</p>
+<pre>ERROR: General  f:49265 st:22,442,295,551&gt; IngameState.updateInternal&gt; Exception thrown
+  java.lang.ArrayIndexOutOfBoundsException: Index 924 out of bounds for length 924 at HashMap.valuesToArray(null:-1).
+  Stack trace:
+    java.base/java.util.HashMap.valuesToArray(Unknown Source)
+    java.base/java.util.HashMap$Values.toArray(Unknown Source)
+    java.base/java.util.ArrayList.&lt;init&gt;(Unknown Source)
+    zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs(WorldRegionToMetaGrid.java:482)
+    zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid.addToMetaGrid(WorldRegionToMetaGrid.java:396)
+    zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid.clientProcessBuildings(WorldRegionToMetaGrid.java:144)
+    zombie.iso.areas.isoregion.data.DataRoot.clientProcessBuildings(DataRoot.java:390)
+    zombie.iso.areas.isoregion.IsoRegions.update(IsoRegions.java:240)
+    zombie.iso.IsoWorld.updateWorld(IsoWorld.java:3338)
+    zombie.iso.IsoWorld.updateInternal(IsoWorld.java:3429)
+    zombie.iso.IsoWorld.update(IsoWorld.java:3362)
+    zombie.gameStates.IngameState.updateInternal(IngameState.java:1508)
+    zombie.gameStates.IngameState.update(IngameState.java:1328)
+    zombie.gameStates.GameStateMachine.update(GameStateMachine.java:65)
+    zombie.GameWindow.logic(GameWindow.java:390)
+    zombie.GameWindow.frameStep(GameWindow.java:790)
+    zombie.GameWindow.mainThreadStep(GameWindow.java:567)
+    zombie.MainThread.mainLoop(MainThread.java:69)
+LOG  : Lua  f:49265&gt; removing all player data
+LOG  : General f:49265&gt; STATE: exit zombie.gameStates.IngameState</pre>
+<p><strong>Root cause (42.20.4 bytecode, verified with javap -l against the shipped jar)</strong></p>
+<ol><li>IsoMetaCell exposes room and building maps backed by plain HashMap.</li><li>Reader, main thread, no lock.<pre>WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs
+  line 477: copies building-map values, then rebuilds the map
+  line 482: copies room-map values, then rebuilds the map</pre><p>The LineNumberTable maps line 482 to getfield isoRooms / HashMap.values / ArrayList.&lt;init&gt;, i.e. the frame in the stack above is the isoRooms copy. It is reached from IsoRegions.update() whenever the region worker requests a buffer swap on the non-server path. The client processes this when the region worker finishes a pass. Neither IsoRegions, DataRoot nor WorldRegionToMetaGrid contain a synchronized block or any reference to WorldStreamer; the streamer is not paused for this.</p></li><li>Writer, World Streamer thread, no lock.<pre>WorldStreamer worker -&gt; chunk load/deserialization -&gt; IsoChunk.getRoom
+  -&gt; IsoMetaGrid.getRoomByID</pre><p>The last method looks up room and building entries and inserts missing entries into their respective shared maps.</p><p>The IsoChunk -&gt; getRoomByID edge is the only caller of getRoom(long) in IsoChunk, and it sits inside the chunk deserialisation path, which on a client can execute on the streamer thread. Disk and received chunk loading both reach this method.</p></li><li>Why the exception is exactly "Index N out of bounds for length N". The JDK map implementation links a new entry before updating its size. The collection-copy operation sizes its destination from that recorded size, then visits the entries. A concurrent writer can invalidate that relationship before the copy finishes.<p>A concurrent put that has linked its node but not yet incremented size gives the reader an array of size and a table with size + 1 nodes. That is the observed signature. (Any earlier unsynchronised put that corrupted the map's size/table invariant produces the same failure on the next copy, so the crash can also be deferred.)</p></li></ol>
+<p><strong>Impact</strong></p>
+<ul><li>Client is kicked to the main menu with no error dialog. The player has to rejoin; the server is unaffected.</li><li>Concurrent chunk loading and metagrid rebuilding expose the shared-map race. Dense areas and sustained movement are plausible trigger conditions; the report does not establish a measured failure rate.</li><li>The building map has a similar unsynchronized copy/update path, but this exception identifies the room-map copy, not a building-map failure.</li></ul>
+<p><strong>Suggested fixes (minimal)</strong></p>
+<p>These are proposals, not verified fixes:</p>
+<ol><li>A concurrent map may address the unsafe collection-copy operation, but does not make the complete rebuild atomic. A lookup could still miss a room during rebuilding and create a duplicate; changing only the map implementation is not a complete consistency fix.</li><li>Protect both the entire rebuild and the corresponding lookup/insertion sequence with the same lock. Validate lock ordering against chunk loading and other metagrid consumers before adopting this approach.</li><li>Schedule clientProcessBuildings only while the World Streamer is quiescent, after verifying the synchronization mechanism and other possible writers. The rebuild must not overlap chunk deserialization.</li></ol>
+<p>Attachments: full client console.txt (redacted), and javap -l output for the three classes above showing the line-number mapping. Available on request.</p>
+</body></html>

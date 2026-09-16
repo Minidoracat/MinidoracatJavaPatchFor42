@@ -65,6 +65,7 @@
 | [42.17 MP] visited map fragmented / 3.83 MB blob per login（2026-04-26，QA Artem_VB 已建 ticket）— https://theindiestone.com/forums/topic/94585-4217-mp-player-visited-map-data-fragmented-and-sometimes-lost-on-relog-server-streams-a-fixed-~383mb-blob-per-user-on-every-login/ | Bug Reports | **部分處理**：`WorldMapVisitedServer.sendRequestData` 現以 `Deflater` 壓縮後傳送（42.20.4 反編譯 :125-156），5 分鐘 `savePeriod` 已不存在（改由 `QueuedSaveAll` 統一存檔）。傳輸層 ack/retry 未見。可在該串回一句 follow-up。 |
 | [42.20] getFileWriter allowlist 靜默回 null（2026-08-01）— https://theindiestone.com/forums/topic/97743-4220-getfilewriter-silently-returns-null-for-non-allowlisted-extensions-mod-data-writes-fail-with-no-error-and-no-log/ | Mod Portal | 未查 42.20.4 是否加 log；與本批無關。 |
 | Dedicated Server can't download mods（2026-07-14 回覆）— https://theindiestone.com/forums/topic/96649-dedicated-server-cant-download-mods/ | PZ Support | 不適用。 |
+| [42.20.4] [MP] Client kicked to main menu: `IsoMetaCell.isoRooms` HashMap raced（2026-09-05，D-R1，草稿 `2026-09-05-client-metagrid-isorooms-race-tis.md`）— https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/ | Bug Reports | 已發，對帳通過。client 端 `recalculateBuildingAndRoomIDs`（main）vs `IsoMetaGrid.getRoomByID`（World Streamer）無鎖同一 HashMap；與 A-R3／A-R6 同家族。玩家高速自駕觸發，AutoDrive 非根因。 |
 
 ## 2. 本批 16 份：分類、優先級、現況
 
