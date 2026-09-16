@@ -15,6 +15,10 @@ echo "== libmdcpfguard.so"
     -o "${out}/libmdcpfguard.so" "${here}/pfguard.c" -ldl -lpthread
 "${CC}" "${common[@]}" -DPFG_TESTING -fPIC -shared -fvisibility=default \
     -o "${out}/libmdcpfguard-test.so" "${here}/pfguard.c" -ldl -lpthread
+
+echo "== libmdcsteamfix.so (independent cold-load audit repair)"
+"${CC}" "${common[@]}" -Werror -fPIC -shared -Wl,-z,now \
+    -o "${out}/libmdcsteamfix.so" "${here}/steamfix.c"
 # The interposed symbols must be exported, or LD_PRELOAD does nothing.
 # `grep -q` would SIGPIPE readelf and trip `pipefail`, so snapshot the table first.
 symbols="$(readelf -Ws "${out}/libmdcpfguard.so")"

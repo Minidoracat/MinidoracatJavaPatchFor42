@@ -434,3 +434,41 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
    已合併重建）；`UseNativeCode=false`（dedicated 無效）。
 6. **平行**：向 TIS 回報兩個獨立缺陷（merge 洩漏＝有行號的確定 bug；rect pool 零驗證＋兩次同簽名
    `0x30`），不宣稱 writer 已知。
+
+## 10. Steam PseudoTCP 修復與 core 啟動保障
+
+`libmdcsteamfix.so` 是獨立的 **LD_AUDIT 冷載入修補**，不併入 pfguard、不改官方 `.so`
+磁碟內容、不攔 `memcpy`、不吞 SIGSEGV。已定位的缺陷：部分 ACK 只縮短傳送片段長度，
+卻漏推進起始序號；重傳時 `seq - snd_una` 變成錯誤的 32-bit 無號偏移，造成非法讀取。
+真函式庫測試涵蓋當場 recovery、稍後 duplicate ACK、連續部分 ACK、完整 ACK 與停用對照；
+檢查對端實際會收到的序號及 payload，不以「沒有崩潰」代替資料正確。
+
+- **同源**：Steam SHA256 `d8fbc2925af26522c3316f8bad2ac307b4726391a6174c220ca760fc3a421591`，
+  build ID `df982870f387389583ef1882f42a920ba6918af4`。wrapper 要求 `steamfix.manifest.sha256`
+  精確包含 Steam／修補庫兩個實際路徑各一次，再核 SHA；載入時另驗 ELF 幾何、build ID、
+  目標與重傳指令。不同版本不猜座標，印 `DISARMED` 並保留 vanilla。
+- **冷載入**：`la_objopen` 在 relocation／constructor 前執行；只改 base namespace。
+  8-byte 單入口區塊改成 direct jump，trampoline 保留原指令並補 `seq += nFree`，再跳回。
+  每次載入保留 4 KiB 到程序結束；不在 `la_objclose` 提早挖掉仍可能被跳入的 trampoline。
+  Steam 更新時必重驗整檔同源、指令語境、重定位不覆蓋目標，以及覆蓋區間的唯一入邊。
+- **回退**：`steamfix.mode` 設 `0`／`off`，下次啟動不載入修補；`1` 才啟用，未知值停用。
+  停用時有效 `MDC_STEAMFIX=0`，即使 inherited audit 使用別名也不能偷渡啟用。
+  Steam gate 與 PathFind gate 相互獨立；`DISARMED` 代表仍跑有原缺陷的 vanilla，**不是修好**。
+- **啟動武裝**：`deploy/core-launch.py` 須裝在不可由遊戲帳號替換的 root-owned 路徑，
+  由範圍限定的 sudoers 執行。先設定並讀回 `coredump_filter=0x31`，再提高 core limit；
+  隨後完整降 uid／gid／補充群組，才執行既有 wrapper。保留附帶 JRE 的 PATH；
+  caller 的 `LD_*`／`PYTHON*` 不穿越 root 邊界。低於 12 GiB 空間時明示 `CORE DISARMED`
+  並以 core=0 啟動；非預期武裝／降權失敗則拒啟，不能靜默重新打開取證空窗。
+  HotSpot 的 `DumpPrivateMappingsInCore`／`DumpSharedMappingsInCore` 預設可再加上
+  檔案映射位元 `0x0c`，故執行中的 `0x3d` 也正常；驗收需保留 `0x31` 並確認 anonymous-shared
+  位元 `0x02` 未開，不能只把完整數字釘死為 `0x31`。
+- **大型 core**：reader 支援 `PN_XNUM` 與 NT_FILE 的頁單位；缺 NT_FILE 時可傳
+  `--hs-err hs_err_pid<PID>.log`。PID 從 log **內容**與 core notes 核對，不信檔名。
+  畸形／截斷 note 不可假裝成「缺映射」；shim 可讀的 build ID 不符即拒讀。
+  身分頁未保存時明示警告，帳本 magic/layout 驗證不等於已證明二進位同源。
+
+驗證指令：`bash native-observer/tests/run-tests.sh`（含 reader／root launcher 測試），
+另以本機合法取得的原版檔執行
+`python3 native-observer/tests/test_steamfix.py /path/to/steamclient.so`。
+啟動後必須同時看到 `CORE ARMED` 與 `[mdc-steamfix] APPLIED`；
+只有程序存活／wrapper PASS 不算修補生效，更不能替代長時間的連線與重傳驗收。

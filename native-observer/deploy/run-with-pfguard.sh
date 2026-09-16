@@ -20,6 +20,49 @@ jsig="${serverfiles}/jre64/lib/libjsig.so"
 
 GAME_ARGS=("$@")
 
+# Steam repair is independent of the PathFind observer. Remove an inherited copy
+# before evaluating the gate, so an invalid/off repair can never leak through.
+audit=""
+steam_enabled=0
+IFS=':' read -r -a audit_entries <<<"${LD_AUDIT:-}"
+for entry in "${audit_entries[@]}"; do
+    [[ -z "${entry}" || "${entry}" == *libmdcsteamfix* ]] && continue
+    audit="${audit:+${audit}:}${entry}"
+done
+steamfix="${root}/libmdcsteamfix.so"
+steam_manifest="${root}/steamfix.manifest.sha256"
+steam_manifest_complete() {
+    local digest file count=0 steam=0 helper=0
+    while read -r digest file; do
+        [[ "${digest}" =~ ^[[:xdigit:]]{64}$ ]] || return 1
+        file="${file#\*}"
+        if [[ "${file}" == "${serverfiles}/linux64/steamclient.so" ]]; then
+            steam=$((steam+1))
+        elif [[ "${file}" == "${steamfix}" ]]; then
+            helper=$((helper+1))
+        else
+            return 1
+        fi
+        count=$((count+1))
+    done <"${steam_manifest}"
+    [[ "${count}" == 2 && "${steam}" == 1 && "${helper}" == 1 ]]
+}
+if [[ -e "${steam_manifest}" || -e "${steamfix}" ]]; then
+    mode=""
+    [[ ! -r "${root}/steamfix.mode" ]] || mode="$(<"${root}/steamfix.mode")"
+    if [[ "${mode}" == 0 || "${mode}" == off ]]; then
+        printf '[mdc-steamfix] OFF: vanilla Steam selected\n' >&2
+    elif [[ "${mode}" != 1 || ! -r "${steamfix}" || ! -r "${steam_manifest}" ]] \
+        || ! steam_manifest_complete \
+        || ! sha256sum --quiet --strict --check "${steam_manifest}"; then
+        printf '[mdc-steamfix] DISARMED: mode/file/SHA gate failed; vanilla Steam selected\n' >&2
+        [[ "${PFG_DRY_RUN:-0}" != 1 ]] || exit 78
+    else
+        audit="${steamfix}${audit:+:${audit}}"
+        steam_enabled=1
+    fi
+fi
+
 # Inherited LD_PRELOAD (if any) minus every entry that names this observer, so a DISARMED launch
 # can never carry the observer in through the environment.
 inherited_preload() {
@@ -40,7 +83,8 @@ disarmed() {
     cd "${serverfiles}"
     local rest; rest="$(inherited_preload)"
     # Mirror the official launcher's intent with a real absolute path for libjsig.
-    exec env LD_PRELOAD="${jsig}${rest:+:${rest}}" ./ProjectZomboid64 "${GAME_ARGS[@]}"
+    exec env LD_PRELOAD="${jsig}${rest:+:${rest}}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
+        ./ProjectZomboid64 "${GAME_ARGS[@]}"
 }
 
 [[ -r "${manifest}" ]] || disarmed "manifest missing or unreadable: ${manifest}"
@@ -77,4 +121,5 @@ printf '[mdc-pfguard] startup gate PASS: preloading %s (tuning entries: %d)\n' "
 cd "${serverfiles}"
 rest="$(inherited_preload)"
 preload="${observer}:${jsig}${rest:+:${rest}}"
-exec env "${TUNING_ENV[@]}" LD_PRELOAD="${preload}" ./ProjectZomboid64 "${GAME_ARGS[@]}"
+exec env "${TUNING_ENV[@]}" LD_PRELOAD="${preload}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
+    ./ProjectZomboid64 "${GAME_ARGS[@]}"

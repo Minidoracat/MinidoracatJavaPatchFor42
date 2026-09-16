@@ -15,6 +15,9 @@ if ! bash "${root}/build.sh" >/dev/null; then
     exit 1
 fi
 
+python3 "${here}/test_pfguard_ring.py" || exit 1
+python3 "${here}/test_core_launch.py" || exit 1
+
 pass=0
 fail=0
 log=$(mktemp)
@@ -145,6 +148,27 @@ gate_run exec LD_PRELOAD="${gate_install}/libmdcpfguard.so"; gate_check "gate ex
     "FAKE-GAME preload=${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b A=unset"
 rm -f "${gate_install}/libmdcpfguard.so"
 gate_run exec; gate_check "gate exec: observer missing -> vanilla launch" 0 "FAKE-GAME preload=${gate_server}/jre64/lib/libjsig.so args=-servername pz -x a b"
+
+# Steam's independent gate must work even with the PathFind observer disarmed.
+printf '#!/bin/sh\nprintf "AUDIT=%%s MODE=%%s\\n" "$LD_AUDIT" "$MDC_STEAMFIX"\n' >"${gate_server}/ProjectZomboid64"
+printf 'steam-v1' >"${gate_server}/linux64/steamclient.so"
+cp "${out}/libmdcsteamfix.so" "${gate_install}/libmdcsteamfix.so"
+printf '1\n' >"${gate_install}/steamfix.mode"
+sha256sum "${gate_server}/linux64/steamclient.so" "${gate_install}/libmdcsteamfix.so" >"${gate_install}/steamfix.manifest.sha256"
+gate_run exec; gate_check "Steam repair survives PathFind DISARMED" 0 "^AUDIT=${gate_install}/libmdcsteamfix.so MODE=1$"
+printf '0\n' >"${gate_install}/steamfix.mode"
+gate_run exec LD_AUDIT="${gate_install}/libmdcsteamfix.so"; gate_check "Steam off strips inherited repair" 0 '^AUDIT= MODE=0$'
+ln -s "${gate_install}/libmdcsteamfix.so" "${gate_install}/alias.so"
+gate_run exec LD_AUDIT="${gate_install}/alias.so"; gate_check "Steam off disarms an inherited alias" 0 "^AUDIT=${gate_install}/alias.so MODE=0$"
+printf '1\n' >"${gate_install}/steamfix.mode"
+sha256sum "${gate_server}/linux64/steamclient.so" >"${gate_install}/steamfix.manifest.sha256"
+gate_run exec; gate_check "incomplete Steam manifest cannot arm repair" 0 '^AUDIT= MODE=0$'
+sha256sum "${gate_server}/linux64/steamclient.so" "${gate_install}/libmdcsteamfix.so" >"${gate_install}/steamfix.manifest.sha256"
+printf '1\n' >"${gate_install}/steamfix.mode"
+printf 'steam-v2' >"${gate_server}/linux64/steamclient.so"
+gate_run exec; gate_check "Steam update launches vanilla without repair" 0 '^AUDIT= MODE=0$'
+printf 'unknown\n' >"${gate_install}/steamfix.mode"
+gate_run exec; gate_check "invalid Steam mode cannot arm repair" 0 '^AUDIT= MODE=0$'
 rm -rf "${gate_root}"
 expect clean 0 clean
 assert_log clean-guarded 'guard_alloc=[1-9]'
