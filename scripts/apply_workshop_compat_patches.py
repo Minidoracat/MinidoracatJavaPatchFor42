@@ -11,27 +11,32 @@ server-console.txt 的 `version=X.Y.Z` 讀。
 Tsarslib 的 AnimSets 大小寫 symlink 亦已退役，B42.20.3 會以
 ZomboidFileSystem.getCanonicalFile(File,String) 做不分大小寫的子路徑解析。
 
-PSR: --psr-output FILE 僅產生副本；--psr-temporary STATE_DIR 則在 --apply 時就地修補。
-啟動前呼叫暫時模式：Workshop 更新、modversion 變更或來源替換後永久退場；
-只還原完整符合我方指紋的檔案，作者新檔不覆寫。--psr-retire 可離線回復。
+2026-09-12：MedievalZ 上游已移除三本雜誌的 OnCreate，撤下對應修補規則。
+
+--vfe-temporary STATE_DIR 只處理 Vanilla Foods Expanded 的 aging manager：就地修補
+Workshop 原檔，原檔備份與狀態放 STATE_DIR；本機 mod.info 的 modversion 或 Steam
+time_updated 一變就自動退場還原，--vfe-retire 可離線手動退場；一般 PATCHES 模式不受影響。
+
+--psr-output FILE 只產生來源 SHA 綁定的 PSR 掃描優化副本；不改 Workshop 原檔，
+不加入一般 PATCHES 排程。需 --apply 才建立輸出，且不覆寫既有不同內容。
+--psr-temporary STATE_DIR 共用相同退場核心：上游更新或來源替換後永久退場，
+不覆蓋作者新檔；--psr-retire 可離線回復。需由啟動流程呼叫才會檢查更新。
 """
 
 from __future__ import annotations
 
-import json
-import stat
-import time
-import urllib.parse
-import urllib.request
-
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
 import stat
 import sys
 import tempfile
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 
@@ -77,24 +82,7 @@ function NB_BuildRecipeCode.WindowWall.OnCreate(params)""",
             ),
         ),
     },
-    {
-        "path": "3661164291/mods/MedievalZ/{version}/media/scripts/MedievalZRecipeBooks.txt",
-        "known_versions": (
-            (
-                "0a57fe44db783531dcc5f728915b8fb1c8da6d9f4cde4be822a8c10ac3d184be",
-                "4fe181af4c66a332524f7cf4d9d482eb7441a7ca61a3e2204b8ac5cfab8877e5",
-            ),
-        ),
-        "replacements": (
-            (
-                "OnCreate = SpecialLootSpawns.OnCreateRecipeMagazine,",
-                "OnCreate = ItemCodeOnCreate.onCreateRecipeMagazine,",
-                3,
-            ),
-        ),
-    },
 )
-
 
 PSR_SCAN_PATCH = {
     "path": "3725311427/mods/Plysken Solar Revolution/{version}/media/lua/server/PSR/PowerBank/PowerBankObject_Server.lua",
@@ -118,15 +106,117 @@ PSR_SCAN_PATCH = {
     ),
 }
 
+VFE_WORKSHOP_ID = "3577903007"
+# 正式 Steam API 目前回報的 time_updated；只有完全相符才允許就地修補。
+VFE_PINNED_REVISION = 1789430355
+# 來源 version 目錄 mod.info 的 modversion：比 Steam metadata 更即時的本機退場訊號。
+VFE_PINNED_MODVERSION = "3.2.16"
 MODVERSION_RE = re.compile(r"^[ \t]*modversion[ \t]*=[ \t]*(\S+)[ \t]*$", re.MULTILINE)
-
 WORKSHOP_DETAILS_URL = (
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 )
-
+VFE_STATE_TOOL = "minidoracat-vfe-temporary"
 TEMPORARY_STATE_VERSION = 1
-
+VFE_STATE_NAME = "vfe-temporary-state.json"
+VFE_BACKUP_NAME = "vfe-agingmanager-original.lua"
+# active=已套用；retiring=退場 tombstone（restore 尚未完成）；retired=已退場，永久不再套用。
 TEMPORARY_PHASES = ("active", "retiring", "retired")
+VFE_TEMPORARY_MARKER = "-- MDC-VFE-TEMPORARY"
+VFE_TEMPORARY_HEADER = (
+    f"{VFE_TEMPORARY_MARKER} in-place patch; retire with --vfe-temporary --vfe-retire --apply.\n"
+    "-- upstream: Vanilla Foods Expanded 3.2.16 media/lua/server/vfx_agingmanager.lua\n"
+    "-- upstream sha256: {source_hash}\n"
+    f"-- pinned workshop revision: {VFE_PINNED_REVISION}\n"
+    "\n"
+)
+VFE_TEMPORARY = {
+    "path": "3577903007/mods/Vanilla Foods Expanded/{version}/media/lua/server/vfx_agingmanager.lua",
+    "known_sources": (
+        "f5a891fc28235fcdb50458a574960ce4ca7c3f580a4f4a19bf0bd7228c274cd9",
+    ),
+    "replacements": (
+        (
+            """VFX.AgingScanBudgetMs = 1
+VFX.AgingScanSquaresPerTick = 50
+""",
+            """VFX.AgingScanBudgetMs = 1
+VFX.AgingScanSquaresPerTick = 50
+
+local MAX_QUEUED_SQUARES = 512
+
+-- 保守地板快篩：沒有地面物品、也沒有任何帶容器的物件時，這格不可能藏食物。
+-- 不看容器內容，所以空容器、非目標容器、巢狀容器與任何地面物品一律保留。
+local function mdcSquareMayHoldFood(square)
+    local worldObjects = square:getWorldObjects()
+    if worldObjects and worldObjects:size() > 0 then
+        return true
+    end
+
+    local objects = square:getObjects()
+    if objects then
+        for i = 0, objects:size() - 1 do
+            local object = objects:get(i)
+            if object and object:getContainerCount() > 0 then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+print("[MDC-VFE] temporary aging filter enabled cap=512 upstream=3.2.16")
+""",
+            1,
+        ),
+        (
+            """    if pending then
+        pending.square = nil
+        pendingSquareScans[square] = nil
+        pendingSquareCount = pendingSquareCount - 1
+        scanSession.skipped = scanSession.skipped + 1
+    end
+
+    local starting = scanSession == nil
+""",
+            """    if pending then
+        pending.square = nil
+        pending.chunk = nil
+        pendingSquareScans[square] = nil
+        pendingSquareCount = pendingSquareCount - 1
+        scanSession.skipped = scanSession.skipped + 1
+    end
+
+    if not mdcSquareMayHoldFood(square) then
+        if pendingSquareCount == 0 and scanSession then
+            finishScanSession()
+        end
+        return
+    end
+
+    if squareScanTail - squareScanHead + 1 >= MAX_QUEUED_SQUARES then
+        scanGridSquare(square)
+        return
+    end
+
+    local starting = scanSession == nil
+""",
+            1,
+        ),
+        (
+            """        pendingSquareScans[square] = nil
+        pending.square = nil
+        pendingSquareCount = pendingSquareCount - 1
+""",
+            """        pendingSquareScans[square] = nil
+        pending.square = nil
+        pending.chunk = nil
+        pendingSquareCount = pendingSquareCount - 1
+""",
+            1,
+        ),
+    ),
+}
 
 PSR_LIFECYCLE = {
     "patch": PSR_SCAN_PATCH,
@@ -138,6 +228,25 @@ PSR_LIFECYCLE = {
     "backup_name": "psr-powerbank-original.lua",
     "mod_info_parents": 5,
 }
+VFE_LIFECYCLE = {
+    "patch": VFE_TEMPORARY,
+    "workshop_id": VFE_WORKSHOP_ID,
+    "pinned_revision": VFE_PINNED_REVISION,
+    "pinned_modversion": VFE_PINNED_MODVERSION,
+    "state_tool": VFE_STATE_TOOL,
+    "state_name": VFE_STATE_NAME,
+    "backup_name": VFE_BACKUP_NAME,
+    "mod_info_parents": 3,
+    "header": VFE_TEMPORARY_HEADER,
+}
+
+
+def patch_sources(patch: dict):
+    return (
+        patch["known_sources"]
+        if "known_sources" in patch
+        else dict(patch["known_versions"])
+    )
 
 
 def parse_mod_version(name: str) -> tuple[int, ...] | None:
@@ -323,106 +432,6 @@ def run(
 
     print("ALREADY_PATCHED")
     return 0
-
-
-def self_test() -> None:
-    from unittest.mock import patch as mock_patch
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        parent = Path(temp_dir)
-        for name in ("common", "media", "42", "42.13", "42.14", "42.15", "42.21"):
-            (parent / name).mkdir()
-        assert pick_version_dir(parent, "42.20.3") == "42.15"
-        assert pick_version_dir(parent, "42.13") == "42.13"
-        assert pick_version_dir(parent, "42.0") == "42"
-        assert pick_version_dir(parent, "41.78") is None
-        assert parse_mod_version("common") is None
-        legacy_only = parent / "legacy-only"
-        legacy_only.mkdir()
-        (legacy_only / "41.78").mkdir()
-        assert pick_version_dir(legacy_only, "42.20.3") is None
-        (parent / "42.20.4").mkdir()
-        assert pick_version_dir(parent, "42.20.3") == "42.20.4"
-        same_rank = parent / "same-rank"
-        same_rank.mkdir()
-        same_rank_dirs = (same_rank / "42.20.3", same_rank / "42.20.4")
-        for directory in same_rank_dirs:
-            directory.mkdir()
-        with mock_patch.object(Path, "iterdir", return_value=iter(same_rank_dirs)):
-            assert pick_version_dir(same_rank, "42.20.3") == "42.20.4"
-
-        console = parent / "console.txt"
-        console.write_text(
-            "LOG  : General      f:0 st:1> version=42.20.3 70207f62e0 demo=false\n"
-            "modversion=42.13\n"
-            "os.version=17.0.9\n"
-            "version=1.2\n",
-            encoding="utf-8",
-        )
-        assert detect_game_version(console) == "42.20.3"
-        console.write_text(
-            "LOG  : General      f:0 st:1> version=42.20.3 demo=false\n"
-            "modversion=42.13\n",
-            encoding="utf-8",
-        )
-        assert detect_game_version(console) == "42.20.3"
-
-        root = parent / "workshop"
-        (root / "3536052310/mods/Neat_Building/42.15/media/lua").mkdir(parents=True)
-        resolved = resolve_patch_path(
-            root,
-            "3536052310/mods/Neat_Building/{version}/media/lua/x.lua",
-            "42.20.3",
-        )
-        assert resolved.name == "x.lua"
-        assert "42.15" in resolved.parts
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        root = Path(temp_dir) / "workshop"
-        backup_root = Path(temp_dir) / "backups"
-        test_patches = []
-        fixtures = []
-
-        for patch in PATCHES:
-            rel = patch["path"].replace(VERSION_TOKEN, "42.15")
-            path = root / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            parts = []
-            for before, _, expected_count in patch["replacements"]:
-                parts.extend([before] * expected_count)
-            original = "\nfixture-separator\n".join(parts).encode("utf-8")
-            updated = apply_replacements(original, patch)
-            test_patch = dict(patch)
-            test_patch["path"] = rel
-            test_patch["known_versions"] = (
-                (sha256_bytes(original), sha256_bytes(updated)),
-            )
-            test_patches.append(test_patch)
-            fixtures.append((path, original, updated))
-            path.write_bytes(original)
-
-        assert run(root, backup_root, apply=False, patches=tuple(test_patches)) == 2
-
-        unknown_path, unknown_original, _ = fixtures[0]
-        unknown_bytes = unknown_original + b"\n-- simulated upstream update\n"
-        unknown_path.write_bytes(unknown_bytes)
-        assert run(root, backup_root, apply=True, patches=tuple(test_patches)) == 3
-        assert unknown_path.read_bytes() == unknown_bytes
-        for path, _, updated in fixtures[1:]:
-            assert path.read_bytes() == updated
-
-        unknown_path.write_bytes(unknown_original)
-        assert run(root, backup_root, apply=True, patches=tuple(test_patches)) == 0
-        assert run(root, backup_root, apply=False, patches=tuple(test_patches)) == 0
-        print("SELF_TEST_OK")
-
-
-def patch_sources(patch: dict):
-    return (
-        patch["known_sources"]
-        if "known_sources" in patch
-        else dict(patch["known_versions"])
-    )
 
 
 def run_psr_output(
@@ -845,6 +854,98 @@ def run_temporary(
     )
 
 
+def self_test() -> None:
+    from unittest.mock import patch as mock_patch
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        parent = Path(temp_dir)
+        for name in ("common", "media", "42", "42.13", "42.14", "42.15", "42.21"):
+            (parent / name).mkdir()
+        assert pick_version_dir(parent, "42.20.3") == "42.15"
+        assert pick_version_dir(parent, "42.13") == "42.13"
+        assert pick_version_dir(parent, "42.0") == "42"
+        assert pick_version_dir(parent, "41.78") is None
+        assert parse_mod_version("common") is None
+        legacy_only = parent / "legacy-only"
+        legacy_only.mkdir()
+        (legacy_only / "41.78").mkdir()
+        assert pick_version_dir(legacy_only, "42.20.3") is None
+        (parent / "42.20.4").mkdir()
+        assert pick_version_dir(parent, "42.20.3") == "42.20.4"
+        same_rank = parent / "same-rank"
+        same_rank.mkdir()
+        same_rank_dirs = (same_rank / "42.20.3", same_rank / "42.20.4")
+        for directory in same_rank_dirs:
+            directory.mkdir()
+        with mock_patch.object(Path, "iterdir", return_value=iter(same_rank_dirs)):
+            assert pick_version_dir(same_rank, "42.20.3") == "42.20.4"
+
+        console = parent / "console.txt"
+        console.write_text(
+            "LOG  : General      f:0 st:1> version=42.20.3 70207f62e0 demo=false\n"
+            "modversion=42.13\n"
+            "os.version=17.0.9\n"
+            "version=1.2\n",
+            encoding="utf-8",
+        )
+        assert detect_game_version(console) == "42.20.3"
+        console.write_text(
+            "LOG  : General      f:0 st:1> version=42.20.3 demo=false\n"
+            "modversion=42.13\n",
+            encoding="utf-8",
+        )
+        assert detect_game_version(console) == "42.20.3"
+
+        root = parent / "workshop"
+        (root / "3536052310/mods/Neat_Building/42.15/media/lua").mkdir(parents=True)
+        resolved = resolve_patch_path(
+            root,
+            "3536052310/mods/Neat_Building/{version}/media/lua/x.lua",
+            "42.20.3",
+        )
+        assert resolved.name == "x.lua"
+        assert "42.15" in resolved.parts
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir) / "workshop"
+        backup_root = Path(temp_dir) / "backups"
+        test_patches = []
+        fixtures = []
+
+        for patch in PATCHES:
+            rel = patch["path"].replace(VERSION_TOKEN, "42.15")
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            parts = []
+            for before, _, expected_count in patch["replacements"]:
+                parts.extend([before] * expected_count)
+            original = "\nfixture-separator\n".join(parts).encode("utf-8")
+            updated = apply_replacements(original, patch)
+            test_patch = dict(patch)
+            test_patch["path"] = rel
+            test_patch["known_versions"] = (
+                (sha256_bytes(original), sha256_bytes(updated)),
+            )
+            test_patches.append(test_patch)
+            fixtures.append((path, original, updated))
+            path.write_bytes(original)
+
+        assert run(root, backup_root, apply=False, patches=tuple(test_patches)) == 2
+
+        unknown_path, unknown_original, _ = fixtures[0]
+        unknown_bytes = unknown_original + b"\n-- simulated upstream update\n"
+        unknown_path.write_bytes(unknown_bytes)
+        assert run(root, backup_root, apply=True, patches=tuple(test_patches)) == 3
+        assert unknown_path.read_bytes() == unknown_bytes
+        for path, _, updated in fixtures[1:]:
+            assert path.read_bytes() == updated
+
+        unknown_path.write_bytes(unknown_original)
+        assert run(root, backup_root, apply=True, patches=tuple(test_patches)) == 0
+        assert run(root, backup_root, apply=False, patches=tuple(test_patches)) == 0
+        print("SELF_TEST_OK")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -865,12 +966,39 @@ def main() -> int:
     )
     parser.add_argument("--game-version", help="override detected game version")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--psr-output", type=Path, metavar="FILE", help="generate a SHA-pinned PSR copy outside Workshop")
-    mode.add_argument("--psr-temporary", type=Path, metavar="STATE_DIR", help="patch PSR temporarily and retire on upstream updates")
-    parser.add_argument("--psr-retire", action="store_true", help="with --psr-temporary: retire without network access")
+    mode.add_argument(
+        "--psr-output",
+        type=Path,
+        metavar="FILE",
+        help="generate a SHA-pinned PSR optimization outside Workshop; never patch the source",
+    )
+    mode.add_argument(
+        "--psr-temporary",
+        type=Path,
+        metavar="STATE_DIR",
+        help="apply PSR temporarily; retire permanently when the upstream revision changes",
+    )
+    mode.add_argument(
+        "--vfe-temporary",
+        type=Path,
+        metavar="STATE_DIR",
+        help="only patch the VFE aging manager in place; STATE_DIR keeps state + original backup",
+    )
+    parser.add_argument(
+        "--vfe-retire",
+        action="store_true",
+        help="with --vfe-temporary: retire the in-place patch (restore original, no network)",
+    )
+    parser.add_argument(
+        "--psr-retire",
+        action="store_true",
+        help="with --psr-temporary: restore owned bytes and retire without network access",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.vfe_retire and not args.vfe_temporary:
+        parser.error("--vfe-retire requires --vfe-temporary STATE_DIR")
     if args.psr_retire and not args.psr_temporary:
         parser.error("--psr-retire requires --psr-temporary STATE_DIR")
 
@@ -884,7 +1012,23 @@ def main() -> int:
     if args.psr_output:
         return run_psr_output(args.root, args.psr_output, args.apply, game_version)
     if args.psr_temporary:
-        return run_temporary(PSR_LIFECYCLE, args.root, args.psr_temporary, args.apply, game_version, args.psr_retire)
+        return run_temporary(
+            PSR_LIFECYCLE,
+            args.root,
+            args.psr_temporary,
+            args.apply,
+            game_version=game_version,
+            retire=args.psr_retire,
+        )
+    if args.vfe_temporary:
+        return run_temporary(
+            VFE_LIFECYCLE,
+            args.root,
+            args.vfe_temporary,
+            args.apply,
+            game_version=game_version,
+            retire=args.vfe_retire,
+        )
     return run(args.root, args.backup_root, args.apply, game_version=game_version)
 
 

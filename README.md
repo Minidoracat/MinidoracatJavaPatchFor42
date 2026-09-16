@@ -98,6 +98,33 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
    `radius * 0.05F`，同時新增了 `fleeDistance = radius * 3.0F + 20.0F`——方法內仍剛好有一個
    `20.0f`，舊座標會**通過守門卻改到逃跑距離**。每次更新都該重跑語境確認，不能只看命中數。
 
+## VFE 可退場暫時修補（選用）
+
+`scripts/apply_workshop_compat_patches.py --vfe-temporary <狀態目錄>` 只對已核對的
+Vanilla Foods Expanded 3.2.16 **伺服器副本**做就地修補。另指定 `--root`（伺服器
+Workshop 內容目錄）、`--game-version` 與 `--apply`；不帶 `--apply` 只檢查、不寫檔。
+不要指向日常遊玩的 Steam 訂閱原檔。此模式不執行其他相容補丁，也不建立整檔覆蓋。
+
+沒有地面物品、也沒有物件容器的普通格子會在排隊前被排除；空容器、非目標物品與容器內
+巢狀背包仍走原掃描。512 筆實際佇列上限、滿載即時處理與取消時解除 chunk 參照均保留。
+食物老化、替換與同步演算法不改。
+
+首次套用前核對 Workshop 更新識別、`mod.info` 版本及原檔 SHA，保存乾淨原檔與指紋。
+作者更新、本機版本或來源變更時，管理器會退場：**只有現檔完全等於我方修補版才還原；
+作者新內容一律保留。** 退場狀態永久禁止自動重套，手動退場另加 `--vfe-retire --apply`。
+退場中斷可重跑補完；備份損毀、狀態混用或不明來源不會被盲目覆寫。
+
+部署時須移出舊的 ServerPatch 覆蓋檔及其重建入口，並在既有更新／重啟流程的 JVM 啟動前
+執行管理器，讓它在遊戲下載新版前先處理退場。不另建排程。網路查詢失敗會回傳錯誤且不改檔；
+啟動整合應明示警告，不能把檢查失敗當成作者已更新。已執行中的 Lua 不會因磁碟還原而卸載，
+仍須重啟載入新內容。作者更新也不代表必然已修復同一問題，需另行驗收。
+
+狀態目錄保存 `vfe-temporary-state.json` 與 `vfe-agingmanager-original.lua`，請保留作退場依據。
+啟用 Lua checksum 的環境須循正常 MOD 配發流程，不應為本補丁關閉校驗。
+驗證：`python scripts/test_vfe_temporary.py`；
+`lua scripts/test_vfe_aging_behavior.lua <暫時修補後的測試副本>`。
+Lua 測試為隔離夾具，驗伺服器側物品狀態與同步呼叫，不代表真實客戶端收包或效能百分比。
+
 ## 客戶端模組化安裝包
 
 `build-client.ps1` 只建置 client 產物，不安裝、不啟動遊戲，也不寫入 server manifest：
