@@ -438,6 +438,12 @@ public final class PatchConfig {
                 "zombie/inventory/ItemContainer", "containsID", "(I)Z",
                 "zombie/mdc/ContainerAddCycleProbe", "containsID"));
         addItem.expectedHits = 1;
+        // W30：只加速容器的大批登記，不替換 IsoCell 的清單或單件 API。
+        Patcher.MethodOps bulkItems = itemCont.method("addItemsToProcessItems", "()V");
+        bulkItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoCell", "addToProcessItems", "(Ljava/util/ArrayList;)V",
+                "zombie/mdc/BulkItemRegistration", "addToProcessItems"));
+        bulkItems.expectedHits = 1;
         patches.add(itemCont);
 
         // ---- W6 地圖格載入捕手（2026-08-14 全服假死實案，凍結 114 分鐘；docs/patches.md 2r）----
@@ -1009,6 +1015,18 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;)V",
                 "zombie/mdc/AnimalUpdateGuard", "onServerPacket"));
         animalIngress.expectedHits = 1;
+
+        // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
+        Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");
+        for (String methodName : new String[]{"updateSeed", "updateFishingData"}) {
+            Patcher.MethodOps fishBroadcast = fishSchool.method(methodName, "()V");
+            fishBroadcast.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                    "zombie/network/GameServer", "transmitFishingData",
+                    "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V",
+                    "zombie/mdc/FishingDataBroadcast", "transmitFishingData"));
+            fishBroadcast.expectedHits = 1;
+        }
+        patches.add(fishSchool);
 
         return patches;
     }

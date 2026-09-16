@@ -3672,6 +3672,50 @@ SmokeCheck 鎖唯一接收入口、精確同形改道、上游協定指紋與 cl
 本機完整建置與兩輪隔離安裝／移除通過；不代表已部署或已證明歷史動物遺失的原因，
 也不會自動復原既有存檔。
 
+## 2ar. 容器大批物品登記（W30，server，預設 on）
+
+`ItemContainer.addItemsToProcessItems` 內唯一的批次登記呼叫，同形改道至
+`BulkItemRegistration`；疊加在既有 ItemContainer ClassPatch，不覆蓋 W5／W5-2。
+不替換 `IsoCell`、原始清單實例或單件登記 API，不建立跨呼叫索引。
+
+原版對批次每件物品線性查找既有清單。本刀只在既有清單至少 4096 件、批次至少
+256 個非 null 元素時，暫時索引批次 identity、掃描既有清單一次，再依原順序撤銷
+待移除並補入缺席物品。輸入／既有清單須為 exact ArrayList、移除集須為 exact HashSet、
+清單不得別名；物品須沿用 Object.equals/hashCode 且非 Comparable。
+任何資格不符均在修改遊戲狀態前整通回原版，保留自訂回呼及壞元素之前的前綴副作用。
+可選索引配置失敗會明示警告後回原版；不承諾任意並行修改清單的等價性。
+
+`-Dmdc.bulkItemRegistration=0`／`off` 停用，其餘值與未設定均啟用，需重啟。
+SmokeCheck 鎖 IsoCell final、原批次方法與純 getter 指紋、唯一改道及 frames；
+行為差分涵蓋順序／identity、重複、移除撤銷、raw 錯誤、自訂回呼、外部同大小修改，
+另以強制 hash 碰撞 JVM 演練 Comparable tree-bin 回呼。
+這是條件式加速；實際大容器分布與命中頻率未量測，不能由微型測試推算整服 FPS。
+
+## 2as. 魚群廣播內容共用（W31，server，預設 on）
+
+`FishSchoolManager.updateSeed`／`updateFishingData` 內的兩個廣播呼叫各改道一次至
+`FishingDataBroadcast`。不改 `GameServer.transmitFishingData` 原方法、單連線回覆、
+client 或 wire 格式；每位收件人的 header、鎖與送出流程保留。
+
+只從第一個真正完成的 body 取快照，供同批後續收件人使用，不提前序列化、不跨批快取。
+連線清單須為 exact ArrayList，兩張來源 map 須為原版 exact Trove 型別；
+自訂清單整批直通原版，自訂連線或傳到本層的例外會停止剩餘共用。
+byte order／容量不符時該封走原逐欄位寫入，保留部分寫入後失敗的行為。
+快照 OOM 只放棄額外共用、印警告，當下已完成的封包仍照送。
+原生 Send 內部吞掉的失敗，以及原生 Error 留住 sendLock 的既有缺陷均未改動。
+共用依賴同一主執行緒更新，不保證任意並行修改來源資料的等價性。
+
+`-Dmdc.fishingDataBroadcast=0`／`off` 停用，其餘值與未設定均啟用，需重啟。
+SmokeCheck 鎖兩個 caller 的精確改道、原廣播與 lambda／decoder 指紋、
+ByteBufferWriter final，並確認 FishSchoolManager 其他方法未變。
+永久回歸使用真 Java writer／send／client decoder，只替換 native send 葉子並注入故障；
+比較逐收件人位元組、解析結果、例外與鎖，涵蓋自訂連線清單在兩封之間修改來源的反例。
+
+**驗收邊界**：候選曾以正常 Steam client 驗證實際魚群狀態更新與玩家物品往返；
+正式整合包另做完整本機建置及隔離安裝／移除。多收件者共用目前仍是離線真 Java
+封包管線證據，不是多客戶端實機或正式服收益驗收。兩刀只加入 server 出包，
+完成本機出包不代表已部署；正式安裝／回退與重啟仍須遵循既有維護流程。
+
 ---
 
 ## 3. 部署後驗證清單

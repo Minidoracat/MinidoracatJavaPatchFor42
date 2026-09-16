@@ -94,6 +94,9 @@ $helperEntries = @(
     'zombie/mdc/HutchSyncGate.class',
     'zombie/mdc/PopManAddLock.class',
     'zombie/mdc/AnimalUpdateGuard.class',
+    'zombie/mdc/BulkItemRegistration.class',
+    'zombie/mdc/BulkItemRegistration$1.class',
+    'zombie/mdc/FishingDataBroadcast.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -366,6 +369,24 @@ java "-Dmdc.animalUpdateGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzo
 Assert-Ok "AnimalUpdateGuardTest（off，原版危險行為對照）"
 java "-Dmdc.animalUpdateGuard=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest unknown
 Assert-Ok "AnimalUpdateGuardTest（未知值仍 enforce）"
+
+Write-Host "[9x/10] 大批物品登記（W30）順序、移除撤銷、回呼與原版回退..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest
+Assert-Ok "BulkItemRegistrationTest（on，真 IsoCell 差分）"
+java -Xverify:all "-Dmdc.bulkItemRegistration=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest off
+Assert-Ok "BulkItemRegistrationTest（0，原版回退）"
+java -Xverify:all "-Dmdc.bulkItemRegistration=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest off
+Assert-Ok "BulkItemRegistrationTest（off，文字別名）"
+java -Xverify:all -XX:+UnlockExperimentalVMOptions -XX:hashCode=2 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest collisions
+Assert-Ok "BulkItemRegistrationTest（Comparable 強制碰撞回呼）"
+
+Write-Host "[9y/10] 魚群廣播（W31）真 writer/send/decoder、錯誤續送與原版回退..."
+java -Xverify:all -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" on
+Assert-Ok "FishingDataBroadcastTest（on，多收件人與錯誤路徑）"
+java -Xverify:all "-Dmdc.fishingDataBroadcast=0" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+Assert-Ok "FishingDataBroadcastTest（0，原版回退）"
+java -Xverify:all "-Dmdc.fishingDataBroadcast=off" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+Assert-Ok "FishingDataBroadcastTest（off，文字別名）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
