@@ -1045,6 +1045,16 @@ public final class PatchConfig {
         zoneMeta.expectedHits = 2;   // 成年、幼體兩個迴圈
         patches.add(zoneAnimal);
 
+        // W33：分娩品種守衛。checkPregnancy 內唯一 addBaby() 1:1 改道；幼崽品種查不到就不生，
+        // 避免原版產出 data/adef 為 null 的幼崽拖垮世界更新與動物存檔；docs/patches.md 2av。
+        Patcher.ClassPatch animalData = new Patcher.ClassPatch("zombie/characters/animals/datas/AnimalData");
+        Patcher.MethodOps pregnancy = animalData.method("checkPregnancy", "()V");
+        pregnancy.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "addBaby", "()Lzombie/characters/animals/IsoAnimal;",
+                "zombie/mdc/BabyBreedGuard", "addBaby"));
+        pregnancy.expectedHits = 1;
+        patches.add(animalData);
+
         return patches;
     }
 
