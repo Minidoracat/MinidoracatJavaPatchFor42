@@ -2771,6 +2771,25 @@ public final class SmokeCheck {
                         "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.updateStatsAway (I)V",
                         "INVOKESTATIC " + awayHelper + ".updateStatsAway " + awayDesc).equals(methodText(pFromWorker)));
 
+
+        // W33：分娩品種守衛。原版 addBaby 以 getBreedByName 結果直接建構（無 null 檢查）是本刀存在理由；
+        // TIS 補上檢查時該條會紅＝撤刀。
+        String adCls = "zombie/characters/animals/datas/AnimalData";
+        String babyDesc = "()Lzombie/characters/animals/IsoAnimal;";
+        String babyHelper = "zombie/mdc/BabyBreedGuard";
+        failed += check("W33 addBaby 全 jar 恰 4 個呼叫點（分娩 1＋生成故事 3，後者刻意不動）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal",
+                        "addBaby", babyDesc) == 4);
+        String vAddBaby = methodText(methodFromJar(jar, "zombie/characters/animals/IsoAnimal", "addBaby", babyDesc));
+        failed += check("W33 vanilla addBaby 將 getBreedByName 結果直接交給建構子",
+                java.util.regex.Pattern.compile(
+                        "INVOKEVIRTUAL zombie/characters/animals/AnimalDefinitions\\.getBreedByName [^\\n]*\\n\\s*"
+                        + "INVOKESPECIAL zombie/characters/animals/IsoAnimal\\.<init>").matcher(vAddBaby).find());
+        failed += check("W33 checkPregnancy 唯一改道同形，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, adCls, "checkPregnancy", "()V")).replace(
+                        "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.addBaby " + babyDesc,
+                        "INVOKESTATIC " + babyHelper + ".addBaby (Lzombie/characters/animals/IsoAnimal;)Lzombie/characters/animals/IsoAnimal;")
+                        .equals(methodText(method(distJava, adCls, "checkPregnancy", "()V"))));
         // 聲音觀測只包既有已認證派送，不修改 wire class 或任何聲音／魚群方法。
         String soundProbe = "zombie/network/packets/sound/MdcWorldSoundProbe";
         String soundPacket = "zombie/network/packets/sound/WorldSoundPacket";

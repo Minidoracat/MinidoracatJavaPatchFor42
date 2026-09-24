@@ -3777,6 +3777,26 @@ SmokeCheck 釘三個呼叫點 census、兩個方法同形改道，以及原版�
 （TIS 改用動物自身時間時該條會紅＝重估本刀）。`AnimalAwayProbeTest` 覆蓋 observe／off、
 陳舊 zone、無時間戳、zone 路徑與例外穿透。
 
+## 2av. 分娩品種守衛（W33，server，預設 on）
+
+**事故（2026-09-24 18:03:06）**：`AnimalData.checkPregnancy → IsoAnimal.addBaby` NPE
+（`getData()` is null）。原版以母獸品種名查幼崽定義，`getBreedByName` 查不到時回 null，
+卻仍直接交給 `IsoAnimal` 建構子，產出 data／adef 為 null 的幼崽並已進入世界。之後約 2 分鐘
+`IsoAnimal.update` NPE 1289 次，每次打斷該 tick 的 `IsoCell.ProcessObjects`；
+關機前兩次 `AnimalPopulationManager.save` 也因它 NPE 中斷。母獸位置當時未記錄。
+
+**手術**：`checkPregnancy` 內唯一 `addBaby()` 1:1 改道 `BabyBreedGuard.addBaby`。先做原版同一組
+查詢（`getDef(babyType)`、母獸品種、`getBreedByName`），任一環為 null 就不生這一隻、回 null
+（caller 丟棄回傳值），並記母獸型別／ID／品種／babyType／座標（前 64 筆）；否則委派原版，
+行為不變。`babyType` 為 null 仍交原版（原版自己回 null）。全 jar 另有 3 個生成故事呼叫點
+（ranch、遷徙群、拖車故事）刻意不動。kill switch `-Dmdc.babyBreedGuard=0`，需重啟。
+
+SmokeCheck 釘全 jar 4 個呼叫點、`checkPregnancy` 同形改道，以及原版 `getBreedByName`
+結果直接進建構子的事實（TIS 補檢查時會紅＝撤刀）。`BabyBreedGuardTest` 以真
+`AnimalDefinitions` 查詢覆蓋 on／off、品種不符、幼崽定義缺失、babyType null 與例外穿透。
+驗收：`[BabyBreedGuard] skip birth` 出現時對照該品種來源 mod；`IsoAnimal.update` 的
+`adef is null` NPE 不再出現。
+
 ---
 
 ## 3. 部署後驗證清單
