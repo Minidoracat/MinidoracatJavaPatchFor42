@@ -3745,6 +3745,38 @@ Error 刻意 fail-fast，若診斷 Error 與原例外同時發生，仍可能由
 累積門檻以注入完成樣本避免 sleep 上界假設；另以真原版零半徑封包走整合派送煙霧。
 這些不是實際慢包的線上驗收；生效後須核對 banner，並把 slowCall／slowBatch 與同時段堆疊對照。
 
+## 2au. 動物離線補算觀測（W32，server，預設 observe）
+
+**事故（2026-09-24）**：同一個玩家牧場兩次在 chunk 重新載入時出事——
+13:01:38（玩家斷線重連）與 14:22:13（另一玩家高速抵達）各凍結主迴圈約 13 秒，隨即同秒 6 隻動物死亡
+（`user Bob died`），地上大量糞便，Cleaner 同時記到豬群 `pregnancies=12 unborn=140`。
+兩張 MainLoopWatchdog 快照同為 `ServerMap.preupdate → IsoChunk.doLoadGridsquare →
+AnimalPopulationManager.addChunkToWorld → AnimalManagerMain.fromWorker →
+IsoAnimal.updateStatsAway → AnimalData.hourGrow`，全是原版路徑。
+
+**待證假說**：原版以 `worldAgeHours - zone.hourLastSeen` 當離線時數，逐小時執行
+`hourGrow`、配種、生蛋與掠食判定。`DesignationZone.hourLastSeen` 只在 zone 兩角都離開串流時更新；
+大圍場橫跨多個 chunk，只要角落 chunk 持續載入，中間 chunk 卸載重載就會拿到陳舊值，每次重載都重補數天。
+動物自身的 `timeSinceLastUpdate`（`unloaded()` 寫入）才是真實離線時間，本刀拿它當對照。
+
+**手術**：全 jar 三個 `IsoAnimal.updateStatsAway(I)V` 呼叫點 1:1 改道 `AnimalAwayProbe`——
+`AnimalManagerMain.fromWorker` ×1（source=chunk）與 `DesignationZoneAnimal.doMeta` ×2
+（source=zone，同樣用 `hourLastSeen`）。helper 委派前先讀動物自身時數，原版恰好執行一次，
+不改時數、不 clamp，例外原樣穿透。
+
+- 明細：zone 時數 ≥ `-Dmdc.animalAwayProbe.detailHours`（預設 24）逐筆記
+  source／hoursAway／animalHoursAway／worldAgeHours／耗時／是否死亡／動物型別與座標／zone id、名稱、
+  hourLastSeen、rect、streamed；每 60 秒最多 30 行，超額計 `suppressed`。
+- heartbeat：有呼叫時每 5 分鐘最多一行，含 calls／big／mismatch（zone 時數比動物自身多 ≥24h）／
+  died／max／sum／totalMs／maxMs／anomalies。
+- `-Dmdc.animalAwayProbe=0` 停用（純直通），需重啟。
+
+**判讀**：`mismatch` 持續成長、明細中 hoursAway 遠大於 animalHoursAway＝假說成立，
+再另案出 enforce（改用動物自身時間或設上限）。兩者相近＝離線補算本來就這麼長，需改查 hourGrow 本身。
+SmokeCheck 釘三個呼叫點 census、兩個方法同形改道，以及原版讀 `DesignationZone.hourLastSeen` 的事實
+（TIS 改用動物自身時間時該條會紅＝重估本刀）。`AnimalAwayProbeTest` 覆蓋 observe／off、
+陳舊 zone、無時間戳、zone 路徑與例外穿透。
+
 ---
 
 ## 3. 部署後驗證清單

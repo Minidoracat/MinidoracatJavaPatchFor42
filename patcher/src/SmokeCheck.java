@@ -2748,6 +2748,29 @@ public final class SmokeCheck {
                     methodText(original).equals(methodText(method(distJava, fishCls, original.name, original.desc))));
         }
 
+        // W32：動物離線補算觀測。唯一 callsite 同形改道；vanilla 以 zone.hourLastSeen 推算時數的
+        // 事實一併釘住（TIS 改用動物自身時間戳時此條紅＝重估本刀）。
+        String awayMainCls = "zombie/characters/animals/AnimalManagerMain";
+        String awayHelper = "zombie/mdc/AnimalAwayProbe";
+        String awayDesc = "(Lzombie/characters/animals/IsoAnimal;I)V";
+        MethodNode vFromWorker = methodFromJar(jar, awayMainCls, "fromWorker", "(Ljava/util/ArrayList;)V");
+        MethodNode pFromWorker = method(distJava, awayMainCls, "fromWorker", "(Ljava/util/ArrayList;)V");
+        failed += check("W32 updateStatsAway 全 jar 恰三個呼叫點（fromWorker 1＋doMeta 2）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal",
+                        "updateStatsAway", "(I)V") == 3);
+        String zoneCls = "zombie/iso/areas/DesignationZoneAnimal";
+        failed += check("W32 doMeta 兩處同形改道，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, zoneCls, "doMeta", "(I)V")).replace(
+                        "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.updateStatsAway (I)V",
+                        "INVOKESTATIC " + awayHelper + ".updateStatsAwayZone " + awayDesc)
+                        .equals(methodText(method(distJava, zoneCls, "doMeta", "(I)V"))));
+        failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
+                methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
+        failed += check("W32 唯一改道同形，其餘指令與 frames 保留",
+                methodText(vFromWorker).replace(
+                        "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.updateStatsAway (I)V",
+                        "INVOKESTATIC " + awayHelper + ".updateStatsAway " + awayDesc).equals(methodText(pFromWorker)));
+
         // 聲音觀測只包既有已認證派送，不修改 wire class 或任何聲音／魚群方法。
         String soundProbe = "zombie/network/packets/sound/MdcWorldSoundProbe";
         String soundPacket = "zombie/network/packets/sound/WorldSoundPacket";
