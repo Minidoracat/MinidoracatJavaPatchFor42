@@ -1028,6 +1028,23 @@ public final class PatchConfig {
         }
         patches.add(fishSchool);
 
+        // W32：動物離線補算觀測（純 observe）。全 jar 三個 updateStatsAway 呼叫點 1:1 改道
+        // （fromWorker ×1、DesignationZoneAnimal.doMeta ×2，兩者皆以 zone.hourLastSeen 推算時數），
+        // 記錄該時數對照動物自身 timeSinceLastUpdate；docs/patches.md 2au。
+        String awayProbe = "zombie/mdc/AnimalAwayProbe";
+        Patcher.ClassPatch animalMain = new Patcher.ClassPatch("zombie/characters/animals/AnimalManagerMain");
+        Patcher.MethodOps fromWorker = animalMain.method("fromWorker", "(Ljava/util/ArrayList;)V");
+        fromWorker.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "updateStatsAway", "(I)V", awayProbe, "updateStatsAway"));
+        fromWorker.expectedHits = 1;
+        patches.add(animalMain);
+        Patcher.ClassPatch zoneAnimal = new Patcher.ClassPatch("zombie/iso/areas/DesignationZoneAnimal");
+        Patcher.MethodOps zoneMeta = zoneAnimal.method("doMeta", "(I)V");
+        zoneMeta.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "updateStatsAway", "(I)V", awayProbe, "updateStatsAwayZone"));
+        zoneMeta.expectedHits = 2;   // 成年、幼體兩個迴圈
+        patches.add(zoneAnimal);
+
         return patches;
     }
 

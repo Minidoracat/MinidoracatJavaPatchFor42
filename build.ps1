@@ -97,6 +97,7 @@ $helperEntries = @(
     'zombie/mdc/BulkItemRegistration.class',
     'zombie/mdc/BulkItemRegistration$1.class',
     'zombie/mdc/FishingDataBroadcast.class',
+    'zombie/mdc/AnimalAwayProbe.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -333,6 +334,12 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceOb
 Assert-Ok "FaceObjectGuardTest（on，出貨組態）"
 java "-Dmdc.faceObjectGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest off
 Assert-Ok "FaceObjectGuardTest（faceObjectGuard=0 kill switch）"
+
+Write-Host "[9r2/10] 動物離線補算觀測（W32）行為驗證＋kill switch（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
+Assert-Ok "AnimalAwayProbeTest（observe，出貨組態）"
+java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest off
+Assert-Ok "AnimalAwayProbeTest（animalAwayProbe=0 kill switch）"
 
 Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
 # 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。
