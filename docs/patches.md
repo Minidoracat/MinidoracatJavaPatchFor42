@@ -3830,6 +3830,33 @@ entity bucket，只為清掉離開 10 格的 usingPlayer）、`WorldSoundManager
 4.7%（行號落在單純算距離的第 372 行，推論實際成本是前一個呼叫 `getSoundAnimal` 對全域
 soundList 的逐動物線性掃描，因為沒開 `DebugNonSafepoints` 所以歸屬不精確）。
 
+## 2ax. 使用中玩家索引（W35，server，預設 observe）
+
+**依據（同一份 2026-09-25 晚峰 JFR）**：主執行緒 5.9% 在 `UsingPlayerUpdateSystem.update`，熱點落在
+迴圈裡讀 `getUsingPlayer()` 那行（jar 行 35＝bytecode 44）。原版每幀掃過 IsoObject bucket 的全部 entity，
+只為把「使用中玩家已離開 10 格／換層／死亡」的 `usingPlayer` 清成 null；真正有 usingPlayer 的 entity 極少，
+成本是逐一讀取每個 entity 的記憶體存取。
+
+**手術**：`GameEntity.usingPlayer` 是 private，全 class 恰 7 個 putfield——`setUsingPlayer` 1、
+`receiveUpdateUsingPlayer` 3、`receiveSyncEntity` 2、`reset` 1（只寫 null）。
+- `setUsingPlayer` 頭部 headCall（slots 0、1，帶新值）、兩個 receive 方法每個 RETURN 前 tailCall
+  （讀寫入後的值）；寫成非 null 就記入 `MdcUsingPlayerIndex` 的弱參照集合（不延長 entity 生命週期）。
+- `UsingPlayerUpdateSystem.update` 內唯一 `EntityBucket.getEntities()` 1:1 改道：enforce 時回傳
+  「集合中仍有 usingPlayer、有 component 且 bucket bit 在」的精簡陣列；usingPlayer 已是 null 的就移出集合。
+  原版對每個 entity 的處理互相獨立，不在集合中的 entity 原版也不會做任何事，結果相同，只有處理順序不同。
+- 自我稽核：每 256 次呼叫全表數一次「有 usingPlayer 的 bucket 成員」，多於索引＝遺漏（`missed`）。
+  enforce 出現遺漏就永久退回原版全表並記一行 `MISSED`。
+
+三態 `-Dmdc.usingPlayerIndex`：`2|observe`（預設，回原版全表，只追蹤與稽核）、`1|enforce`、`0|off`
+（連追蹤都關）。需重啟。每 5 分鐘一行 `[UsingPlayerIndex] mode= calls= bucket= active= activeMax=
+audits= missed= fellBack= anomalies=`。**開 enforce 的判準**：observe 一個晚峰以上 `missed=0`，
+且 `bucket` 遠大於 `activeMax`。
+
+SmokeCheck 釘 usingPlayer 為 private、putfield 7 個的分佈（TIS 新增寫入點時紅＝索引會漏）、update 改道
+同形且真指令數不變、GameEntity 追蹤點 1＋1＋2。`MdcUsingPlayerIndexTest` 以真 `IsoObjectBucket` 與
+已 patch 的 `setUsingPlayer` 覆蓋三模式：enforce 只回使用中且在 bucket 的 entity、清成 null 後移出、
+繞過追蹤點的寫入被稽核抓到並退回全表。
+
 ---
 
 ## 3. 部署後驗證清單

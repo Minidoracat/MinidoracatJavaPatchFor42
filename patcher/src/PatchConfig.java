@@ -1066,6 +1066,33 @@ public final class PatchConfig {
         pregnancy.expectedHits = 1;
         patches.add(animalData);
 
+        // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
+        // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點
+        // （setUsingPlayer 頭部帶新值、兩個 receive 方法每個 RETURN 前讀寫入後值；reset 只寫 null），
+        // 並把 update 內唯一 getEntities() 改道成只含使用中 entity 的精簡陣列；每 256 次全表稽核，
+        // enforce 出現遺漏即永久退回原版。-Dmdc.usingPlayerIndex 0|off/1|enforce/2|observe（預設）。
+        String upi = "zombie/entity/MdcUsingPlayerIndex";
+        String recvDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        Patcher.ClassPatch gameEntity = new Patcher.ClassPatch("zombie/entity/GameEntity");
+        Patcher.MethodOps setUsing = gameEntity.method("setUsingPlayer", "(Lzombie/characters/IsoPlayer;)V");
+        setUsing.headCall = new Patcher.HeadCall(upi, "onSetUsingPlayer",
+                "(Lzombie/entity/GameEntity;Lzombie/characters/IsoPlayer;)V", new int[]{0, 1});
+        setUsing.expectedHits = 1;
+        Patcher.MethodOps recvUsing = gameEntity.method("receiveUpdateUsingPlayer", recvDesc);
+        recvUsing.tailCall = new Patcher.TailCall(upi, "afterReceive", "(Lzombie/entity/GameEntity;)V");
+        recvUsing.expectedHits = 1;   // 單一 RETURN
+        Patcher.MethodOps recvSync = gameEntity.method("receiveSyncEntity", recvDesc);
+        recvSync.tailCall = new Patcher.TailCall(upi, "afterReceive", "(Lzombie/entity/GameEntity;)V");
+        recvSync.expectedHits = 2;    // 兩個 RETURN
+        patches.add(gameEntity);
+        Patcher.ClassPatch usingSystem = new Patcher.ClassPatch("zombie/entity/UsingPlayerUpdateSystem");
+        Patcher.MethodOps usingUpdate = usingSystem.method("update", "()V");
+        usingUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/entity/EntityBucket", "getEntities", "()Lzombie/entity/util/ImmutableArray;",
+                upi, "entities"));
+        usingUpdate.expectedHits = 1;
+        patches.add(usingSystem);
+
         return patches;
     }
 

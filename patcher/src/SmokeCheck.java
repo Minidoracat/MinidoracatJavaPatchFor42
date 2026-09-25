@@ -2309,6 +2309,38 @@ public final class SmokeCheck {
                 && countCallsToOwner(gEmit, "zombie/debug/DebugLog") == 0
                 && countExactFields(gEmit, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1);
 
+        // ---- W35 使用中玩家索引（GameEntity usingPlayer 寫入點＋UsingPlayerUpdateSystem.update）----
+        // vanilla 前提（索引完整性的根據）：usingPlayer 是 private，全 class 恰 7 個 putfield——
+        // setUsingPlayer 1、receiveUpdateUsingPlayer 3、receiveSyncEntity 2、reset 1（寫 null）。
+        // TIS 新增寫入點時此條紅＝索引會漏，必須補追蹤點。
+        String geCls = "zombie/entity/GameEntity";
+        String upiCls = "zombie/entity/MdcUsingPlayerIndex";
+        String upDesc = "Lzombie/characters/IsoPlayer;";
+        String rcvDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        ClassNode vGe = classNodeFromJar(jar, geCls);
+        int vPut = vGe.methods.stream().mapToInt(m -> countExactFields(m, Opcodes.PUTFIELD, geCls, "usingPlayer", upDesc)).sum();
+        failed += check("W35 vanilla 前提：usingPlayer 為 private、全 class putfield 恰 7（set 1／receiveUpdate 3／receiveSync 2／reset 1）",
+                vGe.fields.stream().anyMatch(f -> f.name.equals("usingPlayer") && (f.access & Opcodes.ACC_PRIVATE) != 0)
+                && vPut == 7
+                && countExactFields(methodFromJar(jar, geCls, "setUsingPlayer", "(" + upDesc + ")V"), Opcodes.PUTFIELD, geCls, "usingPlayer", upDesc) == 1
+                && countExactFields(methodFromJar(jar, geCls, "receiveUpdateUsingPlayer", rcvDesc), Opcodes.PUTFIELD, geCls, "usingPlayer", upDesc) == 3
+                && countExactFields(methodFromJar(jar, geCls, "receiveSyncEntity", rcvDesc), Opcodes.PUTFIELD, geCls, "usingPlayer", upDesc) == 2
+                && countExactFields(methodFromJar(jar, geCls, "reset", "()V"), Opcodes.PUTFIELD, geCls, "usingPlayer", upDesc) == 1);
+        MethodNode vUpsUpd = methodFromJar(jar, "zombie/entity/UsingPlayerUpdateSystem", "update", "()V");
+        MethodNode pUpsUpd = method(distJava, "zombie/entity/UsingPlayerUpdateSystem", "update", "()V");
+        failed += check("W35 update：getEntities vanilla 恰 1→改道 x1、原呼叫歸零、真指令不變",
+                countExactCalls(vUpsUpd, Opcodes.INVOKEVIRTUAL, "zombie/entity/EntityBucket", "getEntities", "()Lzombie/entity/util/ImmutableArray;") == 1
+                && countExactCalls(pUpsUpd, Opcodes.INVOKEVIRTUAL, "zombie/entity/EntityBucket", "getEntities", "()Lzombie/entity/util/ImmutableArray;") == 0
+                && countExactCalls(pUpsUpd, Opcodes.INVOKESTATIC, upiCls, "entities", "(Lzombie/entity/EntityBucket;)Lzombie/entity/util/ImmutableArray;") == 1
+                && realInsnCount(pUpsUpd) == realInsnCount(vUpsUpd));
+        ClassNode pGe = classNode(distJava, geCls);
+        failed += check("W35 GameEntity 追蹤點：setUsingPlayer headCall 1、receiveUpdate tail 1、receiveSync tail 2、class-wide 合計 4",
+                countExactCalls(method(distJava, geCls, "setUsingPlayer", "(" + upDesc + ")V"), Opcodes.INVOKESTATIC, upiCls, "onSetUsingPlayer", "(L" + geCls + ";" + upDesc + ")V") == 1
+                && countExactCalls(method(distJava, geCls, "receiveUpdateUsingPlayer", rcvDesc), Opcodes.INVOKESTATIC, upiCls, "afterReceive", "(L" + geCls + ";)V") == 1
+                && countExactCalls(method(distJava, geCls, "receiveSyncEntity", rcvDesc), Opcodes.INVOKESTATIC, upiCls, "afterReceive", "(L" + geCls + ";)V") == 2
+                && classWideCalls(pGe, Opcodes.INVOKESTATIC, upiCls, "onSetUsingPlayer", "(L" + geCls + ";" + upDesc + ")V")
+                   + classWideCalls(pGe, Opcodes.INVOKESTATIC, upiCls, "afterReceive", "(L" + geCls + ";)V") == 4);
+
         // ---- W10-C 卡讀條第二波觀測（processServer 打斷／start 時長／update perform 出口）----
         String taProbeCls = "zombie/core/MdcTimedActionProbe";
         String amCls = "zombie/core/ActionManager";
