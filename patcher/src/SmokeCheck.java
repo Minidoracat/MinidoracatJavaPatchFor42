@@ -2287,6 +2287,28 @@ public final class SmokeCheck {
                 && countOpcode(gClosest, Opcodes.NEW) == 0
                 && countCallsToOwner(gClosest, "zombie/debug/DebugLog") == 0);
 
+        // ---- W34 伺服器角色聲音參數跳過（IsoGameCharacter.updateEmitter）----
+        // vanilla 前提：updateEmitter 內 FMODParameterList.update 恰 1 且為 class 唯一呼叫點。
+        // （server emitter 為 Dummy＝跳過無讀者的依據，由 docs/patches.md 2aw 反編譯出處記錄。）
+        String fplCls = "zombie/audio/FMODParameterList";
+        String epgCls = "zombie/mdc/EmitterParamGate";
+        String epgDesc = "(L" + fplCls + ";)V";
+        MethodNode vEmit = methodFromJar(jar, igcCls, "updateEmitter", "()V");
+        failed += check("W34 vanilla 前提：updateEmitter 內 FMODParameterList.update=1、class-wide=1",
+                countExactCalls(vEmit, Opcodes.INVOKEVIRTUAL, fplCls, "update", "()V") == 1
+                && classWideCalls(vIgcNode, Opcodes.INVOKEVIRTUAL, fplCls, "update", "()V") == 1);
+        MethodNode pEmit = method(distJava, igcCls, "updateEmitter", "()V");
+        failed += check("W34 手術後：updateEmitter 改道 x1、原呼叫歸零、真指令不變；class-wide 改道恰 1",
+                countExactCalls(pEmit, Opcodes.INVOKESTATIC, epgCls, "update", epgDesc) == 1
+                && countExactCalls(pEmit, Opcodes.INVOKEVIRTUAL, fplCls, "update", "()V") == 0
+                && realInsnCount(pEmit) == realInsnCount(vEmit)
+                && classWideCalls(pIgcNode, Opcodes.INVOKESTATIC, epgCls, "update", epgDesc) == 1);
+        MethodNode gEmit = method(distJava, epgCls, "update", epgDesc);
+        failed += check("W34 helper 契約：update 零 NEW、零 DebugLog（心跳在獨立方法）、跳過條件讀 GameServer.server",
+                countOpcode(gEmit, Opcodes.NEW) == 0
+                && countCallsToOwner(gEmit, "zombie/debug/DebugLog") == 0
+                && countExactFields(gEmit, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1);
+
         // ---- W10-C 卡讀條第二波觀測（processServer 打斷／start 時長／update perform 出口）----
         String taProbeCls = "zombie/core/MdcTimedActionProbe";
         String amCls = "zombie/core/ActionManager";
