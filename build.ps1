@@ -87,6 +87,7 @@ $helperEntries = @(
     'zombie/mdc/ContainerIdProbe.class',
     'zombie/mdc/FaceObjectGuard.class',
     'zombie/mdc/EmitterParamGate.class',
+    'zombie/entity/MdcUsingPlayerIndex.class',
     'zombie/core/MdcTimedActionProbe.class',
     'zombie/network/MdcAccountGate.class',
     'zombie/network/MdcAccountGate$Row.class',
@@ -344,6 +345,14 @@ java "-Dmdc.emitterParamGate=enforce" -cp "$R\work\out;$R\dist\java;$R\work\proj
 Assert-Ok "EmitterParamGateTest（enforce）"
 java "-Dmdc.emitterParamGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.EmitterParamGateTest off
 Assert-Ok "EmitterParamGateTest（off kill switch）"
+
+Write-Host "[9q3/10] 使用中玩家索引（W35）三態行為驗證（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest observe
+Assert-Ok "MdcUsingPlayerIndexTest（observe，預設出貨）"
+java "-Dmdc.usingPlayerIndex=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest enforce
+Assert-Ok "MdcUsingPlayerIndexTest（enforce）"
+java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest off
+Assert-Ok "MdcUsingPlayerIndexTest（off kill switch）"
 
 Write-Host "[9r2/10] 動物離線補算觀測（W32）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
