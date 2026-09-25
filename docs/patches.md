@@ -3797,6 +3797,39 @@ SmokeCheck 釘全 jar 4 個呼叫點、`checkPregnancy` 同形改道，以及原
 驗收：`[BabyBreedGuard] skip birth` 出現時對照該品種來源 mod；`IsoAnimal.update` 的
 `adef is null` NPE 不再出現。
 
+## 2aw. 伺服器角色聲音參數跳過（W34，server，預設 observe）
+
+**依據（2026-09-25 晚峰 JFR，5 分鐘，主執行緒 13,966 取樣）**：224 取樣（1.6%）落在
+`IsoGameCharacter.updateEmitter → FMODParameterList.update → ParameterFootstepMaterial*`。
+server 上實際走到 `updateEmitter` 的只有動物：`IsoAnimal.update` 每 tick 呼叫兩次（反編譯
+`IsoAnimal.java:388,453`），`AnimalPopulationManager` 卸載後另補呼叫；`IsoPlayer` 有
+`!GameServer.server` 守衛，殭屍在 server 不進 `MovingObjectUpdateScheduler` bucket。
+動物在 server 註冊 FootstepMaterial／FootstepMaterial2（`IsoPlayer.initFMODParameters`，無 server
+守衛），計算時走訪格子全部物件、查 `FOOTSTEP_MATERIAL` 屬性、`Enum.valueOf`。
+
+**為何是白工**：server 的 emitter 一律是 `DummyCharacterSoundEmitter`（`IsoGameCharacter.java:781-783`），
+沒有 FMOD event instance。`FMODParameter.update` 算出的值只經 `setCurrentValue` 迭代
+`FMODLocalParameter.instances`（server 恆空）與 `startEventInstance`（server 不發生）送出，
+無其他讀者。
+
+**手術**：`updateEmitter` 內唯一 `FMODParameterList.update()` 1:1 改道 `EmitterParamGate.update`
+（併入既有 W7／W22 的 `IsoGameCharacter` ClassPatch）。三態 `-Dmdc.emitterParamGate`：
+`2|observe`（預設，照常計算，每 16 次取樣計時一次）、`1|enforce`（`GameServer.server` 時跳過）、
+`0|off`（純直通）；未知值落回 observe。需重啟。每 5 分鐘一行
+`[EmitterParamGate] mode= server= calls= skipped= sampled= avgNs= estSavedMs= anomalies=`。
+
+SmokeCheck 釘 vanilla 呼叫點 1（class-wide 1）、手術後改道 1／原呼叫 0／真指令數不變，以及 helper
+零 NEW、零 DebugLog、跳過條件讀 `GameServer.server`。`EmitterParamGateTest` 三個 JVM 覆蓋
+observe／enforce／off：非 server 一律計算、server＋enforce 完全不計算、取樣計時、委派例外穿透。
+**開 enforce 的判準**：observe 心跳的 `estSavedMs` 換算約佔主執行緒 1% 以上，且 `anomalies=0`。
+
+**同一份 JFR 的其他結論**：`RBTrashed.trashHouse`／`isKidsRoom` 0 取樣、`requestSaveCell` 8 取樣、
+主執行緒 >20 ms `ThreadPark` 0 筆、5 分鐘 deopt 85 次——pzopt 的 kidsRoomMemo、saveCellAsync
+與 JVM `jitSteady` 皆不立案。新熱點另案：`UsingPlayerUpdateSystem.update` 5.9%（每幀全掃 IsoObject
+entity bucket，只為清掉離開 10 格的 usingPlayer）、`WorldSoundManager.getSoundAttractAnimal` 標記
+4.7%（行號落在單純算距離的第 372 行，推論實際成本是前一個呼叫 `getSoundAnimal` 對全域
+soundList 的逐動物線性掃描，因為沒開 `DebugNonSafepoints` 所以歸屬不精確）。
+
 ---
 
 ## 3. 部署後驗證清單

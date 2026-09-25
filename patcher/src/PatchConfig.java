@@ -544,6 +544,17 @@ public final class PatchConfig {
                 "zombie/mdc/FaceObjectGuard", "closestSpriteGridObject"));
         faceObj.expectedHits = 1;
 
+        // ---- W34 伺服器角色聲音參數跳過（2026-09-25；docs/patches.md 2aw）----
+        // updateEmitter 第一行無條件 getFMODParameters().update()；server 上只有動物走到
+        // （每 tick 兩次），腳步材質參數走訪格子物件，但 server emitter 恆為 Dummy、無 event
+        // instance＝算出的值無讀者。晚峰 JFR 主執行緒 1.6%。唯一呼叫點 1:1 改道，
+        // enforce 且 GameServer.server 才跳過。-Dmdc.emitterParamGate 0|off/1|enforce/2|observe（預設）。
+        Patcher.MethodOps emitter = gameChr.method("updateEmitter", "()V");
+        emitter.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/audio/FMODParameterList", "update", "()V",
+                "zombie/mdc/EmitterParamGate", "update"));
+        emitter.expectedHits = 1;
+
         // ---- W8 chunk 寫入閘（2026-08-14；CRC-blam 家族 43 筆資料損失的止血＋蒐證；
         //      docs/patches.md 2t）----
         // 鑑識定案：43/43 筆 SANITY CHECK blam 的 log 值與磁碟檔逐位元組相符＝載入側無辜、
