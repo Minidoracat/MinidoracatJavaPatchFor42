@@ -1,7 +1,7 @@
 # TIS 回報草稿：IsoCell.processItems 混入 null 後永久卡死（未送出）
 
-- 狀態：草稿，尚未回報。本服止血為 W40（docs/patches.md 2bc）。
-- 待補：W40 上線後若記到 `off-main-thread write`，把執行緒名稱與呼叫來源補進「Root cause of the null」。
+- 狀態：草稿，尚未回報。本服止血為 W40（docs/patches.md 2bc），根治為 W41（2bd）。
+- 2026-09-27 已補 null 來源：W40 記到 `ServerPlayersVehicles` 執行緒直接寫入（見 Root cause）。
 
 ```text
 [42.20.4][Dedicated Server] A single null in IsoCell.processItems permanently breaks ProcessItems and snowballs into multi-second main-loop freezes
@@ -29,12 +29,21 @@ Observed
 - GC was healthy (no allocation stalls). A restart cleared it immediately.
 
 Root cause of the null
-Unknown. All vanilla add paths (addToProcessItems(item), addToProcessItems(ArrayList)) skip nulls, and all packets are queued to the main loop, so we suspect a concurrent (off-main-thread) write racing ArrayList.add/removeAll. This happened once in about a month of logs.
+An off-main-thread write. We logged every call to addToProcessItems / addToProcessItemsRemove that did not come from GameServer.mainThread. In one 4-hour evening session there were 8,384 such writes (about 38 per minute); every sampled one came from the ServerPlayersVehicles thread:
+    zombie.iso.IsoCell.addToProcessItems
+    zombie.inventory.ItemContainer.AddItem
+    zombie.inventory.ItemContainer.addItem
+    zombie.vehicles.BaseVehicle.setCurrentKey
+    zombie.vehicles.BaseVehicle.load
+    zombie.iso.IsoObject.load
+    zombie.vehicles.VehiclesDB2$QueueLoadChunk.vehicleLoaded
+    zombie.vehicles.VehiclesDB2$SQLStore.loadChunk
+When VehiclesDB2 loads a vehicle on that thread, the ignition key is put into the vehicle container, and ItemContainer.AddItem unconditionally calls IsoWorld.instance.currentCell.addToProcessItems(item). That ArrayList is modified by the main thread at the same time (add, and removeAll in ProcessRemoveItems), so an add that races a resize or removal can leave a null (or a duplicate) in the list. The freeze happened once in about a month of logs, but the unsafe writes happen every minute.
 
 Suggested fix
 1. Make ProcessItems null-tolerant: skip null entries and remove them (e.g. treat a null as finished so it goes into processItemsRemove).
 2. Optionally keep a HashSet alongside processItems, as is already done for processIsoObject/processIsoObjectSet, so addToProcessItems is O(1) instead of O(n).
-3. Check whether any non-main thread can reach addToProcessItems / addToProcessItemsRemove on the server.
+3. Do not touch the shared processItems list from ServerPlayersVehicles: queue items added off the main thread and register them on the main thread (this is what our second mitigation does: the two addToProcessItems calls in ItemContainer.AddItem check the current thread and defer to a queue drained at the start of ProcessItems).
 
-We are running a server-side mitigation implementing (1) and will report the offending thread if our logging catches one.
+We are running server-side mitigations implementing (1) and (3).
 ```
