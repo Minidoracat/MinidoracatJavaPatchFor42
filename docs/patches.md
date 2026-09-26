@@ -3802,6 +3802,8 @@ SmokeCheck 釘全 jar 4 個呼叫點、`checkPregnancy` 同形改道，以及原
 驗收：`[BabyBreedGuard] skip birth` 出現時對照該品種來源 mod；`IsoAnimal.update` 的
 `adef is null` NPE 不再出現。
 
+**2026-09-26 更正**：上面「null 品種→data null」的歸因不成立，真因是建構子檢查失敗（見 2az）。
+
 ## 2aw. 伺服器角色聲音參數跳過（W34，server，預設 observe）
 
 **依據（2026-09-25 晚峰 JFR，5 分鐘，主執行緒 13,966 取樣）**：224 取樣（1.6%）落在
@@ -3961,6 +3963,62 @@ send；手術後改道 x1、client 與單連線 send 原樣、真指令數不變
 `wetness=ok`，且 `skipped`、`suppressed` 會增加。再以 MIC42 報告的抓包方法比較 `86 01 25`
 （GameEntity）封包佔出向 UDP 的比例（修補前 17.5%，下限），並實地看曬草架：從遠處走近與開車抵達時的
 tooltip 進度、下雨暫停與濕度、完成後出貨。不能由 `skipped` 比例直接宣稱同比例的頻寬改善。
+
+## 2az. 動物半建構物件守衛＋apop 先序列化再開檔（W37，server，預設 on）
+
+**事故（2026-09-26 10:04–11:10）**：某玩家小型圈舍離線 86 小時後重新串流，原版 `doMeta`
+對同一批物件重複補算（同一隻母雞五次、小雞兩次），小雞下一幀進入 `AnimalData.grow`。新成體建構失敗，
+`grow` 在 `newAnimal.getData().setAge` NPE 808 次，接著 `IsoAnimal.update` 的 `this.adef.turnDelta`
+NPE 38,291 次。每次都打斷 `IngameState.updateInternal` 在 `IsoWorld.update` 之後的全部步驟
+（`UpdateStuff` 內的 `GameTime.update`、Lua `OnTick`、GameEntityManager），`worldAgeHours` 停在 29622
+約 65 分鐘。約 10:08 起 7 次存檔都在 `IsoAnimal.save` NPE，`QueuedSaveAll` 後段（SGlobalObjects、
+GlobalModData、地圖標記等）停在 09:37:14。11:10 模組更新重啟時關機 hook 同一 NPE 死亡，後續有序關機
+全部跳過，`steamclient.so+0x25aa8dc` SIGSEGV（與 9/16 22:00 同 offset）。該 cell 的 `apop_X_Y.bin` 被截成 0 bytes，
+下次載入 `newLimit < 0` 失敗後原版 `spawnAnimalsInCell` 重生野生動物，該 cell 原有動物消失。
+9/16（另一個 cell 的 apop 至今 0 bytes）與 9/24 18:03（2av）是同一型。
+
+**根因（42.20.4 反編譯＋javap）**：
+1. `IsoAnimal` 帶座標建構子的 `super()` → `IsoGameCharacter(IsoCell,FFF)` 在座標非 0 時先把物件放進
+   cell objectList（safeToAdd）或 addList，之後 `IsoAnimal` 才跑 `checkForChickenpocalypse()`／
+   `checkForWater()`；任一為真就跳過 `init()`，留下 adef／data 皆 null、animalId=-1 的物件。
+   chickenpocalypse 分支呼叫 `delete()`，`removeFromWorld` 會撤掉 addList；**water 分支什麼都不做，物件進世界**。
+2. 呼叫端（`grow`、`addBaby`）緊接 `getData()` NPE；`grow` 在 `parent.delete()` 之前拋出，小雞留在世界
+   每幀重試。
+3. `AnimalCell.save()` 先 `new FileOutputStream`（截斷）才序列化，序列化只 catch IOException。
+
+**2av 更正**：W33 當時歸因「幼崽品種查不到→null 品種→data null」不成立：`AnimalData` 建構子在
+品種為 null 時改抽隨機品種（`Rand.Next(0, size+1)`，有 1/(n+1) 機率 IndexOutOfBounds），不會留下
+data null。9/24 的 `getData() is null` 同樣是建構檢查失敗。W33 保留為品種不符的保守跳過。
+
+第一次失敗走哪個分支沒有 log 可證（`DebugType.Animal` 預設關、water 分支原版不印任何字）。本刀的
+`ctor failed reason=` 會分出 water／chickenpocalypse／noInit。
+
+**手術**：
+1. `IsoAnimal` 四個帶座標建構子每個 RETURN 前 TailCall `AnimalSpawnGuard.afterCtor`（RETURN 數 3/3/2/2）：
+   data 為 null 且座標非 0 時，依同一個 `isSafeToAdd` 分支從 objectList／addList 撤出（`IsoGameCharacter`
+   加入動作的逆操作）。`(IsoCell)` 載入用建構子走 0,0,0，不碰。
+2. `AnimalData.checkStages` 唯一 `grow` 1:1 改道 `AnimalSpawnGuard.grow`；W33 `BabyBreedGuard` 委派原版
+   `addBaby` 改經 `AnimalSpawnGuard.addBaby`。只在「本次呼叫期間有建構失敗」時吞 NPE（addBaby 回 null），
+   其餘例外原樣穿透；小雞維持原狀，下次 update 由原版重試。
+3. 全 jar 僅有的兩個 `AnimalCell.save()` 呼叫點（`AnimalManagerWorker.save`、`AnimalCell.unload`）改道
+   `zombie.characters.animals.MdcAnimalCellSave`：同一把 `SliceBufferLock`、同檔名，序列化成功才開檔。
+   RuntimeException 時保留舊檔、標回 `dataChanged` 待重試、不外拋，`QueuedSaveAll` 後段與關機 hook 照常完成。
+
+kill switch：`-Dmdc.animalSpawnGuard=0`（1＋2）、`-Dmdc.animalCellSave=0`（3），需重啟。
+
+### 守門與驗證
+
+SmokeCheck 釘三條存在理由（`IsoGameCharacter` 建構子內 `getAddList`、四個建構子各含兩項檢查、
+`AnimalCell.save` 的 FileOutputStream 早於序列化）、四個建構子 `tailCallOk` 且真指令恰 +2×RETURN、
+`checkStages`／`unload`／`worker.save` 同形改道、`AnimalCell.save()` 全 jar 恰 2 個呼叫點。
+`AnimalSpawnGuardTest`（on／off）：unsafe／safe 兩分支撤出、0,0,0 與正常建構不碰、grow／addBaby 只吞
+建構失敗的 NPE。`MdcAnimalCellSaveTest` 用真 `AnimalCell→AnimalChunk→VirtualAnimal→IsoAnimal` 序列化鏈：
+off 重現原版例外外拋＋檔案 0 bytes，on 例外不外拋、舊檔逐位元保留、健康 cell 正常覆寫。完整 build 與兩輪
+安裝往返通過。**真 `IsoAnimal` 建構子在測試 JVM 建不起來，建構子 TailCall 只有結構驗證，沒有執行驗證。**
+
+線上驗收：`[AnimalSpawnGuard] ctor failed`／`skip grow` 出現時對照座標與 reason；`this.adef is null`、
+`AnimalData.getBreed` NPE、`AnimalCell.load> Exception` 新增檔案不再出現；`[AnimalCellSave] serialize failed`
+應為 0，出現代表仍有其他壞動物進到存檔，舊檔已保住。
 
 ---
 

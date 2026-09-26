@@ -2962,6 +2962,56 @@ public final class SmokeCheck {
                         "INVOKESTATIC " + babyHelper + ".addBaby (Lzombie/characters/animals/IsoAnimal;)Lzombie/characters/animals/IsoAnimal;")
                         .equals(methodText(method(distJava, adCls, "checkPregnancy", "()V"))));
 
+        // W37：動物半建構物件守衛＋apop 先序列化再開檔。存在理由三條（TIS 修好時會紅＝撤刀）：
+        // super() 先把角色加進 cell、IsoAnimal 建構子之後才做兩項會跳過 init 的檢查、AnimalCell.save
+        // 先開檔（截斷）才序列化。
+        String animalCls = "zombie/characters/animals/IsoAnimal";
+        String spawnHelper = "zombie/mdc/AnimalSpawnGuard";
+        String afterCtorDesc = "(L" + animalCls + ";)V";
+        failed += check("W37 vanilla IsoGameCharacter 建構子先把物件加入 cell addList／objectList",
+                countExactCalls(methodFromJar(jar, "zombie/characters/IsoGameCharacter", "<init>", "(Lzombie/iso/IsoCell;FFF)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getAddList", "()Ljava/util/Set;") == 1);
+        String[] w37Ctors = {
+                "(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;)V",
+                "(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;Z)V",
+                "(Lzombie/iso/IsoCell;IIILjava/lang/String;Lzombie/characters/animals/datas/AnimalBreed;)V",
+                "(Lzombie/iso/IsoCell;IIILjava/lang/String;Lzombie/characters/animals/datas/AnimalBreed;Z)V"};
+        for (String ctorDesc : w37Ctors) {
+            MethodNode vCtor = methodFromJar(jar, animalCls, "<init>", ctorDesc);
+            MethodNode pCtor = method(distJava, animalCls, "<init>", ctorDesc);
+            int returns = 0;
+            for (AbstractInsnNode in : vCtor.instructions) {
+                if (in.getOpcode() == Opcodes.RETURN) returns++;
+            }
+            failed += check("W37 vanilla 建構子 " + ctorDesc + " 含 chickenpocalypse＋water 兩項檢查",
+                    countExactCalls(vCtor, Opcodes.INVOKEVIRTUAL, animalCls, "checkForChickenpocalypse", "()Z") == 1
+                    && countExactCalls(vCtor, Opcodes.INVOKEVIRTUAL, animalCls, "checkForWater", "()Z") == 1);
+            failed += check("W37 建構子 " + ctorDesc + " 每個 RETURN 前 afterCtor、真指令恰 +2×RETURN",
+                    tailCallOk(pCtor, spawnHelper, "afterCtor", afterCtorDesc)
+                    && realInsnCount(pCtor) == realInsnCount(vCtor) + 2 * returns);
+        }
+        failed += check("W37 checkStages 唯一 grow 同形改道，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, adCls, "checkStages", "()V")).replace(
+                        "INVOKEVIRTUAL " + adCls + ".grow (Ljava/lang/String;)V",
+                        "INVOKESTATIC " + spawnHelper + ".grow (L" + adCls + ";Ljava/lang/String;)V")
+                        .equals(methodText(method(distJava, adCls, "checkStages", "()V"))));
+        String cellCls = "zombie/characters/animals/AnimalCell";
+        String cellHelper = "zombie/characters/animals/MdcAnimalCellSave";
+        String vCellSave = methodText(methodFromJar(jar, cellCls, "save", "()V"));
+        int fosAt = vCellSave.indexOf("INVOKESPECIAL java/io/FileOutputStream.<init>");
+        int serAt = vCellSave.indexOf("INVOKEVIRTUAL " + cellCls + ".save (Ljava/nio/ByteBuffer;)V");
+        failed += check("W37 vanilla AnimalCell.save 先開檔（截斷）才序列化",
+                fosAt >= 0 && serAt > fosAt);
+        failed += check("W37 AnimalCell.save() 全 jar 恰 2 個呼叫點（worker.save＋cell.unload）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, cellCls, "save", "()V") == 2);
+        String[][] cellSaveCallers = {{cellCls, "unload"}, {"zombie/characters/animals/AnimalManagerWorker", "save"}};
+        for (String[] caller : cellSaveCallers) {
+            failed += check("W37 " + caller[1] + " 的 AnimalCell.save 同形改道，其餘指令與 frames 保留",
+                    methodText(methodFromJar(jar, caller[0], caller[1], "()V")).replace(
+                            "INVOKEVIRTUAL " + cellCls + ".save ()V",
+                            "INVOKESTATIC " + cellHelper + ".save (L" + cellCls + ";)V")
+                            .equals(methodText(method(distJava, caller[0], caller[1], "()V"))));
+        }
         // 聲音觀測只包既有已認證派送，不修改 wire class 或任何聲音／魚群方法。
         String soundProbe = "zombie/network/packets/sound/MdcWorldSoundProbe";
         String soundPacket = "zombie/network/packets/sound/WorldSoundPacket";

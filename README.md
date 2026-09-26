@@ -69,6 +69,11 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   玩家端進度改為 1% 一跳。`-Dmdc.gameEntityRelevancy=0`／`-Dmdc.craftLogicSyncGate=0` 分別回原版。
   詳見 [W36](docs/patches.md#2ay-gameentity-廣播收件範圍craftlogic-同步變化閘w36server預設-enforce)。
 
+- **動物半建構物件 W37**：原版動物建構檢查失敗時，會把 adef/data 為 null 的物件留在世界，每 tick
+  打斷世界更新（時間凍結）並讓動物存檔失敗；存檔又先開檔才序列化，把 apop 檔截成 0 bytes。改為撤出失敗
+  物件、只吞該次建構失敗造成的 NPE，並在序列化成功後才寫檔。`-Dmdc.animalSpawnGuard=0`／
+  `-Dmdc.animalCellSave=0` 分別回原版。詳見 [W37](docs/patches.md#2az-動物半建構物件守衛apop-先序列化再開檔w37server預設-on)。
+
 > 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 
 逐項 javap 證據與安全論證：[docs/patches.md](docs/patches.md)；分析原始規格：[docs/specs/](docs/specs/)。

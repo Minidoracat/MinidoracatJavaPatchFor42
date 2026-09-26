@@ -9,12 +9,10 @@ import zombie.debug.DebugLog;
  * W33 分娩品種守衛（2026-09-25；docs/patches.md 2av）。
  *
  * <p><b>事故</b>（正式服 9/24 18:03:06）：{@code AnimalData.checkPregnancy → IsoAnimal.addBaby}
- * NPE「getData() is null」。原版 {@code addBaby} 以母獸品種名查幼崽定義
- * （{@code AnimalDefinitions.getDef(babyType).getBreedByName(...)}），查不到就把 null 品種交給
- * {@code IsoAnimal} 建構子，產出 data／adef 皆 null 的幼崽並已進入世界；隨後
- * {@code IsoAnimal.update} 每 tick NPE（1289 次，打斷 {@code IsoCell.ProcessObjects}），
- * 關機前 {@code AnimalPopulationManager.save} 也因它 NPE 中斷。
- *
+ * NPE「getData() is null」。原版以母獸品種名查幼崽定義，查不到就把 null 品種交給建構子。
+ * <b>2026-09-26 更正</b>：null 品種本身不會造出 data 為 null 的幼崽（{@code AnimalData} 建構子會
+ * 改抽隨機品種）；data 為 null 的真因是建構子的 chickenpocalypse／water 檢查失敗，由 W37
+ * {@link AnimalSpawnGuard} 處理。本刀保留為品種不符的保守跳過。
  * <p><b>手術</b>：{@code checkPregnancy} 內唯一 {@code addBaby()} 呼叫 1:1 改道。先做原版同一組
  * 查詢，任一環為 null 就不生這一隻（回 null，caller 丟棄回傳值）並記母獸資訊；否則委派原版，
  * 行為逐位元不變。Lua／其他 caller 不經此路徑。kill switch {@code -Dmdc.babyBreedGuard=0}。
@@ -30,12 +28,12 @@ public final class BabyBreedGuard {
 
     public static IsoAnimal addBaby(IsoAnimal mother) {
         if (!ENABLED) {
-            return mother.addBaby();
+            return AnimalSpawnGuard.addBaby(mother);
         }
         births++;
         String reason = missingBreed(mother);
         if (reason == null) {
-            return mother.addBaby();
+            return AnimalSpawnGuard.addBaby(mother);
         }
         if (++blocked <= DETAIL_LIMIT) {
             report(mother, reason);
@@ -71,7 +69,7 @@ public final class BabyBreedGuard {
                     + " breed=" + (breed == null ? "null" : breed.getName())
                     + " babyType=" + mother.adef.babyType
                     + " pos=" + (int) mother.getX() + "," + (int) mother.getY() + "," + (int) mother.getZ()
-                    + "（原版會產出 data/adef 為 null 的幼崽，拖垮世界更新與動物存檔）");
+                    + "（幼崽定義查不到母獸品種，原版會改抽隨機品種）");
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
         }
