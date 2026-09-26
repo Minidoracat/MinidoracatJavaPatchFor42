@@ -321,7 +321,7 @@ public final class AnimalLosGateTest {
 
         // maybeBeat 內層覆蓋（review r2）：4096-call 閘讓七組態的正常呼叫量（最大 N=16 組態
         // 約 2080，均 < 4096）永遠不進
-        // 內層。反射把 calls 推到閘界，下一呼叫時 (calls & 0xFFF)==0 進入 60s 節流判斷＋
+        // 內層。反射把 calls 推到閘界，下一呼叫時 (calls & 0xFFF)==0 進入 300s 節流判斷＋
         // beat 拼接（lastBeatNs==0 ⇒ 必印一行含 lodPassthrough 的 beat）——驗拼接不炸、
         // 不計 anomalies。註：此步破壞 calls=forwarded+skipped 恆等式，故置於對帳斷言之後。
         Field callsField = AnimalLosGate.class.getDeclaredField("calls");

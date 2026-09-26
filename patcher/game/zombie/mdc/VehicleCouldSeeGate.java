@@ -58,11 +58,16 @@ public final class VehicleCouldSeeGate {
         return false;
     }
 
+    /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27）；只在主執行緒。 */
+    private static long lastBeatMs;
+
     private static void maybeLog() {
         long total = serverSkipped + replicated;
         // 呼叫率比 VehicleIntersectPrefilter 低 1-2 個數量級（每車每 tick 一次而非每殭屍每車），
         // mask 相應調小，確保首日 runbook「缺行即回退」判準在分鐘級可用（code review 處方）
-        if ((total & 0x3FFFF) == 0L && total != 0L) {
+        long now;
+        if ((total & 0x3FFFF) == 0L && total != 0L && (now = System.currentTimeMillis()) - lastBeatMs >= 300_000L) {
+            lastBeatMs = now;
             DebugType.Multiplayer.println("[MinidoracatJavaPatch][VehicleCouldSee] serverSkipped="
                     + serverSkipped + " replicated=" + replicated);
         }

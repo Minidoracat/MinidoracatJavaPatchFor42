@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import zombie.GameTime;
 import zombie.characters.IsoPlayer;
 import zombie.core.network.ByteBufferWriter;
 import zombie.core.raknet.UdpConnection;
@@ -66,7 +65,7 @@ public final class MdcTimedActionProbe {
 
     private static final long WINDOW_NS = 10_000_000_000L;
     private static final int WINDOW_CAP = 20;
-    private static final long BEAT_NS = 60_000_000_000L;
+    private static final long BEAT_NS = 300_000_000_000L;
 
     /** ActionManager.actions（private static final ConcurrentLinkedQueue<Action>）——class init 一次快取。 */
     private static final Field ACTIONS_FIELD = resolveActionsField();
@@ -128,15 +127,6 @@ public final class MdcTimedActionProbe {
             }
             if (action.duration < 0L) {
                 negativeDuration++;
-                if (allowLine()) {
-                    DebugLog.log(TAG + " negativeDuration#" + negativeDuration
-                            + " type=" + action.type + " name=" + action.name
-                            + " player=" + playerName(action)
-                            + " duration=" + action.duration
-                            + " endTimeDeltaMs=" + (action.endTime - action.startTime)
-                            + " (server 將等到 durationMax 才 perform)"
-                            + " suppressed=" + suppressed + ".");
-                }
             }
         } catch (RuntimeException e) {
             anomalies++;
@@ -166,8 +156,6 @@ public final class MdcTimedActionProbe {
         }
         NetTimedActionPacket request = CURRENT_PACKET.get() instanceof NetTimedActionPacket p ? p : null;
         int requestId = request == null ? Integer.MIN_VALUE : request.id;
-        String requestType = request == null ? "?" : request.type;
-        long now = GameTime.getServerTimeMills();
         UdpConnection connection = CURRENT_CONNECTION.get();
         boolean connectionScoped = SCOPE_ON && CURRENT_PACKET.get() != null;
         for (Object o : actions) {
@@ -185,21 +173,8 @@ public final class MdcTimedActionProbe {
             if (sameId) {
                 sameIdResend++;
             }
-            String verdict;
             if (MODE == MODE_ENFORCE && !sameId && old instanceof NetTimedAction) {
-                verdict = sendReject(old) ? "reject-sent" : "reject-skipped-no-conn";
-            } else {
-                verdict = sameId ? "same-id-resend" : "silent-drop(vanilla)";
-            }
-            if (allowLine()) {
-                DebugLog.log(TAG + " interrupted#" + interruptedAccepted
-                        + " player=" + playerName(old)
-                        + " old=" + typeOf(old) + "#" + old.id
-                        + " waitedMs=" + (now - old.startTime)
-                        + " remainingMs=" + (old.endTime - now)
-                        + " new=" + requestType + "#" + (request == null ? "?" : String.valueOf(request.id))
-                        + " action=" + verdict
-                        + " suppressed=" + suppressed + ".");
+                sendReject(old);
             }
         }
     }
@@ -237,12 +212,6 @@ public final class MdcTimedActionProbe {
             performCalls++;
             if (!result) {
                 performFalse++;
-                if (allowLine()) {
-                    DebugLog.log(TAG + " performFalse#" + performFalse
-                            + " type=" + typeOf(action)
-                            + " player=" + playerName(action)
-                            + " (vanilla 接著送 Reject)" + ".");
-                }
             }
         } catch (RuntimeException e) {
             anomalies++;
@@ -369,7 +338,6 @@ public final class MdcTimedActionProbe {
     private static void removeForConnection(Collection<?> actions, Action initiator, UdpConnection connection,
             byte id, boolean cancelled) {
         boolean observe = MODE != MODE_OFF;
-        long now = observe ? GameTime.getServerTimeMills() : 0L;
         List<Action> owned = null;
         int hits = 0;
         for (Object o : actions) {
@@ -380,14 +348,12 @@ public final class MdcTimedActionProbe {
                 owned.add(queued);
             } else if (observe) {
                 sparedOther++;
-                logSpared(initiator, connection, queued, id, cancelled, now);
             }
         }
         if (observe && hits > 1) removeMultiHit++;
         if (owned == null) {
             if (observe) {
                 noOwnedMatch++;
-                logNoTarget(initiator, connection, id, cancelled, hits, false);
             }
             return;
         }
@@ -439,42 +405,22 @@ public final class MdcTimedActionProbe {
     private static void refuseUnknown(Action initiator, UdpConnection connection, byte id, boolean cancelled) {
         if (MODE != MODE_OFF) {
             unknownRefused++;
-            logNoTarget(initiator, connection, id, cancelled, -1, true);
+            logUntrusted(initiator, connection, id, cancelled);
         }
     }
 
-    private static void logSpared(Action initiator, UdpConnection connection, Action victim, byte id,
-            boolean cancelled, long now) {
+    /** 逐筆明細只留「身分不可信」這個異常訊號（恆 0）；其餘改由 beat 計數（2026-09-27 log 精簡）。 */
+    private static void logUntrusted(Action initiator, UdpConnection connection, byte id, boolean cancelled) {
         try {
             if (!allowLine()) return;
-            DebugLog.log(TAG + " otherOwnerSameId#" + sparedOther
-                    + " id=" + id + " cancelled=" + cancelled
-                    + " connection=" + connection.getConnectedGUID()
-                    + " connectionPlayers=" + connectionPlayers(connection)
-                    + " sourceType=" + safeName(typeOf(initiator))
-                    + " owner=" + playerName(victim) + "/" + safeName(typeOf(victim))
-                    + " state=" + victim.state + " duration=" + victim.duration
-                    + " waitedMs=" + (now - victim.startTime)
-                    + " remainingMs=" + (victim.endTime - now)
-                    + " action=spared(scope=connection) suppressed=" + suppressed + ".");
-        } catch (RuntimeException e) {
-            anomalies++;
-        }
-    }
-
-    private static void logNoTarget(Action initiator, UdpConnection connection, byte id, boolean cancelled,
-            int hits, boolean unknown) {
-        try {
-            if (hits == 0 && !unknown) return;
-            if (!allowLine()) return;
-            DebugLog.log(TAG + (unknown ? " untrustedAction#" + unknownRefused : " noOwnedMatch#" + noOwnedMatch)
+            DebugLog.log(TAG + " untrustedAction#" + unknownRefused
                     + " id=" + id + " cancelled=" + cancelled
                     + " state=" + (initiator == null ? "?" : initiator.state)
                     + " connection=" + (connection == null ? "none" : connection.getConnectedGUID())
                     + " connectionPlayers=" + connectionPlayers(connection)
                     + " sourceType=" + safeName(typeOf(initiator))
                     + " source=" + (CURRENT_PACKET.get() == null ? "server-internal" : "packet")
-                    + " sameIdInQueue=" + hits + " action=refused suppressed=" + suppressed + ".");
+                    + " action=refused suppressed=" + suppressed + ".");
         } catch (RuntimeException e) {
             anomalies++;
         }
@@ -583,7 +529,7 @@ public final class MdcTimedActionProbe {
         return SCOPE_ON ? "connection" : "vanilla";
     }
 
-    /** heartbeat：每 256 個 start 檢查一次時鐘、60s 一行。 */
+    /** heartbeat：每 256 個 start 檢查一次時鐘、300s 一行。 */
     private static void maybeBeat() {
         if ((starts & 0xFFL) != 0L) {
             return;

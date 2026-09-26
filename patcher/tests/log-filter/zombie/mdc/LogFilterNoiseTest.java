@@ -2,10 +2,10 @@ package zombie.mdc;
 
 /**
  * LogFilter warnObj 攔截判定行為鎖（全名單雙向鏡像）——OBJ_EXACT 從 9 名放大到
- * 19 名後，人工核對錯誤不再有建置期防線（LoadCheck 只驗簽名、SmokeCheck 只驗
+ * 37 名後，人工核對錯誤不再有建置期防線（LoadCheck 只驗簽名、SmokeCheck 只驗
  * 命中數），本測試鎖住：
  * <ul>
- *   <li>雙向鏡像：19 個保留名逐條必攔、17 個依門檻剔除名逐條必放行——鏡像是刻意的
+ *   <li>雙向鏡像：37 個保留名逐條必攔、5 個依門檻剔除名逐條必放行——鏡像是刻意的
  *       雙重記帳：改 OBJ_EXACT 必須同步改本測試，一換一貼錯／誤刪／誤復活都會爆；</li>
  *   <li>equals 紀律：延伸名／截斷名／未知名／空串必須放行（寧漏不誤）；</li>
  *   <li>名單防呆：反作弊訊息不經 warnObj（真正的路徑保護是 SmokeCheck 的 patch
@@ -18,7 +18,7 @@ public final class LogFilterNoiseTest {
 
     private static final String P = "Invalid SpriteConfig object! scripted object = ";
 
-    /** OBJ_EXACT 的 SpriteConfig 段完整鏡像（3 初版＋6 42.20＋10 42.20.3）。 */
+    /** OBJ_EXACT 的 SpriteConfig 段完整鏡像（3 初版＋6 42.20＋10 42.20.3＋18 42.20.4）。 */
     private static final String[] SUPPRESSED_NAMES = {
         "MetalBigWireFence", "WoodFloorLvl3", "Wooden_Windows",
         "DoubleWireGate", "BrickWallLvl2", "MetalSmallWireFence",
@@ -26,22 +26,23 @@ public final class LogFilterNoiseTest {
         "SandFloor", "WoodenDarkWallLvl3", "GravelFloor", "Floor_SpringGrass",
         "DoubleDoor", "WoodenWindowFrameLvl3", "WoodFloorLvl2",
         "Wood_DoubleDoorDark", "WoodDoorFrameLvl3", "Fences_MetalFarmGate",
+        "Commercial_FullGlassBlackWall", "Commercial_GridGlassBlackWall", "Commercial_HalfGlassRedWall",
+        "Commercial_FullGlassRedWall", "Commercial_HalfGlassBlackWall", "Commercial_GridGlassRedWall",
+        "MetalFloorLvl1", "Wood_Crate_Lvl2", "Floor_SummerGrass", "WoodFloorLvl1",
+        "WoodenDarkDoorFrameLvl3", "Composter", "BrickFloorLvl1", "Floor_SummerGrassCorner",
+        "ComposterShoddy", "DoubleFenceGate", "WoodenDarkWindowFrameLvl3", "Floor_Concrete",
     };
 
-    /** 42.20.3 依入列門檻（≥4 筆/h）刻意剔除的 17 名（86～2 筆/26h）——必須放行。 */
+    /** 依入列門檻（≥4 筆/h）仍未達標的名字（2026-09-26 25.2h 窗：3.3/h 以下）——必須放行。 */
     private static final String[] REJECTED_BY_THRESHOLD = {
-        "BrickDoorFrameLvl2", "ComposterShoddy", "Composter", "MetalFloorLvl1",
-        "LogGate", "BrickFloorLvl1", "Wood_FancyBookCase", "WoodenDarkDoorFrameLvl3",
-        "Wood_Crate_Lvl2", "Commercial_GridGlassRedWall", "Commercial_FullGlassBlackWall",
-        "WoodenPole", "Commercial_HalfGlassBlackWall", "Commercial_HalfGlassRedWall",
-        "Commercial_GridGlassBlackWall", "Commercial_FullGlassRedWall", "Campfire",
+        "BrickDoorFrameLvl2", "LogGate", "Wood_FancyBookCase", "WoodenPole", "Campfire",
     };
 
     public static void main(String[] args) {
-        // 規模鎖：OBJ_EXACT 收了鏡像之外的名字時，19 條 suppressed 全過也會在此爆
+        // 規模鎖：OBJ_EXACT 收了鏡像之外的名字時，37 條 suppressed 全過也會在此爆
         if (LogFilter.objExactCountForTest() != SUPPRESSED_NAMES.length) {
             throw new AssertionError("OBJ_EXACT 應為 " + SUPPRESSED_NAMES.length
-                    + " 名（3 初版＋6 42.20＋10 42.20.3），實得 " + LogFilter.objExactCountForTest()
+                    + " 名（3 初版＋6 42.20＋10 42.20.3＋18 42.20.4），實得 " + LogFilter.objExactCountForTest()
                     + "——名單增減必須同步本測試與 docs");
         }
         // 雙向鏡像：保留名逐條必攔、門檻剔除名逐條必放行
@@ -63,6 +64,12 @@ public final class LogFilterNoiseTest {
         // OBJ_PREFIX 既有行為鎖（PacketsCache 動態尾綴）
         requireSuppressed("No packet handler for type: 999");
         requireForwarded("No packet handler for typo: 999");
+        // 抑噪 #10 LOG_PREFIX：車輛卸載正常路徑（動態 id 尾綴）必攔；同方法外的相似字串、null 放行
+        require(LogFilter.suppressesLog("IsoChunk.removeFromWorld: vehicle wasn't removed from world id=42"),
+                "vehicle unload 前綴必須被攔");
+        require(!LogFilter.suppressesLog("IsoChunk.removeFromWorld: vehicle was removed from world id=42"),
+                "改字的訊息必須放行");
+        require(!LogFilter.suppressesLog(null), "suppressesLog(null) 必須放行（不得 NPE）");
         // 抑噪 #9 println 名單：只攔 IsoThumpable 的 not-found；同方法的 square-is-null、
         // 其他 class 的 not-found（破損訊號）、null 一律放行
         require(LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on square 8769,15252,0"),
@@ -74,7 +81,7 @@ public final class LogFilterNoiseTest {
         require(!LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on squar"),
                 "截斷前綴必須放行");
         require(!LogFilter.suppressesPrintln(null), "null 必須放行（不得 NPE）");
-        System.out.println("log-filter OK  雙向鏡像 19+17／equals 紀律／名單防呆／prefix 行為／println 名單全數通過");
+        System.out.println("log-filter OK  雙向鏡像 37+5／equals 紀律／名單防呆／prefix 行為／println 名單全數通過");
     }
 
     private static void requireSuppressed(String msg) {

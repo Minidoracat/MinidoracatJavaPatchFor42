@@ -61,7 +61,7 @@ public final class AnimalLosGate {
 
     static final int MODE = parseMode();
     static final int N = readInt("mdc.animalLosN", 2, 1, 16);
-    private static final long BEAT_NS = 60_000_000_000L;
+    private static final long BEAT_NS = 300_000_000_000L;
 
     // 主執行緒單寫單讀（updateInternal 只在主迴圈跑；行為測試亦單執行緒），普通 long 即可。
     private static long calls;
@@ -176,7 +176,7 @@ public final class AnimalLosGate {
 
     /**
      * heartbeat：每 4096 次呼叫才讀一次時鐘（熱路徑不無條件讀 nanoTime——比照
-     * AnimalRelevancyGate/ChunkWriteGuard 的計數器節流慣例），60s 節流一行。
+     * AnimalRelevancyGate/ChunkWriteGuard 的計數器節流慣例），300s 節流一行。
      * 自包 RuntimeException：log 基礎設施故障計 anomalies、不外逃、不擋主流程。
      */
     private static void maybeBeat() {

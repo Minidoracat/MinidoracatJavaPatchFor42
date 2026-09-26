@@ -4079,6 +4079,91 @@ headCall 與真指令 +2、`IsoCell` 其餘方法逐指令不變。`ProcessItems
 寫入被記錄。線上驗收：`beat size` 維持小量；若出現 `null in processItems` 或 `off-main-thread write`，
 以該行的執行緒與呼叫來源追查 null 的真正來源。
 
+**2026-09-26 線上結果**：18:00／20:06 重啟後 `nulls=0`，清單 1.5–3.1 萬；`off-main-thread write` 每分鐘約 38 次
+（20:06 session 到 23:59 共 8,384 次），抽樣明細（前 20 筆＋每 1000 筆，28 行）全是 `ServerPlayersVehicles` 執行緒載入車輛：`VehiclesDB2$SQLStore.loadChunk` →
+`BaseVehicle.load` → `setCurrentKey` → `ItemContainer.AddItem` → `IsoCell.addToProcessItems`。修法見 W41（2bd）。
+
+## 2bd. 非主執行緒物品登記改道主執行緒（W41，server，預設 on）
+
+**根因**：W40 抓到的唯一跨執行緒寫入者是 `ServerPlayersVehicles`。它在背景載入車輛時把鑰匙放進車內容器，
+`ItemContainer.AddItem` 無條件 `IsoCell.addToProcessItems(item)`，與主執行緒同時增刪同一份 `ArrayList`。
+`ArrayList.add` 擴容與主執行緒 `remove` 交錯，就會留下 null 或重複項——正是 W40 的 null 來源。
+
+**手術**：`ItemContainer.AddItem(InventoryItem)`／`AddItem(String)` 內唯一 `addToProcessItems` 1:1 改道
+`ProcessItemsGuard.addToProcessItems`（與 W5 同一個 `ItemContainer` ClassPatch）。主執行緒
+（`GameServer.mainThread`）照原版直接登記；其他執行緒排入 `ConcurrentLinkedQueue`，由 `ProcessItems` 頭部
+`beginPass` 在主執行緒補登記，最晚延後一個處理週期。佇列超過 100,000 件時退回原版直接寫。補登記前若物品已被
+移除，會多被 `update()` 一次再由 `finishupdate()` 移出，與原版「先登記後移除」的形狀相同。
+`AddItemBlind` 本來就不登記，保持原版。kill switch `-Dmdc.processItemsDefer=0`（與 W40 的 `processItemsGuard` 分開）。
+
+**W40 量測擴充**：`ProcessItems` 唯一 RETURN 前 `endPass` 記單次耗時；`addToProcessItems(InventoryItem)` 頭部
+`touchAdd` 計登記次數，每 256 次抽樣量一次整份清單 `contains` 的耗時；`addToProcessItems(ArrayList)` 頭部
+`touchAddAll` 計批次件數（原版逐件 `contains`）。beat 新增 `passes passMsAvg passMsMax addCalls addAllItems
+scanUsAvg estScanMs deferred drained pending overflow`；`estScanMs`＝登記次數×抽樣平均，用來判斷是否值得把清單
+換成 HashSet。
+
+SmokeCheck：`BaseVehicle.setCurrentKey` 經 `ItemContainer` 加鑰匙（存在理由）、兩個 `AddItem` 同形改道其餘指令與
+frames 不變、`AddItemBlind` 不動、`ProcessItems` 頭 beginPass＋尾 endPass 真指令 +4、四個寫入口 headCall 形狀。
+`ProcessItemsGuardTest nodefer` 驗其他執行緒照原版直接寫；`on` 驗排入佇列、不碰清單、下一次 `ProcessItems`
+補登記且當幀處理。線上驗收：`off-main-thread write` 歸零（改道後其他執行緒不再進 `IsoCell`）、`deferred≈drained`、
+`pending` 小、`overflow=0`、`nulls=0`。
+
+## 2be. 動物補算時數上限（W42，server，預設 on）
+
+**證據（20:06 session，3.3h）**：W32 記到 650 筆補算，174 筆的 zone 時數比動物自身離線時間多 ≥24h；38 隻死亡中
+25 隻在補算後 60 秒內，其中 8 隻浣熊同一圈舍 `catchUp=2x/17h`、hunger 1.0 同時死亡，`AnimalMetaPredator=false`。
+W38 已消除 doMeta 內的重複補算（594/3057 組 → 1/649），剩下的是時數本身算太多。
+
+**根因**：`fromWorker` 與 `DesignationZoneAnimal.doMeta` 都以 `worldAgeHours - zone.hourLastSeen` 當離線時數。
+`hourLastSeen` 只在整個 zone 離開串流時更新；大圍場部分 chunk 重載、或 zone 在關機時仍串流中，重啟與重載都會
+拿陳舊值、重補數天。動物自身 `timeSinceLastUpdate` 由 `unloaded()` 寫入，是較準的離線起點，但原版在動物活著時
+不更新它，一直載入中的動物時鐘停在上次卸載，存檔後帶著陳舊值。
+
+**手術**：
+- W32 的三個補算改道（`AnimalAwayProbe`）在委派前讀動物自身離線時數，取 `min(zone 時數, 自身時數)`；自身無紀錄
+  （-1，新生或舊存檔）沿用原版時數；時鐘在未來（先前多補、之後未卸載）補 0；非正時數不動。只會減少、不會增加。
+- `AnimalData.update` 內唯一 `hourGrow(false)`（活著的每小時一次）1:1 改道 `liveHourGrow`：先把動物時鐘設為
+  現在再委派。與 W33 同一個 `AnimalData` ClassPatch。
+- kill switch `-Dmdc.animalCatchUpCap=0`：回原版時數且不刷新時鐘。`-Dmdc.animalAwayProbe=0` 只關觀測，上限照做。
+
+部署後第一次載入時，仍帶舊版陳舊時鐘的動物上限無效（自身時數也很大）＝原版行為；活過一小時或卸載一次後才有效。
+
+**觀測**：W32 beat 新增 `capped cappedHours clockRefresh cap`，`sumHours` 改名 `sumAppliedHours`（實際補算時數）。
+逐筆明細只在「zone 時數比自身多 ≥24h」或「補算後死亡」時記，新增 `applied=`。W39 死亡帳本的 `catchUp` 記實際補算時數。
+
+SmokeCheck：原版 `AnimalData` 全 class 零寫入動物時鐘、`update` 內 `hourGrow` 恰 1（存在理由），改道同形。
+`AnimalAwayProbeTest` 三組態：出貨組態驗陳舊 zone 補 2h 而非 200h、時鐘在未來補 0、無紀錄沿用 500h、活著時刷新時鐘；
+`nocap` 驗全部回原版時數且不刷新。線上驗收：`capped` 與 `cappedHours` 成長、`mismatch` 明細的 `applied` 接近
+`animalHoursAway`、補算後 60 秒內的死亡明顯減少。
+
+## 2bf. 2026-09-27 log 精簡、探針退役與量測補強（server）
+
+20:06 session（3.8h、53,126 行）的 patch log 以 TimedActionProbe 2,863、AnimalRelevancy 2,542、ChunkWriteGuard
+1,946、AnimalAwayProbe 824 行為大宗。本輪只改輸出節奏與內容，不改任何刀的行為：
+
+- **心跳改 5 分鐘**：AnimalRelevancyGate、AnimalRequestGate、ChunkWriteGuard（計數閘後加 5 分鐘時間閘，多執行緒用
+  CAS）；VehicleIntersectPrefilter、VehicleCouldSeeGate（主執行緒）；AnimalLosGate、AnimalLosScan、W10-C beat
+  （60s → 300s）。
+- **W10-C 逐筆明細移除**：`negativeDuration#`、`interrupted#`、`performFalse#`、`otherOwnerSameId#`、`noOwnedMatch#`
+  只留 beat 計數；唯一保留 `untrustedAction#`（身分不可信，異常訊號，恆 0）。1,600 筆負時長全是動畫動作、709 次
+  打斷中 653 次是 ISWaitWhileGettingUp，逐筆已無新資訊。
+- **W39 `via` 修正**：38 筆全卡在 `IsoPlayer.onKilled<IsoGameCharacter.Kill<…<die`。改為跳過 `OnDeath`／`DoDeath`／
+  `onKilled`／`Kill`／`die`，取前 6 個遊戲幀。
+- **退役**：W5-2 `ContainerAddCycleProbe`（9/23–9/26 共 40 個 session wouldCycle／depthCapped 全 0；W5 捕手仍在）、
+  W20(a) `ContainerIdProbe`（同窗每 session 0–3 次 square-null，ContainerID 不再 patch）、WorldSound 週期心跳
+  （同窗零慢呼叫；慢呼叫明細與看門狗的 `describeActive` 保留）。
+- **抑噪 #10**：`IsoChunk.removeFromWorld: vehicle wasn't removed from world id=`（20:06 session 3,002 行、678 個
+  id、佔 5.7%）。dedicated server 的 `IsoPlayer.players[]` 只有 ServerLOS 執行緒瞬間寫入，`BaseVehicle.removeFromWorld`
+  的乘客早退幾乎不成立；原版印完隨即再呼叫一次 `removeFromWorld` 完成移除＝車輛卸載的正常路徑。方法內唯一
+  `DebugLog.log(String)` 改道 `LogFilter.log`，`LOG_PREFIX` 以 startsWith 攔。SmokeCheck 釘「印完再移除」與乘客早退
+  只比對 `IsoPlayer.players`。
+- **SpriteConfig 18 名**：2026-09-26 25.2h 窗重算，達 ≥4 筆/h 者收（Commercial_* 六名、MetalFloorLvl1、Wood_Crate_Lvl2、
+  Floor_SummerGrass、WoodFloorLvl1、WoodenDarkDoorFrameLvl3、Composter、BrickFloorLvl1、Floor_SummerGrassCorner、
+  ComposterShoddy、DoubleFenceGate、WoodenDarkWindowFrameLvl3、Floor_Concrete）。8/19 窗內不達標的名字量已放大；
+  BrickDoorFrameLvl2（3.3/h）以下仍放行。`LogFilterNoiseTest` 鏡像 37＋5。
+- **雞舍同步變化量測**（W26，純觀測）：每次自發 sync 的 payload 與同一雞舍上一次逐位元比較，beat 新增
+  `unchanged unchangedBytes`。蛋的 Food age 每秒可變，只有 payload 完全相同才算；數據出來前不做 W36 式變化閘。
+
 ---
 
 ## 3. 部署後驗證清單

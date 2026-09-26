@@ -85,9 +85,14 @@ public final class VehicleIntersectPrefilter {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27）；只在主執行緒。 */
+    private static long lastBeatMs;
+
     private static void maybeLog() {
         long total = rejected + delegated;
-        if ((total & 0xFFFFFF) == 0L && total != 0L) {
+        long now;
+        if ((total & 0xFFFFFF) == 0L && total != 0L && (now = System.currentTimeMillis()) - lastBeatMs >= 300_000L) {
+            lastBeatMs = now;
             DebugType.Multiplayer.println("[MinidoracatJavaPatch][VehiclePrefilter] rejected="
                     + rejected + " delegated=" + delegated + " anomalies=" + anomalies);
         }

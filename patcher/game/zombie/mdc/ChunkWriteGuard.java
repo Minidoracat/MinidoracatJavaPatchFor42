@@ -284,7 +284,15 @@ public final class ChunkWriteGuard {
         }
     }
 
+    /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27：原每 2048 次寫入一行）；存檔 worker 多執行緒故用 CAS。 */
+    private static final AtomicLong LAST_BEAT_MS = new AtomicLong();
+
     private static void heartbeat() {
+        long now = System.currentTimeMillis();
+        long prev = LAST_BEAT_MS.get();
+        if (now - prev < 300_000L || !LAST_BEAT_MS.compareAndSet(prev, now)) {
+            return;
+        }
         try {
             DebugLog.log("[MinidoracatJavaPatch][ChunkWriteGuard] passed=" + passed.get()
                     + " flagged=" + flagged.get() + " anomalies=" + anomalies.get() + " mode=" + MODE);

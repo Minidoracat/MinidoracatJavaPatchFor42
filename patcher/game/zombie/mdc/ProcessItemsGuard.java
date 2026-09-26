@@ -1,50 +1,84 @@
 package zombie.mdc;
 
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import zombie.debug.DebugLog;
 import zombie.inventory.InventoryItem;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoWorld;
+import zombie.network.GameServer;
 
 /**
- * W40 物品處理清單 null 容錯＋跨執行緒寫入觀測（2026-09-26；docs/patches.md 2bc）。
+ * W40 物品處理清單 null 容錯＋W41 跨執行緒寫入改道主執行緒（2026-09-26；docs/patches.md 2bc／2bd）。
  *
- * <p><b>事故</b>（9/26 13:52–15:21）：{@code IsoCell.processItems} 混進一個 null。伺服器每 5 秒跑一次
- * {@code ProcessItems}，每次都在 {@code i.update()} NPE（738 次）；null 之後的物品永遠不再被評估，
- * {@code finishupdate()} 為真的物品不再移出，清單一路長到「已載入容器的全部物品」。每個容器載入都要對
- * 整份清單做 {@code ArrayList.contains}，chunk 載入凍結 5–16 秒，20–29 人時 fps 從 9.8 掉到 2–3。
- * null 的來源在靜態分析中找不到（所有加入點都擋 null、封包都排入主迴圈），推測是跨執行緒寫入的資料競爭。
+ * <p><b>W40</b>：{@code IsoCell.ProcessItems} 內唯一 {@code InventoryItem.update()}／{@code finishupdate()}
+ * 1:1 改道；null 時不呼叫、{@code finishupdate} 回 true，同一幀由原版 {@code ProcessRemoveItems} 移除。
  *
- * <p><b>手術</b>：(1) {@code ProcessItems} 內唯一 {@code InventoryItem.update()}／{@code finishupdate()}
- * 1:1 改道：null 時不呼叫、{@code finishupdate} 回 true，讓原版把它放進 processItemsRemove，
- * 同一幀的 {@code ProcessRemoveItems} 就移掉；非 null 行為不變。(2) 四個 addToProcessItems／
- * addToProcessItemsRemove 頭部與 {@link BulkItemRegistration} 快路徑呼叫 {@link #touch}：非主執行緒寫入
- * 時記執行緒名與呼叫來源（純觀測）。每 5 分鐘一行心跳帶清單大小。kill switch {@code -Dmdc.processItemsGuard=0}。
+ * <p><b>W41</b>：W40 觀測抓到 null 的來源——{@code ServerPlayersVehicles} 執行緒載入車輛時
+ * （{@code VehiclesDB2.SQLStore.loadChunk → BaseVehicle.load → setCurrentKey → ItemContainer.AddItem}）
+ * 直接呼叫 {@code IsoCell.addToProcessItems}，與主執行緒同時增刪同一份 {@code ArrayList}（晚峰約每分鐘 38 次）。
+ * {@code ItemContainer.AddItem} 兩個 {@code addToProcessItems} 呼叫點改道 {@link #addToProcessItems}：
+ * 不在主執行緒（{@code GameServer.mainThread}）時排入佇列，由 {@code ProcessItems} 頭部 {@link #beginPass}
+ * 在主執行緒補登記；佇列超過上限退回原版直接呼叫。
+ *
+ * <p><b>觀測</b>：四個寫入口頭部記錄非主執行緒寫入（前 20 筆＋每 1000 筆附呼叫來源）；每 5 分鐘心跳帶
+ * 清單大小、ProcessItems 單次耗時、登記呼叫量與抽樣線性搜尋成本（每 256 次量一次整份 contains）。
+ * kill switch：{@code -Dmdc.processItemsGuard=0}（W40＋觀測）、{@code -Dmdc.processItemsDefer=0}（W41）。
  */
 public final class ProcessItemsGuard {
 
     private static final boolean ENABLED = !"0".equals(System.getProperty("mdc.processItemsGuard"));
+    private static final boolean DEFER = !"0".equals(System.getProperty("mdc.processItemsDefer"));
     private static final String TAG = "[MinidoracatJavaPatch][ProcessItemsGuard] ";
     private static final long HEARTBEAT_MS = 300_000L;
     private static final long DETAIL_LIMIT = 20L;
+    private static final int DEFER_CAP = 100_000;
+    private static final long SAMPLE_MASK = 255L;
+    private static final Object SENTINEL = new Object();
 
-    /** 第一次 ProcessItems 的執行緒＝主執行緒；之前不做跨執行緒判定。 */
-    private static volatile Thread main;
-    // update／finishupdate 只在主執行緒（IsoCell.ProcessItems）。
-    private static long calls, nulls, lastBeat;
+    private static final ConcurrentLinkedQueue<InventoryItem> QUEUE = new ConcurrentLinkedQueue<>();
+    private static final AtomicInteger pending = new AtomicInteger();
+    private static final AtomicLong deferred = new AtomicLong();
+    private static final AtomicLong overflow = new AtomicLong();
     private static final AtomicLong offThread = new AtomicLong();
     private static final AtomicLong anomalies = new AtomicLong();
+
+    // 以下只在主執行緒（ProcessItems 與主執行緒的寫入口）。
+    private static long calls, nulls, lastBeat;
+    private static long passes, passNsTotal, passNsMax, passStartNs, drained;
+    private static long addCalls, addAllItems, scanSamples, scanNsTotal;
+
+    /** {@code IsoCell.ProcessItems} 頭部：補登記其他執行緒排入的物品並開始計時。 */
+    public static void beginPass(IsoCell cell) {
+        passStartNs = System.nanoTime();
+        InventoryItem item;
+        while ((item = QUEUE.poll()) != null) {
+            pending.decrementAndGet();
+            drained++;
+            cell.addToProcessItems(item);
+        }
+    }
+
+    /** {@code IsoCell.ProcessItems} 唯一 RETURN 前。 */
+    public static void endPass(IsoCell cell) {
+        long ns = System.nanoTime() - passStartNs;
+        passes++;
+        passNsTotal += ns;
+        passNsMax = Math.max(passNsMax, ns);
+        long now = System.currentTimeMillis();
+        if (ENABLED && now - lastBeat >= HEARTBEAT_MS) {
+            lastBeat = now;
+            beat(cell);
+        }
+    }
 
     /** {@code IsoCell.ProcessItems} 內唯一 {@code InventoryItem.update()}。 */
     public static void update(InventoryItem item) {
         if (item != null) {
-            if (main == null) {
-                main = Thread.currentThread();
-            }
-            if ((++calls & 4095) == 0) {
-                maybeBeat();
-            }
+            calls++;
             item.update();
             return;
         }
@@ -68,11 +102,53 @@ public final class ProcessItemsGuard {
         return true;
     }
 
-    /** processItems／processItemsRemove 的寫入口：非主執行緒呼叫時記錄（純觀測）。 */
-    public static void touch(IsoCell cell) {
-        Thread m = main;
-        if (!ENABLED || m == null || Thread.currentThread() == m) {
+    /** {@code ItemContainer.AddItem} 的 {@code IsoCell.addToProcessItems} 改道：非主執行緒時排入佇列。 */
+    public static void addToProcessItems(IsoCell cell, InventoryItem item) {
+        Thread main = GameServer.mainThread;
+        if (!DEFER || main == null || Thread.currentThread() == main || item == null) {
+            cell.addToProcessItems(item);
             return;
+        }
+        if (pending.incrementAndGet() > DEFER_CAP) {
+            pending.decrementAndGet();
+            overflow.incrementAndGet();
+            cell.addToProcessItems(item);
+            return;
+        }
+        QUEUE.add(item);
+        deferred.incrementAndGet();
+    }
+
+    /** {@code IsoCell.addToProcessItems(InventoryItem)} 頭部。 */
+    public static void touchAdd(IsoCell cell) {
+        if (!onMain()) {
+            return;
+        }
+        if ((++addCalls & SAMPLE_MASK) == 0L) {
+            sampleScan(cell);
+        }
+    }
+
+    /** {@code IsoCell.addToProcessItems(ArrayList)} 頭部（原版逐件 contains）。 */
+    public static void touchAddAll(IsoCell cell, ArrayList<InventoryItem> items) {
+        if (onMain() && items != null) {
+            addAllItems += items.size();
+        }
+    }
+
+    /** {@code IsoCell.addToProcessItemsRemove} 兩個多載頭部與 {@link BulkItemRegistration} 快路徑。 */
+    public static void touch(IsoCell cell) {
+        onMain();
+    }
+
+    /** 主執行緒回 true；其他執行緒記錄後回 false；主執行緒尚未設定或 kill switch 時回 false 且不記。 */
+    private static boolean onMain() {
+        Thread main = GameServer.mainThread;
+        if (!ENABLED || main == null) {
+            return false;
+        }
+        if (Thread.currentThread() == main) {
+            return true;
         }
         long n = offThread.incrementAndGet();
         if (n <= DETAIL_LIMIT || n % 1000 == 0) {
@@ -83,15 +159,31 @@ public final class ProcessItemsGuard {
                 anomalies.incrementAndGet();
             }
         }
+        return false;
     }
 
-    private static void maybeBeat() {
-        long now = System.currentTimeMillis();
-        if (now - lastBeat >= HEARTBEAT_MS) {
-            lastBeat = now;
-            DebugLog.log(TAG + "beat calls=" + calls + " nulls=" + nulls + " size=" + size()
-                    + " offThreadWrites=" + offThread.get() + " anomalies=" + anomalies.get());
+    private static void sampleScan(IsoCell cell) {
+        long t0 = System.nanoTime();
+        if (cell.getProcessItems().contains(SENTINEL)) {
+            anomalies.incrementAndGet();
         }
+        scanNsTotal += System.nanoTime() - t0;
+        scanSamples++;
+    }
+
+    private static void beat(IsoCell cell) {
+        double scanUs = scanSamples == 0 ? 0 : scanNsTotal / 1000.0 / scanSamples;
+        long scans = addCalls + addAllItems;
+        DebugLog.log(TAG + "beat updates=" + calls + " nulls=" + nulls + " size=" + cell.getProcessItems().size()
+                + " passes=" + passes + " passMsAvg=" + fmt(passes == 0 ? 0 : passNsTotal / 1e6 / passes)
+                + " passMsMax=" + fmt(passNsMax / 1e6) + " addCalls=" + addCalls + " addAllItems=" + addAllItems
+                + " scanUsAvg=" + fmt(scanUs) + " estScanMs=" + (long) (scans * scanUs / 1000)
+                + " deferred=" + deferred.get() + " drained=" + drained + " pending=" + pending.get()
+                + " overflow=" + overflow.get() + " offThreadWrites=" + offThread.get() + " anomalies=" + anomalies.get());
+    }
+
+    private static String fmt(double v) {
+        return String.valueOf(Math.round(v * 10) / 10.0);
     }
 
     private static int size() {
@@ -117,8 +209,12 @@ public final class ProcessItemsGuard {
     }
 
     static boolean enabledForTest() { return ENABLED; }
+    static boolean deferForTest() { return DEFER; }
     static long nullsForTest() { return nulls; }
     static long offThreadForTest() { return offThread.get(); }
+    static long deferredForTest() { return deferred.get(); }
+    static int pendingForTest() { return pending.get(); }
+    static long addCallsForTest() { return addCalls; }
 
     private ProcessItemsGuard() {}
 }

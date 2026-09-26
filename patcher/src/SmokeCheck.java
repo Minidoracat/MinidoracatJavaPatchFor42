@@ -588,40 +588,31 @@ public final class SmokeCheck {
         failed += check("W5 負對照：全 class 各僅一處改道（其他呼叫端保持 vanilla）",
                 guardCallsWholeClass == 1 && guardInvCallsWholeClass == 1);
 
-        // ---- W5-2 容器環門口 observe：同一個 ItemContainer ClassPatch 上疊加 ----
-        String addProbeCls = "zombie/mdc/ContainerAddCycleProbe";
+        // ---- W41 跨執行緒 processItems 寫入改道（W5-2 已於 2026-09-27 退役）----
+        // 存在理由：BaseVehicle.setCurrentKey（VehiclesDB2 在 ServerPlayersVehicles 執行緒載車時呼叫）
+        // 經 ItemContainer.addItem → AddItem 直接呼叫 IsoCell.addToProcessItems。
         String invItemCls = "zombie/inventory/InventoryItem";
-        String w52AddDesc = "(L" + invItemCls + ";)L" + invItemCls + ";";
-        String containsDesc = "(I)Z";
-        String probeContainsDesc = "(L" + icCls + ";I)Z";
-        MethodNode vAddItem = methodFromJar(jar, icCls, "AddItem", w52AddDesc);
-        MethodNode pAddItem = method(distJava, icCls, "AddItem", w52AddDesc);
-        MethodNode vAddBlind = methodFromJar(jar, icCls, "AddItemBlind", w52AddDesc);
-        MethodNode pAddBlind = method(distJava, icCls, "AddItemBlind", w52AddDesc);
-        failed += check("W5-2 vanilla：AddItem containsID 恰1、Blind無probe掛點",
-                countExactCalls(vAddItem, Opcodes.INVOKEVIRTUAL,
-                        icCls, "containsID", containsDesc) == 1);
-        failed += check("W5-2 patched：AddItem 1→1 observe改道；Blind刻意保持vanilla",
-                countExactCalls(pAddItem, Opcodes.INVOKESTATIC,
-                        addProbeCls, "containsID", probeContainsDesc) == 1
-                && countExactCalls(pAddItem, Opcodes.INVOKEVIRTUAL,
-                        icCls, "containsID", containsDesc) == 0
-                && realInsnCount(pAddItem) == realInsnCount(vAddItem)
-                && realInsnCount(pAddBlind) == realInsnCount(vAddBlind));
-        MethodNode addProbeEntry = method(distJava, addProbeCls, "containsID", probeContainsDesc);
-        failed += check("W5-2 wrapper：vanilla containsID恰1、probeAndLog恰1",
-                countExactCalls(addProbeEntry, Opcodes.INVOKEVIRTUAL,
-                        icCls, "containsID", containsDesc) == 1
-                && countExactCalls(addProbeEntry, Opcodes.INVOKESTATIC,
-                        addProbeCls, "probeAndLog", "(L" + icCls + ";I)V") == 1);
-        MethodNode addProbe = method(distJava, addProbeCls, "probe", "(L" + icCls + ";I)I");
-        failed += check("W5-2 helper：probe零NEW零Rand；catch只RuntimeException",
-                countOpcode(addProbe, Opcodes.NEW) == 0
-                && classNode(distJava, addProbeCls).methods.stream()
-                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0
-                && classNode(distJava, addProbeCls).methods.stream()
-                        .flatMap(m -> m.tryCatchBlocks.stream())
-                        .allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type)));
+        String piGuardCls = "zombie/mdc/ProcessItemsGuard";
+        String addOneDesc = "(L" + invItemCls + ";)V";
+        boolean keyViaAddItem = classNodeFromJar(jar, "zombie/vehicles/BaseVehicle").methods.stream()
+                .filter(m -> m.name.equals("setCurrentKey"))
+                .anyMatch(m -> countCallsToOwner(m, icCls) > 0);
+        failed += check("W41 vanilla BaseVehicle.setCurrentKey 經 ItemContainer 加入鑰匙", keyViaAddItem);
+        for (String w41Desc : new String[]{"(L" + invItemCls + ";)L" + invItemCls + ";",
+                "(Ljava/lang/String;)L" + invItemCls + ";"}) {
+            MethodNode vAdd = methodFromJar(jar, icCls, "AddItem", w41Desc);
+            failed += check("W41 AddItem" + w41Desc + " 唯一 addToProcessItems 同形改道，其餘指令與 frames 保留",
+                    countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "addToProcessItems", addOneDesc) == 1
+                    && methodText(vAdd).replace(
+                            "INVOKEVIRTUAL zombie/iso/IsoCell.addToProcessItems " + addOneDesc,
+                            "INVOKESTATIC " + piGuardCls + ".addToProcessItems (Lzombie/iso/IsoCell;L" + invItemCls + ";)V")
+                            .equals(methodText(method(distJava, icCls, "AddItem", w41Desc))));
+        }
+        MethodNode vBlind = methodFromJar(jar, icCls, "AddItemBlind", "(L" + invItemCls + ";)L" + invItemCls + ";");
+        failed += check("W41 AddItemBlind 不經 processItems、保持 vanilla",
+                countExactCalls(vBlind, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "addToProcessItems", addOneDesc) == 0
+                && methodText(vBlind).equals(methodText(method(distJava, icCls, "AddItemBlind",
+                        "(L" + invItemCls + ";)L" + invItemCls + ";"))));
 
 
         // ---- W6 地圖格載入捕手（IsoChunk.doLoadGridsquare 的 addToWorld 改道）----
@@ -750,6 +741,21 @@ public final class SmokeCheck {
         failed += check("W6 主 catch 型別鎖定為 RuntimeException（Error 必須穿透）",
                 guardBody.tryCatchBlocks != null && guardBody.tryCatchBlocks.size() == 1
                 && "java/lang/RuntimeException".equals(guardBody.tryCatchBlocks.get(0).type));
+        // 抑噪 #10：IsoChunk.removeFromWorld 唯一 DebugLog.log(String) 同形改道；存在理由＝印完隨即再呼叫
+        // BaseVehicle.removeFromWorld（正常卸載路徑），且乘客早退只比對 IsoPlayer.players[]（server 端不常駐）。
+        MethodNode vChunkUnload = methodFromJar(jar, chunkCls, "removeFromWorld", "()V");
+        String vChunkUnloadText = methodText(vChunkUnload);
+        int unloadLog = vChunkUnloadText.indexOf("INVOKESTATIC zombie/debug/DebugLog.log (Ljava/lang/String;)V");
+        failed += check("抑噪#10 vanilla：removeFromWorld 內 DebugLog.log 恰 1，其後再呼叫 BaseVehicle.removeFromWorld；"
+                        + "乘客早退比對 IsoPlayer.players",
+                countExactCalls(vChunkUnload, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V") == 1
+                && vChunkUnloadText.indexOf("INVOKEVIRTUAL " + vehicleCls + ".removeFromWorld ()V", unloadLog) > unloadLog
+                && countExactFields(methodFromJar(jar, vehicleCls, "removeFromWorld", "()V"), Opcodes.GETSTATIC,
+                        "zombie/characters/IsoPlayer", "players", "[Lzombie/characters/IsoPlayer;") == 1);
+        failed += check("抑噪#10 同形改道到 LogFilter.log，其餘指令與 frames 保留",
+                vChunkUnloadText.replace("INVOKESTATIC zombie/debug/DebugLog.log (Ljava/lang/String;)V",
+                        "INVOKESTATIC zombie/mdc/LogFilter.log (Ljava/lang/String;)V")
+                        .equals(methodText(method(distJava, chunkCls, "removeFromWorld", "()V"))));
 
         // ---- W4-1 v2 chunk 供給併包（2026-09-07 復活，預設 observe；PlayerDownloadServer 三掛點）----
         String pdsCls = "zombie/network/PlayerDownloadServer";
@@ -1805,7 +1811,7 @@ public final class SmokeCheck {
         // 到期）且自帶同步（writeTeleportPlayer 的公開入口可能不在世界更新緒）；
         // 全 class 只有一個寫入點＝送出 teleport，判定端恰 1 次 containsKey。
         MethodNode gRwClinit = method(distJava, rwCls, "<clinit>", "()V");
-        failed += check("W26 共用 helper：EXEMPT＝WeakHashMap＋synchronizedMap 各 1、全 class put 恰 1（唯一寫入＝送出 teleport）、containsKey 恰 1；HutchSyncGate 不再自帶名單",
+        failed += check("W26 共用 helper：EXEMPT＝WeakHashMap＋synchronizedMap 各 1、全 class put 恰 1（唯一寫入＝送出 teleport）、containsKey 恰 1；HutchSyncGate 不再自帶名單（唯一 put 在 payload 變化量測）",
                 countNew(gRwClinit, "java/util/WeakHashMap") == 1
                 && countExactCalls(gRwClinit, Opcodes.INVOKESTATIC, "java/util/Collections",
                         "synchronizedMap", "(Ljava/util/Map;)Ljava/util/Map;") == 1
@@ -1814,7 +1820,10 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, rwCls), Opcodes.INVOKEINTERFACE,
                         "java/util/Map", "containsKey", "(Ljava/lang/Object;)Z") == 1
                 && classWideCalls(classNode(distJava, hsgCls), Opcodes.INVOKEINTERFACE,
-                        "java/util/Map", "put", mapPutDesc) == 0);
+                        "java/util/Map", "put", mapPutDesc) == 1
+                && countExactCalls(method(distJava, hsgCls, "samePayload",
+                        "(Lzombie/iso/objects/IsoHutch;Lzombie/core/network/ByteBufferWriter;I)Z"),
+                        Opcodes.INVOKEINTERFACE, "java/util/Map", "put", mapPutDesc) == 1);
 
         // ---- W26-2 teleport 豁免掛點（TeleportPacket.write 的唯一 PlayerID.write）----
         // vanilla 前提：write 只有一個 PlayerID.write，且在 3 個 putFloat 之前（wire 順序）。
@@ -2096,15 +2105,13 @@ public final class SmokeCheck {
 
         // ---- W20 衣物同步守衛 ----
         String csgCls = "zombie/mdc/ClothingSyncGuard";
-        String cipCls = "zombie/mdc/ContainerIdProbe";
-        String cidCls = "zombie/network/fields/ContainerID";
         String scpCls = "zombie/network/packets/SyncClothingPacket";
         String idCls = "zombie/network/packets/SyncClothingPacket$ItemDescription";
         String svpCls = "zombie/network/packets/SyncVisualsPacket";
         String ivCls = "zombie/core/skinnedmodel/visual/ItemVisual";
         String w20Ic = "zombie/core/ImmutableColor";
         String pidCls = "zombie/network/fields/character/PlayerID";
-        String cidSetDesc = "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V";
+        // (a) ContainerIdProbe 已於 2026-09-27 退役（每 session 0–3 次 square-null，原版低頻現象）。
         String wornCtorDesc = "(Lzombie/characters/WornItems/WornItem;)V";
         String svpParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
         String getPlayerDesc = "()Lzombie/characters/IsoPlayer;";
@@ -2140,24 +2147,6 @@ public final class SmokeCheck {
                         "error", "(Ljava/lang/Object;)V") == 1
                 && countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
                         "getItemVisuals", "(Lzombie/core/skinnedmodel/visual/ItemVisuals;)V") == 1);
-        // vanilla 前提 (a)：雙參 set 直讀 raw square（GETFIELD square=6：頭部守衛塊 4＋
-        // ObjectContainer/IsoObject 分支各 1；零 getSquare()）且 getObjects 恰 2（NPE 點）；
-        // 單參 set 呼叫雙參恰 1（stack 兩層 set 的結構）。
-        MethodNode vCidSet2 = methodFromJar(jar, cidCls, "set", cidSetDesc);
-        MethodNode vCidSet1 = methodFromJar(jar, cidCls, "set", "(Lzombie/inventory/ItemContainer;)V");
-        failed += check("W20 vanilla (a)：雙參 set raw square=6／getSquare=0／getObjects=2；單參呼叫雙參=1",
-                countExactFields(vCidSet2, Opcodes.GETFIELD, "zombie/iso/IsoObject", "square",
-                        "Lzombie/iso/IsoGridSquare;") == 6
-                && countExactCalls(vCidSet2, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject",
-                        "getSquare", "()Lzombie/iso/IsoGridSquare;") == 0
-                && countExactCalls(vCidSet2, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoGridSquare",
-                        "getObjects", "()Lzombie/util/list/PZArrayList;") == 2
-                && countExactCalls(vCidSet1, Opcodes.INVOKEVIRTUAL, cidCls, "set", cidSetDesc) == 1);
-        // 手術後：三個 headCall（含多 slot 首用）全序＋redirect 歸零／真指令數對帳。
-        MethodNode pCidSet2 = method(distJava, cidCls, "set", cidSetDesc);
-        failed += check("W20 手術後 (a)：雙參 set 頭部 aload_1→aload_2→onSet、真指令恰 +3",
-                headCallSlotsOk(pCidSet2, cipCls, "onSet", cidSetDesc, 1, 2)
-                && realInsnCount(pCidSet2) == realInsnCount(vCidSet2) + 3);
         MethodNode vScpSet = methodFromJar(jar, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
         MethodNode pScpSet = method(distJava, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
         failed += check("W20 手術後 (b)：SyncClothingPacket.set 頭部 aload_1→onClothingSet、真指令恰 +2",
@@ -2190,22 +2179,18 @@ public final class SmokeCheck {
                 && realInsnCount(pSvpWrite) == realInsnCount(vSvpWrite));
         // helper 契約：tintOf 的 getTint 委派恰 2（off 直通＋非 null 主路徑）、white 引用恰 2
         // （nullVisual/nullTint 兩個 enforce 出口）；onVisualsMismatch 的 error 委派恰 1
-        // （唯一出口，off/observe 同一 sink）；parsePlayer 的 getPlayer 委派恰 1；
-        // ContainerIdProbe.onSet 純觀測（getStackTrace 恰 1、零 KahluaTable 觸碰由 import 面保證）。
+        // （唯一出口，off/observe 同一 sink）；parsePlayer 的 getPlayer 委派恰 1。
         MethodNode gTintOf = method(distJava, csgCls, "tintOf", "(L" + ivCls + ";)L" + w20Ic + ";");
         MethodNode gMismatch = method(distJava, csgCls, "onVisualsMismatch",
                 "(Lzombie/debug/DebugType;Ljava/lang/Object;)V");
         MethodNode gParsePlayer = method(distJava, csgCls, "parsePlayer",
                 "(L" + pidCls + ";)Lzombie/characters/IsoPlayer;");
-        MethodNode gOnSet = method(distJava, cipCls, "onSet", cidSetDesc);
-        failed += check("W20 helper 契約：tintOf 委派2/white 引用2；mismatch error 出口1；parsePlayer 委派1；onSet getStackTrace 1",
+        failed += check("W20 helper 契約：tintOf 委派2/white 引用2；mismatch error 出口1；parsePlayer 委派1",
                 countExactCalls(gTintOf, Opcodes.INVOKEVIRTUAL, ivCls, "getTint", "()L" + w20Ic + ";") == 2
                 && countExactFields(gTintOf, Opcodes.GETSTATIC, w20Ic, "white", "L" + w20Ic + ";") == 2
                 && countExactCalls(gMismatch, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "error", "(Ljava/lang/Object;)V") == 1
-                && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 1
-                && countExactCalls(gOnSet, Opcodes.INVOKEVIRTUAL, "java/lang/Thread",
-                        "getStackTrace", "()[Ljava/lang/StackTraceElement;") == 1);
+                && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 1);
 
         // ---- W20-2：ItemDescription ctor 頭部 headCall 捕 WornItem（nullVisual 歸因）----
         // ctor 頭部 aload_1 只碰參數不碰 uninitializedThis；真指令 +2；tintOf 改道不受影響。
@@ -2936,6 +2921,22 @@ public final class SmokeCheck {
                 countExactCalls(pMeta, Opcodes.INVOKESTATIC, awayHelper, "updateStatsAwayZone", awayDesc) == 2
                 && countExactCalls(pMeta, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal",
                         "updateStatsAway", "(I)V") == 0);
+        // W42：存在理由＝vanilla 只在 unloaded()／存檔載入／補算迴圈寫動物時鐘，活著的每小時不刷新
+        // （AnimalData 全 class 零寫入）；update() 內唯一 hourGrow 同形改道。
+        String animalDataCls = "zombie/characters/animals/datas/AnimalData";
+        int clockWrites = 0;
+        for (MethodNode m : classNodeFromJar(jar, animalDataCls).methods) {
+            clockWrites += countExactFields(m, Opcodes.PUTFIELD, "zombie/characters/animals/IsoAnimal",
+                    "timeSinceLastUpdate", "J");
+        }
+        MethodNode vDataUpdate = methodFromJar(jar, animalDataCls, "update", "()V");
+        failed += check("W42 vanilla AnimalData 不寫動物時鐘，update 內 hourGrow 恰 1",
+                clockWrites == 0
+                && countExactCalls(vDataUpdate, Opcodes.INVOKEVIRTUAL, animalDataCls, "hourGrow", "(Z)V") == 1);
+        failed += check("W42 AnimalData.update 唯一 hourGrow 同形改道，其餘指令與 frames 保留",
+                methodText(vDataUpdate).replace("INVOKEVIRTUAL " + animalDataCls + ".hourGrow (Z)V",
+                        "INVOKESTATIC " + awayHelper + ".liveHourGrow (L" + animalDataCls + ";Z)V")
+                        .equals(methodText(method(distJava, animalDataCls, "update", "()V"))));
         // W38：存在理由＝updateStatsAway 內 checkZone→setDZone 會 remove＋add（移到清單尾端）。
         String metaSnap = "zombie/mdc/AnimalMetaSnapshot";
         String zoneArg = "(L" + zoneCls + ";)V";
@@ -2983,27 +2984,32 @@ public final class SmokeCheck {
                 nullChecks == 0
                 && countExactCalls(vProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "update", "()V") == 1
                 && countExactCalls(vProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "finishupdate", "()Z") == 1);
-        failed += check("W40 ProcessItems 兩處同形改道，世界物品迴圈與 frames 保留",
-                methodText(vProcessItems)
-                        .replace("INVOKEVIRTUAL zombie/inventory/InventoryItem.update ()V",
-                                "INVOKESTATIC " + piGuard + ".update (Lzombie/inventory/InventoryItem;)V")
-                        .replace("INVOKEVIRTUAL zombie/inventory/InventoryItem.finishupdate ()Z",
-                                "INVOKESTATIC " + piGuard + ".finishupdate (Lzombie/inventory/InventoryItem;)Z")
-                        .equals(methodText(method(distJava, isoCellCls, "ProcessItems", "(Ljava/util/Iterator;)V"))));
+        MethodNode pProcessItems = method(distJava, isoCellCls, "ProcessItems", "(Ljava/util/Iterator;)V");
+        String cellDesc = "(L" + isoCellCls + ";)V";
+        failed += check("W40／W41 ProcessItems 兩處 1:1 改道、頭部 beginPass、唯一 RETURN 前 endPass、真指令恰 +4",
+                countExactCalls(pProcessItems, Opcodes.INVOKESTATIC, piGuard, "update", "(Lzombie/inventory/InventoryItem;)V") == 1
+                && countExactCalls(pProcessItems, Opcodes.INVOKESTATIC, piGuard, "finishupdate", "(Lzombie/inventory/InventoryItem;)Z") == 1
+                && countExactCalls(pProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "update", "()V") == 0
+                && countExactCalls(pProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "finishupdate", "()Z") == 0
+                && headCallSlotsOk(pProcessItems, piGuard, "beginPass", cellDesc, 0)
+                && tailCallOk(pProcessItems, piGuard, "endPass", cellDesc)
+                && realInsnCount(pProcessItems) == realInsnCount(vProcessItems) + 4);
         String[][] piWriters = {
-                {"addToProcessItems", "(Lzombie/inventory/InventoryItem;)V"},
-                {"addToProcessItems", "(Ljava/util/ArrayList;)V"},
-                {"addToProcessItemsRemove", "(Lzombie/inventory/InventoryItem;)V"},
-                {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V"}};
+                {"addToProcessItems", "(Lzombie/inventory/InventoryItem;)V", "touchAdd", cellDesc},
+                {"addToProcessItems", "(Ljava/util/ArrayList;)V", "touchAddAll",
+                        "(L" + isoCellCls + ";Ljava/util/ArrayList;)V"},
+                {"addToProcessItemsRemove", "(Lzombie/inventory/InventoryItem;)V", "touch", cellDesc},
+                {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V", "touch", cellDesc}};
         java.util.Set<String> piTargets = new java.util.HashSet<>();
         piTargets.add("ProcessItems(Ljava/util/Iterator;)V");
         for (String[] w : piWriters) {
             piTargets.add(w[0] + w[1]);
             MethodNode vW = methodFromJar(jar, isoCellCls, w[0], w[1]);
             MethodNode pW = method(distJava, isoCellCls, w[0], w[1]);
-            failed += check("W40 " + w[0] + w[1] + " 頭部 aload_0→touch、真指令恰 +2",
-                    headCallSlotsOk(pW, piGuard, "touch", "(L" + isoCellCls + ";)V", 0)
-                    && realInsnCount(pW) == realInsnCount(vW) + 2);
+            int[] slots = w[2].equals("touchAddAll") ? new int[]{0, 1} : new int[]{0};
+            failed += check("W40 " + w[0] + w[1] + " 頭部 " + w[2] + "、真指令恰 +" + (slots.length + 1),
+                    headCallSlotsOk(pW, piGuard, w[2], w[3], slots)
+                    && realInsnCount(pW) == realInsnCount(vW) + slots.length + 1);
         }
         int piUntouchedDiffs = 0;
         for (MethodNode original : classNodeFromJar(jar, isoCellCls).methods) {

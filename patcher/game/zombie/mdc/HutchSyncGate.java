@@ -13,6 +13,10 @@ import zombie.network.PacketTypes;
  * 僅過濾 IsoHutch.update 的兩個自發 sync；操作、remote relay 與存檔格式保持原版。
  * 收件判定（整窗寬、位置聯集、載具／noclip／teleport 豁免）在 {@link RecipientWindow}，
  * 與 W36 GameEntity 廣播共用。
+ *
+ * <p>2026-09-27 加量測（純觀測、不改送包）：每次自發 sync 的 payload（{@code syncIsoObjectSend} 寫出的
+ * bytes）與同一雞舍上一次逐位元比較，{@code unchanged}／{@code unchangedBytes} 回答「W36 式變化閘能省多少」。
+ * 蛋的 Food age 每秒可變，payload 相同才算未變，不以欄位近似。
  */
 public final class HutchSyncGate {
     static final int OFF = 0;
@@ -25,7 +29,9 @@ public final class HutchSyncGate {
 
     // syncUpdate 在世界更新主緒。
     private static long calls, considered, sent, skipped, wouldSkip, sentBytes, wouldSkipBytes;
-    private static long passthrough, exempt, scopeErrors, logErrors;
+    private static long passthrough, exempt, scopeErrors, logErrors, unchanged, unchangedBytes;
+    /** 每個雞舍上一次自發 sync 的 payload；IsoObject 未覆寫 equals／hashCode，WeakHashMap 即 identity 且隨卸載回收。 */
+    private static final java.util.Map<IsoHutch, byte[]> LAST_PAYLOAD = new java.util.WeakHashMap<>();
     private static long lastBeatNs;
     private static boolean announced;
 
@@ -51,6 +57,8 @@ public final class HutchSyncGate {
         calls++;
         float x = square.getX();
         float y = square.getY();
+        long sentBytesBefore = sentBytes;
+        int payloadState = 0; // 0＝本次尚未序列化、1＝與上次相同、2＝不同
         for (UdpConnection connection : GameServer.udpEngine.connections) {
             considered++;
             boolean eligible;
@@ -70,7 +78,11 @@ public final class HutchSyncGate {
             }
             ByteBufferWriter out = connection.startPacket();
             PacketTypes.PacketType.SyncIsoObject.doPacket(out);
+            int payloadStart = out.position();
             hutch.syncIsoObjectSend(out);
+            if (payloadState == 0) {
+                payloadState = samePayload(hutch, out, payloadStart) ? 1 : 2;
+            }
             int bytes = connection.getBufferPosition();
             PacketTypes.PacketType.SyncIsoObject.send(connection);
             sent++;
@@ -79,9 +91,32 @@ public final class HutchSyncGate {
                 wouldSkipBytes += bytes; // observe 真正寫出的 bytes，不外推未序列化的資料。
             }
         }
+        if (payloadState == 1) {
+            unchanged++;
+            unchangedBytes += sentBytes - sentBytesBefore;
+        }
         // 原版即使沒有連線仍會走這裡；不能因所有收件人都被過濾而漏存。
         hutch.flagForHotSave();
         maybeBeat();
+    }
+
+    /** payload 與此雞舍上一次逐位元相同回 true；不同或首次則記下本次內容。 */
+    static boolean samePayload(IsoHutch hutch, ByteBufferWriter out, int start) {
+        int len = out.position() - start;
+        byte[] prev = LAST_PAYLOAD.get(hutch);
+        if (prev != null && prev.length == len) {
+            int i = 0;
+            while (i < len && prev[i] == out.bb.get(start + i)) {
+                i++;
+            }
+            if (i == len) {
+                return true;
+            }
+        }
+        byte[] copy = new byte[len];
+        out.bb.get(start, copy);
+        LAST_PAYLOAD.put(hutch, copy);
+        return false;
     }
 
     static boolean shouldSend(UdpConnection connection, float x, float y) {
@@ -110,6 +145,7 @@ public final class HutchSyncGate {
             DebugLog.log(TAG + "mode=" + MODE + " calls=" + calls + " considered=" + considered
                     + " sent=" + sent + " skipped=" + skipped + " wouldSkip=" + wouldSkip
                     + " sentBytes=" + sentBytes + " wouldSkipBytes=" + wouldSkipBytes
+                    + " unchanged=" + unchanged + " unchangedBytes=" + unchangedBytes
                     + " passthrough=" + passthrough + " exempt=" + exempt
                     + " scopeErrors=" + scopeErrors + " logErrors=" + logErrors
                     + " disabled=" + RecipientWindow.disabled());
