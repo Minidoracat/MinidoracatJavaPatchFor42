@@ -4020,6 +4020,37 @@ off 重現原版例外外拋＋檔案 0 bytes，on 例外不外拋、舊檔逐�
 `AnimalData.getBreed` NPE、`AnimalCell.load> Exception` 新增檔案不再出現；`[AnimalCellSave] serialize failed`
 應為 0，出現代表仍有其他壞動物進到存檔，舊檔已保住。
 
+## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
+
+**現象**：玩家回報動物經常異常死亡。W32 觀測 9/25 00:06–9/26 12:2x（約 36 小時）補算後當場死亡約 133 隻；
+有明細的 42 隻中 27 隻（64%）在同一幀被同一 zone 的 `doMeta` 重複補算 2–4 次；全部明細 3,057 組
+（幀、動物、座標）裡 594 組被處理超過一次，離線時數出現 62→0→−61 這類「補進未來」序列。
+`AnimalMetaPredator=false`，不是離線掠食者。
+
+**根因（42.20.4 反編譯＋javap）**：`DesignationZoneAnimal.doMeta` 以索引走訪 `this.animals`（方法內 8 個
+`GETFIELD animals`）。`IsoAnimal.updateStatsAway` 先把 `zoneCheckTimer` 歸零再 `checkZone()` →
+`setDZone()`，後者即使同一個 zone 也先 `removeAnimal` 再 `addAnimal`，把該動物移到清單尾端。索引迴圈
+因此重複補算部分動物（每次再加一整段離線時數的 `hourGrow`、年齡、`timeSinceLastUpdate`），同時漏掉另一些。
+
+**手術**：同一個 `doMeta` MethodOps（W32 兩個 redirect 保留）：頭部 `AnimalMetaSnapshot.begin`、單一 RETURN
+前 `end`，8 個 `GETFIELD animals` 之後插 `animals(list)`。begin 後第一次讀（`check()` 已重建清單）拍快照，
+本次 doMeta 其餘讀取都回快照：每隻動物每個迴圈恰好補算一次，補算內容不變。doMeta 不巢狀；例外跳過 end
+時下一次 begin 覆蓋。kill switch `-Dmdc.animalMetaSnapshot=0`。
+
+SmokeCheck 釘存在理由（`updateStatsAway` 呼叫 `checkZone`、`setDZone` 先 remove 後 add）、head／tail／8 個
+swap 位置與真指令 +12、W32 兩個改道。`AnimalMetaSnapshotTest` 以原版迴圈形狀重現：off 重複與漏算，on 每隻恰一次。
+
+線上驗收：W32 明細中同一（幀、動物、座標）重複的組數應歸零；`died` 佔 `calls` 的比例應下降。
+
+## 2bb. 動物死亡帳本（W39，server，純觀測）
+
+取代開 `DebugType.Animal`（water 分支原版不印字、debugln／noise 量大）。`IsoAnimal.OnDeath()` 頭部
+`AnimalDeathLedger.onDeath`：每隻死亡一行 `[AnimalDeath] animal=種類#ID pos wild baby ageDays health hunger
+thirst zone hutch [catchUp=次數x/時數h catchUpAgoMs] via=前 4 個遊戲幀`。catchUp 由 W32 三個補算呼叫點回報，
+60 秒內剛補算過才標記；via 可分辨飢渴、補算、玩家擊殺與宰殺。每 60 秒最多 40 行明細，每 5 分鐘一行
+`beat deaths domestic wild afterCatchUp suppressed anomalies`。不改行為，kill switch `-Dmdc.animalDeathLedger=0`。
+SmokeCheck 釘 OnDeath 頭部 aload_0→onDeath、真指令 +2；`AnimalDeathLedgerTest` 驗補算標記、上限與 data null。
+
 ---
 
 ## 3. 部署後驗證清單

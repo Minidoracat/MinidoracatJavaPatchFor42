@@ -1102,6 +1102,23 @@ public final class PatchConfig {
         workerSave.expectedHits = 1;
         patches.add(animalWorker);
 
+        // W38：doMeta 補算快照（docs/patches.md 2ba）。updateStatsAway→checkZone→setDZone 會把動物
+        // 移到 zone.animals 尾端，原版索引迴圈因而重複補算／漏算。頭部 begin、RETURN 前 end，方法內
+        // 8 個 GETFIELD animals 之後換成本次 doMeta 的快照（W32 的兩個 redirect 同一個 MethodOps）。
+        String metaSnap = "zombie/mdc/AnimalMetaSnapshot";
+        String zoneDesc = "(Lzombie/iso/areas/DesignationZoneAnimal;)V";
+        zoneMeta.headCall = new Patcher.HeadCall(metaSnap, "begin", zoneDesc);
+        zoneMeta.tailCall = new Patcher.TailCall(metaSnap, "end", zoneDesc);
+        zoneMeta.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETFIELD,
+                "zombie/iso/areas/DesignationZoneAnimal", "animals", "Ljava/util/ArrayList;", metaSnap, "animals");
+        zoneMeta.expectedHits = 2 + 1 + 1 + 8;   // W32 redirect 2＋head＋tail（單一 RETURN）＋8 個 GETFIELD
+
+        // W39：動物死亡帳本（純觀測，docs/patches.md 2bb）。OnDeath 頭部記錄死亡當下狀態與來源。
+        Patcher.MethodOps onDeath = animal.method("OnDeath", "()V");
+        onDeath.headCall = new Patcher.HeadCall("zombie/mdc/AnimalDeathLedger", "onDeath",
+                "(Lzombie/characters/animals/IsoAnimal;)V");
+        onDeath.expectedHits = 1;
+
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
         // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點
         // （setUsingPlayer 頭部帶新值、兩個 receive 方法每個 RETURN 前讀寫入後值；reset 只寫 null），

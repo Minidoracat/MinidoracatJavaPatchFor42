@@ -74,6 +74,11 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   物件、只吞該次建構失敗造成的 NPE，並在序列化成功後才寫檔。`-Dmdc.animalSpawnGuard=0`／
   `-Dmdc.animalCellSave=0` 分別回原版。詳見 [W37](docs/patches.md#2az-動物半建構物件守衛apop-先序列化再開檔w37server預設-on)。
 
+- **畜牧區補算 W38／動物死亡帳本 W39**：原版離線補算迴圈會因動物在清單中被移到尾端而重複補算或漏算
+  （重複補算＝飢渴與年齡加倍，異常死亡主因），改為本次補算固定讀一份快照。另在動物死亡時記一行狀態與來源
+  （純觀測）。`-Dmdc.animalMetaSnapshot=0`／`-Dmdc.animalDeathLedger=0` 分別回原版。
+  詳見 [W38](docs/patches.md#2ba-畜牧區離線補算快照w38server預設-on)、[W39](docs/patches.md#2bb-動物死亡帳本w39server純觀測)。
+
 > 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 
 逐項 javap 證據與安全論證：[docs/patches.md](docs/patches.md)；分析原始規格：[docs/specs/](docs/specs/)。

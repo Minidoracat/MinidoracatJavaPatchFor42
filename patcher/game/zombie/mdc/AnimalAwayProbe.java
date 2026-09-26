@@ -49,6 +49,7 @@ public final class AnimalAwayProbe {
     }
 
     private static void observe(IsoAnimal animal, int hours, String source) {
+        AnimalDeathLedger.noteCatchUp(animal, hours);
         if (!ENABLED) {
             animal.updateStatsAway(hours);
             return;
