@@ -3567,6 +3567,11 @@ map 也不保留已失去其他參照的角色。沒有額外 ACK、loaded-set �
 `PlayerID.write` 仍在 catch 外原樣執行。`LinkageError` 等 Error 不被吞掉。
 代價是被傳送過的角色仍收遠端更新；不以更激進的排除交換漏送風險。
 
+2026-09-26 起判定程式碼（含 teleport 豁免名單與簿記故障的全域降級）移到共用的
+`RecipientWindow`，W36 GameEntity 廣播沿用同一份判定（見 2ay）；雞舍的行為與計數不變。
+`TeleportPacket.write` 的改道目標隨之改為 `RecipientWindow.writeTeleportPlayer`。
+`hutchSyncGate` 與 `gameEntityRelevancy` 都為 0 時才不記 teleport 豁免。
+
 ### 模式與觀測
 
 `-Dmdc.hutchSyncGate`：未設定＝`1`／`enforce`，`2`／`observe` 只記判定但照送，
@@ -3856,6 +3861,106 @@ SmokeCheck 釘 usingPlayer 為 private、putfield 7 個的分佈（TIS 新增寫
 同形且真指令數不變、GameEntity 追蹤點 1＋1＋2。`MdcUsingPlayerIndexTest` 以真 `IsoObjectBucket` 與
 已 patch 的 `setUsingPlayer` 覆蓋三模式：enforce 只回使用中且在 bucket 的 entity、清成 null 後移出、
 繞過追蹤點的寫入被稽核抓到並退回全表。
+
+---
+
+## 2ay. GameEntity 廣播收件範圍＋CraftLogic 同步變化閘（W36，server，預設 enforce）
+
+**依據（2026-09-26 03:11–03:13 正式服抓包，MinidoracatServerAnalyze
+`reports/ops/2026-09-26-MIC42-stamp-traffic.md`）**：PacketType 293 `GameEntity` 佔出向 UDP
+**17.5%**（30 秒、9,589 包、9.41 MiB；只計含 anchor 的封包，屬下限）。一分鐘內 107,641 個追蹤章
+只有 96 種值，最常見的值 39,159 次、送給全部 20 名在線玩家；所在物品是曬草架上的 `Base.DryGrass`。
+
+**原版路徑（42.20.4）**：自動工作站製作中，`CraftLogic.onUpdate` 每 1000 ms（`UpdateLimit(1000L)`）
+呼叫 `sendCraftLogicSync`，以 `save` 序列化整份 CraftLogic（含製作中輸入物品與 modData）→
+`Component.sendServerPacket` → `GameEntityNetwork.sendPacketData(..., isIgnoreConnection=true)` →
+`INetworkPacket.sendToAll`，不看距離全服廣播。IsoObject 的 entityNetID 由所在格座標＋object index
+組成，client 端 `GameEntityManager.GetEntity` 查不到就直接丟棄（只有 InventoryItem 有擁有者背包的
+fallback），沒載入該格的 client 收到也沒有用。
+
+**手術**：
+
+1. `GameEntityNetwork.sendPacketData` 內唯一 `INetworkPacket.sendToAll` 1:1 改道
+   `GameEntityBroadcastGate.sendToAll`（descriptor 相同）。處理的是整個 server 廣播出口：CraftLogicSync、
+   SyncGameEntity、UpdateUsingPlayer，以及其他 Component 的 `sendServerPacket`。helper 保留原版的連線
+   順序、排除連線 GUID 與 `isFullyConnected` 條件，逐連線呼叫原版 `INetworkPacket.send`；
+   只有位置可信的實體（有所在格的 IsoObject、以車輛座標定位的 VehiclePart）才判定是否略過。
+   InventoryItem（未裝備時 `getX` 回 `Float.MAX_VALUE`，client 依擁有者背包查找）、MetaEntity、
+   非有限座標一律回原版全服廣播。
+2. 收件判定沿用 W26：原 `HutchSyncGate.shouldSend` 的判定與 teleport 豁免名單抽成共用的
+   `RecipientWindow`（行為逐項不變）。收件窗是整窗寬 `W*8`，server 實體位置與原版 `RelevantTo` 取聯集；
+   非可信奇數寬度、`connectArea`、換角、死亡等不確定狀態，以及載具內、noclip、送出過 teleport 的角色
+   一律照送。這個窗約是 client 載入半寬（最多 `(W/2)*8+7`）的兩倍。
+3. `CraftLogic.onUpdate` 內唯一 `sendCraftLogicSync` 改道 `MdcCraftSyncGate.periodicSync`：只在 client
+   看得到的內容變化時才送。比較的內容是每筆 in-progress 的整數百分比（原版 tooltip 與 overlay 同一算式
+   `(int)(getProgress*100)`）、in-progress 清單的筆數與身分、目前配方（封包尾的配方名），以及
+   DryingCraftLogic 顯示用的濕度（`%.0f%%`，另分出「大於 0 即暫停」）。owner 身分也納入，
+   pool 重用的 component 不會沿用舊基準。helper 放在 crafting package，以讀取 package-private 的清單；
+   濕度只存在 private `temporaryWetnesses`，以快取的反射讀取。
+4. `CraftLogicSystem.stop` 內唯一 `sendCraftLogicSync` 改道 `explicitSync`：照送，並把送出的內容記為
+   基準。少了這步，「[A]@0% 已送 → 取消 → 同一個 A 以 0% 重新開始」會被週期路徑誤判為已送。
+   原版 `onStart` 本來就不送，開始製作由下一次週期同步以清單變化送出。
+5. 簽章算不出來（資料不完整、濕度欄位讀不到）就照原版送，並清掉該 CraftLogic 的基準。
+
+封包格式與序列化都不變，玩家不需要安裝任何東西。
+
+### 遠方玩家進入範圍時的狀態（42.20.4 反編譯＋javap）
+
+`PlayerDownloadServer.update` 對 server 已載入的 chunk 以 `IsoChunk.SaveLoadedChunk` 即時序列化，
+不是讀磁碟檔：`IsoObject.save → saveEntity → Component.save`，`CraftLogic.save` 在製作中寫出
+in-progress 清單（含 elapsedTime），`DryingCraftLogic.save` 追加每筆濕度；client 由
+`IsoObject.load → loadEntity → CraftLogic.load → loadInProgressCraftData` 還原。因此剛下載該 chunk 的
+client 拿到的就是下載當下的狀態，**不需要補送**。步行玩家在 chunk 進入載入範圍之前早就在收件窗內，
+之後的每一次變化同步都會收到。SmokeCheck 釘住這條鏈，TIS 改掉任一環就要重新評估。
+
+### 代價與殘留
+
+- client 不跑 CraftLogicSystem，進度只來自同步，所以 client 看到的進度與剩餘時間改成 1% 一跳。
+  DryGrass（`time = 86400`，一個遊戲日）在本服 1 小時的遊戲日下，1% 約 36 真實秒，
+  tooltip 的剩餘時間最多落後這麼久。server 端製作時序完全不變。
+- 被略過的期間 client 仍持有該格的情況（載具前移的載入區、releventPos 延遲）：載具與 teleport 已豁免；
+  其餘只會落後到下一次內容變化或重新下載 chunk。
+- server 未載入、從磁碟送出的 chunk 與原版相同，不在本刀範圍。
+- CraftLogicSync 仍是整份 save（輸入物品 modData 照送），也仍然早於 Lua 的 `luaCallOnUpdate`；
+  本刀只減少次數與收件人。
+- 簽章只看上述內容，不看輸入物品本身。若配方或 mod 在製作中的 Lua OnUpdate 改動輸入物品（例如 modData），
+  client 要等下一次內容變化才看到。
+
+### 模式與觀測
+
+`-Dmdc.gameEntityRelevancy`、`-Dmdc.craftLogicSyncGate` 各自三態：未設定＝`1`／`enforce`，
+`2`／`observe` 只計數照送，`0`／`off` 純委派；未知值落到 observe，需重啟。
+
+首次有效呼叫及每 5 分鐘各一行：
+
+- `[MinidoracatJavaPatch][GameEntityBroadcast] mode= calls= unpositioned= considered= sent= skipped=
+  wouldSkip= sentBytes= wouldSkipBytes= craftCalls= craftWouldSkip= passthrough= exempt= scopeErrors=
+  logErrors= disabled=`。bytes 是 GameEntity body（12 bytes 標頭＋EntityPacketData 內容），不含 3 bytes
+  封包型別與 RakNet／UDP 開銷；payload 在送出前就已組好，enforce 下 `wouldSkipBytes` 就是沒送出的量。
+- `[MinidoracatJavaPatch][CraftSyncGate] mode= periodic= sent= suppressed= wouldSuppress= explicit=
+  sigErrors= wetness=ok logErrors=`。
+
+### 守門與驗證
+
+SmokeCheck 鎖：`sendPacketData` 廣播分支唯一 `sendToAll` 的參數語境（GameEntity 型別、排除連線＝參數 3、
+values＝{data, entity, component}）與其後的 release；原版 `sendToAll` 只有 GUID 排除＋fully-connected＋
+send；手術後改道 x1、client 與單連線 send 原樣、真指令數不變；helper 的 send 不在 try 內、範圍判定在 try
+內且只 catch RuntimeException；上述 chunk 狀態鏈；`sendCraftLogicSync` 全 jar 恰 2 處（onUpdate 在
+`limit.Check` 之後、stop 在 `finaliseRecipe` 之後）、同步內容為整份 save＋廣播出口、DryingCraftLogic
+不自送且有 `temporaryWetnesses`；兩處改道 x1 與兩個 class 真指令總數不變；helper 的送出次數、
+明確同步先送再記基準、基準表為 WeakHashMap。
+
+`GameEntityTrafficTest` 三模式各一個獨立 JVM，跑 dist 內手術後的真 `sendPacketData` 與真
+`CraftLogic.onUpdate`：窗內收、窗外只在 enforce 略過、載具與不可信寬度照收、排除連線與未 fully-connected
+維持原版、wire 與原版 `sendToAll` 逐位元相同、InventoryItem 維持全服；整數百分比不變不送、跨百分比與
+清單變長照送、明確同步後同身分同百分比重新開始仍送；配方、owner、濕度顯示變化改變簽章；簽章失敗照送。
+把 `explicitSync` 改成不記基準的變體會被測試抓到。完整 build 與兩輪安裝往返通過。
+**以上都不是線上驗收**。
+
+線上驗收：確認正確包已載入、兩把 `mode=1`、`scopeErrors`／`sigErrors`／`logErrors` 為 0、`disabled=false`、
+`wetness=ok`，且 `skipped`、`suppressed` 會增加。再以 MIC42 報告的抓包方法比較 `86 01 25`
+（GameEntity）封包佔出向 UDP 的比例（修補前 17.5%，下限），並實地看曬草架：從遠處走近與開車抵達時的
+tooltip 進度、下雨暫停與濕度、完成後出貨。不能由 `skipped` 比例直接宣稱同比例的頻寬改善。
 
 ---
 

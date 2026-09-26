@@ -829,12 +829,13 @@ public final class PatchConfig {
 
         // Server 送出 teleport 後，client 新位置可能早於 server 位置回報；先豁免該角色。
         // 掛在 wire 身分寫入漏斗，既不改 PlayerID/XYZ，也不猜測轉場完成時間。
+        // 豁免名單在 RecipientWindow，W26 雞舍與 W36 GameEntity 廣播共用。
         Patcher.ClassPatch hutchTeleport = new Patcher.ClassPatch("zombie/network/packets/TeleportPacket");
         Patcher.MethodOps hutchTeleportWrite = hutchTeleport.method("write",
                 "(Lzombie/core/network/ByteBufferWriter;)V");
         hutchTeleportWrite.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/network/fields/character/PlayerID", "write",
-                "(Lzombie/core/network/ByteBufferWriter;)V", hutchSyncGate, "writeTeleportPlayer"));
+                "(Lzombie/core/network/ByteBufferWriter;)V", "zombie/mdc/RecipientWindow", "writeTeleportPlayer"));
         hutchTeleportWrite.expectedHits = 1;
         patches.add(hutchTeleport);
 
@@ -1092,6 +1093,40 @@ public final class PatchConfig {
                 upi, "entities"));
         usingUpdate.expectedHits = 1;
         patches.add(usingSystem);
+
+        // W36：GameEntity 廣播收件範圍＋CraftLogic 週期同步變化閘（docs/patches.md 2ay）。
+        // sendPacketData 的 server 廣播分支原版 INetworkPacket.sendToAll 不看距離；改道後以 W26 的
+        // RecipientWindow 略過遠方連線（位置不可信的 InventoryItem／MetaEntity 仍全服）。
+        // CraftLogic.onUpdate 每 1000 ms 的整份同步改為內容（整數百分比／in-progress 清單／濕度）
+        // 變化才送；CraftLogicSystem.stop 的明確同步照送並更新比較基準。封包格式不變。
+        // -Dmdc.gameEntityRelevancy／-Dmdc.craftLogicSyncGate：0|off/1|enforce（預設）/2|observe。
+        Patcher.ClassPatch geNetwork = new Patcher.ClassPatch("zombie/entity/GameEntityNetwork");
+        Patcher.MethodOps geSend = geNetwork.method("sendPacketData",
+                "(Lzombie/entity/network/EntityPacketData;Lzombie/entity/GameEntity;Lzombie/entity/Component;"
+                        + "Lzombie/network/IConnection;Z)V");
+        geSend.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/network/packets/INetworkPacket", "sendToAll",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/network/IConnection;[Ljava/lang/Object;)V",
+                "zombie/mdc/GameEntityBroadcastGate", "sendToAll"));
+        geSend.expectedHits = 1;
+        patches.add(geNetwork);
+        String craftLogicCls = "zombie/entity/components/crafting/CraftLogic";
+        String craftGate = "zombie/entity/components/crafting/MdcCraftSyncGate";
+        Patcher.ClassPatch craftLogic = new Patcher.ClassPatch(craftLogicCls);
+        Patcher.MethodOps craftUpdate = craftLogic.method("onUpdate",
+                "(Lzombie/entity/components/crafting/recipe/CraftRecipeData;)V");
+        craftUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                craftLogicCls, "sendCraftLogicSync", "()V", craftGate, "periodicSync"));
+        craftUpdate.expectedHits = 1;
+        patches.add(craftLogic);
+        Patcher.ClassPatch craftSystem = new Patcher.ClassPatch("zombie/entity/components/crafting/CraftLogicSystem");
+        Patcher.MethodOps craftStop = craftSystem.method("stop",
+                "(L" + craftLogicCls + ";Lzombie/entity/components/crafting/recipe/CraftRecipeData;Z"
+                        + "Lzombie/entity/components/resources/ResourceGroup;)V");
+        craftStop.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                craftLogicCls, "sendCraftLogicSync", "()V", craftGate, "explicitSync"));
+        craftStop.expectedHits = 1;
+        patches.add(craftSystem);
 
         return patches;
     }

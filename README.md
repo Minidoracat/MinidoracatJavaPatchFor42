@@ -64,6 +64,11 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   蛋與孵化資料保持原版。登入、載具、傳送及不確定狀態保守放行；可用
   `-Dmdc.hutchSyncGate=0` 回到原版廣播。詳見 [W26](docs/patches.md#2an-雞舍自發同步收件人過濾w26server預設-enforce)。
 
+- **GameEntity 廣播 W36**：自動工作站（如曬草架）製作中每秒全服廣播整份狀態，改為沿用 W26 判定只送附近
+  連線，且進度整數百分比、製作清單或濕度顯示沒變就不送；位置不可信的物品實體維持全服。封包格式不變，
+  玩家端進度改為 1% 一跳。`-Dmdc.gameEntityRelevancy=0`／`-Dmdc.craftLogicSyncGate=0` 分別回原版。
+  詳見 [W36](docs/patches.md#2ay-gameentity-廣播收件範圍craftlogic-同步變化閘w36server預設-enforce)。
+
 > 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 
 逐項 javap 證據與安全論證：[docs/patches.md](docs/patches.md)；分析原始規格：[docs/specs/](docs/specs/)。

@@ -1660,6 +1660,8 @@ public final class SmokeCheck {
 
         // ---- W26 雞舍自發同步收件人過濾（IsoHutch.update 的兩個 sync）----
         String hsgCls = "zombie/mdc/HutchSyncGate";
+        // 收件判定與 teleport 豁免簿記自 W36 起移到共用的 RecipientWindow。
+        String rwCls = "zombie/mdc/RecipientWindow";
         String tpCls = "zombie/network/packets/TeleportPacket";
         String w26Iso = "zombie/iso/IsoObject";
         String w26Udp = "zombie/core/raknet/UdpConnection";
@@ -1751,9 +1753,9 @@ public final class SmokeCheck {
         // 怎麼送」的承諾就破了，其他上萬個 IsoObject 的 wire 一起被牽動。
         MethodNode pSyncIso = method(distJava, w26Iso, "syncIsoObject", w26SyncIsoDesc);
         ClassNode pIsoObjNode = classNode(distJava, w26Iso);
-        failed += check("W26 負對照：IsoObject 全 class 零 HutchSyncGate 改道、syncIsoObject 四步／hot-save 與 vanilla 同、sync 鏈真指令數不變",
+        failed += check("W26 負對照：IsoObject 全 class 零 HutchSyncGate／RecipientWindow 改道、syncIsoObject 四步／hot-save 與 vanilla 同、sync 鏈真指令數不變",
                 classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc) == 0
-                && classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, hsgCls,
+                && classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, rwCls,
                         "writeTeleportPlayer", w26TpHelperDesc) == 0
                 && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Udp, "startPacket", w26StartDesc) == 3
                 && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "doPacket", w26BbwDesc) == 3
@@ -1799,18 +1801,20 @@ public final class SmokeCheck {
                         .allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
         // 幾何、載具／noclip／teleport 與全域降級由行為測試驗證，不釘 helper 私有欄位讀取次數。
         String mapPutDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
-        // helper 契約④：豁免名單必須是 weak-key（強引用會把退役角色永久釘在堆上、豁免永不
+        // 共用 helper 契約④：豁免名單必須是 weak-key（強引用會把退役角色永久釘在堆上、豁免永不
         // 到期）且自帶同步（writeTeleportPlayer 的公開入口可能不在世界更新緒）；
         // 全 class 只有一個寫入點＝送出 teleport，判定端恰 1 次 containsKey。
-        MethodNode gHsgClinit = method(distJava, hsgCls, "<clinit>", "()V");
-        failed += check("W26 helper：EXEMPT＝WeakHashMap＋synchronizedMap 各 1、全 class put 恰 1（唯一寫入＝送出 teleport）、containsKey 恰 1",
-                countNew(gHsgClinit, "java/util/WeakHashMap") == 1
-                && countExactCalls(gHsgClinit, Opcodes.INVOKESTATIC, "java/util/Collections",
+        MethodNode gRwClinit = method(distJava, rwCls, "<clinit>", "()V");
+        failed += check("W26 共用 helper：EXEMPT＝WeakHashMap＋synchronizedMap 各 1、全 class put 恰 1（唯一寫入＝送出 teleport）、containsKey 恰 1；HutchSyncGate 不再自帶名單",
+                countNew(gRwClinit, "java/util/WeakHashMap") == 1
+                && countExactCalls(gRwClinit, Opcodes.INVOKESTATIC, "java/util/Collections",
                         "synchronizedMap", "(Ljava/util/Map;)Ljava/util/Map;") == 1
-                && classWideCalls(classNode(distJava, hsgCls), Opcodes.INVOKEINTERFACE,
+                && classWideCalls(classNode(distJava, rwCls), Opcodes.INVOKEINTERFACE,
                         "java/util/Map", "put", mapPutDesc) == 1
+                && classWideCalls(classNode(distJava, rwCls), Opcodes.INVOKEINTERFACE,
+                        "java/util/Map", "containsKey", "(Ljava/lang/Object;)Z") == 1
                 && classWideCalls(classNode(distJava, hsgCls), Opcodes.INVOKEINTERFACE,
-                        "java/util/Map", "containsKey", "(Ljava/lang/Object;)Z") == 1);
+                        "java/util/Map", "put", mapPutDesc) == 0);
 
         // ---- W26-2 teleport 豁免掛點（TeleportPacket.write 的唯一 PlayerID.write）----
         // vanilla 前提：write 只有一個 PlayerID.write，且在 3 個 putFloat 之前（wire 順序）。
@@ -1825,11 +1829,11 @@ public final class SmokeCheck {
                         < firstCallIndex(vTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc));
         // 手術後：改道 1、原呼叫歸零、真指令數不變、XYZ 三個 putFloat 仍在改道之後（wire 不變）。
         failed += check("W26-2 patched：write 改道 x1、原 PlayerID.write 歸零、真指令不變、XYZ putFloat 仍在其後",
-                countExactCalls(pTpWrite, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
+                countExactCalls(pTpWrite, Opcodes.INVOKESTATIC, rwCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
                 && countExactCalls(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 0
                 && realInsnCount(pTpWrite) == realInsnCount(vTpWrite)
                 && countExactCalls(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc) == 3
-                && lastCallIndex(pTpWrite, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc)
+                && lastCallIndex(pTpWrite, Opcodes.INVOKESTATIC, rwCls, "writeTeleportPlayer", w26TpHelperDesc)
                         < firstCallIndex(pTpWrite, Opcodes.INVOKEVIRTUAL, w26Bbw, "putFloat", putFloatDesc));
         // 負對照：全 class PlayerID.write 恰少 1、改道恰 1（只此一處）、真指令總數不變；
         // parse（wire 的對稱另一半）逐項未動——豁免簿記不得改變任何線路位元。
@@ -1839,14 +1843,14 @@ public final class SmokeCheck {
         failed += check("W26-2 負對照：全 class PlayerID.write 恰少 1、改道恰 1、真指令總數不變、parse 未被改動",
                 classWideCalls(pTpNode, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc)
                         == classWideCalls(vTpNode, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) - 1
-                && classWideCalls(pTpNode, Opcodes.INVOKESTATIC, hsgCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
+                && classWideCalls(pTpNode, Opcodes.INVOKESTATIC, rwCls, "writeTeleportPlayer", w26TpHelperDesc) == 1
                 && classRealInsnCount(pTpNode) == classRealInsnCount(vTpNode)
                 && realInsnCount(method(distJava, tpCls, "parse", tpParseDesc))
                         == realInsnCount(methodFromJar(jar, tpCls, "parse", tpParseDesc))
                 && countExactCalls(method(distJava, tpCls, "parse", tpParseDesc),
                         Opcodes.INVOKEVIRTUAL, w26Pid, "parse", tpParseDesc) == 1);
         // 豁免簿記與原 ID 寫入的例外邊界不能混合；全域降級由故障後的收件行為驗證。
-        MethodNode gWriteTp = method(distJava, hsgCls, "writeTeleportPlayer", w26TpHelperDesc);
+        MethodNode gWriteTp = method(distJava, rwCls, "writeTeleportPlayer", w26TpHelperDesc);
         failed += check("W26-2 helper：PlayerID.write 委派 1 且在 try 外、RETURN 恰 1、catch 僅 RuntimeException、put 1",
                 countExactCalls(gWriteTp, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 1
                 && callsInsideTryRange(gWriteTp, Opcodes.INVOKEVIRTUAL, w26Pid, "write", w26BbwDesc) == 0
@@ -2340,6 +2344,119 @@ public final class SmokeCheck {
                 && countExactCalls(method(distJava, geCls, "receiveSyncEntity", rcvDesc), Opcodes.INVOKESTATIC, upiCls, "afterReceive", "(L" + geCls + ";)V") == 2
                 && classWideCalls(pGe, Opcodes.INVOKESTATIC, upiCls, "onSetUsingPlayer", "(L" + geCls + ";" + upDesc + ")V")
                    + classWideCalls(pGe, Opcodes.INVOKESTATIC, upiCls, "afterReceive", "(L" + geCls + ";)V") == 4);
+
+        // ---- W36 GameEntity 廣播收件範圍＋CraftLogic 同步變化閘 ----
+        String genCls = "zombie/entity/GameEntityNetwork";
+        String inpCls = "zombie/network/packets/INetworkPacket";
+        String gebCls = "zombie/mdc/GameEntityBroadcastGate";
+        String clCls = "zombie/entity/components/crafting/CraftLogic";
+        String clsCls = "zombie/entity/components/crafting/CraftLogicSystem";
+        String dclCls = "zombie/entity/components/crafting/DryingCraftLogic";
+        String craftSyncCls = "zombie/entity/components/crafting/MdcCraftSyncGate";
+        String crdCls = "zombie/entity/components/crafting/recipe/CraftRecipeData";
+        String sendAllDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/network/IConnection;[Ljava/lang/Object;)V";
+        String sendOneDesc = "(Lzombie/network/IConnection;Lzombie/network/PacketTypes$PacketType;[Ljava/lang/Object;)V";
+        String spdDesc = "(Lzombie/entity/network/EntityPacketData;Lzombie/entity/GameEntity;Lzombie/entity/Component;"
+                + "Lzombie/network/IConnection;Z)V";
+        String clUpdDesc = "(L" + crdCls + ";)V";
+        String clStopDesc = "(L" + clCls + ";L" + crdCls + ";ZLzombie/entity/components/resources/ResourceGroup;)V";
+        String clHelperDesc = "(L" + clCls + ";)V";
+        MethodNode vSpd = methodFromJar(jar, genCls, "sendPacketData", spdDesc);
+        MethodNode pSpd = method(distJava, genCls, "sendPacketData", spdDesc);
+        // vanilla 前提：廣播分支唯一 sendToAll 的 values＝{data, entity, component}、排除連線＝參數 3、
+        // 型別 GameEntity；helper 以 values[1] 取實體座標、values[0] 量 payload。release 在其後。
+        failed += check("W36 vanilla：sendPacketData 的 sendToAll 恰 1（class-wide 1）、args＝GameEntity／slot3／{0,1,2}、release 在其後",
+                countExactCalls(vSpd, Opcodes.INVOKESTATIC, inpCls, "sendToAll", sendAllDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, genCls), Opcodes.INVOKESTATIC, inpCls, "sendToAll", sendAllDesc) == 1
+                && gameEntitySendToAllArgs(vSpd, inpCls, sendAllDesc)
+                && lastCallIndex(vSpd, Opcodes.INVOKESTATIC, inpCls, "sendToAll", sendAllDesc)
+                        < firstCallIndex(vSpd, Opcodes.INVOKESTATIC, "zombie/entity/network/EntityPacketData",
+                                "release", "(Lzombie/entity/network/EntityPacketData;)V"));
+        // helper 複製的是原版 sendToAll 迴圈的收件條件：排除 GUID、fully-connected、逐連線 send，原版不看距離。
+        MethodNode vSendAll = methodFromJar(jar, inpCls, "sendToAll", sendAllDesc);
+        failed += check("W36 vanilla：INetworkPacket.sendToAll 只有 GUID 排除＋isFullyConnected＋send、零 relevancy 判定",
+                countExactCalls(vSendAll, Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection", "getConnectedGUID", "()J") == 1
+                && countExactCalls(vSendAll, Opcodes.INVOKEINTERFACE, "zombie/network/IConnection", "getConnectedGUID", "()J") == 1
+                && countExactCalls(vSendAll, Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection", "isFullyConnected", "()Z") == 1
+                && countExactCalls(vSendAll, Opcodes.INVOKESTATIC, inpCls, "send", sendOneDesc) == 1
+                && countCalls(vSendAll, "zombie/core/raknet/UdpConnection", "isRelevantTo") == 0
+                && countCalls(vSendAll, "zombie/core/raknet/UdpConnection", "RelevantTo") == 0);
+        failed += check("W36 patched：sendPacketData 改道 x1、原 sendToAll 歸零、client／單連線 send 原樣、真指令不變",
+                countExactCalls(pSpd, Opcodes.INVOKESTATIC, gebCls, "sendToAll", sendAllDesc) == 1
+                && countExactCalls(pSpd, Opcodes.INVOKESTATIC, inpCls, "sendToAll", sendAllDesc) == 0
+                && countExactCalls(pSpd, Opcodes.INVOKESTATIC, inpCls, "send", "(Lzombie/network/PacketTypes$PacketType;[Ljava/lang/Object;)V") == 1
+                && countExactCalls(pSpd, Opcodes.INVOKESTATIC, inpCls, "send", sendOneDesc) == 1
+                && realInsnCount(pSpd) == realInsnCount(vSpd)
+                && classRealInsnCount(classNode(distJava, genCls)) == classRealInsnCount(classNodeFromJar(jar, genCls)));
+        // helper：逐連線 send 恰 1 且不在 try 內（送包例外語意同原版）；原版委派 3（off／簿記停用／位置不可信）；
+        // 收件條件與原版同（GUID 排除＋fully-connected），範圍判定在 try 內且 catch 僅 RuntimeException。
+        MethodNode gGeb = method(distJava, gebCls, "sendToAll", sendAllDesc);
+        failed += check("W36 helper：send 1 不在 try、sendToAll 委派 3、GUID／fully-connected 條件同原版、verdict 在 try 內、catch 僅 RuntimeException",
+                countExactCalls(gGeb, Opcodes.INVOKESTATIC, inpCls, "send", sendOneDesc) == 1
+                && callsInsideTryRange(gGeb, Opcodes.INVOKESTATIC, inpCls, "send", sendOneDesc) == 0
+                && countExactCalls(gGeb, Opcodes.INVOKESTATIC, inpCls, "sendToAll", sendAllDesc) == 3
+                && countExactCalls(gGeb, Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection", "getConnectedGUID", "()J") == 1
+                && countExactCalls(gGeb, Opcodes.INVOKEINTERFACE, "zombie/network/IConnection", "getConnectedGUID", "()J") == 1
+                && countExactCalls(gGeb, Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection", "isFullyConnected", "()Z") == 1
+                && callsInsideTryRange(gGeb, Opcodes.INVOKESTATIC, rwCls, "verdict", "(Lzombie/core/raknet/UdpConnection;FF)I") == 1
+                && gGeb.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+        // 「遠方玩家進入範圍時的狀態」前提：chunk 下載以 live 序列化（SaveLoadedChunk）送出，
+        // IsoObject.save→saveEntity→Component.save；CraftLogic.save 含 in-progress 清單、
+        // DryingCraftLogic.save 追加濕度。TIS 改掉任一環，被略過的連線就可能拿到舊狀態＝撤刀重估。
+        failed += check("W36 vanilla：chunk 帶 live CraftLogic 狀態（SaveLoadedChunk／saveEntity／Component.save／in-progress／濕度）",
+                countExactCalls(methodFromJar(jar, "zombie/network/PlayerDownloadServer", "update", "()V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk",
+                        "(Lzombie/network/ClientChunkRequest$Chunk;Ljava/util/zip/CRC32;)V") == 1
+                && countExactCalls(methodFromJar(jar, "zombie/iso/IsoObject", "save", "(Ljava/nio/ByteBuffer;Z)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "saveEntity", "(Ljava/nio/ByteBuffer;)V") == 1
+                && countExactCalls(methodFromJar(jar, "zombie/entity/GameEntity", "saveEntity", "(Ljava/nio/ByteBuffer;)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/entity/Component", "save", "(Ljava/nio/ByteBuffer;)V") == 1
+                && countExactCalls(methodFromJar(jar, clCls, "save", "(Ljava/nio/ByteBuffer;)V"),
+                        Opcodes.INVOKEVIRTUAL, clCls, "saveInProgessCraftData", "(Ljava/nio/ByteBuffer;)V") == 1
+                && countExactCalls(methodFromJar(jar, dclCls, "save", "(Ljava/nio/ByteBuffer;)V"),
+                        Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "putDouble", "(D)Ljava/nio/ByteBuffer;") == 1);
+        // CraftLogic 前提：週期同步只在 onUpdate（limit.Check 之後），明確同步只在 CraftLogicSystem.stop
+        // （finaliseRecipe 之後）；全 jar Java 呼叫點恰 2。同步內容＝整份 save＋server 廣播出口。
+        // DryingCraftLogic 不自送、onUpdate 走 super；濕度只在 private temporaryWetnesses（helper 反射讀）。
+        MethodNode vClUpd = methodFromJar(jar, clCls, "onUpdate", clUpdDesc);
+        MethodNode vClStop = methodFromJar(jar, clsCls, "stop", clStopDesc);
+        MethodNode vClSync = methodFromJar(jar, clCls, "sendCraftLogicSync", "()V");
+        failed += check("W36 vanilla：sendCraftLogicSync 全 jar 2 處（onUpdate 在 Check 後／stop 在 finalise 後）、內容＝save＋sendServerPacket、Drying 不自送且有 temporaryWetnesses",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 2
+                && countExactCalls(vClUpd, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 1
+                && firstCallIndex(vClUpd, Opcodes.INVOKEVIRTUAL, "zombie/core/utils/UpdateLimit", "Check", "()Z")
+                        < firstCallIndex(vClUpd, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V")
+                && countExactCalls(vClStop, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 1
+                && firstCallIndex(vClStop, Opcodes.INVOKEVIRTUAL, clCls, "finaliseRecipe", clUpdDesc)
+                        < firstCallIndex(vClStop, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V")
+                && countExactCalls(vClSync, Opcodes.INVOKEVIRTUAL, clCls, "save", "(Ljava/nio/ByteBuffer;)V") == 1
+                && countExactCalls(vClSync, Opcodes.INVOKEVIRTUAL, clCls, "sendServerPacket",
+                        "(Lzombie/entity/network/EntityPacketData;Lzombie/core/raknet/UdpConnection;)V") == 1
+                && classWideCalls(classNodeFromJar(jar, dclCls), Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 0
+                && classWideCalls(classNodeFromJar(jar, dclCls), Opcodes.INVOKEVIRTUAL, dclCls, "sendCraftLogicSync", "()V") == 0
+                && countExactCalls(methodFromJar(jar, dclCls, "onUpdate", clUpdDesc), Opcodes.INVOKESPECIAL, clCls, "onUpdate", clUpdDesc) == 1
+                && hasField(classNodeFromJar(jar, dclCls), "temporaryWetnesses", "Ljava/util/HashMap;"));
+        MethodNode pClUpd = method(distJava, clCls, "onUpdate", clUpdDesc);
+        MethodNode pClStop = method(distJava, clsCls, "stop", clStopDesc);
+        failed += check("W36 patched：onUpdate→periodicSync、stop→explicitSync 各 x1、原呼叫歸零、兩 class 真指令總數不變",
+                countExactCalls(pClUpd, Opcodes.INVOKESTATIC, craftSyncCls, "periodicSync", clHelperDesc) == 1
+                && countExactCalls(pClUpd, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 0
+                && countExactCalls(pClStop, Opcodes.INVOKESTATIC, craftSyncCls, "explicitSync", clHelperDesc) == 1
+                && countExactCalls(pClStop, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 0
+                && classRealInsnCount(classNode(distJava, clCls)) == classRealInsnCount(classNodeFromJar(jar, clCls))
+                && classRealInsnCount(classNode(distJava, clsCls)) == classRealInsnCount(classNodeFromJar(jar, clsCls)));
+        // helper：週期路徑的原版送出 3 處（off／簽章失敗／內容變化）；明確同步先送再記基準；
+        // 基準表是 WeakHashMap（不釘住已釋放的 component），類內零 HashMap 配置。
+        MethodNode gPeriodic = method(distJava, craftSyncCls, "periodicSync", clHelperDesc);
+        MethodNode gExplicit = method(distJava, craftSyncCls, "explicitSync", clHelperDesc);
+        MethodNode gCsgClinit = method(distJava, craftSyncCls, "<clinit>", "()V");
+        failed += check("W36 helper：periodicSync 送出 3、explicitSync 送出 1 且先於 signature、基準表 WeakHashMap 1、零 HashMap",
+                countExactCalls(gPeriodic, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 3
+                && countExactCalls(gExplicit, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V") == 1
+                && firstCallIndex(gExplicit, Opcodes.INVOKEVIRTUAL, clCls, "sendCraftLogicSync", "()V")
+                        < firstCallIndex(gExplicit, Opcodes.INVOKESTATIC, craftSyncCls, "signature", "(L" + clCls + ";)J")
+                && countNew(gCsgClinit, "java/util/WeakHashMap") == 1
+                && classNode(distJava, craftSyncCls).methods.stream().allMatch(m -> countNew(m, "java/util/HashMap") == 0));
 
         // ---- W10-C 卡讀條第二波觀測（processServer 打斷／start 時長／update perform 出口）----
         String taProbeCls = "zombie/core/MdcTimedActionProbe";
@@ -2844,6 +2961,7 @@ public final class SmokeCheck {
                         "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.addBaby " + babyDesc,
                         "INVOKESTATIC " + babyHelper + ".addBaby (Lzombie/characters/animals/IsoAnimal;)Lzombie/characters/animals/IsoAnimal;")
                         .equals(methodText(method(distJava, adCls, "checkPregnancy", "()V"))));
+
         // 聲音觀測只包既有已認證派送，不修改 wire class 或任何聲音／魚群方法。
         String soundProbe = "zombie/network/packets/sound/MdcWorldSoundProbe";
         String soundPacket = "zombie/network/packets/sound/WorldSoundPacket";
@@ -3605,6 +3723,48 @@ public final class SmokeCheck {
             }
         }
         return null;
+    }
+
+    /** W36：sendToAll 前的參數建構＝GameEntity 型別、排除連線 slot 3、values＝{slot0, slot1, slot2}。 */
+    static boolean gameEntitySendToAllArgs(MethodNode m, String owner, String desc) {
+        MethodInsnNode call = findExactCall(m, Opcodes.INVOKESTATIC, owner, "sendToAll", desc);
+        if (call == null) {
+            return false;
+        }
+        AbstractInsnNode in = call;
+        for (int slot = 2; slot >= 0; slot--) {
+            in = prevReal(in);
+            if (in == null || in.getOpcode() != Opcodes.AASTORE) {
+                return false;
+            }
+            in = prevReal(in);
+            if (!isVar(in, Opcodes.ALOAD, slot)) {
+                return false;
+            }
+            in = prevReal(in);
+            if (in == null || in.getOpcode() != Opcodes.ICONST_0 + slot) {
+                return false;
+            }
+            in = prevReal(in);
+            if (in == null || in.getOpcode() != Opcodes.DUP) {
+                return false;
+            }
+        }
+        in = prevReal(in);
+        if (!(in instanceof TypeInsnNode t) || t.getOpcode() != Opcodes.ANEWARRAY || !t.desc.equals("java/lang/Object")) {
+            return false;
+        }
+        in = prevReal(in);
+        if (in == null || in.getOpcode() != Opcodes.ICONST_3) {
+            return false;
+        }
+        in = prevReal(in);
+        if (!isVar(in, Opcodes.ALOAD, 3)) {
+            return false;
+        }
+        in = prevReal(in);
+        return isField(in, Opcodes.GETSTATIC, "zombie/network/PacketTypes$PacketType", "GameEntity",
+                "Lzombie/network/PacketTypes$PacketType;");
     }
 
     static int countFieldReads(MethodNode method, String owner, String name) {
