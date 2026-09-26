@@ -4164,6 +4164,58 @@ SmokeCheck：原版 `AnimalData` 全 class 零寫入動物時鐘、`update` 內 
 - **雞舍同步變化量測**（W26，純觀測）：每次自發 sync 的 payload 與同一雞舍上一次逐位元比較，beat 新增
   `unchanged unchangedBytes`。蛋的 Food age 每秒可變，只有 payload 完全相同才算；數據出來前不做 W36 式變化閘。
 
+## 2bg. 地面物品過期清除時機同步＋物品搬移失敗即時回報（W43／W44，server，預設 on）
+
+**症狀（2026-09-27 01:40 玩家回報）**：畜牧場的糞便「撿不起來」，讀條走滿後空等、東西沒進背包，同一件重試多次都一樣；
+玩家重登後那些物品就消失。client log 無任何錯誤；伺服器 00:21 session 有 81 行
+`ERROR: sendItemsToContainer: can't find world item with id=…`（29 個 id，單一 id 重試 9 次），70 行集中在該玩家待在
+農場的 01:32–01:43。9/20 以來每 session 0–104 行，不是新問題。
+
+**卡住的機制（W44 的對象）**：地面撿物走 `ItemTransaction`，不是 W10 的 `NetTimedAction`。來源是 WorldObject 且伺服器
+找不到物品時，`isConsistent` 在 source=null 時仍回 0 ⇒ Accept；到期 `Transaction.update()` 失敗，
+`TransactionManager.update` 只 `setState(Reject)`、**不送封包**（只有 Done 回送）。client 停在 Accept，等「時長＋10 秒」
+逾時被移除，空清單上 `isDone` 成立 ⇒ `forceComplete`：讀條走滿、空等、沒拿到。整疊撿時每件各卡一輪。
+
+**幽靈物品從哪來（W43 的對象）**：
+- `IsoGridSquare.load:3272-3301` 載入時丟掉過期地面物品，沒有 client 守衛（2n 受精蛋案已證實 client 收 chunk 與讀本機
+  快取都走這段）。伺服器只在自己載入 chunk 時清；chunk 一直載著，過期物品留在記憶體。client 每次載入都清 ⇒ 同一格兩邊
+  `objects` 清單長度不同。
+- 伺服器移除地面物件時送的 `RemoveItemFromSquare` 只帶物件序號（`RemoveItemFromSquarePacket.set` 取 `getObjectIndex`），
+  client 按序號刪 ⇒ 錯位時刪到別的物件或超出範圍直接略過（非 debug 不留 log），被撿走的那件留在 client 畫面上。
+- 正式服 `DayLength=3`（1 小時一天）＋`HoursForWorldItemRemoval=24`＝現實約 1 小時就過期；清單含全部 `Dung_*`、
+  `ChickenFeather`、`TurkeyFeather`、`Egg`，畜牧區最容易觸發。
+
+**W43 手術（無新 bytecode 改動）**：client 取得「伺服器已載入 chunk」資料的唯一出口是 `PlayerDownloadServer.update()`
+內的 `SaveLoadedChunk`（W4-1 已改道到 `ChunkRequestPacker.saveLoadedChunk`；另一個呼叫點在 `ServerChunkLoader` 存檔路徑，
+與 client 無關）。helper 在序列化前呼叫 `WorldItemExpirySync.beforeSend`：以與 `IsoGridSquare.load` 逐項相同的條件
+（含 `split("_")[0]` 分支不看 dropTime／hours 的原版怪處），把該 chunk 的過期地面物品經原版 `GameServer.RemoveItemFromMap`
+移除。已載入該格的其他 client 收到的序號與伺服器一致（relevance 範圍 `range/2+2` chunk 大於 client 視窗）；
+下載中的 client 那格尚未載入，移除封包直接被丟棄（`delayPacket` 只延後 coop 載入中的格子），拿到的資料本來就沒有
+這些物品 ⇒ 兩邊清單一致。方向與受精蛋案相反：伺服器採用 client 本來就會套用的結果，玩家可見的清除規則不變。
+- 時鐘邊界：client 載入晚於伺服器序列化，途中到期的物品會被 client 多刪，故提前
+  `-Dmdc.worldItemExpiry.marginHours`（預設 1 遊戲小時≈現實 2.5 分鐘，clamp 0..24）。
+- 成本：原版每移除一件做一次 `RecalcAllWithNeighbours`；每件只付一次，沒有過期物品的 chunk 只多一次 64×層數掃描。
+- 只吞 `RuntimeException`（計 anomalies，序列化照常＝原版）。kill switch `-Dmdc.worldItemExpiry=0|off`。
+- beat（5 分鐘，僅在有 chunk 下載時）：`chunks removed removedSinceLast maxPerChunk anomalies`。
+
+**W44 手術**：`TransactionManager.update()` 內三個 `Transaction.setState` 1:1 改道 `MdcTransactionReject.setState`
+（`zombie.core` 套件以讀 protected `entries`／`playerId`）。先照原樣設狀態；只有 Reject 且為 `ItemTransactionPacket`
+時，比照 Done 分支以同一物件送給該玩家連線（Reject 的 write 只帶 id＋state），client `isRejected` ⇒ `forceStop`。
+任一 entry 來源為 `Floor` 時不送：原版「地面→地面」先搬完才以距離 >1.1 回 false（`Transaction.updateItem:302-341`），
+物品其實已移動，維持原版不打斷後續排隊。已知取捨：多件交易前面幾件已搬、後面失敗時，改為立刻中斷剩餘排隊（原版是
+空等後繼續）。kill switch `-Dmdc.transactionReject=0|off`。beat 只在有 Reject 時：`rejects sent skippedFloor
+skippedNoConn anomalies`。
+
+**殘留（原版，本刀不處理）**：chunk 傳輸途中對同格的新增／移除封包會因 client 那格尚未載入而被丟；伺服器未載入的
+chunk 由 client 讀檔、伺服器稍後自行載入時多清的部分不通知 client。兩者都會產生幽靈，頻率預期遠低於主因；要即時清掉
+需要 client Lua 按 id 移除（原版沒有按 id 刪地面物品的封包）。
+
+**驗證**：SmokeCheck 釘 `IsoGridSquare.load` 丟棄條件的呼叫／欄位讀取數（TIS 改條件即紅，避免再錯位）、
+`RemoveItemFromSquarePacket.set` 取 `getObjectIndex`（存在理由）、`TransactionManager.update` 內 setState=3 且
+`PacketType.send` 恰 1（TIS 補 Reject 回送即紅＝撤 W44）、改道同形。`WorldItemExpirySyncTest` 驗丟棄條件與原版逐項
+等價（含兩個原版怪處）與旋鈕解析。沒有本機可執行的 dedicated server 端到端情境；線上驗收＝`can't find world item`
+每 session 行數大幅下降、`WorldItemExpiry removed` 成長且 `anomalies=0`、`TransactionReject sent` 對應剩餘的撿物失敗。
+
 ---
 
 ## 3. 部署後驗證清單

@@ -398,6 +398,23 @@ public final class PatchConfig {
         pdsDedupe.expectedHits = 1;
         patches.add(pds);
 
+        // ---- W43 地面物品過期清除時機同步（2026-09-27；docs/patches.md 2bg）----
+        // 不新增手術：掛在上面 W4-1 的 SaveLoadedChunk 改道 helper 內，序列化前先清掉 client
+        // 載入時會丟棄的過期地面物品（IsoGridSquare.load 無 client 守衛＋RemoveItemFromSquare
+        // 按序號刪 ⇒ 兩邊清單錯位產生幽靈物品）。-Dmdc.worldItemExpiry=0|off 回原版。
+
+        // ---- W44 物品搬移失敗即時回報（2026-09-27；docs/patches.md 2bg）----
+        // TransactionManager.update() 失敗只 setState(Reject) 不送封包，client 要等時長+10 秒
+        // 逾時才 forceComplete（讀條走滿後空等、東西沒拿到）。三個 setState 1:1 改道，Reject 時
+        // 比照 Done 分支以同一物件回送。-Dmdc.transactionReject=0|off 回原版。
+        Patcher.ClassPatch txManager = new Patcher.ClassPatch("zombie/core/TransactionManager");
+        Patcher.MethodOps txUpdate = txManager.method("update", "()V");
+        txUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/Transaction",
+                "setState", "(Lzombie/core/Transaction$TransactionState;)V",
+                "zombie/core/MdcTransactionReject", "setState"));
+        txUpdate.expectedHits = 3;
+        patches.add(txManager);
+
         // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
         // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
         // 自我遞迴 → 假死 13 分鐘、graceful quit 收不進去、看門狗強制重啟。

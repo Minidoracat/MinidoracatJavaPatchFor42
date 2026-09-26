@@ -165,10 +165,12 @@ public final class ChunkRequestPacker {
 
     /**
      * {@code update()} 內 {@code IsoChunk.SaveLoadedChunk} 的 1:1 改道（receiver 前置）：
-     * 只量主執行緒序列化耗時，例外原樣透傳（vanilla 呼叫端自己 catch 後 sendNotRequired）。
+     * 先讓 W43 {@link WorldItemExpirySync} 清掉 client 載入時會丟棄的過期地面物品（與 packer
+     * 模式無關），再量主執行緒序列化耗時；例外原樣透傳（vanilla 呼叫端自己 catch 後 sendNotRequired）。
      */
     public static void saveLoadedChunk(IsoChunk chunk, ClientChunkRequest.Chunk ccrc, CRC32 crc32)
             throws IOException {
+        WorldItemExpirySync.beforeSend(chunk);
         if (MODE == MODE_OFF) {
             chunk.SaveLoadedChunk(ccrc, crc32);
             return;

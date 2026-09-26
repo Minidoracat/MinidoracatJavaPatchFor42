@@ -838,6 +838,53 @@ public final class SmokeCheck {
                 && countExactCalls(packerSave, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk",
                         "SaveLoadedChunk", slcVanillaDesc) == 2);
 
+        // ---- W43 地面物品過期清除時機同步（helper 內呼叫，無新手術）----
+        // 存在理由兩條：client 按序號刪地面物件（set 取 getObjectIndex）、IsoGridSquare.load 的
+        // 丟棄條件——helper 逐項照抄，TIS 改動條件時必須紅燈重對，否則兩邊清單又會錯位。
+        String expiryCls = "zombie/mdc/WorldItemExpirySync";
+        MethodNode vSqLoad = methodFromJar(jar, "zombie/iso/IsoGridSquare", "load", "(Ljava/nio/ByteBuffer;IZ)V");
+        failed += check("W43 vanilla 前提：IsoGridSquare.load 丟棄條件 worldItemRemovalListContains=4、getWorldAgeHours=1、isIgnoreRemoveSandbox=1、Item.getObsolete=1、dropTime 讀 2、hoursForWorldItemRemoval 讀 2、blacklistToggle 讀 4",
+                countExactCalls(vSqLoad, Opcodes.INVOKEVIRTUAL, "zombie/SandboxOptions",
+                        "worldItemRemovalListContains", "(Ljava/lang/String;)Z") == 4
+                && countExactCalls(vSqLoad, Opcodes.INVOKEVIRTUAL, "zombie/GameTime", "getWorldAgeHours", "()D") == 1
+                && countExactCalls(vSqLoad, Opcodes.INVOKEVIRTUAL, "zombie/iso/objects/IsoWorldInventoryObject",
+                        "isIgnoreRemoveSandbox", "()Z") == 1
+                && countExactCalls(vSqLoad, Opcodes.INVOKEVIRTUAL, "zombie/scripting/objects/Item", "getObsolete", "()Z") == 1
+                && countInstanceFieldReads(vSqLoad, "zombie/iso/objects/IsoWorldInventoryObject", "dropTime") == 2
+                && countInstanceFieldReads(vSqLoad, "zombie/SandboxOptions", "hoursForWorldItemRemoval") == 2
+                && countInstanceFieldReads(vSqLoad, "zombie/SandboxOptions", "itemRemovalListBlacklistToggle") == 4);
+        failed += check("W43 vanilla 前提：RemoveItemFromSquarePacket.set 以 getObjectIndex 定位（按序號刪＝錯位即幽靈）",
+                countExactCalls(methodFromJar(jar, "zombie/network/packets/RemoveItemFromSquarePacket", "set",
+                        "(Lzombie/iso/IsoObject;)V"), Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject",
+                        "getObjectIndex", "()I") == 1);
+        failed += check("W43 helper：saveLoadedChunk 呼叫 beforeSend 恰 1；purge 經 GameServer.RemoveItemFromMap 恰 1",
+                countExactCalls(packerSave, Opcodes.INVOKESTATIC, expiryCls, "beforeSend", "(Lzombie/iso/IsoChunk;)V") == 1
+                && countExactCalls(method(distJava, expiryCls, "purge", "(Lzombie/iso/IsoChunk;D)I"),
+                        Opcodes.INVOKESTATIC, "zombie/network/GameServer", "RemoveItemFromMap", "(Lzombie/iso/IsoObject;)I") == 1);
+
+        // ---- W44 物品搬移失敗即時回報（TransactionManager.update）----
+        String txRejectCls = "zombie/core/MdcTransactionReject";
+        String txSetStateDesc = "(Lzombie/core/Transaction$TransactionState;)V";
+        MethodNode vTxUpdate = methodFromJar(jar, "zombie/core/TransactionManager", "update", "()V");
+        MethodNode pTxUpdate = method(distJava, "zombie/core/TransactionManager", "update", "()V");
+        failed += check("W44 vanilla 前提：update 內 setState=3、PacketType.send 恰 1（只有 Done 回送；TIS 補 Reject 回送時紅＝撤刀）",
+                countExactCalls(vTxUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Transaction", "setState", txSetStateDesc) == 3
+                && countExactCalls(vTxUpdate, Opcodes.INVOKEVIRTUAL, "zombie/network/PacketTypes$PacketType",
+                        "send", "(Lzombie/network/IConnection;)V") == 1);
+        failed += check("W44 手術後：setState 改道 x3、原呼叫歸零、真指令不變",
+                countExactCalls(pTxUpdate, Opcodes.INVOKESTATIC, txRejectCls, "setState",
+                        "(Lzombie/core/Transaction;Lzombie/core/Transaction$TransactionState;)V") == 3
+                && countExactCalls(pTxUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Transaction", "setState", txSetStateDesc) == 0
+                && realInsnCount(pTxUpdate) == realInsnCount(vTxUpdate));
+        failed += check("W44 helper：setState 委派原版 Transaction.setState 恰 1、回送 send 恰 1",
+                countExactCalls(method(distJava, txRejectCls, "setState",
+                        "(Lzombie/core/Transaction;Lzombie/core/Transaction$TransactionState;)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/core/Transaction", "setState", txSetStateDesc) == 1
+                && countExactCalls(method(distJava, txRejectCls, "setState",
+                        "(Lzombie/core/Transaction;Lzombie/core/Transaction$TransactionState;)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/network/PacketTypes$PacketType",
+                        "send", "(Lzombie/network/IConnection;)V") == 1);
+
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（server）",
                 patchInfoOk(distJava, "server"));
 

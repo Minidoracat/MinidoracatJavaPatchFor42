@@ -108,6 +108,8 @@ $helperEntries = @(
     'zombie/mdc/AnimalDeathLedger.class',
     'zombie/mdc/ProcessItemsGuard.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
+    'zombie/mdc/WorldItemExpirySync.class',
+    'zombie/core/MdcTransactionReject.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -176,6 +178,10 @@ java "-Dmdc.chunkPacker=enforce" "-Dmdc.chunkPacker.batch=60" "-Dmdc.chunkPacker
 Assert-Ok "ChunkRequestPackerTest（enforce 但 windowBudget=0＝不併包）"
 java "-Dmdc.chunkPacker=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest off
 Assert-Ok "ChunkRequestPackerTest（off kill switch）"
+
+Write-Host "[9b2/10] 地面物品過期清除同步（W43）丟棄條件與原版逐項等價＋旋鈕解析..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldItemExpirySyncTest
+Assert-Ok "WorldItemExpirySyncTest"
 
 Write-Host "[9c/10] 地圖格載入捕手（W6）行為驗證（含替身必拋負對照）＋kill switch..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest
