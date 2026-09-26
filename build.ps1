@@ -94,6 +94,9 @@ $helperEntries = @(
     'zombie/mdc/IoPoolIsolation.class',
     'zombie/mdc/IoPoolIsolation$Local.class',
     'zombie/mdc/HutchSyncGate.class',
+    'zombie/mdc/RecipientWindow.class',
+    'zombie/mdc/GameEntityBroadcastGate.class',
+    'zombie/entity/components/crafting/MdcCraftSyncGate.class',
     'zombie/mdc/PopManAddLock.class',
     'zombie/mdc/AnimalUpdateGuard.class',
     'zombie/mdc/BulkItemRegistration.class',
@@ -278,8 +281,19 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchS
 Assert-Ok "HutchSyncGateTest（enforce，預設出貨模式）"
 java "-Dmdc.hutchSyncGate=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest observe
 Assert-Ok "HutchSyncGateTest（observe，只量測不過濾）"
-java "-Dmdc.hutchSyncGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest off
-Assert-Ok "HutchSyncGateTest（hutchSyncGate=0 kill switch，純委派）"
+# off 同時關掉 W36 廣播過濾＝共用 teleport 簿記也停用，驗證兩把都關時 TeleportPacket.write 純委派。
+java "-Dmdc.hutchSyncGate=0" "-Dmdc.gameEntityRelevancy=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest off
+Assert-Ok "HutchSyncGateTest（hutchSyncGate=0＋gameEntityRelevancy=0，純委派）"
+
+Write-Host "[9n3/10] GameEntity 廣播收件範圍＋CraftLogic 同步變化閘（W36）三模式行為驗證（獨立 JVM）..."
+# enforce＝預設出貨（遠方連線略過、位置不可信型別全服、wire 與原版逐位元相同；進度整數百分比／
+# in-progress 清單／濕度不變就不送）；observe＝只計數照送；off＝兩把都純委派。測試自驗模式。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest enforce
+Assert-Ok "GameEntityTrafficTest（enforce，預設出貨模式）"
+java "-Dmdc.gameEntityRelevancy=2" "-Dmdc.craftLogicSyncGate=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest observe
+Assert-Ok "GameEntityTrafficTest（observe，只計數照送）"
+java "-Dmdc.gameEntityRelevancy=0" "-Dmdc.craftLogicSyncGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest off
+Assert-Ok "GameEntityTrafficTest（兩把 kill switch 全關，純委派）"
 
 Write-Host "[9o/10] 動物 LOS 節流閘（W18）七組態行為驗證（獨立 JVM）..."
 # observe＝預設出貨（自驗預設 N=2、size 採樣兩分支、錯誤契約：簿記 fail-open 恰一次委派＋

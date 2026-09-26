@@ -58,7 +58,7 @@ public final class HutchSyncGateTest {
 
     private static int failed;
 
-    /** off 模式下 {@code EXEMPT} 為 null，{@code shouldSend} 不可直呼（只驗端到端行為）。 */
+    /** 只在雞舍過濾啟用時直呼判定；off 只驗端到端委派。 */
     private static final boolean JUDGE = HutchSyncGate.MODE != HutchSyncGate.OFF;
     /** 只有 enforce 會真的少送。 */
     private static final boolean FILTERS = HutchSyncGate.MODE == HutchSyncGate.ENFORCE;
@@ -327,7 +327,7 @@ public final class HutchSyncGateTest {
         }
 
         PlayerID id = playerId(traveller, (short) 7);
-        byte[] written = capture(out -> HutchSyncGate.writeTeleportPlayer(id, out));
+        byte[] written = capture(out -> RecipientWindow.writeTeleportPlayer(id, out));
         byte[] vanillaId = capture(id::write);
         expect("teleport wire：改道後與原版 PlayerID.write 逐位元相同",
                 Arrays.equals(written, vanillaId));
@@ -355,7 +355,7 @@ public final class HutchSyncGateTest {
 
         PlayerID orphan = new PlayerID();
         orphan.setID((short) 9);
-        byte[] orphanWire = capture(out -> HutchSyncGate.writeTeleportPlayer(orphan, out));
+        byte[] orphanWire = capture(out -> RecipientWindow.writeTeleportPlayer(orphan, out));
         expect("PlayerID 尚未解析出角色：不記豁免、不炸、照樣寫入",
                 Arrays.equals(orphanWire, capture(orphan::write)));
     }
@@ -528,15 +528,16 @@ public final class HutchSyncGateTest {
         Error linkageError = null;
         byte[] linkageWire = null;
         try {
-            linkageWire = capture(out -> HutchSyncGate.writeTeleportPlayer(linkage, out));
+            linkageWire = capture(out -> RecipientWindow.writeTeleportPlayer(linkage, out));
         } catch (LinkageError error) {
             linkageError = error;
         }
-        if (JUDGE) {
+        // 豁免簿記由 RecipientWindow 共用：雞舍或 W36 任一啟用就會進簿記入口。
+        if (RecipientWindow.ACTIVE) {
             expect("LinkageError：fail-fast 外逃，不被吞掉", linkageError instanceof NoSuchMethodError);
         } else {
-            expect("off：連簿記入口都不進，LinkageError 不會被觸發", linkageError == null);
-            expect("off：teleport 仍原樣寫入",
+            expect("全關：連簿記入口都不進，LinkageError 不會被觸發", linkageError == null);
+            expect("全關：teleport 仍原樣寫入",
                     linkageWire != null && Arrays.equals(linkageWire, capture(linkage::write)));
         }
 
@@ -548,7 +549,7 @@ public final class HutchSyncGateTest {
 
         RuntimeFailingPlayerID faulty = new RuntimeFailingPlayerID();
         faulty.setID((short) 13);
-        byte[] faultyWire = capture(out -> HutchSyncGate.writeTeleportPlayer(faulty, out));
+        byte[] faultyWire = capture(out -> RecipientWindow.writeTeleportPlayer(faulty, out));
         // 沒有 try/catch：writeTeleportPlayer 若讓 RuntimeException 外逃，這裡會直接以堆疊終止
         expect("簿記 RuntimeException：不外逃且 id 仍原樣寫入",
                 Arrays.equals(faultyWire, capture(faulty::write)));
