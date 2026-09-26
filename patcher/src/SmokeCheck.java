@@ -2892,9 +2892,9 @@ public final class SmokeCheck {
                 && methodText(vBulk).replace(
                         "INVOKEVIRTUAL zombie/iso/IsoCell.addToProcessItems (Ljava/util/ArrayList;)V",
                         "INVOKESTATIC " + bulkHelper + ".addToProcessItems " + bulkDesc).equals(methodText(pBulk)));
-        failed += check("W30 不替換 IsoCell 類別或單件 API",
-                !Files.exists(distJava.resolve("zombie/iso/IsoCell.class"))
-                && classWideCalls(classNode(distJava, icCls), Opcodes.INVOKESTATIC,
+        // W40 起 IsoCell 本體有手術（ProcessItems 改道＋四個寫入口 headCall），其餘方法由 W40「逐指令不變」鎖住。
+        failed += check("W30 只改道 ItemContainer 的批次呼叫，不改 IsoCell 的 addToProcessItems 語意",
+                classWideCalls(classNode(distJava, icCls), Opcodes.INVOKESTATIC,
                         bulkHelper, "addToProcessItems", bulkDesc) == 1);
         String fishCls = "zombie/iso/FishSchoolManager";
         String fishHelper = "zombie/mdc/FishingDataBroadcast";
@@ -2971,6 +2971,46 @@ public final class SmokeCheck {
                 headCallSlotsOk(pOnDeath, "zombie/mdc/AnimalDeathLedger", "onDeath",
                         "(Lzombie/characters/animals/IsoAnimal;)V", 0)
                 && realInsnCount(pOnDeath) == realInsnCount(vOnDeath) + 2);
+        // W40：存在理由＝原版 ProcessItems 對 processItems.get(n) 不做 null 檢查（TIS 補檢查時會紅＝撤刀）。
+        String isoCellCls = "zombie/iso/IsoCell";
+        String piGuard = "zombie/mdc/ProcessItemsGuard";
+        MethodNode vProcessItems = methodFromJar(jar, isoCellCls, "ProcessItems", "(Ljava/util/Iterator;)V");
+        int nullChecks = 0;
+        for (AbstractInsnNode in : vProcessItems.instructions) {
+            if (in.getOpcode() == Opcodes.IFNULL || in.getOpcode() == Opcodes.IFNONNULL) nullChecks++;
+        }
+        failed += check("W40 vanilla ProcessItems 無 null 檢查，InventoryItem.update／finishupdate 各恰 1",
+                nullChecks == 0
+                && countExactCalls(vProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "update", "()V") == 1
+                && countExactCalls(vProcessItems, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem", "finishupdate", "()Z") == 1);
+        failed += check("W40 ProcessItems 兩處同形改道，世界物品迴圈與 frames 保留",
+                methodText(vProcessItems)
+                        .replace("INVOKEVIRTUAL zombie/inventory/InventoryItem.update ()V",
+                                "INVOKESTATIC " + piGuard + ".update (Lzombie/inventory/InventoryItem;)V")
+                        .replace("INVOKEVIRTUAL zombie/inventory/InventoryItem.finishupdate ()Z",
+                                "INVOKESTATIC " + piGuard + ".finishupdate (Lzombie/inventory/InventoryItem;)Z")
+                        .equals(methodText(method(distJava, isoCellCls, "ProcessItems", "(Ljava/util/Iterator;)V"))));
+        String[][] piWriters = {
+                {"addToProcessItems", "(Lzombie/inventory/InventoryItem;)V"},
+                {"addToProcessItems", "(Ljava/util/ArrayList;)V"},
+                {"addToProcessItemsRemove", "(Lzombie/inventory/InventoryItem;)V"},
+                {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V"}};
+        java.util.Set<String> piTargets = new java.util.HashSet<>();
+        piTargets.add("ProcessItems(Ljava/util/Iterator;)V");
+        for (String[] w : piWriters) {
+            piTargets.add(w[0] + w[1]);
+            MethodNode vW = methodFromJar(jar, isoCellCls, w[0], w[1]);
+            MethodNode pW = method(distJava, isoCellCls, w[0], w[1]);
+            failed += check("W40 " + w[0] + w[1] + " 頭部 aload_0→touch、真指令恰 +2",
+                    headCallSlotsOk(pW, piGuard, "touch", "(L" + isoCellCls + ";)V", 0)
+                    && realInsnCount(pW) == realInsnCount(vW) + 2);
+        }
+        int piUntouchedDiffs = 0;
+        for (MethodNode original : classNodeFromJar(jar, isoCellCls).methods) {
+            if (piTargets.contains(original.name + original.desc)) continue;
+            if (!methodText(original).equals(methodText(method(distJava, isoCellCls, original.name, original.desc)))) piUntouchedDiffs++;
+        }
+        failed += check("W40 IsoCell 其餘方法逐指令不變", piUntouchedDiffs == 0);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",

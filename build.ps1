@@ -108,6 +108,7 @@ $helperEntries = @(
     'zombie/characters/animals/MdcAnimalCellSave.class',
     'zombie/mdc/AnimalMetaSnapshot.class',
     'zombie/mdc/AnimalDeathLedger.class',
+    'zombie/mdc/ProcessItemsGuard.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -405,6 +406,13 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.Animal
 Assert-Ok "AnimalDeathLedgerTest（on，出貨組態）"
 java "-Dmdc.animalDeathLedger=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest off
 Assert-Ok "AnimalDeathLedgerTest（animalDeathLedger=0）"
+
+Write-Host "[9r6/10] 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 IsoCell）..."
+# off 組態重現原版：null 處 NPE、之後物品不處理、null 留在清單；on 同幀移除並記錄其他執行緒寫入。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest on
+Assert-Ok "ProcessItemsGuardTest（on，出貨組態）"
+java "-Dmdc.processItemsGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest off
+Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
 
 Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
 # 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。

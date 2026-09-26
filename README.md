@@ -79,6 +79,10 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   （純觀測）。`-Dmdc.animalMetaSnapshot=0`／`-Dmdc.animalDeathLedger=0` 分別回原版。
   詳見 [W38](docs/patches.md#2ba-畜牧區離線補算快照w38server預設-on)、[W39](docs/patches.md#2bb-動物死亡帳本w39server純觀測)。
 
+- **物品處理清單 W40**：原版每 5 秒處理一次的物品清單混進 null 時會每次 NPE、清單不再縮減，chunk 載入的線性
+  搜尋讓伺服器凍結 5–16 秒。改為略過並移除 null，另記錄非主執行緒對這份清單的寫入以追查來源。
+  `-Dmdc.processItemsGuard=0` 回原版。詳見 [W40](docs/patches.md#2bc-物品處理清單-null-容錯跨執行緒寫入觀測w40server預設-on)。
+
 > 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 
 逐項 javap 證據與安全論證：[docs/patches.md](docs/patches.md)；分析原始規格：[docs/specs/](docs/specs/)。
