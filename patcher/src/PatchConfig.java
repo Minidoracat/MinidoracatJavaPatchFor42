@@ -425,19 +425,21 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoGameCharacter;)Z",
                 "zombie/mdc/ContainerCycleGuard", "isInCharacterInventory"));
         inCharInv.expectedHits = 1;
-        // ---- W5-2 環「門口」偵測（observe 首發，2026-08-29；enforce 待 observe 數據另案）----
-        // 根治方向：AddItem 加入前偵測「物品是 target 祖先」＝將成環。vanilla 述詞
-        // chainContainsContainingItem 是 private 且只爬 2 層，helper 自行實作完整深度同語意爬升。
-        // 本版純 observe：不改回傳值、不拒絕；且 containsID=true 時 vanilla 根本不加入，helper
-        // 只在 false 時 probe，避免污染 wouldCycle。AddItemBlind 不設 item.container backlink、
-        // headCall 又在容量拒絕前，無法產生可信訊號；Java 外部 caller=0，暫不掛（W5 捕手兜底）。
-        // AddItem：方法內唯一 containsID 呼叫 redirect（1→1 同形，原值照回＋旁路 probe）。
-        Patcher.MethodOps addItem = itemCont.method("AddItem",
-                "(Lzombie/inventory/InventoryItem;)Lzombie/inventory/InventoryItem;");
-        addItem.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/inventory/ItemContainer", "containsID", "(I)Z",
-                "zombie/mdc/ContainerAddCycleProbe", "containsID"));
-        addItem.expectedHits = 1;
+        // W5-2 環「門口」偵測（2026-08-29 observe）已於 2026-09-27 退役：9/23–9/26 共 40 個 session 的 wouldCycle／depthCapped 全為 0，
+        // 容器環未曾形成；W5 捕手仍在。復活見 docs/patches.md 2q 後記。
+        // ---- W41 跨執行緒 processItems 寫入改道主執行緒（docs/patches.md 2bd）----
+        // ServerPlayersVehicles 執行緒載入車輛時經 BaseVehicle.setCurrentKey → AddItem 直接寫主執行緒的
+        // IsoCell.processItems（ArrayList）；AddItem 兩個多載內唯一的 addToProcessItems 1:1 改道，
+        // 非主執行緒時排入佇列，由 ProcessItems 頭部在主執行緒補登記。
+        for (String addDesc : new String[]{
+                "(Lzombie/inventory/InventoryItem;)Lzombie/inventory/InventoryItem;",
+                "(Ljava/lang/String;)Lzombie/inventory/InventoryItem;"}) {
+            Patcher.MethodOps addItem = itemCont.method("AddItem", addDesc);
+            addItem.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                    "zombie/iso/IsoCell", "addToProcessItems", "(Lzombie/inventory/InventoryItem;)V",
+                    "zombie/mdc/ProcessItemsGuard", "addToProcessItems"));
+            addItem.expectedHits = 1;
+        }
         // W30：只加速容器的大批登記，不替換 IsoCell 的清單或單件 API。
         Patcher.MethodOps bulkItems = itemCont.method("addItemsToProcessItems", "()V");
         bulkItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
@@ -486,6 +488,13 @@ public final class PatchConfig {
                 "zombie/iso/IsoMovingObject", "addToWorld", "()V",
                 "zombie/mdc/ChunkLoadGuard", "addToWorld"));
         loadSquare.expectedHits = 2;
+        // 抑噪 #10（2026-09-27）：chunk 卸載時 `vehicle wasn't removed from world id=N`。dedicated server 的
+        // IsoPlayer.players[] 只有 ServerLOS 執行緒瞬間寫入，BaseVehicle.removeFromWorld 的乘客早退幾乎不成立，
+        // 原版印完這行隨即再呼叫一次 removeFromWorld 完成移除＝車輛卸載的正常路徑；
+        // 9/26 20:06 session 3,002 行（678 個不同 id）、佔 log 5.7%。方法內唯一 DebugLog.log(String)。
+        Patcher.MethodOps chunkUnload = isoChunk.method("removeFromWorld", "()V");
+        chunkUnload.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, DL, "log", LOG_STR, "log"));
+        chunkUnload.expectedHits = 1;
         patches.add(isoChunk);
 
         // ---- W7 朝向暫存執行緒隔離（2026-08-13 Player-A 雞舍實案；docs/patches.md 2s）----
@@ -871,16 +880,9 @@ public final class PatchConfig {
         // vanilla 整包拒絕反而安全——只觀測：redirect parse 的 3 處 PlayerID.getPlayer
         // （捕獲 parse 對象）＋mismatch error callsite（資訊超集行：player＋signed diff）。
         // 共同根因假說（observe 證偽）：同一件 null-visual worn item 令 (b) 炸且令
-        // getItemVisuals 少算 1 ⇒ (c) wire-local=+1。kill switch 三把分離：
-        // -Dmdc.containerIdProbe（0/2 預設）、-Dmdc.clothingTintGuard（0/1/2 預設）、
-        // -Dmdc.visualsMismatchProbe（0/2 預設）。
-        Patcher.ClassPatch containerId = new Patcher.ClassPatch("zombie/network/fields/ContainerID");
-        Patcher.MethodOps cidSet = containerId.method("set",
-                "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V");
-        cidSet.headCall = new Patcher.HeadCall("zombie/mdc/ContainerIdProbe", "onSet",
-                "(Lzombie/inventory/ItemContainer;Lzombie/iso/IsoObject;)V", new int[]{1, 2});
-        cidSet.expectedHits = 1;
-        patches.add(containerId);
+        // getItemVisuals 少算 1 ⇒ (c) wire-local=+1。kill switch 兩把：
+        // -Dmdc.clothingTintGuard（0/1/2 預設）、-Dmdc.visualsMismatchProbe（0/2 預設）。
+        // (a) ContainerIdProbe 已於 2026-09-27 退役：9/23–9/26 共 40 個 session 每 session 僅 0–3 次 square-null，屬低頻原版現象。
 
         Patcher.ClassPatch syncClothing = new Patcher.ClassPatch(
                 "zombie/network/packets/SyncClothingPacket");
@@ -1040,9 +1042,9 @@ public final class PatchConfig {
         }
         patches.add(fishSchool);
 
-        // W32：動物離線補算觀測（純 observe）。全 jar 三個 updateStatsAway 呼叫點 1:1 改道
+        // W32：動物離線補算觀測＋W42 補算時數上限。全 jar 三個 updateStatsAway 呼叫點 1:1 改道
         // （fromWorker ×1、DesignationZoneAnimal.doMeta ×2，兩者皆以 zone.hourLastSeen 推算時數），
-        // 記錄該時數對照動物自身 timeSinceLastUpdate；docs/patches.md 2au。
+        // 記錄該時數對照動物自身 timeSinceLastUpdate，W42 取兩者較小值；docs/patches.md 2au／2be。
         String awayProbe = "zombie/mdc/AnimalAwayProbe";
         Patcher.ClassPatch animalMain = new Patcher.ClassPatch("zombie/characters/animals/AnimalManagerMain");
         Patcher.MethodOps fromWorker = animalMain.method("fromWorker", "(Ljava/util/ArrayList;)V");
@@ -1065,6 +1067,11 @@ public final class PatchConfig {
                 "zombie/characters/animals/IsoAnimal", "addBaby", "()Lzombie/characters/animals/IsoAnimal;",
                 "zombie/mdc/BabyBreedGuard", "addBaby"));
         pregnancy.expectedHits = 1;
+        // W42：活著的每小時刷新動物自身時鐘（vanilla 只在 unloaded() 寫），補算上限才有依據。
+        Patcher.MethodOps liveUpdate = animalData.method("update", "()V");
+        liveUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/datas/AnimalData", "hourGrow", "(Z)V", awayProbe, "liveHourGrow"));
+        liveUpdate.expectedHits = 1;
         patches.add(animalData);
 
         // W37：動物半建構物件守衛＋apop 存檔先序列化再開檔（docs/patches.md 2az）。
@@ -1119,23 +1126,30 @@ public final class PatchConfig {
                 "(Lzombie/characters/animals/IsoAnimal;)V");
         onDeath.expectedHits = 1;
 
-        // W40：IsoCell.ProcessItems null 容錯＋跨執行緒寫入觀測（docs/patches.md 2bc）。processItems 混進 null 時
-        // 原版每次 ProcessItems 都 NPE、清單不再縮減，chunk 載入的線性 contains 凍結 5–16 秒。
+        // W40／W41：IsoCell.ProcessItems null 容錯＋跨執行緒寫入觀測與補登記（docs/patches.md 2bc／2bd）。
+        // processItems 混進 null 時原版每次 ProcessItems 都 NPE、清單不再縮減，chunk 載入的線性 contains
+        // 凍結 5–16 秒。ProcessItems 頭部 beginPass（補登記 W41 佇列、開始計時）、唯一 RETURN 前 endPass。
         String piGuard = "zombie/mdc/ProcessItemsGuard";
+        String cellArg = "(Lzombie/iso/IsoCell;)V";
         Patcher.ClassPatch isoCell = new Patcher.ClassPatch("zombie/iso/IsoCell");
         Patcher.MethodOps processItems = isoCell.method("ProcessItems", "(Ljava/util/Iterator;)V");
         processItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/inventory/InventoryItem", "update", "()V", piGuard, "update"));
         processItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/inventory/InventoryItem", "finishupdate", "()Z", piGuard, "finishupdate"));
-        processItems.expectedHits = 2;
-        for (String[] writer : new String[][]{
-                {"addToProcessItems", "(Lzombie/inventory/InventoryItem;)V"},
-                {"addToProcessItems", "(Ljava/util/ArrayList;)V"},
-                {"addToProcessItemsRemove", "(Lzombie/inventory/InventoryItem;)V"},
-                {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V"}}) {
-            Patcher.MethodOps w = isoCell.method(writer[0], writer[1]);
-            w.headCall = new Patcher.HeadCall(piGuard, "touch", "(Lzombie/iso/IsoCell;)V");
+        processItems.headCall = new Patcher.HeadCall(piGuard, "beginPass", cellArg);
+        processItems.tailCall = new Patcher.TailCall(piGuard, "endPass", cellArg);
+        processItems.expectedHits = 4;   // 兩個改道＋head＋單一 RETURN
+        Patcher.MethodOps addOne = isoCell.method("addToProcessItems", "(Lzombie/inventory/InventoryItem;)V");
+        addOne.headCall = new Patcher.HeadCall(piGuard, "touchAdd", cellArg);
+        addOne.expectedHits = 1;
+        Patcher.MethodOps addAll = isoCell.method("addToProcessItems", "(Ljava/util/ArrayList;)V");
+        addAll.headCall = new Patcher.HeadCall(piGuard, "touchAddAll",
+                "(Lzombie/iso/IsoCell;Ljava/util/ArrayList;)V", new int[]{0, 1});
+        addAll.expectedHits = 1;
+        for (String removeDesc : new String[]{"(Lzombie/inventory/InventoryItem;)V", "(Ljava/util/ArrayList;)V"}) {
+            Patcher.MethodOps w = isoCell.method("addToProcessItemsRemove", removeDesc);
+            w.headCall = new Patcher.HeadCall(piGuard, "touch", cellArg);
             w.expectedHits = 1;
         }
         patches.add(isoCell);

@@ -131,10 +131,8 @@ public final class MdcWorldSoundProbeTest {
         expect("observe 全程 logger 零故障（logErrors=0）", counter("logErrors") == 0L);
         expect("明細行總數恰好等於額度 " + DETAIL_CAP + "（實際 " + detailRows().size() + "）",
                 detailRows().size() == DETAIL_CAP);
-        expect("heartbeat 行格式（首次有觀測即寫一行 beat，含 calls/slow/maxRadius/batches）",
-                rows().stream().anyMatch(r -> r.contains(TAG + " beat calls=")
-                        && r.contains(" maxRadius=") && r.contains(" batches=")
-                        && r.contains(" logErrors=")));
+        expect("不寫週期 beat 行（log 預算：只剩 banner 與限額明細）",
+                rows().stream().noneMatch(r -> r.contains(TAG + " beat")));
         testNoCoordinatesLogged();
     }
 
@@ -608,7 +606,7 @@ public final class MdcWorldSoundProbeTest {
         return out;
     }
 
-    /** 吃額度的明細行＝slowCall＋slowBatch（banner／heartbeat 不算）。 */
+    /** 吃額度的明細行＝slowCall＋slowBatch（banner 不算）。 */
     private static List<String> detailRows() {
         List<String> out = new ArrayList<>();
         for (String row : rows()) {

@@ -61,6 +61,26 @@ public final class LogFilter {
         "Invalid SpriteConfig object! scripted object = Wood_DoubleDoorDark",            // 476
         "Invalid SpriteConfig object! scripted object = WoodDoorFrameLvl3",              // 297
         "Invalid SpriteConfig object! scripted object = Fences_MetalFarmGate",           // 150
+        // 42.20.4 新增（2026-09-26 正式服 25.2h 聚合；門檻 ≥4 筆/h ⇒ ≥101 筆）。8/19 窗內不達標的
+        // Commercial_*／Composter 等名字量已放大，本輪重算後收；BrickDoorFrameLvl2（82）以下仍不收。
+        "Invalid SpriteConfig object! scripted object = Commercial_FullGlassBlackWall",  // 22768
+        "Invalid SpriteConfig object! scripted object = Commercial_GridGlassBlackWall",  // 13000
+        "Invalid SpriteConfig object! scripted object = Commercial_HalfGlassRedWall",    // 7772
+        "Invalid SpriteConfig object! scripted object = Commercial_FullGlassRedWall",    // 2648
+        "Invalid SpriteConfig object! scripted object = Commercial_HalfGlassBlackWall",  // 2192
+        "Invalid SpriteConfig object! scripted object = Commercial_GridGlassRedWall",    // 1874
+        "Invalid SpriteConfig object! scripted object = MetalFloorLvl1",                 // 931
+        "Invalid SpriteConfig object! scripted object = Wood_Crate_Lvl2",                // 860
+        "Invalid SpriteConfig object! scripted object = Floor_SummerGrass",              // 740
+        "Invalid SpriteConfig object! scripted object = WoodFloorLvl1",                  // 642
+        "Invalid SpriteConfig object! scripted object = WoodenDarkDoorFrameLvl3",        // 444
+        "Invalid SpriteConfig object! scripted object = Composter",                      // 414
+        "Invalid SpriteConfig object! scripted object = BrickFloorLvl1",                 // 266
+        "Invalid SpriteConfig object! scripted object = Floor_SummerGrassCorner",        // 183
+        "Invalid SpriteConfig object! scripted object = ComposterShoddy",                // 163
+        "Invalid SpriteConfig object! scripted object = DoubleFenceGate",                // 160
+        "Invalid SpriteConfig object! scripted object = WoodenDarkWindowFrameLvl3",      // 116
+        "Invalid SpriteConfig object! scripted object = Floor_Concrete",                 // 106
     };
     private static final String[] OBJ_PREFIX = {
         "No packet handler for type:",                                                   // PacketsCache <init>
@@ -72,6 +92,7 @@ public final class LogFilter {
     };
     private static final String[] LOG_PREFIX = {
         "ItemPickInfo -> cannot get ID for ",                                            // ItemPickInfo（debug 診斷前綴不同、照常轉發）
+        "IsoChunk.removeFromWorld: vehicle wasn't removed from world id=",               // IsoChunk 車輛卸載正常路徑（抑噪 #10）
     };
 
     /**
@@ -132,18 +153,27 @@ public final class LogFilter {
         type.warn(message);
     }
 
+    /** LOG_EXACT／LOG_PREFIX 的攔截判定——pure function 供 LogFilterNoiseTest 鎖行為（{@code s} 可為 null）。 */
+    static boolean suppressesLog(String s) {
+        if (s == null) {
+            return false;
+        }
+        for (String p : LOG_EXACT) {
+            if (s.equals(p)) {
+                return true;
+            }
+        }
+        for (String p : LOG_PREFIX) {
+            if (s.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void log(String message) {
-        if (message != null) {
-            for (String p : LOG_EXACT) {
-                if (message.equals(p)) {
-                    return;
-                }
-            }
-            for (String p : LOG_PREFIX) {
-                if (message.startsWith(p)) {
-                    return;
-                }
-            }
+        if (suppressesLog(message)) {
+            return;
         }
         DebugLog.log(message);
     }

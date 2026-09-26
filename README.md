@@ -29,9 +29,10 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 > 對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋。改回原版行為（蛋照清），
 > 受精蛋請養在雞舍孵化。
 
-- **抑噪 8 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（exact 白名單 19 名）／
+- **抑噪 10 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（exact 白名單 37 名）／
   ItemPickInfo／NetworkZombieManager／PacketsCache／INetworkPacket.logInconsistentPacket／
-  GameServer.sendToxicBuilding——只攔已知噪音樣式，未知警告與反作弊警告照常輸出。
+  GameServer.sendToxicBuilding／IsoObject.syncIsoObject（IsoThumpable not found）／
+  IsoChunk.removeFromWorld（車輛卸載正常路徑）——只攔已知噪音樣式，未知警告與反作弊警告照常輸出。
 - **防崩潰守衛 2 項**：hit/Zombie（guard-before-super）與 hit/Fall（縱深防禦）的 null 頭部守衛。
 - **行為 1 項**：IsoAnimal（動物壓力三調：閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半，
   clamp 與行為路徑不動）。
@@ -79,9 +80,15 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   （純觀測）。`-Dmdc.animalMetaSnapshot=0`／`-Dmdc.animalDeathLedger=0` 分別回原版。
   詳見 [W38](docs/patches.md#2ba-畜牧區離線補算快照w38server預設-on)、[W39](docs/patches.md#2bb-動物死亡帳本w39server純觀測)。
 
-- **物品處理清單 W40**：原版每 5 秒處理一次的物品清單混進 null 時會每次 NPE、清單不再縮減，chunk 載入的線性
-  搜尋讓伺服器凍結 5–16 秒。改為略過並移除 null，另記錄非主執行緒對這份清單的寫入以追查來源。
-  `-Dmdc.processItemsGuard=0` 回原版。詳見 [W40](docs/patches.md#2bc-物品處理清單-null-容錯跨執行緒寫入觀測w40server預設-on)。
+- **物品處理清單 W40／W41**：原版每 5 秒處理一次的物品清單混進 null 時會每次 NPE、清單不再縮減，chunk 載入的線性
+  搜尋讓伺服器凍結 5–16 秒。W40 略過並移除 null；W41 修掉來源——背景執行緒載入車輛時直接寫這份清單，
+  改為排入佇列由主執行緒補登記。`-Dmdc.processItemsGuard=0`／`-Dmdc.processItemsDefer=0` 分別回原版。
+  詳見 [W40](docs/patches.md#2bc-物品處理清單-null-容錯跨執行緒寫入觀測w40server預設-on)、
+  [W41](docs/patches.md#2bd-非主執行緒物品登記改道主執行緒w41server預設-on)。
+
+- **動物補算時數上限 W42**：原版以圈區上次離開串流的時間推算離線時數，常比動物實際離線多算數天（9/26 一個 session
+  38 隻死亡中 25 隻發生在補算後 60 秒內）。改為不超過動物自身離線時間，並在動物活著時每小時更新自身時鐘。`-Dmdc.animalCatchUpCap=0` 回原版。
+  詳見 [W42](docs/patches.md#2be-動物補算時數上限w42server預設-on)。
 
 > 本節僅列部分項目；完整清單見 docs/patches.md，啟用項目與逐方法命中數以 `PatchConfig.all()` 為準。
 

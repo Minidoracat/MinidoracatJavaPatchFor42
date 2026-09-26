@@ -39,8 +39,8 @@ import zombie.network.PacketTypes;
  * 計時包含原版呼叫與少量發佈指令，不含後續記錄與寫 log。
  *
  * <p><b>log 預算</b>：慢呼叫與慢批次共用 {@value #WINDOW_CAP} 行／{@value #WINDOW_SECONDS}s 的
- * 明細額度（超出只累計 {@code suppressed}），另有 {@value #BEAT_SECONDS}s 一次的 heartbeat
- * （沒有新觀測就不寫）與首次生效 banner。正常運轉近乎零輸出。
+ * 明細額度（超出只累計 {@code suppressed}），與首次生效 banner。週期 heartbeat 已於 2026-09-27
+ * 移除（9/23–9/26 共 40 個 session 零慢呼叫）；累計計數改由看門狗凍結快照的 {@link #describeActive()} 帶出。正常運轉零輸出。
  *
  * <p><b>凍結中取狀態</b>：{@link #describeActive()} 供看門狗的 stack dump 附掛，用 seq 旗標
  * ＋重讀校驗（volatile 發佈／取得）讀出「此刻正在處理的那個封包」的原始數據；只保存原生型別，
@@ -64,11 +64,9 @@ public final class MdcWorldSoundProbe {
     private static final long BATCH_MS = 100L;
 
     private static final long WINDOW_SECONDS = 60L;
-    private static final long BEAT_SECONDS = 300L;
     /** 慢呼叫＋慢批次共用的明細行額度。 */
     private static final int WINDOW_CAP = 3;
     private static final long WINDOW_NS = WINDOW_SECONDS * 1_000_000_000L;
-    private static final long BEAT_NS = BEAT_SECONDS * 1_000_000_000L;
     /** banner 寫失敗時最多重試幾圈（DebugLog 尚未就緒的情形）。 */
     private static final int BANNER_ATTEMPTS = 8;
 
@@ -106,11 +104,9 @@ public final class MdcWorldSoundProbe {
     private static long batchMaxNs;
     private static int batchMaxRadius;
 
-    // ---- log 節流／banner／heartbeat 狀態（owner 執行緒）----
+    // ---- log 節流／banner 狀態（owner 執行緒）----
     private static long windowStartNs;
     private static int windowCount;
-    private static long lastBeatNs;
-    private static long lastBeatCalls;
     private static boolean bannerShown;
     private static int bannerTries;
 
@@ -172,7 +168,7 @@ public final class MdcWorldSoundProbe {
     }
 
     /**
-     * 主迴圈掛點（每圈一次）：結算上一個觀測批次、必要時寫 heartbeat。與看門狗的 kill switch
+     * 主迴圈掛點（每圈一次）：結算上一個觀測批次。與看門狗的 kill switch
      * 無關，只受 {@code -Dmdc.worldSoundProbe} 影響。第一次呼叫捕獲 owner 執行緒並寫 banner。
      */
     public static void onTick() {
@@ -191,7 +187,6 @@ public final class MdcWorldSoundProbe {
             showBanner();
         }
         flushBatch();
-        maybeBeat();
     }
 
     /**
@@ -320,38 +315,13 @@ public final class MdcWorldSoundProbe {
         try {
             DebugLog.log(TAG + " 首次生效 mode=observe slowCallMs=" + SLOW_MS
                     + " slowBatchMs=" + BATCH_MS + " detailCap=" + WINDOW_CAP + "/" + WINDOW_SECONDS
-                    + "s beat=" + BEAT_SECONDS + "s ownerThread="
+                    + "s ownerThread="
                     + Thread.currentThread().getName()
                     + "（-Dmdc.worldSoundProbe=0|off 停用；純觀測，不改任何音效行為；"
                     + "觀測 slowCall/slowBatch/maxRadius）.");
             bannerShown = true;
         } catch (RuntimeException e) {
             logErrors++;   // DebugLog 尚未就緒：下一圈再試，最多 BANNER_ATTEMPTS 次
-        }
-    }
-
-    /** heartbeat：{@value #BEAT_SECONDS}s 一行，且僅在期間有新觀測時才寫（沒事不製造噪音）。 */
-    private static void maybeBeat() {
-        try {
-            if (calls == lastBeatCalls) {
-                return;
-            }
-            long now = System.nanoTime();
-            if (lastBeatNs != 0L && now - lastBeatNs < BEAT_NS) {
-                return;
-            }
-            lastBeatNs = now;
-            lastBeatCalls = calls;
-            DebugLog.log(TAG + " beat calls=" + calls + " slow=" + slow + " failed=" + failed
-                    + " totalMs=" + (totalNs / 1_000_000L) + " maxMs=" + (maxNs / 1_000_000L)
-                    + " maxRadius=" + maxRadius + " batches=" + batches
-                    + " slowBatches=" + slowBatches + " batchSeq=" + batchSeq
-                    + " nested=" + nested + " foreign=" + foreign.get()
-                    + " unarmed=" + unarmed.get() + " foreignTicks=" + foreignTicks.get()
-                    + " logged=" + logged + " suppressed=" + suppressed
-                    + " logErrors=" + logErrors + ".");
-        } catch (RuntimeException e) {
-            logErrors++;
         }
     }
 

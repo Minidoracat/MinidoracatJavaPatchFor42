@@ -69,7 +69,7 @@ public final class AnimalLosScan {
     static final int MODE_OBSERVE = 2;
 
     static final int MODE = parseMode();
-    private static final long BEAT_NS = 60_000_000_000L;
+    private static final long BEAT_NS = 300_000_000_000L;
 
     /** 安全域上限：t ≤ 2^16 時 float ULP ≤ 2^-7，0.25F 裕度 ≥ 32 ULP（§4.3-A）。 */
     private static final float SAFE_DOMAIN_MAX = 65536.0F;

@@ -96,6 +96,7 @@ public final class HutchSyncGateTest {
         testHotSaveWithoutRecipients();
         testInvalidObjectAndVanillaPaths();
         testEggSerialization();
+        testPayloadUnchanged();
         testSerializationAndSendFailure();
         // 全域毒化：必須最後（之後所有 syncUpdate 都退回原版廣播）
         testTeleportBookkeepingFault();
@@ -105,6 +106,28 @@ public final class HutchSyncGateTest {
             System.exit(1);
         }
         System.out.println("hutch-sync OK  mode=" + want);
+    }
+
+    /** 變化量測：同一雞舍逐位元相同才算未變；長度或任一 byte 不同、不同雞舍都算變化。 */
+    private static void testPayloadUnchanged() throws Exception {
+        IsoHutch a = alloc(IsoHutch.class);
+        IsoHutch b = alloc(IsoHutch.class);
+        expect("首次序列化：不算未變", !HutchSyncGate.samePayload(a, payload(1, 2, 3), 4));
+        expect("同雞舍同內容：未變", HutchSyncGate.samePayload(a, payload(1, 2, 3), 4));
+        expect("同雞舍最後一個 byte 不同：變化", !HutchSyncGate.samePayload(a, payload(1, 2, 4), 4));
+        expect("變化後以新內容為基準", HutchSyncGate.samePayload(a, payload(1, 2, 4), 4));
+        expect("長度不同：變化", !HutchSyncGate.samePayload(a, payload(1, 2, 4, 0), 4));
+        expect("另一個雞舍各自比較", !HutchSyncGate.samePayload(b, payload(1, 2, 4, 0), 4));
+    }
+
+    /** 4 byte 封包標頭（start=4）後接 payload。 */
+    private static zombie.core.network.ByteBufferWriter payload(int... bytes) {
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate(64);
+        bb.putInt(0xCAFE);
+        for (int v : bytes) {
+            bb.put((byte) v);
+        }
+        return new zombie.core.network.ByteBufferWriter(bb);
     }
 
     // ---------------------------------------------------------------- 幾何

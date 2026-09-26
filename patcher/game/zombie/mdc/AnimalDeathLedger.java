@@ -116,14 +116,18 @@ public final class AnimalDeathLedger {
         return s.toString();
     }
 
-    /** 跳過 helper 與死亡機制本身（OnDeath／DoDeath），取前 4 個遊戲幀。 */
+    /** 通用死亡機制本身的方法名（9/26 38 筆 via 全卡在這幾幀，看不到死因）。 */
+    private static final java.util.Set<String> DEATH_FRAMES =
+            java.util.Set.of("OnDeath", "DoDeath", "onKilled", "Kill", "die");
+
+    /** 跳過 helper 與通用死亡機制（OnDeath／DoDeath／onKilled／Kill／die），取前 6 個遊戲幀。 */
     static String callers() {
         return StackWalker.getInstance().walk(frames -> {
             StringBuilder s = new StringBuilder();
             frames.filter(f -> f.getClassName().startsWith("zombie.")
                             && !f.getClassName().startsWith("zombie.mdc.")
-                            && !f.getMethodName().equals("OnDeath") && !f.getMethodName().equals("DoDeath"))
-                    .limit(4)
+                            && !DEATH_FRAMES.contains(f.getMethodName()))
+                    .limit(6)
                     .forEach(f -> s.append(s.isEmpty() ? "" : "<")
                             .append(f.getClassName().substring(f.getClassName().lastIndexOf('.') + 1))
                             .append('.').append(f.getMethodName()).append(':').append(f.getLineNumber()));

@@ -7,16 +7,12 @@ import zombie.core.ImmutableColor;
 import zombie.core.skinnedmodel.visual.ItemVisual;
 import zombie.debug.DebugType;
 import zombie.inventory.InventoryItem;
-import zombie.inventory.ItemContainer;
-import zombie.iso.IsoGridSquare;
-import zombie.iso.IsoObject;
 
 /**
- * W20 ClothingSyncGuard＋ContainerIdProbe 行為驗證（獨立 JVM；模式是 static final，
+ * W20 ClothingSyncGuard 行為驗證（獨立 JVM；模式是 static final，
  * 三組態由 build.ps1 分開驅動並以 argv 自驗，property 拼錯不得假綠）。
  * 覆蓋：(b) tintOf 三態（observe 拋 NPE 保 vanilla 語意／enforce null→white／off 直通）、
- * (c) mismatch 訊息解析與 signed diff 分佈、ThreadLocal 捕獲、(a) square-null 分解計數、
- * rate-limit 與 off 純早退。
+ * (c) mismatch 訊息解析與 signed diff 分佈、ThreadLocal 捕獲、rate-limit 與 off 純早退。
  */
 public final class ClothingSyncGuardTest {
 
@@ -32,22 +28,18 @@ public final class ClothingSyncGuardTest {
         int wantAux = "off".equals(want) ? ClothingSyncGuard.MODE_OFF : ClothingSyncGuard.MODE_OBSERVE;
         expect("property 與測試模式一致（" + want + "）",
                 ClothingSyncGuard.TINT_MODE == wantTint
-                && ClothingSyncGuard.MISMATCH_MODE == wantAux
-                && ContainerIdProbe.MODE == (wantAux == ClothingSyncGuard.MODE_OFF
-                        ? ContainerIdProbe.MODE_OFF : ContainerIdProbe.MODE_OBSERVE));
+                && ClothingSyncGuard.MISMATCH_MODE == wantAux);
 
         testParseCounts();
         testTint(wantTint);
         testMismatch(wantAux);
-        testContainerProbe(wantAux);
 
         if (failed != 0) {
             System.out.println("clothing-sync-guard FAIL " + failed + " 項");
             System.exit(1);
         }
         System.out.println("clothing-sync-guard OK tint=" + ClothingSyncGuard.TINT_MODE
-                + " mismatch=" + ClothingSyncGuard.MISMATCH_MODE
-                + " probe=" + ContainerIdProbe.MODE);
+                + " mismatch=" + ClothingSyncGuard.MISMATCH_MODE);
     }
 
     private static void testParseCounts() {
@@ -166,44 +158,6 @@ public final class ClothingSyncGuardTest {
                     && ClothingSyncGuard.wireOtherForTest() == other0 + 1);
         }
         expect("mismatch 全程零 anomalies", ClothingSyncGuard.anomaliesForTest() == 0);
-    }
-
-    private static void testContainerProbe(int mode) throws Exception {
-        long calls0 = ContainerIdProbe.callsForTest();
-        long sq0 = ContainerIdProbe.squareNullForTest();
-        long on0 = ContainerIdProbe.objectNullForTest();
-
-        ItemContainer container = (ItemContainer) rawInstance(ItemContainer.class);
-        IsoObject bare = (IsoObject) rawInstance(IsoObject.class);
-        ContainerIdProbe.onSet(container, null);
-        ContainerIdProbe.onSet(container, bare);
-        IsoObject placed = (IsoObject) rawInstance(IsoObject.class);
-        placed.square = (IsoGridSquare) rawInstance(IsoGridSquare.class);
-        ContainerIdProbe.onSet(container, placed);
-
-        if (mode == ClothingSyncGuard.MODE_OFF) {
-            expect("off：probe 計數凍結（純早退）",
-                    ContainerIdProbe.callsForTest() == calls0
-                    && ContainerIdProbe.squareNullForTest() == sq0);
-        } else {
-            expect("observe：calls+3、objectNull+1、squareNull+1（square 非 null 不記詳情）",
-                    ContainerIdProbe.callsForTest() == calls0 + 3
-                    && ContainerIdProbe.objectNullForTest() == on0 + 1
-                    && ContainerIdProbe.squareNullForTest() == sq0 + 1);
-        }
-        expect("probe 全程零 anomalies", ContainerIdProbe.anomaliesForTest() == 0);
-
-        StackTraceElement[] stack = {
-                new StackTraceElement("java.lang.Thread", "getStackTrace", "Thread.java", 1),
-                new StackTraceElement("zombie.mdc.ContainerIdProbe", "onSet", "ContainerIdProbe.java", 1),
-                new StackTraceElement("zombie.network.fields.ContainerID", "set", "ContainerID.java", 245),
-                new StackTraceElement("zombie.network.fields.ContainerID", "set", "ContainerID.java", 156),
-                new StackTraceElement("zombie.network.packets.RemoveInventoryItemFromContainerPacket",
-                        "setData", "RemoveInventoryItemFromContainerPacket.java", 50),
-        };
-        expect("probe caller 分類：跳過兩層 ContainerID.set、落在 packet.setData",
-                ContainerIdProbe.firstForeignFrame(stack)
-                        .startsWith("zombie.network.packets.RemoveInventoryItemFromContainerPacket.setData"));
     }
 
     /** 以 serialization 建構子分配未初始化實例，避開世界依賴（W12 慣例）。 */

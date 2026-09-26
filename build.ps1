@@ -67,7 +67,6 @@ $helperEntries = @(
     'zombie/mdc/ChunkRequestPacker.class',
     'zombie/mdc/ContainerCycleGuard.class',
     'zombie/mdc/ContainerCycleGuard$State.class',
-    'zombie/mdc/ContainerAddCycleProbe.class',
     'zombie/mdc/ChunkLoadGuard.class',
     'zombie/mdc/ForwardVectorGuard.class',
     'zombie/mdc/ChunkWriteGuard.class',
@@ -84,7 +83,6 @@ $helperEntries = @(
     'zombie/mdc/AnimalLosScan.class',
     'zombie/mdc/VehicleRemoveGuard.class',
     'zombie/mdc/ClothingSyncGuard.class',
-    'zombie/mdc/ContainerIdProbe.class',
     'zombie/mdc/FaceObjectGuard.class',
     'zombie/mdc/EmitterParamGate.class',
     'zombie/entity/MdcUsingPlayerIndex.class',
@@ -164,11 +162,6 @@ Assert-Ok "ContainerCycleGuardTest"
 # 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場
 java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
 Assert-Ok "ContainerCycleGuardTest（maxDepth=0 kill switch）"
-# W5-2 門口 probe：預設 observe＋off kill switch 各獨立 JVM（probe 純函式仍跑，wrapper 模式自驗）。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerAddCycleProbeTest
-Assert-Ok "ContainerAddCycleProbeTest（observe 預設）"
-java "-Dmdc.containerAddCycleProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerAddCycleProbeTest
-Assert-Ok "ContainerAddCycleProbeTest（off kill switch）"
 
 
 Write-Host "[9b/10] chunk 供給併包（W4-1 v2）三模式行為驗證（獨立 JVM；模式是 static final）..."
@@ -340,15 +333,15 @@ java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projec
 Assert-Ok "VehicleRemoveGuardTest（off 文字別名，純早退 kill switch）"
 
 Write-Host "[9q/10] 衣物同步守衛（W20）三組態行為驗證（獨立 JVM）..."
-# observe＝預設出貨（(b) 記錄後拋 NPE 保 vanilla 語意、(c) 資訊超集行、(a) square-null 分解）；
-# enforce＝(b) null→white 修復（僅 tint 刀有 enforce 語意）；off＝三把 kill switch 全關、
+# observe＝預設出貨（(b) 記錄後拋 NPE 保 vanilla 語意、(c) 資訊超集行）；
+# enforce＝(b) null→white 修復（僅 tint 刀有 enforce 語意）；off＝兩把 kill switch 全關、
 # 純直通/早退。三組態都真跑並自驗模式，property 拼錯不得假綠。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest observe
 Assert-Ok "ClothingSyncGuardTest（observe，預設出貨模式）"
 java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest enforce
 Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
-java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" "-Dmdc.containerIdProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
-Assert-Ok "ClothingSyncGuardTest（三把 kill switch 全關，純直通）"
+java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
+Assert-Ok "ClothingSyncGuardTest（兩把 kill switch 全關，純直通）"
 
 Write-Host "[9r/10] 面向物件 sprite-grid null 守衛（W22）行為驗證＋kill switch（獨立 JVM）..."
 # on＝預設出貨（null→回原 object、非 null 逐位元轉發、委派例外穿透）；off＝純直通（null 照回）。
@@ -373,11 +366,13 @@ Assert-Ok "MdcUsingPlayerIndexTest（enforce）"
 java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest off
 Assert-Ok "MdcUsingPlayerIndexTest（off kill switch）"
 
-Write-Host "[9r2/10] 動物離線補算觀測（W32）行為驗證＋kill switch（獨立 JVM）..."
+Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
-Assert-Ok "AnimalAwayProbeTest（observe，出貨組態）"
+Assert-Ok "AnimalAwayProbeTest（出貨組態：觀測＋W42 上限）"
 java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest off
 Assert-Ok "AnimalAwayProbeTest（animalAwayProbe=0 kill switch）"
+java "-Dmdc.animalCatchUpCap=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest nocap
+Assert-Ok "AnimalAwayProbeTest（animalCatchUpCap=0，W42 回 vanilla 時數）"
 
 Write-Host "[9r3/10] 分娩品種守衛（W33）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest
@@ -407,12 +402,15 @@ Assert-Ok "AnimalDeathLedgerTest（on，出貨組態）"
 java "-Dmdc.animalDeathLedger=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest off
 Assert-Ok "AnimalDeathLedgerTest（animalDeathLedger=0）"
 
-Write-Host "[9r6/10] 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 IsoCell）..."
-# off 組態重現原版：null 處 NPE、之後物品不處理、null 留在清單；on 同幀移除並記錄其他執行緒寫入。
+Write-Host "[9r6/10] 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40）＋非主執行緒登記改道（W41）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 IsoCell）..."
+# off 組態重現原版：null 處 NPE、之後物品不處理、null 留在清單；on 同幀移除並記錄其他執行緒寫入，
+# 其他執行緒的 AddItem 登記排入佇列、下一次 ProcessItems 補登記；nodefer 回原版直接寫。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest on
 Assert-Ok "ProcessItemsGuardTest（on，出貨組態）"
 java "-Dmdc.processItemsGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest off
 Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
+java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest nodefer
+Assert-Ok "ProcessItemsGuardTest（processItemsDefer=0，W41 回原版直接寫）"
 
 Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
 # 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。

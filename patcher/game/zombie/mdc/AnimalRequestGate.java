@@ -131,6 +131,8 @@ public final class AnimalRequestGate {
      * 觸發計數，量級遠低於 W13 的判定熱路徑，故週期取 2^14。
      */
     private static final long HEARTBEAT_EVERY = 1L << 14;
+    /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27）。 */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_BEAT_MS = new java.util.concurrent.atomic.AtomicLong();
     private static final String TAG = "[MinidoracatJavaPatch][AnimalRequestGate] ";
 
     /** 同 tick 內由 {@link #getPacket} 捕獲、供 {@link #filterRequests} 做範圍判定。 */
@@ -378,6 +380,11 @@ public final class AnimalRequestGate {
     }
 
     private static void heartbeat() {
+        long now = System.currentTimeMillis();
+        long prev = LAST_BEAT_MS.get();
+        if (now - prev < 300_000L || !LAST_BEAT_MS.compareAndSet(prev, now)) {
+            return;
+        }
         try {
             DebugLog.log(TAG + "cooldown=" + COOLDOWN_MODE + " range=" + RANGE_MODE
                     + " cooldownMs=" + COOLDOWN_MS

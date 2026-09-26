@@ -158,6 +158,8 @@ public final class AnimalRelevancyGate {
      * {@code suppressed} 不增加的呼叫會讓和停在同一個值，一旦命中倍數就每次呼叫都印。
      */
     private static final long HEARTBEAT_EVERY = 1L << 20;
+    /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27：原每 20 秒一行、佔 log 大宗）。 */
+    private static final java.util.concurrent.atomic.AtomicLong LAST_BEAT_MS = new java.util.concurrent.atomic.AtomicLong();
     private static final String TAG = "[MinidoracatJavaPatch][AnimalRelevancy] ";
 
     private static int parseMode() {
@@ -271,6 +273,11 @@ public final class AnimalRelevancyGate {
     }
 
     private static void heartbeat() {
+        long now = System.currentTimeMillis();
+        long prev = LAST_BEAT_MS.get();
+        if (now - prev < 300_000L || !LAST_BEAT_MS.compareAndSet(prev, now)) {
+            return;
+        }
         try {
             DebugLog.log(TAG + "mode=" + MODE
                     + " calls=" + calls.get()
