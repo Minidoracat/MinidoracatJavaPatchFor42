@@ -104,6 +104,8 @@ $helperEntries = @(
     'zombie/mdc/FishingDataBroadcast.class',
     'zombie/mdc/AnimalAwayProbe.class',
     'zombie/mdc/BabyBreedGuard.class',
+    'zombie/mdc/AnimalSpawnGuard.class',
+    'zombie/characters/animals/MdcAnimalCellSave.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -379,6 +381,17 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBr
 Assert-Ok "BabyBreedGuardTest（on，出貨組態）"
 java "-Dmdc.babyBreedGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest off
 Assert-Ok "BabyBreedGuardTest（babyBreedGuard=0 kill switch）"
+
+Write-Host "[9r4/10] 動物半建構物件守衛＋apop 先序列化再開檔（W37）行為驗證＋kill switch（獨立 JVM）..."
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSpawnGuardTest
+Assert-Ok "AnimalSpawnGuardTest（on，出貨組態）"
+java "-Dmdc.animalSpawnGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSpawnGuardTest off
+Assert-Ok "AnimalSpawnGuardTest（animalSpawnGuard=0 kill switch）"
+# off 組態重現原版事故（例外外拋＋apop 截成 0 bytes），on 保留舊檔。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest on
+Assert-Ok "MdcAnimalCellSaveTest（on，出貨組態）"
+java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest off
+Assert-Ok "MdcAnimalCellSaveTest（animalCellSave=0，原版截斷重現）"
 
 Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
 # 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。

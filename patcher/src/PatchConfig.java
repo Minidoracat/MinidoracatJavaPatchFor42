@@ -1067,6 +1067,41 @@ public final class PatchConfig {
         pregnancy.expectedHits = 1;
         patches.add(animalData);
 
+        // W37：動物半建構物件守衛＋apop 存檔先序列化再開檔（docs/patches.md 2az）。
+        // (1) IsoAnimal 四個帶座標建構子每個 RETURN 前 afterCtor：建構檢查失敗（data null）時把
+        //     super() 已放進 cell 的物件撤出，杜絕 adef/data 為 null 的動物每 tick 打斷世界更新。
+        // (2) checkStages 唯一 grow 1:1 改道：該次建構失敗造成的 NPE 吞掉（W33 addBaby 同理，於 helper 內）。
+        // (3) 全 jar 兩個 AnimalCell.save() 呼叫點改道：序列化成功才開檔，失敗保留舊檔不外拋。
+        String spawnGuard = "zombie/mdc/AnimalSpawnGuard";
+        String[][] animalCtors = {
+                {"(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;)V", "3"},
+                {"(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;Z)V", "3"},
+                {"(Lzombie/iso/IsoCell;IIILjava/lang/String;Lzombie/characters/animals/datas/AnimalBreed;)V", "2"},
+                {"(Lzombie/iso/IsoCell;IIILjava/lang/String;Lzombie/characters/animals/datas/AnimalBreed;Z)V", "2"},
+        };
+        for (String[] ctor : animalCtors) {
+            Patcher.MethodOps ops = animal.method("<init>", ctor[0]);
+            ops.tailCall = new Patcher.TailCall(spawnGuard, "afterCtor", "(Lzombie/characters/animals/IsoAnimal;)V");
+            ops.expectedHits = Integer.parseInt(ctor[1]);   // RETURN 數（javap）
+        }
+        Patcher.MethodOps stages = animalData.method("checkStages", "()V");
+        stages.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/datas/AnimalData", "grow", "(Ljava/lang/String;)V", spawnGuard, "grow"));
+        stages.expectedHits = 1;
+        String cellSave = "zombie/characters/animals/MdcAnimalCellSave";
+        Patcher.ClassPatch animalCell = new Patcher.ClassPatch("zombie/characters/animals/AnimalCell");
+        Patcher.MethodOps cellUnload = animalCell.method("unload", "()V");
+        cellUnload.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/AnimalCell", "save", "()V", cellSave, "save"));
+        cellUnload.expectedHits = 1;
+        patches.add(animalCell);
+        Patcher.ClassPatch animalWorker = new Patcher.ClassPatch("zombie/characters/animals/AnimalManagerWorker");
+        Patcher.MethodOps workerSave = animalWorker.method("save", "()V");
+        workerSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/AnimalCell", "save", "()V", cellSave, "save"));
+        workerSave.expectedHits = 1;
+        patches.add(animalWorker);
+
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
         // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點
         // （setUsingPlayer 頭部帶新值、兩個 receive 方法每個 RETURN 前讀寫入後值；reset 只寫 null），
