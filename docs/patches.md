@@ -4051,6 +4051,34 @@ thirst zone hutch [catchUp=次數x/時數h catchUpAgoMs] via=前 4 個遊戲幀`
 `beat deaths domestic wild afterCatchUp suppressed anomalies`。不改行為，kill switch `-Dmdc.animalDeathLedger=0`。
 SmokeCheck 釘 OnDeath 頭部 aload_0→onDeath、真指令 +2；`AnimalDeathLedgerTest` 驗補算標記、上限與 data null。
 
+## 2bc. 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40，server，預設 on）
+
+**事故（2026-09-26 13:52–15:21）**：20–29 人時 fps 從 9.8 掉到 2–3，14:40 起單幀凍結 15–16 秒。
+W15 看門狗 78 張主執行緒快照中 65 張（83%）落在同一條路徑：chunk 載入 → `IsoObject.addToWorld` →
+`ItemContainer.addItemsToProcessItems` → `IsoCell.addToProcessItems` → `ArrayList.contains`。同一時段
+`IsoCell.ProcessItems` 每次都 NPE（`"i" is null`，738 次，9 月其他 session 零次）。GC 無 Allocation Stall，
+major GC 後 heap 44–54%，排除記憶體。
+
+**根因（42.20.4 反編譯＋javap）**：伺服器每 5 秒跑一次 `ProcessItems`，以索引走訪 `processItems` 並直接呼叫
+`i.update()`／`i.finishupdate()`，沒有 null 檢查。清單一旦混進 null，每次都在該處 NPE：null 之後的物品永遠不再
+被評估，`finishupdate()` 為真的物品不再進 `processItemsRemove`，清單只剩 chunk 卸載會縮減，長成「已載入容器的
+全部物品」。每個 `addToProcessItems` 都要對整份清單做線性 `contains`，玩家走進物品多的區域就凍結；null 不會自行
+消失，只有重啟能清。null 的來源靜態分析找不到：所有加入點都擋 null、封包都排入主迴圈、Workshop Lua 沒有碰這份
+清單，推測是跨執行緒寫入的資料競爭。
+
+**手術**：`IsoCell.ProcessItems` 內唯一 `InventoryItem.update()`／`finishupdate()` 1:1 改道 `ProcessItemsGuard`：
+null 時不呼叫、`finishupdate` 回 true，原版就把它放進 `processItemsRemove`，同一幀的 `ProcessRemoveItems` 移掉；
+非 null 行為不變。四個 `addToProcessItems`／`addToProcessItemsRemove` 頭部與 `BulkItemRegistration` 快路徑呼叫
+`touch`：非主執行緒（第一次 `ProcessItems` 的執行緒）寫入時記執行緒名與前 8 個遊戲幀（前 20 筆、之後每 1000 筆）。
+每 5 分鐘 `beat calls nulls size offThreadWrites anomalies`，`size` 是清單大小，可直接看出是否又在膨脹。
+kill switch `-Dmdc.processItemsGuard=0`。
+
+SmokeCheck 釘存在理由（原版 `ProcessItems` 零 null 檢查、update／finishupdate 各 1）、兩處同形改道、四個
+headCall 與真指令 +2、`IsoCell` 其餘方法逐指令不變。`ProcessItemsGuardTest` 跑 dist 內手術後的真 `ProcessItems`／
+`ProcessRemoveItems`／`addToProcessItems`：off 重現 NPE、null 之後不處理、null 留在清單；on 同幀移除、其他執行緒
+寫入被記錄。線上驗收：`beat size` 維持小量；若出現 `null in processItems` 或 `off-main-thread write`，
+以該行的執行緒與呼叫來源追查 null 的真正來源。
+
 ---
 
 ## 3. 部署後驗證清單

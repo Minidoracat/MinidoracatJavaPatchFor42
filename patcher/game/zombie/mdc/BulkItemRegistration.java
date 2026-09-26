@@ -121,6 +121,7 @@ public final class BulkItemRegistration {
             cell.addToProcessItems(incoming);
             return;
         }
+        ProcessItemsGuard.touch(cell); // W40：快路徑直接寫 live／removing，不經 IsoCell 的寫入口
         for (int i = 0; i < incoming.size(); i++) {
             InventoryItem item = incoming.get(i);
             if (item != null) {

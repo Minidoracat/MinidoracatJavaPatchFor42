@@ -1119,6 +1119,27 @@ public final class PatchConfig {
                 "(Lzombie/characters/animals/IsoAnimal;)V");
         onDeath.expectedHits = 1;
 
+        // W40：IsoCell.ProcessItems null 容錯＋跨執行緒寫入觀測（docs/patches.md 2bc）。processItems 混進 null 時
+        // 原版每次 ProcessItems 都 NPE、清單不再縮減，chunk 載入的線性 contains 凍結 5–16 秒。
+        String piGuard = "zombie/mdc/ProcessItemsGuard";
+        Patcher.ClassPatch isoCell = new Patcher.ClassPatch("zombie/iso/IsoCell");
+        Patcher.MethodOps processItems = isoCell.method("ProcessItems", "(Ljava/util/Iterator;)V");
+        processItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/inventory/InventoryItem", "update", "()V", piGuard, "update"));
+        processItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/inventory/InventoryItem", "finishupdate", "()Z", piGuard, "finishupdate"));
+        processItems.expectedHits = 2;
+        for (String[] writer : new String[][]{
+                {"addToProcessItems", "(Lzombie/inventory/InventoryItem;)V"},
+                {"addToProcessItems", "(Ljava/util/ArrayList;)V"},
+                {"addToProcessItemsRemove", "(Lzombie/inventory/InventoryItem;)V"},
+                {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V"}}) {
+            Patcher.MethodOps w = isoCell.method(writer[0], writer[1]);
+            w.headCall = new Patcher.HeadCall(piGuard, "touch", "(Lzombie/iso/IsoCell;)V");
+            w.expectedHits = 1;
+        }
+        patches.add(isoCell);
+
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
         // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點
         // （setUsingPlayer 頭部帶新值、兩個 receive 方法每個 RETURN 前讀寫入後值；reset 只寫 null），
