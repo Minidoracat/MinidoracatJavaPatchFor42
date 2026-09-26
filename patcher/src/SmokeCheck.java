@@ -2930,11 +2930,47 @@ public final class SmokeCheck {
                 jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal",
                         "updateStatsAway", "(I)V") == 3);
         String zoneCls = "zombie/iso/areas/DesignationZoneAnimal";
-        failed += check("W32 doMeta 兩處同形改道，其餘指令與 frames 保留",
-                methodText(methodFromJar(jar, zoneCls, "doMeta", "(I)V")).replace(
-                        "INVOKEVIRTUAL zombie/characters/animals/IsoAnimal.updateStatsAway (I)V",
-                        "INVOKESTATIC " + awayHelper + ".updateStatsAwayZone " + awayDesc)
-                        .equals(methodText(method(distJava, zoneCls, "doMeta", "(I)V"))));
+        MethodNode vMeta = methodFromJar(jar, zoneCls, "doMeta", "(I)V");
+        MethodNode pMeta = method(distJava, zoneCls, "doMeta", "(I)V");
+        failed += check("W32 doMeta 兩處改道、原 updateStatsAway 呼叫歸零",
+                countExactCalls(pMeta, Opcodes.INVOKESTATIC, awayHelper, "updateStatsAwayZone", awayDesc) == 2
+                && countExactCalls(pMeta, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal",
+                        "updateStatsAway", "(I)V") == 0);
+        // W38：存在理由＝updateStatsAway 內 checkZone→setDZone 會 remove＋add（移到清單尾端）。
+        String metaSnap = "zombie/mdc/AnimalMetaSnapshot";
+        String zoneArg = "(L" + zoneCls + ";)V";
+        MethodNode vStatsAway = methodFromJar(jar, "zombie/characters/animals/IsoAnimal", "updateStatsAway", "(I)V");
+        MethodNode vSetDZone = methodFromJar(jar, "zombie/characters/animals/IsoAnimal", "setDZone", zoneArg);
+        failed += check("W38 vanilla updateStatsAway 呼叫 checkZone，setDZone 先 removeAnimal 再 addAnimal",
+                countExactCalls(vStatsAway, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/IsoAnimal", "checkZone", "()V")
+                + countExactCalls(vStatsAway, Opcodes.INVOKESPECIAL, "zombie/characters/animals/IsoAnimal", "checkZone", "()V") == 1
+                && methodText(vSetDZone).indexOf(zoneCls + ".removeAnimal") >= 0
+                && methodText(vSetDZone).indexOf(zoneCls + ".removeAnimal") < methodText(vSetDZone).indexOf(zoneCls + ".addAnimal"));
+        int swapped = 0;
+        boolean swapShape = true;
+        for (AbstractInsnNode in : pMeta.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
+                    && fi.owner.equals(zoneCls) && fi.name.equals("animals")) {
+                AbstractInsnNode next = in.getNext();
+                while (next != null && next.getOpcode() < 0) next = next.getNext();
+                swapShape &= next instanceof MethodInsnNode mi && mi.owner.equals(metaSnap) && mi.name.equals("animals");
+                swapped++;
+            }
+        }
+        failed += check("W38 doMeta：begin 頭部、end 在 RETURN 前、8 個 GETFIELD animals 各接快照、真指令恰 +12",
+                countFieldTouches(vMeta, zoneCls, "animals") == 8 && swapped == 8 && swapShape
+                && countExactCalls(pMeta, Opcodes.INVOKESTATIC, metaSnap, "animals",
+                        "(Ljava/util/ArrayList;)Ljava/util/ArrayList;") == 8
+                && headCallSlotsOk(pMeta, metaSnap, "begin", zoneArg, 0)
+                && tailCallOk(pMeta, metaSnap, "end", zoneArg)
+                && realInsnCount(pMeta) == realInsnCount(vMeta) + 12);
+        // W39：OnDeath 頭部帳本（純觀測）。
+        MethodNode vOnDeath = methodFromJar(jar, "zombie/characters/animals/IsoAnimal", "OnDeath", "()V");
+        MethodNode pOnDeath = method(distJava, "zombie/characters/animals/IsoAnimal", "OnDeath", "()V");
+        failed += check("W39 OnDeath 頭部 aload_0→AnimalDeathLedger.onDeath、真指令恰 +2",
+                headCallSlotsOk(pOnDeath, "zombie/mdc/AnimalDeathLedger", "onDeath",
+                        "(Lzombie/characters/animals/IsoAnimal;)V", 0)
+                && realInsnCount(pOnDeath) == realInsnCount(vOnDeath) + 2);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",

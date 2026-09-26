@@ -106,6 +106,8 @@ $helperEntries = @(
     'zombie/mdc/BabyBreedGuard.class',
     'zombie/mdc/AnimalSpawnGuard.class',
     'zombie/characters/animals/MdcAnimalCellSave.class',
+    'zombie/mdc/AnimalMetaSnapshot.class',
+    'zombie/mdc/AnimalDeathLedger.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -392,6 +394,17 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters
 Assert-Ok "MdcAnimalCellSaveTest（on，出貨組態）"
 java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest off
 Assert-Ok "MdcAnimalCellSaveTest（animalCellSave=0，原版截斷重現）"
+
+Write-Host "[9r5/10] 畜牧區補算快照（W38）＋動物死亡帳本（W39）行為驗證＋kill switch（獨立 JVM）..."
+# W38 off 組態以原版迴圈形狀重現重複補算／漏算；on 每隻恰一次。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalMetaSnapshotTest on
+Assert-Ok "AnimalMetaSnapshotTest（on，出貨組態）"
+java "-Dmdc.animalMetaSnapshot=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalMetaSnapshotTest off
+Assert-Ok "AnimalMetaSnapshotTest（animalMetaSnapshot=0，原版重現）"
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest on
+Assert-Ok "AnimalDeathLedgerTest（on，出貨組態）"
+java "-Dmdc.animalDeathLedger=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest off
+Assert-Ok "AnimalDeathLedgerTest（animalDeathLedger=0）"
 
 Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
 # 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。
