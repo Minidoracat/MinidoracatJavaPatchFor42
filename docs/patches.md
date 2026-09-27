@@ -4429,6 +4429,39 @@ rebuilds rebuildUsAvg disabled modifiedExits nested anomalies`。
 - 線上驗收：首次生效行；beat `auditMisses=0 lateFixes=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；
   W18 `losAvgUs` 從約 64 µs 降到個位數。
 
+## 2bk. 動物聽覺掃描量測（W48，server，純觀測，預設開）
+
+**原版**：伺服器每隻動物每個 tick 在 `IsoAnimal.updateInternal → respondToSound` 呼叫一次 `WorldSoundManager.getSoundAnimal`。
+client 只看動物所在 chunk 的聲音清單（`chunk.soundList`），伺服器（`GameServer.server`）卻整份掃過全域 `soundList`，
+挑出會影響動物（`stresshumans || stressAnimals`）且在範圍內最大聲的一個，成本是「動物數 × 全世界聲音數」。
+9/25 晚峰 JFR 把約 4.7% 記在下一行的 `getSoundAttractAnimal`（沒開 `DebugNonSafepoints`，歸屬不精確），W47 與
+`animalLosN` 都不經這條路徑。改寫前先量清楚成本與清單組成。
+
+**手術**：併入既有 IsoAnimal ClassPatch 的 `respondToSound`（已有聲音壓力常數手術）：方法內唯一的
+`invokevirtual getSoundAnimal` 1:1 改道 `AnimalSoundProbe.getSoundAnimal`（receiver 前置），委派原版一次並計時，
+回傳原版結果；原版例外原樣上拋、不計入。每 64 次抽樣一次，照原版條件與距離算式重掃清單，數出會影響動物的聲音數
+（`eligible`）與其中在範圍內的數量（`inRange`）。另記同一幀內前後兩隻動物之間清單變動的次數（`changesPerFrame`），
+評估「每幀建一次精簡清單」能否重用。
+
+**心跳**（首次生效一行，之後每 5 分鐘）：`calls frames callsPerFrame=平均/最大 nsAvg usMax frameUsAvg frameUsMax
+list=平均/最大 samples eligible=平均/最大 inRange=平均/最大 hits changesPerFrame windowPct anomalies`。
+`windowPct` 是兩次心跳之間此呼叫佔真實時間的百分比，`frameUsAvg` 是每幀合計耗時。
+
+**判讀**：`windowPct` 或 `frameUsAvg` 佔幀長明顯（>2%）才值得做加速版。`eligible` 遠小於 `list` 時，每幀建一份只含會影響動物
+的精簡清單即可；`eligible` 也大但 `inRange` 很小時，需要依位置分區。`changesPerFrame` 高代表清單在動物之間常被追加，
+快照要能察覺追加（清單只在 `update()` 移除、其他時候只從尾端追加）。加速版必須維持原版的清單順序與「嚴格大於才換」的
+取捨，並處理 W47 審查抓到的兩類問題：掃描途中清單被改動、同一次呼叫中又觸發另一次檢查。
+
+**開關**：`-Dmdc.animalSoundProbe=0|off` 直接委派，不計時也不計數；需重啟。
+
+**驗證**：
+- SmokeCheck：原版前提（`getSoundAnimal` 讀 `GameServer.server` 一次、全域 `soundList` 一次；全 jar 呼叫點恰 1 個且在
+  `respondToSound`）；改道後原呼叫歸零、改道恰 1、真指令數不變；helper 只委派原版一次、catch 只接 `RuntimeException`、零 Rand。
+- `AnimalSoundProbeTest`（`-Xverify:all`）：400 幀隨機聲音清單（含半徑 0、三種旗標、z 差、無方格動物、幀內追加），每次呼叫回傳值
+  與原版為同一物件；calls／hits／frames／每幀上限／幀內變動／抽樣次數與 eligible／inRange 合計對得上獨立重算；清單含 null 時
+  與原版同型例外且不計入；off 模式不計數。
+- 線上驗收：首次生效行、`anomalies=0`；晚峰取三個以上心跳判讀。
+
 ---
 
 ## 3. 部署後驗證清單

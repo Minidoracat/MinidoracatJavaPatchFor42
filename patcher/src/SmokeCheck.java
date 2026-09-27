@@ -462,6 +462,29 @@ public final class SmokeCheck {
         failed += check("逃跑距離的 20.0f→FADD 未被動（假陽性負對照）",
                 countConstThen(sound, 20.0f, Opcodes.FADD) == 1);
 
+        // W48 動物聽覺掃描量測（docs/patches.md 2bk）。原版前提：伺服器分支掃全域 soundList（client 才用 chunk 清單），
+        // 全 jar 只有 respondToSound 呼叫 getSoundAnimal——TIS 改成 chunk 清單或新增呼叫點時紅，量測要重新評估。
+        String wsm = "zombie/WorldSoundManager";
+        String soundDesc = "(L" + animal + ";)L" + wsm + "$WorldSound;";
+        String animalSoundProbe = "zombie/mdc/AnimalSoundProbe";
+        String animalSoundProbeDesc = "(L" + wsm + ";L" + animal + ";)L" + wsm + "$WorldSound;";
+        MethodNode vGetSoundAnimal = methodFromJar(jar, wsm, "getSoundAnimal", soundDesc);
+        MethodNode vSound = methodFromJar(jar, animal, "respondToSound", "()V");
+        failed += check("W48 原版前提：getSoundAnimal 讀 GameServer.server 一次、全域 soundList 一次；全 jar 呼叫點恰 1",
+                countExactFields(vGetSoundAnimal, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1
+                && countExactFields(vGetSoundAnimal, Opcodes.GETFIELD, wsm, "soundList", "Ljava/util/List;") == 1
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1
+                && countExactCalls(vSound, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1);
+        MethodNode probeGet = method(distJava, animalSoundProbe, "getSoundAnimal", animalSoundProbeDesc);
+        failed += check("W48 改道：respondToSound 原呼叫歸零、改道恰 1、真指令數不變；helper 只委派原版一次、零 Rand",
+                countExactCalls(sound, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 0
+                && countExactCalls(sound, Opcodes.INVOKESTATIC, animalSoundProbe, "getSoundAnimal", animalSoundProbeDesc) == 1
+                && realInsnCount(sound) == realInsnCount(vSound)
+                && countExactCalls(probeGet, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1
+                && probeGet.tryCatchBlocks.stream().allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type))
+                && classNode(distJava, animalSoundProbe).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+
         MethodNode stress = method(distJava, animal, "updateStress", "()V");
         failed += check("閒置衰減常數落在 FDIV→FNEG→changeStress 這條路徑",
                 countConstContext(stress, 2750.0f, Opcodes.FDIV, animal, "changeStress", 2) == 1);

@@ -195,7 +195,14 @@ public final class PatchConfig {
         // 沿用舊座標會通過命中數守門卻改到逃跑距離。改乘數才是原本的「聲音壓力 ÷3」。
         Patcher.MethodOps a2 = animal.method("respondToSound", "()V");
         a2.consts.add(new Patcher.ConstChange(0.05f, 1.0f / 60.0f));
-        a2.expectedHits = 1;
+        // W48 動物聽覺掃描量測（docs/patches.md 2bk）：伺服器每隻動物每 tick 經 getSoundAnimal 整份掃全域
+        // soundList。唯一呼叫點 1:1 改道 AnimalSoundProbe，委派原版並計時、抽樣統計，純觀測不改回傳。
+        // -Dmdc.animalSoundProbe=0|off 停用。
+        a2.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/WorldSoundManager", "getSoundAnimal",
+                "(Lzombie/characters/animals/IsoAnimal;)Lzombie/WorldSoundManager$WorldSound;",
+                "zombie/mdc/AnimalSoundProbe", "getSoundAnimal"));
+        a2.expectedHits = 2;
         Patcher.MethodOps a3 = animal.method("killed", "(Lzombie/characters/IsoPlayer;)V");
         a3.consts.add(new Patcher.ConstChange(30.0f, 15.0f));
         a3.expectedHits = 1;

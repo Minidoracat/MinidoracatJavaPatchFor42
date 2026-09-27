@@ -111,6 +111,7 @@ $helperEntries = @(
     'zombie/core/MdcTransactionReject.class',
     'zombie/mdc/AnimalLosIndex.class',
     'zombie/mdc/AnimalLosIndex$ObjectSet.class',
+    'zombie/mdc/AnimalSoundProbe.class',
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -506,6 +507,12 @@ java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$R\work\projectzomboi
 Assert-Ok "AnimalLosIndexTest（快速路徑最後掃描發現位移並停用）"
 java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest violation-audit
 Assert-Ok "AnimalLosIndexTest（比對發現候選缺漏並停用）"
+
+Write-Host "[9zc/10] 動物聽覺掃描量測（W48）：回傳值與原版同一物件、計數與抽樣對帳、例外原樣上拋、off 不計數..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest on
+Assert-Ok "AnimalSoundProbeTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.animalSoundProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest off
+Assert-Ok "AnimalSoundProbeTest（0，直接委派不計數）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
