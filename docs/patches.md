@@ -4311,6 +4311,61 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 
 **官方回報**：`docs/report/2026-09-27-processitems-linear-contains-tis.md`（草稿，未送出）。
 
+## 2bi. VehicleCollide 歸還後強制重送授權（W46，server，預設 on）
+
+**症狀（2026-09-27 晚上）**：`Packets limit has exceeded for VehicleCollide` 兩小時約 18 萬行，佔 console 86%，
+`server-console.txt`（20 MB 上限）約 80 分鐘寫滿清空一次。8 月以來只有 9/26 15:22 那個 session（ProcessItems 凍結
+5–16 秒）出現過 1,974 行。
+
+**抓包（入站 15 秒與 30 秒兩次，另對一個 client 雙向 20 秒）**：
+- 送包的 client 每次 3–4 個、會換人換車（22:09 與 22:16 兩批完全不同），每人每秒 46–237 包。
+  30 秒內 7,167 包全是 `collide=0`（歸還）、零個申請；同一台車每秒的包數約等於 client 幀率。
+- 對照 8/24 舊抓包：正常一次碰撞是 6 個申請、29 個歸還，之後就停。
+- 雙向抓包：伺服器對那幾台車的位置與 client 一致（車輛 ID 沒錯位），也持續送更新，但只帶乘客旗標（16384），
+  從未帶授權（8192）。
+- 警告以 100 ms 為單位成批出現（最多 1,730 行），緊跟在主迴圈卡頓之後。`isLimitExceeded` 依伺服器處理封包的
+  時刻計數（`MaxPacketsPerSecond=1000`），卡頓後積壓的包同一瞬間處理才超過門檻；平時每個 client 只有幾十到兩百多
+  包/秒，不會觸發警告。警告量＝卡住的車數 × 卡頓長度，迴圈平時可能就存在。
+
+**原版缺陷（42.20.4）**：
+1. client 撞到伺服器管的車時，`BaseVehicle.authorizationClientCollide` 先在本機自設 `LocalCollide`（不等伺服器），
+   同時送 `VehicleCollide(true)`（`WorldSimulation.java:238-243`）。
+2. client 持有 `LocalCollide` 的車 1 秒沒動，就每幀送 `VehicleCollide(false)`，並把計時歸零，所以下一幀又送，
+   直到伺服器傳來新授權才停（`WorldSimulation.java:184-197`）。
+3. 伺服器授權同步只送「與上次送給該連線不同」的差異：`ServerVehicleState.shouldSend` 以連線快取的
+   `netPlayerAuthorization／netPlayerId` 比對，相同就不帶 8192。
+4. 申請與歸還若在伺服器同一幀處理（卡頓 ≥1 秒、網路把兩包湊在一起），或申請被其他卡住的 client 每幀送來的歸還
+   立刻蓋回 `Server`，伺服器的淨變化為零，永遠不會送授權更新。client 卡在 `LocalCollide`，每幀送歸還，直到那台車
+   離開它的載入範圍或重登。觸發原因是推測，修法不依賴它。
+5. `VehicleRequest` 只能要求乘客／完整同步，不會重送授權，原版沒有其他自癒路徑。
+
+卡住的 client 也把那幾台車當成自己負責的物理：忽略伺服器送來的位置、自行模擬，送出的 `VehiclePhysics` 被伺服器
+以無授權忽略。玩家撞動那幾台車時可能只在自己畫面上移動（推論，未實際觀察）。
+
+**手術**：`VehicleCollidePacket.processServer` 頭部 headCall，slots＝{0, 2}（封包、連線），真指令 +3，
+新 ClassPatch。helper `zombie.network.packets.vehicle.MdcVehicleCollideResync`（同 package 以讀 protected 欄位
+`isCollide`／`vehicleId`）：
+- 只處理歸還包（`isCollide=false`）。從 `connection.vehicleStates` 取這台車既有的快取，把 `netPlayerId` 設成
+  `Short.MIN_VALUE`（原版只會是 -1 或 onlineID）。下一輪 `sendVehicles` 的 `shouldSend` 必帶 8192，送出伺服器當下
+  的真正授權，client 的 `netPlayerFromServerUpdate` 收到後改掉 `LocalCollide`，停止送歸還。
+- 不論伺服器是否因他人駕駛（`Local`）而忽略這次歸還都重送：client 收到 `Local(他人)` 會改成 `Remote`。
+- 正常歸還本來就有差異、本來就會送，不多送；送出後 `setAuthorization` 把快取寫回，不會持續重送。
+- 連線沒有這台車的快取時不新建（`getVehicleState` 新建會觸發額外同步）。
+- 申請包、封包格式、`authorizationServerCollide` 本身都不動。純伺服器端，玩家不需安裝任何東西。
+- `-Dmdc.vehicleCollideResync=0|off` 回原版，其他值（含未設）啟用，需重啟。RuntimeException 只計數，不擋原版處理。
+- beat（每 5 分鐘，由歸還包帶動）：`releases invalidated noState noVehicle anomalies`，首次生效另印一行。
+
+**驗證**：
+- SmokeCheck（上游前提，TIS 修好即紅＝撤刀訊號）：`shouldSend` 以連線快取的 `netPlayerId` 比對才帶 `SIPUSH 8192`；
+  原版 `processServer` 恰 1 個 `authorizationServerCollide`、不碰 `ServerVehicleState`／`vehicleStates`；
+  `authorizationClientCollide` 本機自設 `LocalCollide`。手術形狀：頭部 `aload_0／aload_2／invokestatic` 全序、
+  真指令恰 +3。helper 只有 1 處 `PUTFIELD netPlayerId`、零 `getVehicleState`。
+- `MdcVehicleCollideResyncTest`（on／off，`-Xverify:all`）：走 dist 手術後的真 `processServer`，以真 `shouldSend`
+  判定。伺服器已是 `Server` 時的歸還：on 下一輪帶授權、off 不送；送出一次後不再重送；伺服器忽略歸還（`Local(5)`）
+  時 on 把 `Local(5)` 送回；申請包不動快取；連線沒有快取時不新建。
+- 線上驗收：用 `temp/vc_trace.py`（gitignore）重抓入站 30 秒，只送 `collide=0` 的迴圈應消失（每台車最多數十包）；
+  卡頓後的 `VehicleCollide` 警告尖峰應大幅下降；beat `invalidated` 成長、`anomalies=0`。
+
 ---
 
 ## 3. 部署後驗證清單

@@ -109,6 +109,7 @@ $helperEntries = @(
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/WorldItemExpirySync.class',
     'zombie/core/MdcTransactionReject.class',
+    'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -483,6 +484,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "MdcWorldSoundProbeTest（主迴圈武裝前維持原版）"
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest logthrow
 Assert-Ok "MdcWorldSoundProbeTest（真 logger 故障與原例外隔離）"
+
+Write-Host "[9za/10] VehicleCollide 歸還後重送授權（W46）：真 processServer＋真 shouldSend 與原版回退..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest on
+Assert-Ok "MdcVehicleCollideResyncTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.vehicleCollideResync=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest off
+Assert-Ok "MdcVehicleCollideResyncTest（0，原版回退）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

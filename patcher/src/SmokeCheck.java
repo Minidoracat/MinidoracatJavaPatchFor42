@@ -3104,6 +3104,36 @@ public final class SmokeCheck {
                 !putWrapOk(mergeShape(null, null, null), mergeShape(piIndex, "wrap", wrapDesc),
                         "T", "f", piIndex, "wrap", wrapDesc));
         failed += checkInventoryItemIdentity(jar);
+
+        // W46：VehicleCollide 歸還後強制重送授權（docs/patches.md 2bi）。存在理由（TIS 修好即紅＝撤刀）：
+        // shouldSend 只在授權與該連線快取不同時才帶 8192；processServer 只改車輛授權、不碰任何連線快取；
+        // client 撞車時在本機自設 LocalCollide（不等伺服器）。
+        String svsCls = "zombie/vehicles/BaseVehicle$ServerVehicleState";
+        String vcpCls = "zombie/network/packets/vehicle/VehicleCollidePacket";
+        String vcrCls = "zombie/network/packets/vehicle/MdcVehicleCollideResync";
+        String vcpDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        MethodNode vShouldSend = methodFromJar(jar, svsCls, "shouldSend", "(Lzombie/vehicles/BaseVehicle;)Z");
+        MethodNode vVcProcess = methodFromJar(jar, vcpCls, "processServer", vcpDesc);
+        MethodNode vClientCollide = methodFromJar(jar, "zombie/vehicles/BaseVehicle",
+                "authorizationClientCollide", "(Lzombie/characters/IsoPlayer;)V");
+        failed += check("W46 原版：shouldSend 以連線快取 netPlayerId 比對才帶 8192；processServer 只呼叫 authorizationServerCollide、不碰連線快取；client 本機自設 LocalCollide",
+                countExactFields(vShouldSend, Opcodes.GETFIELD, svsCls, "netPlayerId", "S") == 1
+                && methodText(vShouldSend).contains("SIPUSH 8192")
+                && countExactCalls(vVcProcess, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                        "authorizationServerCollide", "(SZ)V") == 1
+                && !methodText(vVcProcess).contains("ServerVehicleState")
+                && !methodText(vVcProcess).contains("vehicleStates")
+                && methodText(vClientCollide).contains("GETSTATIC zombie/vehicles/BaseVehicle$Authorization.LocalCollide"));
+        MethodNode pVcProcess = method(distJava, vcpCls, "processServer", vcpDesc);
+        String vcrDesc = "(L" + vcpCls + ";Lzombie/core/raknet/UdpConnection;)V";
+        failed += check("W46 手術後：processServer 頭部 aload_0／aload_2／invokestatic 全序、真指令恰 +3",
+                headCallSlotsOk(pVcProcess, vcrCls, "onProcessServer", vcrDesc, 0, 2)
+                && realInsnCount(pVcProcess) == realInsnCount(vVcProcess) + 3);
+        MethodNode gVcr = method(distJava, vcrCls, "onProcessServer", vcrDesc);
+        failed += check("W46 helper 契約：只改既有快取的 netPlayerId 恰 1 處、不經 getVehicleState 新建快取",
+                countExactFields(gVcr, Opcodes.PUTFIELD, svsCls, "netPlayerId", "S") == 1
+                && countExactCalls(gVcr, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager", "getVehicleState",
+                        "(Lzombie/core/raknet/UdpConnection;Lzombie/vehicles/BaseVehicle;)L" + svsCls + ";") == 0);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",

@@ -91,6 +91,12 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   版本，搜尋 O(1)，順序與內容不變；舊的 W30（批次登記加速）同批退役。`-Dmdc.processItemsIndex=0` 回原版。
   詳見 [W45](docs/patches.md#2bh-物品處理清單身分索引w45server預設-onw30-同批退役)。
 
+- **VehicleCollide 歸還後重送授權 W46**：玩家撞到停放的車時，client 先自認取得那台車的碰撞計算權；伺服器同一幀內
+  處理完申請與歸還（例如卡頓時），淨結果不變就不會通知 client，client 每幀送歸還直到那台車離開載入範圍
+  （單一 client 最多 237 包/秒，伺服器卡頓後一次處理即超過每秒 1000 包上限、洗出大量 log）。伺服器收到歸還時
+  把該連線對這台車的授權快取標為失效，下一輪同步必定送回真正的授權。`-Dmdc.vehicleCollideResync=0` 回原版。
+  詳見 [W46](docs/patches.md#2bi-vehiclecollide-歸還後強制重送授權w46server預設-on)。
+
 - **動物補算時數上限 W42**：原版以圈區上次離開串流的時間推算離線時數，常比動物實際離線多算數天（9/26 一個 session
   38 隻死亡中 25 隻發生在補算後 60 秒內）。改為不超過動物自身離線時間，並在動物活著時每小時更新自身時鐘。`-Dmdc.animalCatchUpCap=0` 回原版。
   詳見 [W42](docs/patches.md#2be-動物補算時數上限w42server預設-on)。

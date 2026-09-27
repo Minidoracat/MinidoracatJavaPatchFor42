@@ -1237,6 +1237,20 @@ public final class PatchConfig {
         craftStop.expectedHits = 1;
         patches.add(craftSystem);
 
+        // W46：VehicleCollide 歸還後強制重送授權（docs/patches.md 2bi）。原版授權同步只送與上次不同的差異
+        // （ServerVehicleState.shouldSend），client 撞車時又先在本機自設 LocalCollide；申請與歸還在同一幀處理
+        // 或申請被他人的歸還蓋回時淨變化為零，伺服器永不糾正，client 每幀送歸還。頭部收 (this, connection)，
+        // 歸還包讓該連線對這台車的授權快取失效，下一輪同步必帶授權。
+        Patcher.ClassPatch vcPacket = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehicleCollidePacket");
+        Patcher.MethodOps vcProcess = vcPacket.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        vcProcess.headCall = new Patcher.HeadCall("zombie/network/packets/vehicle/MdcVehicleCollideResync",
+                "onProcessServer",
+                "(Lzombie/network/packets/vehicle/VehicleCollidePacket;Lzombie/core/raknet/UdpConnection;)V",
+                new int[]{0, 2});
+        vcProcess.expectedHits = 1;
+        patches.add(vcPacket);
+
         return patches;
     }
 
