@@ -162,8 +162,10 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
 ## VFE 可退場暫時修補（選用）
 
 `scripts/apply_workshop_compat_patches.py --vfe-temporary <狀態目錄>` 只對已核對的
-Vanilla Foods Expanded 3.3.0 **伺服器副本**做就地修補。另指定 `--root`（伺服器
-Workshop 內容目錄）、`--game-version` 與 `--apply`；不帶 `--apply` 只檢查、不寫檔。
+Vanilla Foods Expanded 3.3.0 **伺服器副本**就地修補兩個檔案：`vfx_agingmanager.lua` 與
+`vfx_storydistribution.lua`。兩檔依序處理，各自套用、退場與記錄狀態，一檔退場或出錯不影響另一檔；
+結束碼取兩者較差者（3 警告 > 2 待處理 > 0）。另指定 `--root`（伺服器 Workshop 內容目錄）、
+`--game-version` 與 `--apply`；不帶 `--apply` 只檢查、不寫檔。
 不要指向日常遊玩的 Steam 訂閱原檔。此模式不執行其他相容補丁，也不建立整檔覆蓋。
 
 3.3.0 起作者已收編上一版的空格快篩（沒有地面物品也沒有容器的格子不排隊）。本版只在
@@ -172,6 +174,13 @@ Workshop 內容目錄）、`--game-version` 與 `--apply`；不帶 `--apply` 只
 Java 端判定後略過，不在 Lua 端逐件讀；有的話照原版逐件走。清單依短型名由短到長排，因為
 `ItemContainer.compareType` 只看第一個 indexOf 命中；引擎呼叫失敗（回傳 nil）時照原版走。
 其餘排隊、512 上限、滿載即時掃描、取消與卸載流程及老化演算法都不改。
+
+story distribution（9/28 取樣佔主執行緒 3.03%）：原版每次 LoadChunk 都對每個待處理容器做 5 次 Java
+呼叫的失效檢查，再對每棟待處理建築呼叫 `isFullyStreamedIn`，成本隨「載入邊緣跨區的建築」累積。
+本版把失效檢查改成依「state 所在 chunk 的那次載入」分組，每組每次 LoadChunk 只驗該 chunk 是否仍以
+同一個 loadID 登記在原位置，不符才對組內逐一跑原版檢查；建築只在其範圍涵蓋的 64×64 ServerCell 載入時
+檢查（使用者自建建築每次都查），多棟同時完成時照原版 `pairs` 的插入順序處理。替換內容、ZombRand
+抽取順序、同步與除錯輸出不變。
 
 首次套用前核對 Workshop 更新識別、`mod.info` 版本及原檔 SHA，保存乾淨原檔與指紋。
 作者更新、本機版本或來源變更時，管理器會退場：**只有現檔完全等於我方修補版才還原；
@@ -184,13 +193,16 @@ Java 端判定後略過，不在 Lua 端逐件讀；有的話照原版逐件走�
 失敗當成作者已更新。已執行中的 Lua 不會因磁碟還原而卸載，仍須重啟載入新內容。
 作者更新也不代表必然已修復同一問題，需另行驗收。
 
-狀態目錄保存 `vfe-temporary-state.json` 與 `vfe-agingmanager-original.lua`，請保留作退場依據。
+狀態目錄保存 `vfe-temporary-state.json`、`vfe-agingmanager-original.lua`、
+`vfe-story-temporary-state.json`、`vfe-storydistribution-original.lua`，請保留作退場依據。
 啟用 Lua checksum 的環境須循正常 MOD 配發流程，不應為本補丁關閉校驗。
 驗證：`python scripts/test_vfe_temporary.py`；
 `lua scripts/test_vfe_aging_behavior.lua <修補後副本> <未修改的 Workshop 原檔>`（第二個參數
-啟用差分：同一批隨機世界跑兩個版本，物品、mod data、名稱、數值、同步呼叫與錯誤輸出須逐行相同）。
+啟用差分：同一批隨機世界跑兩個版本，物品、mod data、名稱、數值、同步呼叫與錯誤輸出須逐行相同）；
+`lua scripts/test_vfe_story_behavior.lua <修補後副本> <未修改的 Workshop 原檔>`（差分含 cell 載入／卸載與
+square／chunk／容器回收，物品、旗標、ZombRand、同步呼叫、輸出與錯誤須逐行相同且落在同一個引擎事件）。
 Lua 測試為隔離夾具，驗伺服器側物品狀態與同步呼叫，不代表真實客戶端收包或效能百分比；
-`getCountTypeRecurse` 的行為是依反編譯寫的模型。
+`getCountTypeRecurse` 與 chunk／cell 的載入順序是依反編譯寫的模型。
 
 ## 客戶端模組化安裝包
 
