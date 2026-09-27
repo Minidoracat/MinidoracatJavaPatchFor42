@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -28,13 +29,17 @@ import zombie.debug.DebugLog;
  * {@code equals}／{@code hashCode}（SmokeCheck 全 jar 釘住），identity 查表與 {@code ArrayList.contains} 的 equals
  * 比對結果相同；IdentityHashMap 不呼叫元素的任何方法，移除也不留墓碑。
  *
- * <p><b>不變量與自癒</b>：
+ * <p><b>不變量</b>：
  * <ul>
  * <li>只有建立清單的執行緒（伺服器主執行緒）更新與使用索引。其他執行緒照原版寫清單並把索引標成待重建；
  *     其他執行緒的 {@code contains} 走原版線性掃描。</li>
- * <li>會改內容的 public 方法全部覆寫並同步索引；經未覆寫路徑造成的修改由 {@code modCount} 比對察覺，
- *     下次查詢前整份重建。取過 {@code subList} 的清單永久改回線性（view 的 set 不動 modCount，無從察覺）。</li>
- * <li>每 4096 次查詢抽一次原版線性結果比對；不一致即記錄並重建，累計 3 次全域停用，所有清單退回原版。</li>
+ * <li>單件修改（add／remove／set／clear 及 iterator 經過的同名方法）與原版熱路徑 {@code removeAll(HashSet)} 增量同步。
+ *     會回呼外部程式碼或可能中途拋例外留下部分修改的批次操作（replaceAll／sort／removeIf／retainAll／其他集合的
+ *     removeAll）視為批次區段：區段內 {@code contains} 走原版線性，結束後（含例外）整份重建。經未覆寫路徑的結構修改由
+ *     {@code modCount} 比對察覺。取過 {@code subList} 的清單永久改回線性（view 的 set 不動 modCount，無從察覺），
+ *     並釋放索引。</li>
+ * <li>每 4096 次查詢抽一次原版線性結果比對，是最後防線而非正確性保證（只察覺剛好抽中的查詢）。不一致即記錄並重建，
+ *     累計 3 次全域停用，所有清單退回原版並釋放索引。</li>
  * </ul>
  * observe 模式照常維護索引，但一律回傳原版線性結果（逐次比對，只記錄不改變行為）。
  * {@code -Dmdc.processItemsIndex=0|off}：{@link #wrap} 原樣回傳原版 ArrayList。
@@ -67,10 +72,14 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
     private transient volatile boolean dirty;
     private transient volatile boolean viewIssued;
     private transient int expectedModCount;
+    private transient int busy;   // 批次區段深度（只在擁有者執行緒增減）
 
     private ProcessItemsIndex(Collection<?> initial) {
-        super(initial);
+        super();   // 與原版 new ArrayList<>() 相同的預設空容量（ensureCapacity／擴容行為一致）
         owner = Thread.currentThread();
+        if (!initial.isEmpty()) {
+            super.addAll(initial);
+        }
         reindex();
     }
 
@@ -96,7 +105,7 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
             offOwner.incrementAndGet();
             return super.contains(o);
         }
-        if (!fresh()) {
+        if (busy > 0 || !fresh()) {
             return super.contains(o);
         }
         long n = ++lookups;
@@ -157,6 +166,9 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
 
     @Override
     public boolean addAll(int index, Collection<? extends Object> c) {
+        if (index < 0 || index > size()) {
+            return super.addAll(index, c);   // 無效 index：沿用原版先檢查 index、不碰 c 的例外順序
+        }
         boolean t = tracking();
         if (!t) {
             boolean changed = super.addAll(index, c);
@@ -196,8 +208,17 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
 
     @Override
     public boolean removeAll(Collection<?> c) {
+        if (c.getClass() != HashSet.class) {
+            // 原版熱路徑以外（本清單或其 view 的別名、比對語意不明的集合）：照原版做，結束後整份重建。
+            boolean own = enterBulk();
+            try {
+                return super.removeAll(c);
+            } finally {
+                exitBulk(own);
+            }
+        }
         if (c.isEmpty()) {
-            // 原版 batchRemove 會逐一掃完整份清單後回 false；內容與 modCount 皆不變。
+            // 原版 batchRemove 會逐一掃完整份清單後回 false；HashSet.contains 不拋例外，內容與 modCount 皆不變。
             if (Thread.currentThread() == owner) {
                 emptyRemoveAll++;
                 maybeBeat();
@@ -205,12 +226,20 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
             return false;
         }
         boolean t = tracking();
+        int before = size();
         boolean changed = super.removeAll(c);
         if (changed && t) {
-            // removeAll 移除所有 c.contains(元素) 為真的元素（全部副本）。原版唯一呼叫端是 HashSet<InventoryItem>，
-            // 物品沒有覆寫 equals/hashCode ⇒ identity 比對，移除的正是這些鍵。其他比對語意的集合由抽驗兜底。
+            // 原版 ProcessRemoveItems 傳入 HashSet<InventoryItem>：HashSet.contains 以清單元素的 equals 比對，物品沒有覆寫
+            // equals/hashCode ⇒ identity，移除的正是這些鍵（且不會回呼本清單）。實際移除數對不上就整份重建。
+            int expected = 0;
             for (Object o : c) {
-                counts.remove(o);
+                Integer k = counts.remove(o);
+                if (k != null) {
+                    expected += k;
+                }
+            }
+            if (expected != before - size()) {
+                dirty = true;
             }
         }
         done(t);
@@ -222,32 +251,32 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
 
     @Override
     public boolean retainAll(Collection<?> c) {
-        boolean t = tracking();
-        boolean changed = super.retainAll(c);
-        if (changed) {
-            dirty = true;
+        boolean own = enterBulk();
+        try {
+            return super.retainAll(c);
+        } finally {
+            exitBulk(own);
         }
-        done(t);
-        return changed;
     }
 
     @Override
     public boolean removeIf(Predicate<? super Object> filter) {
-        boolean t = tracking();
-        boolean changed = super.removeIf(filter);
-        if (changed) {
-            dirty = true;
+        boolean own = enterBulk();
+        try {
+            return super.removeIf(filter);
+        } finally {
+            exitBulk(own);
         }
-        done(t);
-        return changed;
     }
 
     @Override
     public void replaceAll(UnaryOperator<Object> operator) {
-        boolean t = tracking();
-        super.replaceAll(operator);
-        dirty = true;
-        done(t);
+        boolean own = enterBulk();
+        try {
+            super.replaceAll(operator);
+        } finally {
+            exitBulk(own);
+        }
     }
 
     @Override
@@ -280,11 +309,15 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
         done(t);
     }
 
+    /** comparator 中途拋例外時 TimSort 可能留下重複／遺失的元素，故同樣視為批次區段。 */
     @Override
     public void sort(Comparator<? super Object> c) {
-        boolean t = tracking();
-        super.sort(c);
-        done(t);
+        boolean own = enterBulk();
+        try {
+            super.sort(c);
+        } finally {
+            exitBulk(own);
+        }
     }
 
     @Override
@@ -328,6 +361,7 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
             return false;
         }
         if (disabled || viewIssued) {
+            release();
             return false;
         }
         if (modCount != expectedModCount) {
@@ -344,9 +378,37 @@ public final class ProcessItemsIndex extends ArrayList<Object> {
         }
     }
 
+    /**
+     * 會回呼外部程式碼、或可能中途拋例外留下部分修改的批次操作：區段內本清單的 {@code contains} 走原版線性
+     * （回呼看到的是正在修改的陣列），結束後（含例外）整份重建。
+     */
+    private boolean enterBulk() {
+        if (Thread.currentThread() != owner) {
+            offOwner.incrementAndGet();
+            return false;
+        }
+        busy++;
+        return true;
+    }
+
+    private void exitBulk(boolean own) {
+        if (own) {
+            busy--;
+        }
+        dirty = true;
+    }
+
+    /** 永久線性（取過 subList 或全域停用）：擁有者執行緒上清空索引，不再持有已移出清單的物品。 */
+    private void release() {
+        if (!counts.isEmpty()) {
+            counts.clear();
+        }
+    }
+
     /** 擁有者執行緒上：索引可用時回 true，必要時先整份重建。 */
     private boolean fresh() {
         if (disabled || viewIssued) {
+            release();
             return false;
         }
         if (dirty || modCount != expectedModCount) {

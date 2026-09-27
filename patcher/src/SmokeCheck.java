@@ -22,11 +22,17 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
@@ -3089,11 +3095,14 @@ public final class SmokeCheck {
                 && jarWideFieldReadCensus(jar, Opcodes.GETFIELD, isoCellCls, "processItems") == piInnerGets);
         MethodNode vCellInit = methodFromJar(jar, isoCellCls, "<init>", "(II)V");
         MethodNode pCellInit = method(distJava, isoCellCls, "<init>", "(II)V");
+        String wrapDesc = "(" + listDesc + ")" + listDesc;
         failed += check("W45 建構子唯一 PUTFIELD processItems：原版前為 new ArrayList()，手術後其間緊接 wrap、真指令恰 +1、其餘逐字不變",
                 countFieldTouches(vCellInit, isoCellCls, "processItems") == 1
-                && putWrapOk(vCellInit, pCellInit, isoCellCls, "processItems", piIndex, "wrap",
-                        "(" + listDesc + ")" + listDesc)
+                && putWrapOk(vCellInit, pCellInit, isoCellCls, "processItems", piIndex, "wrap", wrapDesc)
                 && realInsnCount(pCellInit) == realInsnCount(vCellInit) + 1);
+        failed += check("W45 守門負對照：NEW 與 PUTFIELD 間有合流點（部分路徑沿用既有清單）時拒絕",
+                !putWrapOk(mergeShape(null, null, null), mergeShape(piIndex, "wrap", wrapDesc),
+                        "T", "f", piIndex, "wrap", wrapDesc));
         failed += checkInventoryItemIdentity(jar);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
@@ -3814,13 +3823,13 @@ public final class SmokeCheck {
                              String helperOwner, String helperName, String helperDesc) {
         FieldInsnNode vPut = onlyPutField(vanilla, owner, field);
         FieldInsnNode pPut = onlyPutField(patched, owner, field);
-        if (vPut == null || pPut == null || !newArrayListBefore(vPut)) {
+        if (vPut == null || pPut == null || !newArrayListBefore(vanilla, vPut)) {
             return false;
         }
         AbstractInsnNode wrap = prevReal(pPut);
         if (!(wrap instanceof MethodInsnNode call) || call.getOpcode() != Opcodes.INVOKESTATIC
                 || !call.owner.equals(helperOwner) || !call.name.equals(helperName) || !call.desc.equals(helperDesc)
-                || !newArrayListBefore(call)) {
+                || !newArrayListBefore(patched, call)) {
             return false;
         }
         MethodNode copy = new MethodNode(Opcodes.ASM9, patched.access, patched.name, patched.desc,
@@ -3851,15 +3860,66 @@ public final class SmokeCheck {
         return found;
     }
 
-    /** in 之前三條真指令依序為 NEW java/util/ArrayList、DUP、INVOKESPECIAL java/util/ArrayList.&lt;init&gt;()V。 */
-    private static boolean newArrayListBefore(AbstractInsnNode in) {
+    /**
+     * in 之前三條真指令依序為 NEW java/util/ArrayList、DUP、INVOKESPECIAL java/util/ArrayList.&lt;init&gt;()V，
+     * 且 NEW 到 in 之間沒有合流點（frame 或跳轉目標 label）——否則另一條路徑可能把既有清單送進 PUTFIELD，
+     * wrap 會切斷原本的別名。
+     */
+    private static boolean newArrayListBefore(MethodNode m, AbstractInsnNode in) {
         AbstractInsnNode init = prevReal(in);
         AbstractInsnNode dup = init == null ? null : prevReal(init);
         AbstractInsnNode neu = dup == null ? null : prevReal(dup);
-        return init instanceof MethodInsnNode c && c.getOpcode() == Opcodes.INVOKESPECIAL
+        if (!(init instanceof MethodInsnNode c && c.getOpcode() == Opcodes.INVOKESPECIAL
                 && c.owner.equals("java/util/ArrayList") && c.name.equals("<init>") && c.desc.equals("()V")
                 && dup != null && dup.getOpcode() == Opcodes.DUP
-                && neu instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW && t.desc.equals("java/util/ArrayList");
+                && neu instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW && t.desc.equals("java/util/ArrayList"))) {
+            return false;
+        }
+        Set<LabelNode> targets = new HashSet<>();
+        for (AbstractInsnNode x : m.instructions) {
+            if (x instanceof JumpInsnNode j) {
+                targets.add(j.label);
+            } else if (x instanceof TableSwitchInsnNode ts) {
+                targets.add(ts.dflt);
+                targets.addAll(ts.labels);
+            } else if (x instanceof LookupSwitchInsnNode ls) {
+                targets.add(ls.dflt);
+                targets.addAll(ls.labels);
+            }
+        }
+        for (TryCatchBlockNode tc : m.tryCatchBlocks) {
+            targets.add(tc.handler);
+        }
+        for (AbstractInsnNode x = neu.getNext(); x != in; x = x.getNext()) {
+            if (x instanceof FrameNode || (x instanceof LabelNode l && targets.contains(l))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** W45 守門負對照（審查反例）：一條路徑 new ArrayList、另一條讀共用清單，兩者在 PUTFIELD 前合流。 */
+    private static MethodNode mergeShape(String helperOwner, String helperName, String helperDesc) {
+        MethodNode m = new MethodNode(Opcodes.ASM9, Opcodes.ACC_PUBLIC, "<init>", "(Z)V", null, null);
+        LabelNode fresh = new LabelNode();
+        LabelNode put = new LabelNode();
+        InsnList in = m.instructions;
+        in.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        in.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        in.add(new JumpInsnNode(Opcodes.IFEQ, fresh));
+        in.add(new FieldInsnNode(Opcodes.GETSTATIC, "T", "shared", "Ljava/util/ArrayList;"));
+        in.add(new JumpInsnNode(Opcodes.GOTO, put));
+        in.add(fresh);
+        in.add(new TypeInsnNode(Opcodes.NEW, "java/util/ArrayList"));
+        in.add(new InsnNode(Opcodes.DUP));
+        in.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/util/ArrayList", "<init>", "()V", false));
+        in.add(put);
+        if (helperOwner != null) {
+            in.add(new MethodInsnNode(Opcodes.INVOKESTATIC, helperOwner, helperName, helperDesc, false));
+        }
+        in.add(new FieldInsnNode(Opcodes.PUTFIELD, "T", "f", "Ljava/util/ArrayList;"));
+        in.add(new InsnNode(Opcodes.RETURN));
+        return m;
     }
 
     /**

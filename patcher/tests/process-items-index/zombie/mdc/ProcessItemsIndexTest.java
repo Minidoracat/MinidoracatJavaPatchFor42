@@ -6,11 +6,15 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Random;
+import java.util.Set;
+import java.util.TreeSet;
 
 import zombie.inventory.InventoryItem;
 import zombie.iso.IsoCell;
@@ -24,7 +28,9 @@ import zombie.network.GameServer;
  * <li>真 {@code IsoCell(int,int)} 建構子：欄位初始化後 {@code processItems} 是索引清單（off 為原版 ArrayList）。</li>
  * <li>dist 內手術後的真 {@code IsoCell} 方法：同一組操作在原版清單與索引清單上結果逐一相同。</li>
  * <li>20 萬步隨機操作與參照 ArrayList 逐步差分（重複元素、null、self addAll、iterator／listIterator）。</li>
- * <li>subList 改回線性、其他執行緒修改後重建、clone 不共用索引。</li>
+ * <li>subList 改回線性並釋放索引、其他執行緒修改後重建、clone 不共用索引。</li>
+ * <li>批次操作與別名（審查反例）：replaceAll／sort 中途例外與回呼重入、removeAll／retainAll 以自身或 view 為參數、
+ *     非 identity 集合、空集合例外語意、無效 index、空清單 ensureCapacity——逐一與原版 ArrayList 比對。</li>
  * <li>最後：人為弄壞索引，抽驗察覺並重建，累計 3 次全域停用（observe 只記錄、結果恆為原版）。</li>
  * </ul>
  */
@@ -52,6 +58,7 @@ public final class ProcessItemsIndexTest {
         realConstructor(off);
         realIsoCellDifferential(off);
         randomDifferential(off, collisions ? 40_000 : 200_000);
+        bulkAndAliasEdges(off);
         if (!off) {
             viewsThreadsAndClone();
             corruptionSelfHeal(want == ProcessItemsIndex.MODE_OBSERVE);
@@ -278,6 +285,8 @@ public final class ProcessItemsIndexTest {
         expect("subList 後改回線性：view.set 的結果正確反映", viewed.contains(c) && !viewed.contains(a));
         view.clear();
         expect("subList.clear 後正確", !viewed.contains(c) && viewed.contains(b) && viewed.size() == 1);
+        expect("取過 subList 後擁有者查詢即釋放索引（不再持有已移出的物品）",
+                ((ProcessItemsIndex) viewed).countsForTest().isEmpty());
 
         ArrayList<Object> shared = ProcessItemsIndex.wrap(new ArrayList<>());
         shared.add(a);
@@ -301,10 +310,11 @@ public final class ProcessItemsIndexTest {
         source.add(a);
         @SuppressWarnings("unchecked")
         ArrayList<Object> copy = (ArrayList<Object>) source.clone();
+        boolean cloneSame = copy.getClass() == ArrayList.class && sameIdentity(copy, source);
         copy.remove(a);
         copy.add(b);
         expect("clone 是內容相同的原版 ArrayList、修改不影響原清單的索引",
-                copy.getClass() == ArrayList.class && source.contains(a) && !source.contains(b));
+                cloneSame && source.contains(a) && !source.contains(b) && copy.contains(b) && !copy.contains(a));
     }
 
     /** 人為弄壞索引：抽驗察覺並重建；on 累計 3 次全域停用、observe 只記錄且結果恆為原版。最後執行（會停用全域索引）。 */
@@ -333,12 +343,146 @@ public final class ProcessItemsIndexTest {
             expect("observe：不因 divergence 停用", !ProcessItemsIndex.disabledForTest());
         } else {
             expect("on：累計 3 次 divergence 後全域停用", ProcessItemsIndex.disabledForTest());
-            idx.countsForTest().clear();                   // 停用後索引內容不再有影響
+            expect("停用後擁有者查詢即釋放索引", list.contains(a) && idx.countsForTest().isEmpty());
             expect("停用後走原版線性：結果正確", list.contains(a) && list.contains(b));
             ArrayList<Object> fresh = ProcessItemsIndex.wrap(new ArrayList<>());
             fresh.add(a);
             expect("停用後新清單同樣走原版線性", fresh.contains(a) && !fresh.contains(b));
         }
+    }
+
+    /** 審查反例：每個情境與原版 ArrayList 比對例外、內容與 contains（索引清單在 on 模式直接回答，不靠抽驗）。 */
+    private static void bulkAndAliasEdges(boolean off) {
+        FakeItem a = item(false), b = item(false), c = item(false), d = item(false), e = item(false);
+        Object[] probes = {a, b, c, d, e, null};
+        List<Object> ab = java.util.Arrays.asList(a, b);
+        sameAsVanilla("replaceAll 中途拋例外（前段已替換）", off, ab, probes, l -> l.replaceAll(x -> {
+            if (x == b) {
+                throw new IllegalStateException("op");
+            }
+            return x == a ? c : x;
+        }));
+        ArrayList<Object> reentrant = sameAsVanilla("replaceAll 回呼讀本清單（看到已替換的前段）", off, ab, probes,
+                l -> l.replaceAll(x -> x == a ? c : l.contains(c) ? d : e));
+        expect("  原版結果為 [c,d]（回呼確實看到前段替換）", reentrant.get(0) == c && reentrant.get(1) == d);
+        sameAsVanilla("removeIf 回呼讀本清單", off, ab, probes, l -> l.removeIf(x -> x == a && l.contains(b)));
+        sameAsVanilla("removeIf 回呼拋例外", off, ab, probes, l -> l.removeIf(x -> {
+            throw new IllegalStateException("pred");
+        }));
+        sameAsVanilla("removeAll(本清單)", off, ab, probes, l -> l.removeAll(l));
+        sameAsVanilla("removeAll(本清單的唯讀 view)", off, ab, probes, l -> l.removeAll(Collections.unmodifiableList(l)));
+        sameAsVanilla("retainAll(本清單的唯讀 view)", off, ab, probes, l -> l.retainAll(Collections.unmodifiableList(l)));
+        TreeSet<Object> allEqual = new TreeSet<>((x, y) -> 0);
+        allEqual.add(a);
+        sameAsVanilla("removeAll(比較子視全部相等的 TreeSet)", off, ab, probes, l -> l.removeAll(allEqual));
+        String s1 = new String("k"), s2 = new String("k");
+        HashSet<Object> equalNotSame = new HashSet<>(Set.of(s2));
+        sameAsVanilla("removeAll(HashSet 含 equals 相等但非同一物件)", off, java.util.Arrays.asList(a, s1), new Object[]{a, s1, s2},
+                l -> l.removeAll(equalNotSame));
+        HashSet<Object> hot = new HashSet<>(java.util.Arrays.asList(a, d));
+        sameAsVanilla("removeAll(HashSet) 熱路徑：重複元素全部移除", off, java.util.Arrays.asList(a, b, a, c), probes,
+                l -> l.removeAll(hot));
+        sameAsVanilla("removeAll(Set.of()) 遇 null 元素：沿用原版例外", off, java.util.Arrays.asList(a, null), probes,
+                l -> l.removeAll(Set.of()));
+        sameAsVanilla("removeAll(空 HashSet)：捷徑回 false", off, ab, probes, l -> {
+            if (l.removeAll(new HashSet<>())) {
+                throw new AssertionError("回傳 true");
+            }
+        });
+        sameAsVanilla("addAll(-1, null)：先報 index 錯誤", off, ab, probes, l -> l.addAll(-1, null));
+        sameAsVanilla("空清單 ensureCapacity 不動 modCount", off, List.of(), probes, l -> {
+            Iterator<Object> it = l.iterator();
+            l.ensureCapacity(1);
+            it.next();
+        });
+
+        Object[] ranked = new Object[64];
+        IdentityHashMap<Object, Integer> rank = new IdentityHashMap<>();
+        for (int i = 0; i < ranked.length; i++) {
+            ranked[i] = item(false);
+            rank.put(ranked[i], i);
+        }
+        List<Object> shuffled = new ArrayList<>(java.util.Arrays.asList(ranked));
+        Collections.shuffle(shuffled, new Random(45));
+        int[] total = {0};
+        new ArrayList<>(shuffled).sort((x, y) -> {
+            total[0]++;
+            return Integer.compare(rank.get(x), rank.get(y));
+        });
+        int throwAt = total[0] - 3;   // 最後一次合併中途
+        ArrayList<Object> torn = sameAsVanilla("sort 比較子在最後合併中途拋例外", off, shuffled, ranked, l -> {
+            int[] n = {0};
+            l.sort((x, y) -> {
+                if (++n[0] == throwAt) {
+                    throw new IllegalStateException("cmp");
+                }
+                return Integer.compare(rank.get(x), rank.get(y));
+            });
+        });
+        IdentityHashMap<Object, Boolean> distinct = new IdentityHashMap<>();
+        for (Object o : torn) {
+            distinct.put(o, true);
+        }
+        expect("  原版在例外後確實留下重複／遺失的元素（情境有效）", distinct.size() < ranked.length);
+    }
+
+    private interface Scenario {
+        void run(ArrayList<Object> list);
+    }
+
+    /**
+     * 同一情境跑在原版 ArrayList（{@code new ArrayList<>()} 後 addAll，與 IsoCell 相同的建構方式）與索引清單上：
+     * 例外型別、最終內容與每個 probe 的 contains 必須相同；on／observe 另驗查詢後索引與內容一致且沒有新增 divergence。
+     * 回傳原版清單供呼叫端檢查情境本身。
+     */
+    private static ArrayList<Object> sameAsVanilla(String name, boolean off, List<Object> initial, Object[] probes,
+                                                  Scenario s) {
+        ArrayList<Object> ref = new ArrayList<>();
+        ref.addAll(initial);
+        ArrayList<Object> sut = ProcessItemsIndex.wrap(new ArrayList<>());
+        sut.addAll(initial);
+        long divergencesBefore = ProcessItemsIndex.divergencesForTest();
+        String refOutcome = outcome(s, ref);
+        String sutOutcome = outcome(s, sut);
+        boolean same = refOutcome.equals(sutOutcome) && sameIdentity(ref, sut);
+        for (Object p : probes) {
+            same &= ref.contains(p) == sut.contains(p);
+        }
+        if (!off) {
+            same &= indexConsistent((ProcessItemsIndex) sut)
+                    && ProcessItemsIndex.divergencesForTest() == divergencesBefore;
+        }
+        expect(name + "（原版=" + refOutcome + " 索引=" + sutOutcome + "）", same);
+        return ref;
+    }
+
+    private static String outcome(Scenario s, ArrayList<Object> list) {
+        try {
+            s.run(list);
+            return "ok";
+        } catch (Throwable t) {
+            return t.getClass().getSimpleName();
+        }
+    }
+
+    /** 擁有者查詢一次（待重建者先重建）後，索引的每鍵次數必須等於清單內容的 identity multiset。 */
+    private static boolean indexConsistent(ProcessItemsIndex idx) {
+        idx.contains(new Object());
+        IdentityHashMap<Object, Integer> want = new IdentityHashMap<>();
+        for (Object o : idx) {
+            want.merge(o, 1, Integer::sum);
+        }
+        IdentityHashMap<Object, Integer> got = idx.countsForTest();
+        if (got.size() != want.size()) {
+            return false;
+        }
+        for (var entry : want.entrySet()) {
+            Integer n = got.get(entry.getKey());
+            if (n == null || n.intValue() != entry.getValue().intValue()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ---------------------------------------------------------------- 工具

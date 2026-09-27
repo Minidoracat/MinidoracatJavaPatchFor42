@@ -4248,18 +4248,25 @@ addAllItems=7374174 scanUsAvg=37.4 estScanMs=283114`＝主執行緒約 6%（外�
 - 清單本身仍是順序與內容的權威；另以 IdentityHashMap 記每個元素的出現次數，`contains` 查表。identity 等價的依據：
   InventoryItem 全繼承鏈沒有覆寫 equals／hashCode（SmokeCheck 全 jar 釘住）。IdentityHashMap 不呼叫元素的任何方法，
   移除不留墓碑（2g Trove 墓碑教訓）。
-- 空集合 `removeAll` 直接回 false：原版逐一掃完後同樣回 false，內容與 modCount 不變。
-- 會改內容的 public 方法全部覆寫並同步索引：add×2、addAll×2（先快照，自身 addAll 安全）、remove(int)、
-  remove(Object)（與原版同一個 `indexOf` 比對迴圈找位置再經 remove(int)）、removeAll、set、clear；retainAll／
-  removeIf／replaceAll／removeRange 改完標 dirty。iterator／listIterator 的 remove／set／add 都經過這些方法。
-  未覆寫路徑的修改由 modCount 比對察覺，下次查詢前整份重建。removeAll 的索引更新假設 identity 比對（原版唯一
-  呼叫端是 `HashSet<InventoryItem>`）；其他比對語意的集合由抽驗兜底。
-- `subList` 一旦發出，該清單永久改回線性（view 的 set 直接寫陣列、不動 modCount，無從察覺）。`clone` 回傳內容
-  相同的原版 ArrayList（淺拷貝會共用索引）。
+- 空集合 `removeAll(HashSet)` 直接回 false：原版逐一掃完後同樣回 false，`HashSet.contains` 不拋例外，內容與
+  modCount 不變。其他集合（例如 `Set.of()` 遇 null 元素會拋 NPE）照原版做。
+- 單件修改增量同步：add×2、addAll×2（先快照，自身 addAll 安全；無效 index 先交原版報錯）、remove(int)、
+  remove(Object)（與原版同一個 `indexOf` 比對迴圈找位置再經 remove(int)）、set、clear；iterator／listIterator 的
+  remove／set／add 都經過這些方法。未覆寫路徑的結構修改由 modCount 比對察覺，下次查詢前整份重建。
+- 原版熱路徑 `removeAll(HashSet<InventoryItem>)` 增量扣除（`HashSet.contains` 以清單元素的 equals 比對，物品是
+  identity），並核對實際移除數＝索引扣除數，對不上就整份重建（例如 equals 相等但非同一物件的元素）。
+- **批次區段**：replaceAll／sort／removeIf／retainAll，以及參數不是 exact `HashSet` 的 removeAll（含本清單或其 view
+  的別名、比較子語意的 TreeSet）照原版執行；區段內本清單的 `contains` 走原版線性（回呼看到的是正在修改的陣列），
+  結束後不論成功或例外都整份重建。原因：replaceAll 中途拋例外時已替換的前段不動 modCount；comparator 中途拋例外時
+  TimSort 會留下重複／遺失的元素；`removeAll(本清單)` 做完後參數本身已被清空，無從推算移除了哪些鍵。
+- `subList` 一旦發出，該清單永久改回線性（view 的 set 直接寫陣列、不動 modCount，無從察覺），並在擁有者下次操作時
+  清空索引，不再持有已移出清單的物品；全域停用時同樣釋放。`clone` 回傳內容相同的原版 ArrayList（淺拷貝會共用索引）。
+- 建構改用 `super()`＋`addAll`：空清單與原版 `new ArrayList<>()` 同樣是預設空容量（ensureCapacity／擴容行為一致）。
 - 只有建立清單的執行緒使用索引。伺服器由 `GameServer.main → IsoWorld.init` 在主執行緒建構 IsoCell，主迴圈也在
   同一執行緒。其他執行緒照原版寫並標 dirty，查詢走原版線性；W41 已把背景執行緒的登記改道主執行緒，線上
   `offThreadWrites=0`。並行修改的安全性與原版 ArrayList 相同（原版本來就沒有同步）。
-- 自癒：每 4096 次查詢抽一次原版線性比對；不一致即記錄並重建，on 模式累計 3 次全域停用，所有清單退回原版。
+- 抽驗：每 4096 次查詢抽一次原版線性比對；不一致即記錄並重建，on 模式累計 3 次全域停用，所有清單退回原版。
+  這是最後防線，不是正確性保證——只察覺剛好抽中的查詢，正確性靠上面的同步規則。
 - 三態 `-Dmdc.processItemsIndex`：1|on 預設、2|observe（照常維護索引，但一律回傳原版線性結果並逐次比對）、
   0|off（`wrap` 原樣回傳，完全原版）；未知值落回 on，需重啟。observe 仍走空集合 removeAll 捷徑（結果與原版相同）。
 - beat（每 5 分鐘，由每幀的 removeAll 帶動）：`mode size keys lookups hits audits divergences rebuilds rebuildItems
@@ -4286,12 +4293,19 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 - SmokeCheck（上游前提，TIS 修好即紅＝撤刀訊號）：`processItems` 是 private final ArrayList 且無伴生索引欄位；
   兩個 `addToProcessItems` 各恰 1 個 `ArrayList.contains`；`ProcessRemoveItems` 有 0 個 `isEmpty`、2 個 `removeAll`；
   全 jar `PUTFIELD processItems` 恰 1、GETFIELD 全在 IsoCell；InventoryItem 全繼承鏈無 equals／hashCode 覆寫。
-  手術形狀：建構子 `new ArrayList → wrap → putfield` 全序、真指令恰 +1、其餘逐字不變。
+  手術形狀：建構子 `new ArrayList → wrap → putfield` 全序、真指令恰 +1、其餘逐字不變，且 NEW 到 PUTFIELD 之間
+  不得有合流點（frame 或跳轉目標 label）——否則另一條路徑可能把既有清單送進欄位，wrap 會切斷別名。守門另帶
+  一個負對照：在記憶體建出「一條路徑 new、一條路徑讀共用清單、PUTFIELD 前合流」的方法，必須被拒絕。
 - `ProcessItemsIndexTest` 四組態（on／observe／off／`-XX:hashCode=2` 全部 identity hash 碰撞），`-Xverify:all`：
   真 IsoCell 建構子掛點；真 IsoCell（dist 手術後，含 W40／W41）與原版清單跑同一組操作的差分；20 萬步隨機操作
-  差分，逐步比對內容、contains 與每個操作的回傳值；subList、跨執行緒、clone；人為弄壞索引後，驗證抽驗察覺、
+  差分，逐步比對內容、contains 與每個操作的回傳值；批次與別名情境逐一與原版 ArrayList 比對例外、內容、contains
+  與「查詢後索引＝內容 multiset」（replaceAll／removeIf 中途例外與回呼讀本清單、sort 在最後合併中途拋例外、
+  removeAll／retainAll 以本清單或唯讀 view 為參數、比較子 TreeSet、equals 相等非同一物件、Set.of() 遇 null、
+  無效 index、空清單 ensureCapacity）；subList 與全域停用後釋放索引；跨執行緒、clone；人為弄壞索引後抽驗察覺、
   重建、累計 3 次停用（observe 恆回原版結果）。7 個手工 mutant（removeAll 不更新索引、remove(int) 不遞減、
   subList 不停用、set 不同步、observe 回索引結果、空 removeAll 回 true、自身 addAll 不快照）全數被抓。
+- 獨立審查（critic）：無 blocking；四項 SHOULD-FIX（批次操作例外與回呼、removeAll 別名、永久線性未釋放索引、
+  守門未擋合流點）與四項 NIT 均已修正並補上對應案例，修正前的 helper 跑新測試會失敗。
 - 線上驗收：首次生效行 `owner=` 為主執行緒；beat `divergences=0 anomalies=0 disabled=false views=0`；
   W40 `scanUsAvg` 從約 30 µs 降到 1 µs 以下；低 FPS dump 不再出現 `ArrayList.indexOfRange ← IsoCell.addToProcessItems`。
 
