@@ -3696,6 +3696,11 @@ SmokeCheck 鎖 IsoCell final、原批次方法與純 getter 指紋、唯一改�
 另以強制 hash 碰撞 JVM 演練 Comparable tree-bin 回呼。
 這是條件式加速；實際大容器分布與命中頻率未量測，不能由微型測試推算整服 FPS。
 
+**2026-09-27 退役**：W45（2bh）把 `processItems` 換成帶身分索引的清單，`contains` 變 O(1)，原版逐件迴圈
+即為 O(M)，本刀的暫時索引不再有收益；正式服本就幾乎不觸發（清單 ≥4096 且批次 ≥256）。改道、helper
+（`BulkItemRegistration`）、SmokeCheck 契約與行為測試一併移除，ItemContainer 剩 W5（2）＋W41（2）共 4 個命中點。
+要復活請從 git 歷史取回。
+
 ## 2as. 魚群廣播內容共用（W31，server，預設 on）
 
 `FishSchoolManager.updateSeed`／`updateFishingData` 內的兩個廣播呼叫各改道一次至
@@ -4068,8 +4073,8 @@ major GC 後 heap 44–54%，排除記憶體。
 
 **手術**：`IsoCell.ProcessItems` 內唯一 `InventoryItem.update()`／`finishupdate()` 1:1 改道 `ProcessItemsGuard`：
 null 時不呼叫、`finishupdate` 回 true，原版就把它放進 `processItemsRemove`，同一幀的 `ProcessRemoveItems` 移掉；
-非 null 行為不變。四個 `addToProcessItems`／`addToProcessItemsRemove` 頭部與 `BulkItemRegistration` 快路徑呼叫
-`touch`：非主執行緒（第一次 `ProcessItems` 的執行緒）寫入時記執行緒名與前 8 個遊戲幀（前 20 筆、之後每 1000 筆）。
+非 null 行為不變。四個 `addToProcessItems`／`addToProcessItemsRemove` 頭部呼叫 `touch`（W30 的
+`BulkItemRegistration` 快路徑隨 W30 退役移除）：非主執行緒（第一次 `ProcessItems` 的執行緒）寫入時記執行緒名與前 8 個遊戲幀（前 20 筆、之後每 1000 筆）。
 每 5 分鐘 `beat calls nulls size offThreadWrites anomalies`，`size` 是清單大小，可直接看出是否又在膨脹。
 kill switch `-Dmdc.processItemsGuard=0`。
 
@@ -4215,6 +4220,82 @@ chunk 由 client 讀檔、伺服器稍後自行載入時多清的部分不通知
 `PacketType.send` 恰 1（TIS 補 Reject 回送即紅＝撤 W44）、改道同形。`WorldItemExpirySyncTest` 驗丟棄條件與原版逐項
 等價（含兩個原版怪處）與旋鈕解析。沒有本機可執行的 dedicated server 端到端情境；線上驗收＝`can't find world item`
 每 session 行數大幅下降、`WorldItemExpiry removed` 成長且 `anomalies=0`、`TransactionReject sent` 對應剩餘的撿物失敗。
+
+## 2bh. 物品處理清單身分索引（W45，server，預設 on；W30 同批退役）
+
+**症狀（2026-09-27 晚峰）**：三張新地圖首次生成＋40–51 人時主迴圈 FPS 1–2。低 FPS thread dump 約 10% 主執行緒
+樣本停在 `ArrayList.indexOfRange ← ArrayList.contains ← IsoCell.addToProcessItems(:2766) ←
+ItemContainer.addItemsToProcessItems ← IsoObject.addToWorld ← IsoChunk.doLoadGridsquare ←
+ServerMap$ServerCell.RecalcAll2／Load2`。W40 beat（19:45 session 約 79 分鐘）：`size=29892 addCalls=196495
+addAllItems=7374174 scanUsAvg=37.4 estScanMs=283114`＝主執行緒約 6%（外推上限：每次登記都當 miss 全掃）；
+19:05 session size 15k–27k、scanUsAvg≈29、約 5.6%。
+
+**原版缺陷**：
+- `addToProcessItems` 兩個多載加入前先 `processItems.contains`（ArrayList 線性）。chunk 載入時
+  `IsoObject.addToWorld → ItemContainer.addItemsToProcessItems` 對容器每件物品各掃一次整份清單；地面食物因
+  `Food.shouldUpdateInWorld` 每 5 秒經 `IsoWorldInventoryObject.update` 重新登記一次。`Food.updateAge` 另有一處
+  `getProcessItems().contains(this)`。
+- 清單為什麼大：`DaysForRottenFoodRemoval ≠ -1`（本服 44）時 `Food.finishupdate()` 對會腐壞的食物回 false
+  （`Food.java:1335-1337`），它們常駐清單；本服 1.5–3 萬件。
+- `ProcessRemoveItems` 每幀兩次 `processItems.removeAll(processItemsRemove)`，不先檢查空集合，每次掃完整份清單。
+- 對照：同 class 的 `processIsoObject` 已有伴生 `processIsoObjectSet`（`IsoCell.java:139-143`；`ProcessIsoObject`
+  先 `isEmpty` 才 removeAll 並同步 Set，`:2193-2198`），`processItems` 沒有。
+
+**手術**：IsoCell 建構子唯一 `PUTFIELD processItems` 之前插 `INVOKESTATIC ProcessItemsIndex.wrap(ArrayList)ArrayList`
+（Patcher 新詞彙 FieldPutWrap：堆疊 1→1、真指令 +1、`ClassWriter(0)` 保留原 frames；併入既有 isoCell ClassPatch），
+把新建的空 ArrayList 換成子類 `zombie.mdc.ProcessItemsIndex`。IsoCell 其他方法、欄位型別與 getter 都不動，
+所有呼叫端（含 Lua 經 getter 拿到的清單）自動受益。
+- 清單本身仍是順序與內容的權威；另以 IdentityHashMap 記每個元素的出現次數，`contains` 查表。identity 等價的依據：
+  InventoryItem 全繼承鏈沒有覆寫 equals／hashCode（SmokeCheck 全 jar 釘住）。IdentityHashMap 不呼叫元素的任何方法，
+  移除不留墓碑（2g Trove 墓碑教訓）。
+- 空集合 `removeAll` 直接回 false：原版逐一掃完後同樣回 false，內容與 modCount 不變。
+- 會改內容的 public 方法全部覆寫並同步索引：add×2、addAll×2（先快照，自身 addAll 安全）、remove(int)、
+  remove(Object)（與原版同一個 `indexOf` 比對迴圈找位置再經 remove(int)）、removeAll、set、clear；retainAll／
+  removeIf／replaceAll／removeRange 改完標 dirty。iterator／listIterator 的 remove／set／add 都經過這些方法。
+  未覆寫路徑的修改由 modCount 比對察覺，下次查詢前整份重建。removeAll 的索引更新假設 identity 比對（原版唯一
+  呼叫端是 `HashSet<InventoryItem>`）；其他比對語意的集合由抽驗兜底。
+- `subList` 一旦發出，該清單永久改回線性（view 的 set 直接寫陣列、不動 modCount，無從察覺）。`clone` 回傳內容
+  相同的原版 ArrayList（淺拷貝會共用索引）。
+- 只有建立清單的執行緒使用索引。伺服器由 `GameServer.main → IsoWorld.init` 在主執行緒建構 IsoCell，主迴圈也在
+  同一執行緒。其他執行緒照原版寫並標 dirty，查詢走原版線性；W41 已把背景執行緒的登記改道主執行緒，線上
+  `offThreadWrites=0`。並行修改的安全性與原版 ArrayList 相同（原版本來就沒有同步）。
+- 自癒：每 4096 次查詢抽一次原版線性比對；不一致即記錄並重建，on 模式累計 3 次全域停用，所有清單退回原版。
+- 三態 `-Dmdc.processItemsIndex`：1|on 預設、2|observe（照常維護索引，但一律回傳原版線性結果並逐次比對）、
+  0|off（`wrap` 原樣回傳，完全原版）；未知值落回 on，需重啟。observe 仍走空集合 removeAll 捷徑（結果與原版相同）。
+- beat（每 5 分鐘，由每幀的 removeAll 帶動）：`mode size keys lookups hits audits divergences rebuilds rebuildItems
+  emptyRemoveAll offOwner views anomalies disabled`；首次生效另印一行 `owner=`（應為主執行緒名）。
+
+**成本與效果**：本機 microbenchmark，常駐 3 萬件，登記 10 萬件，並以每 1000 件一次的批次 removeAll 維持大小。
+正式服的 `ArrayList.indexOfRange` 由整個 JVM 共用，equals 呼叫點是 megamorphic，所以基準測試先以 String／Integer／
+自訂 equals 類別把該呼叫點弄成 megamorphic：
+
+| 情境 | 原版每件登記 | W45 每件登記 | 空 removeAll（原版 → W45） |
+|---|---|---|---|
+| megamorphic（貼近正式服） | 43.0 µs | 0.30 µs | 12.4 µs → 18 ns |
+| 只見過 Object（JIT 內聯成 ==） | 6.0 µs | 0.25 µs | 9.2 µs → 16 ns |
+
+W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，與 megamorphic 情境同級。依 19:45 session 外推，
+主執行緒約省 6%（上限估計），chunk 大量載入時佔比更高。這不是 FPS 1–2 的唯一解：新地圖首次生成與 MOD 的
+`LoadGridsquare` Lua 另案處理。3 萬鍵的 IdentityHashMap 約 1 MB。
+
+**W40 心跳語意變化**：W40 的 `scanUsAvg`／`estScanMs` 以 `getProcessItems().contains(SENTINEL)` 抽樣。W45 上線後
+這個呼叫走索引，只有每 4096 次一次的抽驗會線性掃描，應從約 30 µs 降到 1 µs 以下，可直接當驗收訊號。
+`estScanMs` 從此只代表索引查表成本。
+
+**驗證**：
+- SmokeCheck（上游前提，TIS 修好即紅＝撤刀訊號）：`processItems` 是 private final ArrayList 且無伴生索引欄位；
+  兩個 `addToProcessItems` 各恰 1 個 `ArrayList.contains`；`ProcessRemoveItems` 有 0 個 `isEmpty`、2 個 `removeAll`；
+  全 jar `PUTFIELD processItems` 恰 1、GETFIELD 全在 IsoCell；InventoryItem 全繼承鏈無 equals／hashCode 覆寫。
+  手術形狀：建構子 `new ArrayList → wrap → putfield` 全序、真指令恰 +1、其餘逐字不變。
+- `ProcessItemsIndexTest` 四組態（on／observe／off／`-XX:hashCode=2` 全部 identity hash 碰撞），`-Xverify:all`：
+  真 IsoCell 建構子掛點；真 IsoCell（dist 手術後，含 W40／W41）與原版清單跑同一組操作的差分；20 萬步隨機操作
+  差分，逐步比對內容、contains 與每個操作的回傳值；subList、跨執行緒、clone；人為弄壞索引後，驗證抽驗察覺、
+  重建、累計 3 次停用（observe 恆回原版結果）。7 個手工 mutant（removeAll 不更新索引、remove(int) 不遞減、
+  subList 不停用、set 不同步、observe 回索引結果、空 removeAll 回 true、自身 addAll 不快照）全數被抓。
+- 線上驗收：首次生效行 `owner=` 為主執行緒；beat `divergences=0 anomalies=0 disabled=false views=0`；
+  W40 `scanUsAvg` 從約 30 µs 降到 1 µs 以下；低 FPS dump 不再出現 `ArrayList.indexOfRange ← IsoCell.addToProcessItems`。
+
+**官方回報**：`docs/report/2026-09-27-processitems-linear-contains-tis.md`（草稿，未送出）。
 
 ---
 

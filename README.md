@@ -86,6 +86,11 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
   詳見 [W40](docs/patches.md#2bc-物品處理清單-null-容錯跨執行緒寫入觀測w40server預設-on)、
   [W41](docs/patches.md#2bd-非主執行緒物品登記改道主執行緒w41server預設-on)。
 
+- **物品處理清單身分索引 W45**：原版每登記一件物品都線性搜尋整份清單。本服會腐壞的食物常駐清單（約 3 萬件），
+  每次約 30–37 µs，chunk 載入時對容器每件物品各搜一次，約佔主執行緒 6%。改為清單建立時換成自帶身分索引的
+  版本，搜尋 O(1)，順序與內容不變；舊的 W30（批次登記加速）同批退役。`-Dmdc.processItemsIndex=0` 回原版。
+  詳見 [W45](docs/patches.md#2bh-物品處理清單身分索引w45server預設-onw30-同批退役)。
+
 - **動物補算時數上限 W42**：原版以圈區上次離開串流的時間推算離線時數，常比動物實際離線多算數天（9/26 一個 session
   38 隻死亡中 25 隻發生在補算後 60 秒內）。改為不超過動物自身離線時間，並在動物活著時每小時更新自身時鐘。`-Dmdc.animalCatchUpCap=0` 回原版。
   詳見 [W42](docs/patches.md#2be-動物補算時數上限w42server預設-on)。
