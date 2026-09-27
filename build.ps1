@@ -97,8 +97,6 @@ $helperEntries = @(
     'zombie/entity/components/crafting/MdcCraftSyncGate.class',
     'zombie/mdc/PopManAddLock.class',
     'zombie/mdc/AnimalUpdateGuard.class',
-    'zombie/mdc/BulkItemRegistration.class',
-    'zombie/mdc/BulkItemRegistration$1.class',
     'zombie/mdc/FishingDataBroadcast.class',
     'zombie/mdc/AnimalAwayProbe.class',
     'zombie/mdc/BabyBreedGuard.class',
@@ -107,6 +105,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalMetaSnapshot.class',
     'zombie/mdc/AnimalDeathLedger.class',
     'zombie/mdc/ProcessItemsGuard.class',
+    'zombie/mdc/ProcessItemsIndex.class',
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/WorldItemExpirySync.class',
     'zombie/core/MdcTransactionReject.class',
@@ -455,15 +454,17 @@ Assert-Ok "AnimalUpdateGuardTest（off，原版危險行為對照）"
 java "-Dmdc.animalUpdateGuard=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest unknown
 Assert-Ok "AnimalUpdateGuardTest（未知值仍 enforce）"
 
-Write-Host "[9x/10] 大批物品登記（W30）順序、移除撤銷、回呼與原版回退..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest
-Assert-Ok "BulkItemRegistrationTest（on，真 IsoCell 差分）"
-java -Xverify:all "-Dmdc.bulkItemRegistration=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest off
-Assert-Ok "BulkItemRegistrationTest（0，原版回退）"
-java -Xverify:all "-Dmdc.bulkItemRegistration=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest off
-Assert-Ok "BulkItemRegistrationTest（off，文字別名）"
-java -Xverify:all -XX:+UnlockExperimentalVMOptions -XX:hashCode=2 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BulkItemRegistrationTest collisions
-Assert-Ok "BulkItemRegistrationTest（Comparable 強制碰撞回呼）"
+Write-Host "[9x/10] processItems 身分索引（W45）：真建構子掛點、真 IsoCell 差分、隨機操作差分、自癒、跨執行緒與原版回退..."
+# on＝出貨組態；observe 一律回原版線性結果並逐次比對；off 由 wrap 原樣回傳原版 ArrayList；
+# collisions 以 -XX:hashCode=2 讓所有 identity hash 相同，驗證全碰撞下索引仍與原版一致。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest on
+Assert-Ok "ProcessItemsIndexTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.processItemsIndex=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest observe
+Assert-Ok "ProcessItemsIndexTest（observe，只比對不改）"
+java -Xverify:all "-Dmdc.processItemsIndex=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest off
+Assert-Ok "ProcessItemsIndexTest（off，原版 ArrayList）"
+java -Xverify:all -XX:+UnlockExperimentalVMOptions -XX:hashCode=2 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest on collisions
+Assert-Ok "ProcessItemsIndexTest（on，identity hash 全碰撞）"
 
 Write-Host "[9y/10] 魚群廣播（W31）真 writer/send/decoder、錯誤續送與原版回退..."
 java -Xverify:all -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" on

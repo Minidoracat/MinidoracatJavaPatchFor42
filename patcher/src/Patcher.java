@@ -80,6 +80,28 @@ public final class Patcher {
     }
 
     /**
+     * 欄位寫入前包裝：在每個 {@code opcode}（PUTFIELD／PUTSTATIC）owner.name:desc <b>之前</b>插入
+     * 「INVOKESTATIC helper(desc)desc」——把即將寫入的值換成 helper 的回傳值。堆疊 1→1（PUTFIELD 的
+     * objectref 留在值的下方不受影響）、線性、無新分支；只作用於所屬 MethodOps 的方法，命中數計入該方法守門。
+     *
+     * <p>與 FieldGetSwap 方向相反：GET 在「之後」接 helper；PUT 必須在「之前」——寫入之後值已被消費
+     * （FieldGetSwap 拒收 PUT 的原因）。W45 首用：IsoCell 建構子把 processItems 的新 ArrayList 包成
+     * 自帶身分索引的子類。
+     */
+    record FieldPutWrap(int opcode, String owner, String name, String desc,
+                        String helperOwner, String helperName) {
+        FieldPutWrap {
+            if (opcode != Opcodes.PUTFIELD && opcode != Opcodes.PUTSTATIC) {
+                throw new IllegalArgumentException(
+                        "FieldPutWrap 只支援 PUTFIELD／PUTSTATIC，收到 opcode=" + opcode);
+            }
+        }
+        String helperDesc() {
+            return "(" + desc + ")" + desc;
+        }
+    }
+
+    /**
      * VehicleBuffer.set(BaseVehicle) 在原 y 欄位寫入後追加 wx/wy 覆寫：
      * 以 helper 從物理 x/y 推導 chunk，不再信任可能已 pool reset/reuse 的 vehicle.chunk。
      *
@@ -129,6 +151,7 @@ public final class Patcher {
         TailCall tailCall = null;
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
+        FieldPutWrap fieldPutWrap = null;
         VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
         IntComparisonChange intComparison = null;
         int expectedHits = 0;
@@ -312,6 +335,12 @@ public final class Patcher {
 
         @Override
         public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+            FieldPutWrap pw = ops.fieldPutWrap;
+            if (pw != null && opcode == pw.opcode()
+                    && pw.owner().equals(owner) && pw.name().equals(name) && pw.desc().equals(desc)) {
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, pw.helperOwner(), pw.helperName(), pw.helperDesc(), false);
+                ops.actualHits++;
+            }
             super.visitFieldInsn(opcode, owner, name, desc);
             FieldGetSwap sw = ops.fieldGetSwap;
             if (sw != null && opcode == sw.opcode()

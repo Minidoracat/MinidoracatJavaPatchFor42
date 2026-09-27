@@ -136,7 +136,7 @@ public final class ProcessItemsGuard {
         }
     }
 
-    /** {@code IsoCell.addToProcessItemsRemove} 兩個多載頭部與 {@link BulkItemRegistration} 快路徑。 */
+    /** {@code IsoCell.addToProcessItemsRemove} 兩個多載頭部。 */
     public static void touch(IsoCell cell) {
         onMain();
     }

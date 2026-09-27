@@ -2890,11 +2890,9 @@ public final class SmokeCheck {
                 methodText(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc))
                         .equals(methodText(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))));
 
-        // W30/W31：不只數命中；原方法、lambda body、側別與 decoder 漂移即要求重新驗證。
+        // W31：不只數命中；原方法、lambda body、側別與 decoder 漂移即要求重新驗證。
+        // （W30 的 IsoCell 三條契約隨 W30 退役移除；processItems 的前提改由下方 W45 守門。）
         String[][] batchContracts = {
-            {"zombie/iso/IsoCell", "addToProcessItems", "(Ljava/util/ArrayList;)V", "9b547926bc14eac8be90f8a26410a9e3ad94bf9fcd22fbf8162f4d196d001642"},
-            {"zombie/iso/IsoCell", "getProcessItems", "()Ljava/util/ArrayList;", "f6c0e6461595177a9375df8b012c71cb5d2f06a8ca1334384d2c3ea0d5d9dff7"},
-            {"zombie/iso/IsoCell", "getProcessItemsRemove", "()Ljava/util/Set;", "8ccf45d50f932a189a120dafd2336a3133a997d34ab71366e5304b5437d91476"},
             {"zombie/network/GameServer", "transmitFishingData", "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V", "cd54af7a8028e0cc907519b83c052b8b2e8a19e3252dde6d57ea8a20af0e5a79"},
             {"zombie/network/GameServer", "lambda$transmitFishingData$0", "(Lzombie/core/network/ByteBufferWriter;J)Z", "8c3b6ca114335016a4b5c54b90ba7652ae6ad0f4ac552aa2836186b9199bc098"},
             {"zombie/network/GameServer", "lambda$transmitFishingData$1", "(Lzombie/core/network/ByteBufferWriter;JLzombie/iso/FishSchoolManager$ChumData;)Z", "ba5ea6e7ee000bab741ca9b8f4f95e3319b8f4c880e975cee234de9823865fdb"},
@@ -2906,28 +2904,11 @@ public final class SmokeCheck {
         for (String[] contract : batchContracts) {
             byte[] text = methodText(methodFromJar(jar, contract[0], contract[1], contract[2]))
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            failed += check("W30/W31 上游契約未漂移：" + contract[0] + "." + contract[1],
+            failed += check("W31 上游契約未漂移：" + contract[0] + "." + contract[1],
                     java.util.HexFormat.of().formatHex(batchSha.digest(text)).equals(contract[3]));
         }
-        String bulkHelper = "zombie/mdc/BulkItemRegistration";
-        String bulkDesc = "(Lzombie/iso/IsoCell;Ljava/util/ArrayList;)V";
-        MethodNode vBulk = methodFromJar(jar, icCls, "addItemsToProcessItems", "()V");
-        MethodNode pBulk = method(distJava, icCls, "addItemsToProcessItems", "()V");
-        failed += check("W30 IsoCell 維持 final，避免略過子類別覆寫與 getter 副作用",
-                (classNodeFromJar(jar, "zombie/iso/IsoCell").access & Opcodes.ACC_FINAL) != 0);
         failed += check("W31 ByteBufferWriter 維持 final，無自訂 writer 回呼改變批次資料",
                 (classNodeFromJar(jar, "zombie/core/network/ByteBufferWriter").access & Opcodes.ACC_FINAL) != 0);
-        failed += check("W30 唯一批次呼叫同形改道，其他指令、frames 與例外處理保留",
-                countExactCalls(vBulk, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
-                        "addToProcessItems", "(Ljava/util/ArrayList;)V") == 1
-                && countExactCalls(pBulk, Opcodes.INVOKESTATIC, bulkHelper, "addToProcessItems", bulkDesc) == 1
-                && methodText(vBulk).replace(
-                        "INVOKEVIRTUAL zombie/iso/IsoCell.addToProcessItems (Ljava/util/ArrayList;)V",
-                        "INVOKESTATIC " + bulkHelper + ".addToProcessItems " + bulkDesc).equals(methodText(pBulk)));
-        // W40 起 IsoCell 本體有手術（ProcessItems 改道＋四個寫入口 headCall），其餘方法由 W40「逐指令不變」鎖住。
-        failed += check("W30 只改道 ItemContainer 的批次呼叫，不改 IsoCell 的 addToProcessItems 語意",
-                classWideCalls(classNode(distJava, icCls), Opcodes.INVOKESTATIC,
-                        bulkHelper, "addToProcessItems", bulkDesc) == 1);
         String fishCls = "zombie/iso/FishSchoolManager";
         String fishHelper = "zombie/mdc/FishingDataBroadcast";
         String fishDesc = "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V";
@@ -3049,6 +3030,7 @@ public final class SmokeCheck {
                 {"addToProcessItemsRemove", "(Ljava/util/ArrayList;)V", "touch", cellDesc}};
         java.util.Set<String> piTargets = new java.util.HashSet<>();
         piTargets.add("ProcessItems(Ljava/util/Iterator;)V");
+        piTargets.add("<init>(II)V");   // W45 FieldPutWrap；形狀由下方 W45 守門鎖住
         for (String[] w : piWriters) {
             piTargets.add(w[0] + w[1]);
             MethodNode vW = methodFromJar(jar, isoCellCls, w[0], w[1]);
@@ -3064,6 +3046,55 @@ public final class SmokeCheck {
             if (!methodText(original).equals(methodText(method(distJava, isoCellCls, original.name, original.desc)))) piUntouchedDiffs++;
         }
         failed += check("W40 IsoCell 其餘方法逐指令不變", piUntouchedDiffs == 0);
+        // W45：processItems 身分索引（docs/patches.md 2bh）。存在理由：原版 addToProcessItems 兩個多載各恰 1 個
+        // ArrayList.contains（線性）、IsoCell 沒有 processItems 的伴生集合、ProcessRemoveItems 不先檢查 isEmpty 就
+        // removeAll——TIS 補上伴生 Set（如同 processIsoObjectSet）時這幾條會紅＝撤刀。
+        String piIndex = "zombie/mdc/ProcessItemsIndex";
+        String listDesc = "Ljava/util/ArrayList;";
+        ClassNode vCellNode = classNodeFromJar(jar, isoCellCls);
+        org.objectweb.asm.tree.FieldNode piField = null;
+        int piCompanions = 0;
+        for (org.objectweb.asm.tree.FieldNode f : vCellNode.fields) {
+            if (f.name.equals("processItems")) {
+                piField = f;
+            } else if (f.name.startsWith("processItems") && !f.name.equals("processItemsRemove")) {
+                piCompanions++;
+            }
+        }
+        int privateFinal = Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL;
+        failed += check("W45 原版 processItems 為 private final ArrayList，且無伴生索引欄位",
+                piField != null && piField.desc.equals(listDesc)
+                && (piField.access & privateFinal) == privateFinal && piCompanions == 0);
+        for (String d : new String[]{"(Lzombie/inventory/InventoryItem;)V", "(Ljava/util/ArrayList;)V"}) {
+            failed += check("W45 原版 addToProcessItems" + d + " 恰 1 個線性 ArrayList.contains",
+                    countExactCalls(methodFromJar(jar, isoCellCls, "addToProcessItems", d), Opcodes.INVOKEVIRTUAL,
+                            "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z") == 1);
+        }
+        MethodNode vRemoveItems = methodFromJar(jar, isoCellCls, "ProcessRemoveItems", "(Ljava/util/Iterator;)V");
+        failed += check("W45 原版 ProcessRemoveItems 不檢查 isEmpty 就對兩份清單 removeAll（每幀全掃）",
+                countExactCalls(vRemoveItems, Opcodes.INVOKEINTERFACE, "java/util/Set", "isEmpty", "()Z") == 0
+                && countExactCalls(vRemoveItems, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll",
+                        "(Ljava/util/Collection;)Z") == 2);
+        int piInnerGets = 0;
+        for (MethodNode m : vCellNode.methods) {
+            for (AbstractInsnNode in : m.instructions) {
+                if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
+                        && fi.owner.equals(isoCellCls) && fi.name.equals("processItems")) {
+                    piInnerGets++;
+                }
+            }
+        }
+        failed += check("W45 全 jar processItems 欄位：PUTFIELD 恰 1、GETFIELD 全在 IsoCell 內（其他類別只能經 getter 拿到同一個清單物件）",
+                jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, isoCellCls, "processItems") == 1
+                && jarWideFieldReadCensus(jar, Opcodes.GETFIELD, isoCellCls, "processItems") == piInnerGets);
+        MethodNode vCellInit = methodFromJar(jar, isoCellCls, "<init>", "(II)V");
+        MethodNode pCellInit = method(distJava, isoCellCls, "<init>", "(II)V");
+        failed += check("W45 建構子唯一 PUTFIELD processItems：原版前為 new ArrayList()，手術後其間緊接 wrap、真指令恰 +1、其餘逐字不變",
+                countFieldTouches(vCellInit, isoCellCls, "processItems") == 1
+                && putWrapOk(vCellInit, pCellInit, isoCellCls, "processItems", piIndex, "wrap",
+                        "(" + listDesc + ")" + listDesc)
+                && realInsnCount(pCellInit) == realInsnCount(vCellInit) + 1);
+        failed += checkInventoryItemIdentity(jar);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",
@@ -3773,6 +3804,116 @@ public final class SmokeCheck {
             }
         }
         return check("W3-3 behavior domain：BaseAnimalBehavior 全後代零 spotted 覆寫（全 jar walk）", bad == 0);
+    }
+
+    /**
+     * W45 FieldPutWrap 形狀：原版目標 PUTFIELD 恰 1 且前三條真指令＝NEW ArrayList／DUP／INVOKESPECIAL &lt;init&gt;()V；
+     * 手術後 PUTFIELD 前緊接 INVOKESTATIC helper、再往前同樣三條；移除 helper 呼叫後方法全文與原版逐字相同。
+     */
+    static boolean putWrapOk(MethodNode vanilla, MethodNode patched, String owner, String field,
+                             String helperOwner, String helperName, String helperDesc) {
+        FieldInsnNode vPut = onlyPutField(vanilla, owner, field);
+        FieldInsnNode pPut = onlyPutField(patched, owner, field);
+        if (vPut == null || pPut == null || !newArrayListBefore(vPut)) {
+            return false;
+        }
+        AbstractInsnNode wrap = prevReal(pPut);
+        if (!(wrap instanceof MethodInsnNode call) || call.getOpcode() != Opcodes.INVOKESTATIC
+                || !call.owner.equals(helperOwner) || !call.name.equals(helperName) || !call.desc.equals(helperDesc)
+                || !newArrayListBefore(call)) {
+            return false;
+        }
+        MethodNode copy = new MethodNode(Opcodes.ASM9, patched.access, patched.name, patched.desc,
+                patched.signature, patched.exceptions.toArray(new String[0]));
+        patched.accept(copy);
+        int removed = 0;
+        for (AbstractInsnNode in : copy.instructions.toArray()) {
+            if (in instanceof MethodInsnNode m && m.getOpcode() == Opcodes.INVOKESTATIC && m.owner.equals(helperOwner)
+                    && m.name.equals(helperName) && m.desc.equals(helperDesc)) {
+                copy.instructions.remove(in);
+                removed++;
+            }
+        }
+        return removed == 1 && methodText(copy).equals(methodText(vanilla));
+    }
+
+    private static FieldInsnNode onlyPutField(MethodNode m, String owner, String field) {
+        FieldInsnNode found = null;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD
+                    && fi.owner.equals(owner) && fi.name.equals(field)) {
+                if (found != null) {
+                    return null;
+                }
+                found = fi;
+            }
+        }
+        return found;
+    }
+
+    /** in 之前三條真指令依序為 NEW java/util/ArrayList、DUP、INVOKESPECIAL java/util/ArrayList.&lt;init&gt;()V。 */
+    private static boolean newArrayListBefore(AbstractInsnNode in) {
+        AbstractInsnNode init = prevReal(in);
+        AbstractInsnNode dup = init == null ? null : prevReal(init);
+        AbstractInsnNode neu = dup == null ? null : prevReal(dup);
+        return init instanceof MethodInsnNode c && c.getOpcode() == Opcodes.INVOKESPECIAL
+                && c.owner.equals("java/util/ArrayList") && c.name.equals("<init>") && c.desc.equals("()V")
+                && dup != null && dup.getOpcode() == Opcodes.DUP
+                && neu instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW && t.desc.equals("java/util/ArrayList");
+    }
+
+    /**
+     * W45 前提：InventoryItem 本身、全部後代與 jar 內祖先都沒有宣告 equals(Object)／hashCode()——identity 索引與
+     * ArrayList.contains 的 equals 比對結果相同（全 jar walk）。TIS 將來覆寫時會紅，須重新評估索引語意。
+     */
+    static int checkInventoryItemIdentity(Path jar) throws Exception {
+        String base = "zombie/inventory/InventoryItem";
+        Map<String, String> superOf = new HashMap<>();
+        Set<String> declares = new HashSet<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e).readAllBytes())
+                        .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                superOf.put(cn.name, cn.superName);
+                for (MethodNode m : cn.methods) {
+                    if ((m.name.equals("equals") && m.desc.equals("(Ljava/lang/Object;)Z"))
+                            || (m.name.equals("hashCode") && m.desc.equals("()I"))) {
+                        declares.add(cn.name);
+                        break;
+                    }
+                }
+            }
+        }
+        int family = 0;
+        int bad = 0;
+        for (String cls : superOf.keySet()) {
+            String cur = cls;
+            while (cur != null && !cur.equals(base)) {
+                cur = superOf.get(cur);
+            }
+            if (cur == null) {
+                continue;
+            }
+            family++;
+            if (declares.contains(cls)) {
+                System.out.println("  !! equals/hashCode 覆寫: " + cls);
+                bad++;
+            }
+        }
+        for (String cur = superOf.get(base); cur != null && superOf.containsKey(cur); cur = superOf.get(cur)) {
+            if (declares.contains(cur)) {
+                System.out.println("  !! 祖先 equals/hashCode 覆寫: " + cur);
+                bad++;
+            }
+        }
+        return check("W45 InventoryItem 繼承鏈（" + family + " 類＋jar 內祖先）無 equals/hashCode 覆寫（全 jar walk）",
+                bad == 0 && family > 1);
     }
 
     static int check(String what, boolean ok) {

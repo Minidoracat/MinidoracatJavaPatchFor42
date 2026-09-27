@@ -457,12 +457,8 @@ public final class PatchConfig {
                     "zombie/mdc/ProcessItemsGuard", "addToProcessItems"));
             addItem.expectedHits = 1;
         }
-        // W30：只加速容器的大批登記，不替換 IsoCell 的清單或單件 API。
-        Patcher.MethodOps bulkItems = itemCont.method("addItemsToProcessItems", "()V");
-        bulkItems.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/IsoCell", "addToProcessItems", "(Ljava/util/ArrayList;)V",
-                "zombie/mdc/BulkItemRegistration", "addToProcessItems"));
-        bulkItems.expectedHits = 1;
+        // W30（容器大批物品登記）已於 2026-09-27 退役：W45 讓 processItems 的 contains 變 O(1)，批次登記的
+        // 原版逐件迴圈即為 O(M)，W30 的暫時索引不再有收益（正式服本就幾乎不觸發）。復活見 docs/patches.md 2ar 後記。
         patches.add(itemCont);
 
         // ---- W6 地圖格載入捕手（2026-08-14 全服假死實案，凍結 114 分鐘；docs/patches.md 2r）----
@@ -1169,6 +1165,15 @@ public final class PatchConfig {
             w.headCall = new Patcher.HeadCall(piGuard, "touch", cellArg);
             w.expectedHits = 1;
         }
+        // W45：processItems 自帶身分索引（docs/patches.md 2bh）。原版 addToProcessItems 兩個多載對整份清單
+        // 做線性 contains；本服 DaysForRottenFoodRemoval≠-1 讓會腐壞食物常駐清單（2–3 萬件），chunk 載入逐件
+        // 登記吃掉主執行緒約 5%。建構子唯一 PUTFIELD processItems 之前包成 ProcessItemsIndex（ArrayList 子類，
+        // contains O(1)、ProcessRemoveItems 的空 removeAll 直接返回），IsoCell 其他方法與全部呼叫點不動。
+        // -Dmdc.processItemsIndex 0|off/1|on（預設）/2|observe。
+        Patcher.MethodOps cellInit = isoCell.method("<init>", "(II)V");
+        cellInit.fieldPutWrap = new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoCell", "processItems",
+                "Ljava/util/ArrayList;", "zombie/mdc/ProcessItemsIndex", "wrap");
+        cellInit.expectedHits = 1;
         patches.add(isoCell);
 
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
