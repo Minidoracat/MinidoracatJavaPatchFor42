@@ -1171,9 +1171,13 @@ public final class PatchConfig {
         // contains O(1)、ProcessRemoveItems 的空 removeAll 直接返回），IsoCell 其他方法與全部呼叫點不動。
         // -Dmdc.processItemsIndex 0|off/1|on（預設）/2|observe。
         Patcher.MethodOps cellInit = isoCell.method("<init>", "(II)V");
-        cellInit.fieldPutWrap = new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoCell", "processItems",
-                "Ljava/util/ArrayList;", "zombie/mdc/ProcessItemsIndex", "wrap");
-        cellInit.expectedHits = 1;
+        cellInit.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoCell", "processItems",
+                "Ljava/util/ArrayList;", "zombie/mdc/ProcessItemsIndex", "wrap"));
+        // W47：objectList 包成帶版本號的 HashSet 子類（docs/patches.md 2bj）。原版有十多處經 getObjectList() 直接
+        // add／remove，動物視線快照以版本號判斷成員與迭代順序是否仍與快照相同；迭代順序與原版 HashSet 相同。
+        cellInit.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoCell", "objectList",
+                "Ljava/util/Set;", "zombie/mdc/AnimalLosIndex", "wrapObjectList"));
+        cellInit.expectedHits = 2;
         patches.add(isoCell);
 
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject

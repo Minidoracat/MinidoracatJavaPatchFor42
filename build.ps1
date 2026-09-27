@@ -109,6 +109,8 @@ $helperEntries = @(
     'zombie/network/packets/sound/MdcWorldSoundProbe.class',
     'zombie/mdc/WorldItemExpirySync.class',
     'zombie/core/MdcTransactionReject.class',
+    'zombie/mdc/AnimalLosIndex.class',
+    'zombie/mdc/AnimalLosIndex$ObjectSet.class',
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -323,8 +325,9 @@ Assert-Ok "AnimalLosGateTest（未知值 bogus 落回 observe——parseMode 安
 Write-Host "[9o2/10] 動物 LOS 迴圈殼 Scan 三模式行為驗證（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest observe
 Assert-Ok "AnimalLosScanTest（observe 預設 timing wrapper）"
-java "-Dmdc.animalLosScan=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest on
-Assert-Ok "AnimalLosScanTest（on fast/delegate/fallback/邊界）"
+# W18-2 完整掃描迴圈本身的單元測試：關掉 W47（W47 與原版的等價由下方 AnimalLosIndexTest 差分負責）。
+java "-Dmdc.animalLosScan=on" "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest on
+Assert-Ok "AnimalLosScanTest（on fast/delegate/fallback/邊界，W47 關閉）"
 java "-Dmdc.animalLosScan=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest off
 Assert-Ok "AnimalLosScanTest（off 直通）"
 
@@ -490,6 +493,19 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "MdcVehicleCollideResyncTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.vehicleCollideResync=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest off
 Assert-Ok "MdcVehicleCollideResyncTest（0，原版回退）"
+
+Write-Host "[9zb/10] 動物視線空間預篩（W47）：與原版逐次差分、observe、off、位移違反停用..."
+$losScanOn = "-Dmdc.animalLosScan=on"
+java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest on
+Assert-Ok "AnimalLosIndexTest（on，出貨組態，4000 個隨機世界與原版差分）"
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest observe
+Assert-Ok "AnimalLosIndexTest（observe，每次比對不改行為）"
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest off
+Assert-Ok "AnimalLosIndexTest（0，完全不經 W47）"
+java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest violation-final
+Assert-Ok "AnimalLosIndexTest（快速路徑最後掃描發現位移並停用）"
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest violation-audit
+Assert-Ok "AnimalLosIndexTest（比對發現候選缺漏並停用）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

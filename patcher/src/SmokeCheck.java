@@ -2030,6 +2030,53 @@ public final class SmokeCheck {
                 && scanUpd.tryCatchBlocks.stream()
                         .allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type)));
 
+        // W47 動物視線空間預篩（docs/patches.md 2bj）。原版前提（任一紅＝等價論證要重做）：
+        // ① spotted() 開頭先清 spottedChr（候選前的遠距前綴可省略的依據）；② BaseAnimalBehavior
+        // 全類不讀寫 spottedList（只放自己）；③ addMovingObject 在更新期間延後加入（快照順序＝當下迭代順序）。
+        String babCls = "zombie/characters/animals/behavior/BaseAnimalBehavior";
+        String spottedPrefilterCls = "zombie/characters/animals/behavior/AnimalSpottedPrefilter";
+        AbstractInsnNode[] spHead = firstReal(methodFromJar(jar, babCls, "spotted", "(Lzombie/iso/IsoMovingObject;ZF)V"), 4);
+        boolean noSpottedList = classNodeFromJar(jar, babCls).methods.stream().allMatch(m -> {
+            for (AbstractInsnNode in : m.instructions) {
+                if (in instanceof FieldInsnNode fi && fi.name.equals("spottedList")
+                        || in instanceof MethodInsnNode mi && mi.name.equals("getSpottedList")) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        MethodNode vAddMoving = methodFromJar(jar, "zombie/iso/IsoCell", "addMovingObject", "(Lzombie/iso/IsoMovingObject;)V");
+        failed += check("W47 原版前提：spotted() 先清 spottedChr、BaseAnimalBehavior 不碰 spottedList、addMovingObject 更新期間延後加入",
+                spHead[0] instanceof VarInsnNode v0 && v0.getOpcode() == Opcodes.ALOAD && v0.var == 0
+                && spHead[1] instanceof FieldInsnNode f1 && f1.getOpcode() == Opcodes.GETFIELD && f1.name.equals("parent")
+                && spHead[2].getOpcode() == Opcodes.ACONST_NULL
+                && spHead[3] instanceof FieldInsnNode f3 && f3.getOpcode() == Opcodes.PUTFIELD
+                        && f3.owner.equals(isoAnimalCls) && f3.name.equals("spottedChr")
+                && noSpottedList
+                && countExactCalls(vAddMoving, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "isSafeToAdd", "()Z") == 1
+                && countFieldTouches(vAddMoving, "zombie/iso/IsoCell", "addList") == 1);
+        String losIdxCls = "zombie/mdc/AnimalLosIndex";
+        String tryDesc = "(L" + isoAnimalCls + ";L" + babCls + ";Ljava/util/Set;Ljava/util/Stack;)Z";
+        MethodNode idxTry = method(distJava, losIdxCls, "handle", tryDesc); // tryHandle 只做重入保護後轉呼叫 handle
+        MethodNode idxStep = method(distJava, losIdxCls, "step", "(L" + isoAnimalCls + ";L" + babCls + ";Lzombie/iso/IsoMovingObject;ZFF)I");
+        int idxClear = firstCallIndex(idxTry, Opcodes.INVOKEVIRTUAL, "java/util/Stack", "clear", "()V");
+        failed += check("W47 helper：快照／候選／比對都在清 spottedList 之前；單一目標處理與 W18-2 同一組委派；零 Rand",
+                idxClear != Integer.MAX_VALUE
+                && firstCallIndex(idxTry, Opcodes.INVOKESTATIC, losIdxCls, "ensureSnapshot", "(Ljava/util/Set;)Z") < idxClear
+                && firstCallIndex(idxTry, Opcodes.INVOKESTATIC, losIdxCls, "collect", "(FFF)I") < idxClear
+                && firstCallIndex(idxTry, Opcodes.INVOKESTATIC, losIdxCls, "audit", "(L" + isoAnimalCls + ";FFF)V") < idxClear
+                && countExactCalls(idxStep, Opcodes.INVOKESTATIC, spottedPrefilterCls, "spotted",
+                        "(L" + babCls + ";Lzombie/iso/IsoMovingObject;ZF)V") == 2
+                && countExactCalls(idxStep, Opcodes.INVOKESTATIC, spottedPrefilterCls, "thresholdOf", "(I)F") == 1
+                && countExactCalls(idxStep, Opcodes.INVOKESTATIC, "zombie/iso/IsoUtils", "DistanceTo", "(FFFF)F") == 1
+                && countExactCalls(idxStep, Opcodes.INVOKEVIRTUAL, "zombie/GameTime", "getMultiplier", "()F") == 1
+                && classNode(distJava, losIdxCls).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+        failed += check("W47 掛點：AnimalLosScan 恰 1 次 tryHandle，且在完整掃描清 spottedList 之前",
+                countExactCalls(scanUpd, Opcodes.INVOKESTATIC, losIdxCls, "tryHandle", tryDesc) == 1
+                && firstCallIndex(scanUpd, Opcodes.INVOKESTATIC, losIdxCls, "tryHandle", tryDesc)
+                        < firstCallIndex(scanUpd, Opcodes.INVOKEVIRTUAL, "java/util/Stack", "clear", "()V"));
+
         // 承重前提釘（review B1；grok 前輪 BLOCKING 的失效類）：enforce 的「Δframe 恆 1 ⇒
         // 無 gcd 剩餘類失明」不是數學免疫，而是「server ⇒ FULL ⇒ frameMod==1 ⇒ 每 tick 全跑」
         // 這條 42.20.3 前提鏈。五支結構釘＋helper 端 runtime fail-open 雙保險；任一紅＝
@@ -3096,13 +3143,23 @@ public final class SmokeCheck {
         MethodNode vCellInit = methodFromJar(jar, isoCellCls, "<init>", "(II)V");
         MethodNode pCellInit = method(distJava, isoCellCls, "<init>", "(II)V");
         String wrapDesc = "(" + listDesc + ")" + listDesc;
-        failed += check("W45 建構子唯一 PUTFIELD processItems：原版前為 new ArrayList()，手術後其間緊接 wrap、真指令恰 +1、其餘逐字不變",
+        String setDesc = "Ljava/util/Set;";
+        String objWrapDesc = "(" + setDesc + ")" + setDesc;
+        failed += check("W45／W47 建構子唯一 PUTFIELD processItems／objectList：原版前為 new ArrayList()／new HashSet()，"
+                        + "手術後其間各緊接 wrap、真指令恰 +2、移除兩個 wrap 後逐字不變",
                 countFieldTouches(vCellInit, isoCellCls, "processItems") == 1
-                && putWrapOk(vCellInit, pCellInit, isoCellCls, "processItems", piIndex, "wrap", wrapDesc)
-                && realInsnCount(pCellInit) == realInsnCount(vCellInit) + 1);
+                && countFieldTouches(vCellInit, isoCellCls, "objectList") == 1
+                && putWrapOk(vCellInit, pCellInit, isoCellCls, "processItems", "java/util/ArrayList", piIndex, "wrap", wrapDesc)
+                && putWrapOk(vCellInit, pCellInit, isoCellCls, "objectList", "java/util/HashSet",
+                        "zombie/mdc/AnimalLosIndex", "wrapObjectList", objWrapDesc)
+                && wrapsStripToVanilla(vCellInit, pCellInit, new String[][]{{piIndex, "wrap", wrapDesc},
+                        {"zombie/mdc/AnimalLosIndex", "wrapObjectList", objWrapDesc}})
+                && realInsnCount(pCellInit) == realInsnCount(vCellInit) + 2);
+        failed += check("W47 全 jar objectList 欄位：PUTFIELD 恰 1（包裝後的集合就是唯一一份）",
+                jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, isoCellCls, "objectList") == 1);
         failed += check("W45 守門負對照：NEW 與 PUTFIELD 間有合流點（部分路徑沿用既有清單）時拒絕",
                 !putWrapOk(mergeShape(null, null, null), mergeShape(piIndex, "wrap", wrapDesc),
-                        "T", "f", piIndex, "wrap", wrapDesc));
+                        "T", "f", "java/util/ArrayList", piIndex, "wrap", wrapDesc));
         failed += checkInventoryItemIdentity(jar);
 
         // W46：VehicleCollide 歸還後強制重送授權（docs/patches.md 2bi）。存在理由（TIS 修好即紅＝撤刀）：
@@ -3846,34 +3903,43 @@ public final class SmokeCheck {
     }
 
     /**
-     * W45 FieldPutWrap 形狀：原版目標 PUTFIELD 恰 1 且前三條真指令＝NEW ArrayList／DUP／INVOKESPECIAL &lt;init&gt;()V；
-     * 手術後 PUTFIELD 前緊接 INVOKESTATIC helper、再往前同樣三條；移除 helper 呼叫後方法全文與原版逐字相同。
+     * FieldPutWrap 形狀（W45／W47）：原版目標 PUTFIELD 恰 1 且前三條真指令＝NEW type／DUP／INVOKESPECIAL &lt;init&gt;()V；
+     * 手術後 PUTFIELD 前緊接 INVOKESTATIC helper、再往前同樣三條。全文比對由 {@link #wrapsStripToVanilla} 負責。
      */
-    static boolean putWrapOk(MethodNode vanilla, MethodNode patched, String owner, String field,
+    static boolean putWrapOk(MethodNode vanilla, MethodNode patched, String owner, String field, String newType,
                              String helperOwner, String helperName, String helperDesc) {
         FieldInsnNode vPut = onlyPutField(vanilla, owner, field);
         FieldInsnNode pPut = onlyPutField(patched, owner, field);
-        if (vPut == null || pPut == null || !newArrayListBefore(vanilla, vPut)) {
+        if (vPut == null || pPut == null || !newBefore(vanilla, vPut, newType)) {
             return false;
         }
         AbstractInsnNode wrap = prevReal(pPut);
-        if (!(wrap instanceof MethodInsnNode call) || call.getOpcode() != Opcodes.INVOKESTATIC
-                || !call.owner.equals(helperOwner) || !call.name.equals(helperName) || !call.desc.equals(helperDesc)
-                || !newArrayListBefore(patched, call)) {
-            return false;
-        }
+        return wrap instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC
+                && call.owner.equals(helperOwner) && call.name.equals(helperName) && call.desc.equals(helperDesc)
+                && newBefore(patched, call, newType);
+    }
+
+    /** 移除 helpers（owner,name,desc）的 INVOKESTATIC 後與原版逐字相同，且每個 helper 恰被移除一次。 */
+    static boolean wrapsStripToVanilla(MethodNode vanilla, MethodNode patched, String[][] helpers) {
         MethodNode copy = new MethodNode(Opcodes.ASM9, patched.access, patched.name, patched.desc,
                 patched.signature, patched.exceptions.toArray(new String[0]));
         patched.accept(copy);
-        int removed = 0;
+        int[] removed = new int[helpers.length];
         for (AbstractInsnNode in : copy.instructions.toArray()) {
-            if (in instanceof MethodInsnNode m && m.getOpcode() == Opcodes.INVOKESTATIC && m.owner.equals(helperOwner)
-                    && m.name.equals(helperName) && m.desc.equals(helperDesc)) {
-                copy.instructions.remove(in);
-                removed++;
+            for (int i = 0; i < helpers.length; i++) {
+                if (in instanceof MethodInsnNode m && m.getOpcode() == Opcodes.INVOKESTATIC && m.owner.equals(helpers[i][0])
+                        && m.name.equals(helpers[i][1]) && m.desc.equals(helpers[i][2])) {
+                    copy.instructions.remove(in);
+                    removed[i]++;
+                }
             }
         }
-        return removed == 1 && methodText(copy).equals(methodText(vanilla));
+        for (int n : removed) {
+            if (n != 1) {
+                return false;
+            }
+        }
+        return methodText(copy).equals(methodText(vanilla));
     }
 
     private static FieldInsnNode onlyPutField(MethodNode m, String owner, String field) {
@@ -3891,18 +3957,18 @@ public final class SmokeCheck {
     }
 
     /**
-     * in 之前三條真指令依序為 NEW java/util/ArrayList、DUP、INVOKESPECIAL java/util/ArrayList.&lt;init&gt;()V，
+     * in 之前三條真指令依序為 NEW type、DUP、INVOKESPECIAL type.&lt;init&gt;()V，
      * 且 NEW 到 in 之間沒有合流點（frame 或跳轉目標 label）——否則另一條路徑可能把既有清單送進 PUTFIELD，
      * wrap 會切斷原本的別名。
      */
-    private static boolean newArrayListBefore(MethodNode m, AbstractInsnNode in) {
+    private static boolean newBefore(MethodNode m, AbstractInsnNode in, String type) {
         AbstractInsnNode init = prevReal(in);
         AbstractInsnNode dup = init == null ? null : prevReal(init);
         AbstractInsnNode neu = dup == null ? null : prevReal(dup);
         if (!(init instanceof MethodInsnNode c && c.getOpcode() == Opcodes.INVOKESPECIAL
-                && c.owner.equals("java/util/ArrayList") && c.name.equals("<init>") && c.desc.equals("()V")
+                && c.owner.equals(type) && c.name.equals("<init>") && c.desc.equals("()V")
                 && dup != null && dup.getOpcode() == Opcodes.DUP
-                && neu instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW && t.desc.equals("java/util/ArrayList"))) {
+                && neu instanceof TypeInsnNode t && t.getOpcode() == Opcodes.NEW && t.desc.equals(type))) {
             return false;
         }
         Set<LabelNode> targets = new HashSet<>();

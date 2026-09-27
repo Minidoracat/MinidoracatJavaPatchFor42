@@ -145,6 +145,13 @@ public final class AnimalLosScan {
             return;
         }
 
+        // W47：網格預篩只處理門檻附近的目標（不成立時未動任何狀態，照下方完整掃描）。
+        if (AnimalLosIndex.tryHandle(a, b, list, spotted)) {
+            animalsScanned++;
+            recordTiming(System.nanoTime() - t0, sz);
+            return;
+        }
+
         // ---- 掃描段：無 fallback，例外原樣上拋（與 vanilla 同型；絕無 double-scan）----
         float ax = a.getX();
         float ay = a.getY();

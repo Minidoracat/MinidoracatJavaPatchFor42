@@ -151,7 +151,7 @@ public final class Patcher {
         TailCall tailCall = null;
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
-        FieldPutWrap fieldPutWrap = null;
+        final List<FieldPutWrap> fieldPutWraps = new ArrayList<>();
         VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
         IntComparisonChange intComparison = null;
         int expectedHits = 0;
@@ -335,11 +335,11 @@ public final class Patcher {
 
         @Override
         public void visitFieldInsn(int opcode, String owner, String name, String desc) {
-            FieldPutWrap pw = ops.fieldPutWrap;
-            if (pw != null && opcode == pw.opcode()
-                    && pw.owner().equals(owner) && pw.name().equals(name) && pw.desc().equals(desc)) {
-                super.visitMethodInsn(Opcodes.INVOKESTATIC, pw.helperOwner(), pw.helperName(), pw.helperDesc(), false);
-                ops.actualHits++;
+            for (FieldPutWrap pw : ops.fieldPutWraps) {
+                if (opcode == pw.opcode() && pw.owner().equals(owner) && pw.name().equals(name) && pw.desc().equals(desc)) {
+                    super.visitMethodInsn(Opcodes.INVOKESTATIC, pw.helperOwner(), pw.helperName(), pw.helperDesc(), false);
+                    ops.actualHits++;
+                }
             }
             super.visitFieldInsn(opcode, owner, name, desc);
             FieldGetSwap sw = ops.fieldGetSwap;

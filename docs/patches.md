@@ -4366,6 +4366,69 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 - 線上驗收：用 `temp/vc_trace.py`（gitignore）重抓入站 30 秒，只送 `collide=0` 的迴圈應消失（每台車最多數十包）；
   卡頓後的 `VehicleCollide` 警告尖峰應大幅下降；beat `invalidated` 成長、`anomalies=0`。
 
+## 2bj. 動物視線空間預篩（W47，server，預設 on）
+
+**數據（2026-09-28 01:0x，約 50 人、約 6 FPS）**：W18 心跳每幀約 254 次實際視線檢查、每次 64 µs，合計約 16 ms／幀
+（主迴圈約 9%）；W18-2 心跳 `objAvg=4339`＝每次檢查都走完整份 `objectList`，只為找出門檻（約 12 格）內的殭屍與玩家。
+同一天把 `-Dmdc.animalLosN` 由 3 改為 5（兩份 JVM json 同步，備份 `*.bak-20260928T011256-pre-los5`），視線頻率再降 40%；
+W47 處理剩下每次檢查的成本。
+
+**手術**：W18-2 `AnimalLosScan.updateLOS` 的 on 路徑在前置取值成功後、清 `spottedList` 前多一次
+`AnimalLosIndex.tryHandle`；回 true 即本次已處理完，false 照原完整掃描（此時未改任何遊戲狀態）。另在既有 W45 的 IsoCell
+建構子手術多一個 FieldPutWrap：`objectList` 的 `new HashSet()` 寫入前換成 `AnimalLosIndex.ObjectSet`（HashSet 子類，
+預設容量與迭代順序同原版，只覆寫 `add`／`addAll` 記成功加入次數，迭代成本不變）。`Patcher.MethodOps.fieldPutWrap` 改為清單以容納同方法兩個包裝。
+- 快照：`objectList` 依迭代順序只留目標（殭屍、非動物玩家），殭屍依快照位置分入 16 格網格，並記下每隻動物前面有幾個目標。
+  幀號（`MovingObjectUpdateScheduler.getFrameCounter`）、清單身分、加入次數或大小改變即重建；清單不是 `ObjectSet` 不走快速路徑；
+  遇到 null 元素不建，交給完整掃描照原樣拋出。
+- 每隻動物只取「門檻＋`MARGIN`（16 格）範圍內的殭屍＋全部玩家」為候選，依迭代順序逐一走與 W18-2 迴圈逐句相同的單一目標處理；
+  處理到自己的位置才把自己加入 `spottedList`。候選範圍超過 1,024 格網格（門檻約 250 格以上）直接回完整掃描。
+- 只在呼叫開始時 `lastAlerted == 0` 才走快速路徑；候選的 `spotted()` 讓 `lastAlerted ≠ 0` 或改了門檻時，從該目標之後改走完整順序。
+- 最後一個有效候選之後若還有任何有效目標，補一次 spotted 前綴（`spottedChr = null`）。
+
+**等價依據**（對照 W18-2 完整掃描，W18-2 本身與原版＋W3-3 逐位元相同）：
+1. 遠距目標唯一效果是 spotted 前綴（`spottedChr = null`、`lastAlerted` 衰減）。`lastAlerted == 0` 時衰減恆無效果；
+   原版 `spotted()` 開頭同樣先清 `spottedChr`，所以候選之前的遠距前綴會被候選自己的前綴覆蓋，可以省略；
+   只剩「最後一個有效候選之後還有沒有有效目標」決定最後的 `spottedChr`。
+2. 候選依迭代順序處理，`spotted()` 呼叫的順序、對象與距離位元都與完整掃描相同；門檻逐 pair 即時讀取。
+3. 原版有十多處經 `getObjectList()` 直接增刪（玩家、動物、虛擬殭屍、網路殭屍等），更新期間成員並非不變；HashSet 擴容也會改變
+   其餘元素的迭代順序。快照綁定（加入次數, 大小）：只有加入會增加大小或觸發擴容，任何移除都讓大小變小，同大小換成員必然經過加入；
+   移除不改其餘元素的相對順序。所以兩者都沒變時，快照的成員與順序恆等於當下的迭代結果。
+4. 動物的 `spottedList` 只放自己；原版 `BaseAnimalBehavior` 全類不讀寫它。依快照中自己的位置加入，`spotted()` 中途拋出例外時
+   留下的 `spottedList` 也與完整掃描相同。
+5. `spotted()` 可經 XP 與 Lua `AddXP` 回呼執行任意程式碼，可能在呼叫中途增刪 `objectList`。完整掃描的 HashSet iterator 在
+   目前元素不是最後一個時，下一次取元素即拋 `ConcurrentModificationException`；是最後一個則迴圈自然結束。W47 在每次委派後比對
+   （加入次數, 大小），依快照中目前目標是否為整份清單最後一個元素，照樣拋出（`modifiedExits`）或結束，不處理已失效的後續目標。
+6. 同一回呼也可能同步觸發另一隻動物的視線檢查。快照與候選暫存是靜態共用的，巢狀呼叫一律走完整掃描（`nested`），
+   外層以 `finally` 釋放保護，正常返回與例外皆同。
+
+**唯一假設與監看**：快照之後到檢查當下，殭屍移動不超過 16 格（玩家不受限，一律逐一檢查）。兩道監看：快速路徑最後的掃描
+遇到落在門檻內的非候選殭屍即判違反（`lateFixes`，同時照原版補處理）；on 模式每 64 次改跑完整掃描並逐一確認門檻內的殭屍
+都在候選中（`auditMisses`；observe 每次都比對）。任一違反即本次啟動永久停用快速路徑、全部回到 W18-2 完整掃描，並記一行座標。
+
+**開關**：`-Dmdc.animalLosIndex` `1|on`（預設）、`2|observe`（只比對不改行為）、`0|off`；需重啟。只在 `AnimalLosScan` 為 on 時生效。
+心跳每 5 分鐘：`calls fast exactAlerted exactDomain exactSnapshot audits auditMisses tailSwitches lateFixes candAvg targetAvg
+rebuilds rebuildUsAvg disabled modifiedExits nested anomalies`。
+
+**驗證**：
+- SmokeCheck：原版前提三條（`spotted()` 開頭先清 `spottedChr`、`BaseAnimalBehavior` 全類不碰 `spottedList`、
+  `addMovingObject` 以 `isSafeToAdd` 延後加入）；IsoCell 建構子兩個 FieldPutWrap 各自緊接在 `new ArrayList()`／`new HashSet()` 之後、
+  移除後逐字同原版、全 jar `objectList` PUTFIELD 恰 1；helper 的快照／候選／比對都在清 `spottedList` 之前、單一目標處理與 W18-2
+  迴圈同一組委派（prefilter 2、門檻 1、DistanceTo 1、multiplier 1）、零 Rand；`AnimalLosScan` 恰 1 次 `tryHandle` 且在完整掃描清空之前。
+- `AnimalLosIndexTest`（`-Xverify:all`，W18-2 on，清單經 `wrapObjectList` 建成與正式服相同的 HashSet）：4,000 個隨機世界（殭屍、
+  隱形／幽靈玩家、抓取用殭屍、其他動物、車輛、物理物件、z 差、無方格、自己不在清單、`spotted()` 中途拋例外、`spotted()` 中途
+  移除後續元素／加入殭屍／移除自己）逐次比對原版 `IsoAnimal.updateLOS` 與 W47 的 spotted 呼叫序列、`spottedChr`、`lastAlerted` 位元、
+  `spottedList`、門檻與例外，全部一致；另測同一幀內同大小換成員、只移除、擴容後成員還原（順序改變）、經 iterator 移除、
+  超大門檻改走完整掃描、被委派目標正好是最後一個元素時中途改動清單（原版不拋）、`spotted()` 內巢狀觸發另一隻動物的視線檢查
+  （含內層拋例外後再次呼叫）；observe、off 同樣一致；位移違反兩種情境都停用且
+  結果仍一致。11 個手工 mutant（不補最後前綴、警戒不改走完整順序、候選不排序、自己一律加入、門檻變大不改走完整順序、快照不看加入
+  次數、快照不看大小、拿掉網格上限、不模擬 CME、最後元素也拋 CME、拿掉重入保護）全數被抓。
+- 審查（critic，唯讀，三輪）：第一輪抓到以清單大小判斷快照有效（同幀同大小換成員、擴容換序會不同）、例外出口的 `spottedList`
+  差異、超大門檻逐格掃描的效能退化；第二輪抓到 `spotted()` 中途改動清單時完整掃描會拋 CME 而 W47 繼續處理；第三輪抓到巢狀視線檢查覆寫外層候選暫存。五項皆已修正並補測。
+- 一次性基準（4,260 個物件、2,500 殭屍分布 1,200 格見方、760 隻動物分 10 群、每幀 150 次檢查、每幀重建快照）：
+  每幀 4,780 µs → 約 230–260 µs；每次候選約 10 個（全部目標 2,540）。`ObjectSet` 完整迭代 4,300 個元素與原版 HashSet 相差約 2.5%（雜訊內）。
+- 線上驗收：首次生效行；beat `auditMisses=0 lateFixes=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；
+  W18 `losAvgUs` 從約 64 µs 降到個位數。
+
 ---
 
 ## 3. 部署後驗證清單
