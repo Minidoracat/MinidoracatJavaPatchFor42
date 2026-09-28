@@ -20,8 +20,9 @@ import zombie.iso.WorldStreamer;
  *   RequestZipList 封包＋sentRequests → receiveChunkPart/receiveNotRequired/
  *   receiveChunkNotReady（42.20.3 新協定）配對 requestNumber → loadReceivedChunks 完成。
  *   已知風險機制（觀測要驗證的假說）：
- *   (a) requestingLargeArea 期間 pendingRequests1>20 會完全停送新請求（sendRequests
- *       頭部 gate）——42.20.3 重驗仍在，待驗。
+ *   (a) sendRequests 頭部停送 gate：pendingRequests1>20 時完全不送新請求。42.20.x 只在
+ *       requestingLargeArea 期間生效；**42.21 起無條件常態化**（requestingLargeArea／
+ *       largeAreaDownloads／requestLargeAreaZip 全刪）——輸出 sendGate=closed 直接標示。
  *   (b) ~~server 端 getRetryChunk 重試≥3 次永久放棄~~ 已隨 42.20.3 刪除重試機制而失效；
  *       未生成 chunk 改由 pending 機制＋ChunkNotReady 主動告知（docs/patches.md 2p），
  *       本觀測 v3.0 起以第 4 個 headCall 計數 ChunkNotReady 並更新接收基準——
@@ -45,7 +46,7 @@ import zombie.iso.WorldStreamer;
  * （relog／in-place 重連／主迴圈凍結三情境同治）→ 基準全部重置。
  *
  * 輸出（console.txt）：active 宣告一次；STALL 行每 10 秒至多一行（含全部佇列水位＋
- * largeArea 旗標，黑邊定罪的關鍵行）；periodic 每 60 秒一行（有活動才報，單機安靜）；
+ * sendGate 停送標示，黑邊定罪的關鍵行）；periodic 每 60 秒一行（有活動才報，單機安靜）；
  * 反射欄位漂移→一次性 disabled 宣告後永久降級僅計數（fail-quiet；另有 SmokeCheck
  * 欄位契約守門在建置期擋漂移）。
  */
@@ -55,6 +56,9 @@ public final class ChunkStreamObserver {
     private static final long STALL_AFTER_NS = 30_000_000_000L;
     private static final long STALL_INTERVAL_NS = 10_000_000_000L;
     private static final long READ_INTERVAL_NS = 10_000_000_000L;
+    // 42.21 sendRequests 頭部停送 gate：pendingRequests1.size()>20 即 return（javap bipush 20；
+    // SmokeCheck 釘住連動）。只用於輸出標示，不改任何判定。
+    static final int SEND_GATE_PENDING1 = 20;
 
     // ---- 網路執行緒可觸碰的狀態（lock-free；絕不做 I/O/反射/鎖）----
     private static final AtomicLong partsReceived = new AtomicLong();
@@ -80,8 +84,6 @@ public final class ChunkStreamObserver {
     private static Field fReqQ0;
     private static Field fReqQ1;
     private static Field fSent;
-    private static Field fLargeArea;
-    private static Field fLargeDl;
     private static Field fReqNum;
     private static int reflectionState;              // 0=未初始化 1=可用 -1=停用
 
@@ -103,26 +105,7 @@ public final class ChunkStreamObserver {
                 return;
             }
             lastReadNs = now;
-            int pending = -1;
-            int pending1 = -1;
-            int reqQ0 = -1;
-            int reqQ1 = -1;
-            int sent = -1;
-            boolean largeArea = false;
-            int largeDl = -1;
-            int reqNum = -1;
-            if (ensureReflection()) {
-                pending = sizeOf(fPending, ws);
-                pending1 = sizeOf(fPending1, ws);
-                reqQ0 = sizeOf(fReqQ0, ws);
-                reqQ1 = sizeOf(fReqQ1, ws);
-                sent = sizeOf(fSent, ws);
-                largeArea = fLargeArea.getBoolean(ws);
-                largeDl = fLargeDl.getInt(ws);
-                reqNum = fReqNum.getInt(ws);
-            }
-            String line = dispatchDecide(now, pending, pending1, reqQ0, reqQ1, sent,
-                    largeArea, largeDl, reqNum);
+            String line = readAndDecide(now, ws);
             if (line != null) {
                 DebugLog.log(line);
             }
@@ -133,15 +116,37 @@ public final class ChunkStreamObserver {
     }
 
     /**
+     * 反射讀佇列水位＋決策（主執行緒；package-private 供行為測試對真實 WorldStreamer 走
+     * production 讀態路徑——欄位漂移時此處降級為 -1，測試即紅）。
+     */
+    static String readAndDecide(long now, WorldStreamer ws) throws IllegalAccessException {
+        int pending = -1;
+        int pending1 = -1;
+        int reqQ0 = -1;
+        int reqQ1 = -1;
+        int sent = -1;
+        int reqNum = -1;
+        if (ensureReflection()) {
+            pending = sizeOf(fPending, ws);
+            pending1 = sizeOf(fPending1, ws);
+            reqQ0 = sizeOf(fReqQ0, ws);
+            reqQ1 = sizeOf(fReqQ1, ws);
+            sent = sizeOf(fSent, ws);
+            reqNum = fReqNum.getInt(ws);
+        }
+        return dispatchDecide(now, pending, pending1, reqQ0, reqQ1, sent, reqNum);
+    }
+
+    /**
      * production 傳參接線（counters 與兩條基準集中於此；package-private 供行為測試
      * 直接覆蓋參數順序——外部 codex post-fix review：測試自組 decide 參數蓋不住
      * 「交換 lastReceiveNs/lastNotReadyNs」的接線突變體）。
      */
     static String dispatchDecide(long nowNs, int pending, int pending1, int reqQ0, int reqQ1,
-            int sent, boolean largeArea, int largeDl, int reqNum) {
+            int sent, int reqNum) {
         return decide(nowNs, partsReceived.get(), notRequiredReceived.get(),
                 notReadyReceived.get(), anomalies.get(), lastReceiveNs, lastNotReadyNs,
-                pending, pending1, reqQ0, reqQ1, sent, largeArea, largeDl, reqNum);
+                pending, pending1, reqQ0, reqQ1, sent, reqNum);
     }
 
     /** receiveChunkPart 頭部掛點（UdpEngine 網路執行緒）：lock-free 計數，不拋不鎖。 */
@@ -199,7 +204,7 @@ public final class ChunkStreamObserver {
      */
     static String decide(long nowNs, long parts, long notReq, long notReady, long anomaliesV,
             long lastRxNs, long lastNotReadyNsV, int pending, int pending1, int reqQ0, int reqQ1,
-            int sent, boolean largeArea, int largeDl, int reqNum) {
+            int sent, int reqNum) {
         boolean outstanding = pending > 0 || pending1 > 0 || reqQ1 > 0 || reqQ0 > 0;
         if (!outstanding) {
             outstandingSinceNs = 0L;
@@ -210,7 +215,7 @@ public final class ChunkStreamObserver {
         String state = " parts=" + parts + " notReq=" + notReq + " notReady=" + notReady
                 + " pending=" + pending + " pending1=" + pending1
                 + " reqQ0=" + reqQ0 + " reqQ1=" + reqQ1 + " sent=" + sent
-                + " largeArea=" + largeArea + " largeDl=" + largeDl
+                + " sendGate=" + (pending1 < 0 ? "?" : pending1 > SEND_GATE_PENDING1 ? "closed" : "open")
                 + " reqNum=" + reqNum + " anomalies=" + anomaliesV;
 
         if (outstanding
@@ -254,8 +259,6 @@ public final class ChunkStreamObserver {
             fReqQ0 = field("chunkRequests0");
             fReqQ1 = field("chunkRequests1");
             fSent = field("sentRequests");
-            fLargeArea = field("requestingLargeArea");
-            fLargeDl = field("largeAreaDownloads");
             fReqNum = field("requestNumber");
             reflectionState = 1;
             return true;

@@ -169,6 +169,104 @@ printf 'steam-v2' >"${gate_server}/linux64/steamclient.so"
 gate_run exec; gate_check "Steam update launches vanilla without repair" 0 '^AUDIT= MODE=0$'
 printf 'unknown\n' >"${gate_install}/steamfix.mode"
 gate_run exec; gate_check "invalid Steam mode cannot arm repair" 0 '^AUDIT= MODE=0$'
+
+echo
+echo "=== Java loose-class startup gate: payload SHA + jar origin; mismatch moves aside, never deletes"
+jg_java="${gate_server}/java"
+jg_parked="${gate_root}/parked"
+mkdir -p "${jg_java}" "${jg_parked}"
+jg_sha() { sha256sum | cut -d' ' -f1; }
+jg_jar() { # fake projectzomboid.jar from name=content pairs
+    python3 - "${jg_java}/projectzomboid.jar" "$@" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as jar:
+    for pair in sys.argv[2:]:
+        name, _, body = pair.partition('=')
+        jar.writestr(name, body)
+PY
+}
+jg_base_jar() { jg_jar 'zombie/A.class=orig-A' 'zombie/A$Inner.class=orig-B' 'zombie/Other.class=x' "$@"; }
+jg_install() { # a fresh install that matches jg_base_jar, like deploy/install.sh leaves it
+    rm -rf "${jg_java}/zombie" "${jg_java}/patch-manifest.txt"
+    mkdir -p "${jg_java}/zombie/mdc"
+    printf 'patched-A' >"${jg_java}/zombie/A.class"
+    printf 'patched-B' >"${jg_java}/zombie/A\$Inner.class"
+    printf 'helper' >"${jg_java}/zombie/mdc/H.class"
+    {
+        printf 'zombie/A.class\t%s\t%s\t1hits\n' "$(printf orig-A | jg_sha)" "$(printf patched-A | jg_sha)"
+        printf 'zombie/A$Inner.class\t%s\t%s\t1hits\n' "$(printf orig-B | jg_sha)" "$(printf patched-B | jg_sha)"
+        printf 'zombie/mdc/H.class\t-\t%s\t0hits\n' "$(printf helper | jg_sha)"
+    } >"${jg_java}/patch-manifest.txt"
+}
+jg_launched() { grep -q '^AUDIT=' "${log}"; }
+jg_kept() { jg_launched && [[ -f "${jg_java}/zombie/A.class" && -f "${jg_java}/patch-manifest.txt" ]]; }
+jg_parked_at() { # stamp dir: whole tree + manifest moved there, nothing left behind, game launched
+    jg_launched && [[ ! -e "${jg_java}/zombie" && ! -e "${jg_java}/patch-manifest.txt" \
+        && -f "${jg_parked}/$1/zombie/A.class" && -f "${jg_parked}/$1/patch-manifest.txt" ]]
+}
+jg_silent() { jg_launched && ! grep -q 'mdc-javagate' "${log}"; }
+jg_untouched() { ! jg_launched && [[ -f "${jg_java}/zombie/A.class" && -f "${jg_java}/patch-manifest.txt" ]]; }
+jg_check() { # name, want-status, regex, predicate [args]
+    local name=$1 want=$2 re=$3; shift 3
+    if [[ "${status}" == "${want}" ]] && grep -qE "${re}" "${log}" && "$@"; then
+        echo "PASS  ${name}"; pass=$((pass + 1))
+    else
+        printf 'FAIL  %s (status=%s)\n' "${name}" "${status}"; sed 's/^/      | /' "${log}"
+        (cd "${gate_root}" && find serverfiles/java parked | sed 's/^/      fs /'); fail=$((fail + 1))
+    fi
+}
+jg=(PFG_PATCH_DISABLED_ROOT="${jg_parked}")
+jg_base_jar; jg_install
+gate_run exec "${jg[@]}"
+jg_check "javagate: matching install -> OK banner, classes kept" 0 \
+    '\[mdc-javagate\] OK: 3 loose classes verified .*jar sha256 [0-9a-f]{8}$' jg_kept
+printf 'foreign' >"${jg_java}/zombie/Foreign.class"
+gate_run exec "${jg[@]}"
+jg_check "javagate: unlisted loose class only warns" 0 'WARNING: 1 loose .class files under java/zombie are not in' jg_kept
+jg_jar 'zombie/A.class=orig-A-42.21' 'zombie/A$Inner.class=orig-B' 'zombie/Other.class=x'
+jg_install
+gate_run exec "${jg[@]}" PFG_GATE_STAMP=T1
+jg_check "javagate: game jar updated -> tree+manifest moved, vanilla launch" 0 \
+    'STARTUP DISARMED: jar class differs from patch build base \(game updated\?\): zombie/A.class -- moved .*/parked/patch-disabled-T1-autogate;' \
+    jg_parked_at patch-disabled-T1-autogate
+jg_base_jar; jg_install
+printf 'tampered' >"${jg_java}/zombie/A.class"
+gate_run exec "${jg[@]}" PFG_GATE_STAMP=T1
+jg_check "javagate: payload SHA mismatch, destination exists -> next free name, old one untouched" 0 \
+    'STARTUP DISARMED: payload SHA mismatch: zombie/A.class -- moved .*patch-disabled-T1-autogate\.1;' \
+    jg_parked_at patch-disabled-T1-autogate.1
+[[ "$(cat "${jg_parked}/patch-disabled-T1-autogate/zombie/A.class")" == patched-A ]] \
+    && { echo "PASS  javagate: earlier parked tree not overwritten"; pass=$((pass + 1)); } \
+    || { echo "FAIL  javagate: earlier parked tree not overwritten"; fail=$((fail + 1)); }
+jg_install; rm -f "${jg_java}/zombie/mdc/H.class"
+gate_run exec "${jg[@]}" PFG_GATE_STAMP=T2
+jg_check "javagate: payload file missing -> moved" 0 'STARTUP DISARMED: payload missing: zombie/mdc/H.class' \
+    jg_parked_at patch-disabled-T2-autogate
+jg_jar 'zombie/A.class=orig-A'; jg_install
+gate_run exec "${jg[@]}" PFG_GATE_STAMP=T3
+jg_check "javagate: patched class gone from jar -> moved" 0 'STARTUP DISARMED: not in jar .*zombie/A\$Inner.class' \
+    jg_parked_at patch-disabled-T3-autogate
+jg_base_jar; jg_install
+printf '../escape.class\t-\t%s\t0hits\n' "$(printf x | jg_sha)" >>"${jg_java}/patch-manifest.txt"
+gate_run exec "${jg[@]}" PFG_GATE_STAMP=T4
+jg_check "javagate: entry outside java/zombie -> malformed, moved" 0 'STARTUP DISARMED: malformed manifest line: \.\./escape.class' \
+    jg_parked_at patch-disabled-T4-autogate
+jg_install; printf 'tampered' >"${jg_java}/zombie/A.class"
+gate_run dry "${jg[@]}"
+jg_check "javagate: dry run reports, exits 78, moves nothing" 78 'DISARMED \(dry run, nothing moved\): payload SHA mismatch' \
+    jg_untouched
+printf 'not a directory' >"${gate_root}/blocked"
+gate_run exec PFG_PATCH_DISABLED_ROOT="${gate_root}/blocked"
+jg_check "javagate: tree cannot be moved aside -> refuse to start (exit 78), nothing launched" 78 \
+    'FATAL: payload SHA mismatch: zombie/A.class; could not move .* refusing to start' jg_untouched
+rm -f "${jg_java}/patch-manifest.txt"
+gate_run exec "${jg[@]}"
+jg_check "javagate: loose classes without manifest -> warn only, nothing moved" 0 \
+    'WARNING: 3 loose .class files under .*/java/zombie but no patch-manifest.txt' \
+    eval 'jg_launched && [[ -f "${jg_java}/zombie/A.class" ]]'
+rm -rf "${jg_java}/zombie"
+gate_run exec "${jg[@]}"
+jg_check "javagate: vanilla install (no manifest, no loose classes) -> silent" 0 '^AUDIT=' jg_silent
 rm -rf "${gate_root}"
 expect clean 0 clean
 assert_log clean-guarded 'guard_alloc=[1-9]'

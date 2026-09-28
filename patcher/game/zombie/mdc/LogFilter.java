@@ -1,17 +1,10 @@
 package zombie.mdc;
 
-import zombie.characters.IsoPlayer;
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
-import zombie.iso.IsoMetaCell;
-import zombie.iso.IsoMetaGrid;
 import zombie.iso.IsoObject;
-import zombie.iso.IsoWorld;
-import zombie.iso.RoomDef;
-import zombie.iso.areas.IsoBuilding;
-import zombie.iso.areas.SafeHouse;
 import zombie.iso.objects.IsoCompost;
 import zombie.iso.objects.IsoDeadBody;
 import zombie.iso.objects.IsoThumpable;
@@ -31,7 +24,6 @@ public final class LogFilter {
 
     /** warn(String format, Object[]) 呼叫點——比對「格式化前」的完整 format 常數（equals）。 */
     private static final String[] FMT_EXACT = {
-        "AnimState not found: %s",                                                       // AnimationSet
         "SkeletonBone not resolved for bone: %s, defaulting to SkeletonBone.None",       // SkinningBoneHierarchy
         "The packet %s is not consistent: %s",                                           // INetworkPacket.logInconsistentPacket
     };
@@ -101,15 +93,6 @@ public final class LogFilter {
      */
     private static final String[] LOG_TYPE_PREFIX = {
         "Send Toxic Building at [ ",                                                      // GameServer.sendToxicBuilding
-    };
-
-    /**
-     * System.out.println(String) 呼叫點（IsoObject.syncIsoObject 兩處同方法改道）——只攔
-     * B42 建造流程每次必印的 IsoThumpable not-found（訊息由 invokedynamic 組成 → startsWith）；
-     * 同方法的 "square is null" 與其他 class（IsoDoor／IsoWindow…）的 not-found 是破損訊號，照常印。
-     */
-    private static final String[] PRINTLN_PREFIX = {
-        "ERROR: IsoThumpable not found on square ",                                     // IsoObject.syncIsoObject（8/30–9/2 四天 11,567 行）
     };
 
     public static void warnFmt(DebugType type, String format, Object[] args) {
@@ -189,26 +172,6 @@ public final class LogFilter {
         DebugLog.log(type, message);
     }
 
-    /** PRINTLN_PREFIX 的攔截判定——pure function 供 LogFilterNoiseTest 鎖行為（{@code s} 可為 null）。 */
-    static boolean suppressesPrintln(String s) {
-        if (s == null) {
-            return false;
-        }
-        for (String p : PRINTLN_PREFIX) {
-            if (s.startsWith(p)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public static void println(java.io.PrintStream out, String message) {
-        if (suppressesPrintln(message)) {
-            return;
-        }
-        out.println(message);
-    }
-
     /**
      * B42.19 只讓 TownZone/TownZones/TrailerPark 通過定期刷新，而且任何一次建造都會把整個 Zone
      * 永久標成 haveConstruction。若同一垂直欄位確有未搬動的原生固定容器，回傳僅供本次 gate
@@ -270,97 +233,6 @@ public final class LogFilter {
         }
         String type = zone.getType();
         return "TownZone".equals(type) || "TownZones".equals(type) || "TrailerPark".equals(type);
-    }
-
-    /**
-     * B42.19 大型 Map= 組合偶爾遺失 IsoGridSquare -> IsoRoom 綁定；只在安全屋申請路徑
-     * 回查 authoritative roomList，補回 roomId 後仍交由原版 SafeHouse 規則驗證。
-     */
-    public static IsoBuilding getBuilding(IsoGridSquare square) {
-        if (square == null) {
-            return null;
-        }
-        IsoBuilding building = square.getBuilding();
-        if (building != null) {
-            return building;
-        }
-
-        RoomDef room = findRoom(square);
-        if (room == null) {
-            return null;
-        }
-
-        long oldRoomId = square.getRoomID();
-        square.setRoomID(room.getID());
-        building = square.getBuilding();
-        if (building == null) {
-            square.setRoomID(oldRoomId);
-            return null;
-        }
-
-        DebugLog.log(DebugType.Multiplayer, String.format(
-                "[MinidoracatJavaPatch] repaired safehouse room binding at %d,%d,%d roomId=%d",
-                square.getX(), square.getY(), square.getZ(), room.getID()));
-        return building;
-    }
-
-    public static String canBeSafehouse(IsoGridSquare square, IsoPlayer player) {
-        getBuilding(square);
-        if (player != null) {
-            getBuilding(player.getCurrentSquare());
-        }
-        return SafeHouse.canBeSafehouse(square, player);
-    }
-
-    private static RoomDef findRoom(IsoGridSquare square) {
-        IsoMetaGrid grid = IsoWorld.instance.getMetaGrid();
-        IsoMetaCell center = grid.getMetaGridFromTile(square.getX(), square.getY());
-        if (center == null) {
-            return null;
-        }
-
-        RoomDef fallback = findRoom(center, square);
-        if (fallback != null && fallback.userDefined) {
-            return fallback;
-        }
-
-        // ponytail: claim-time O(n) fallback; add an index only if this ever becomes a hot path.
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) {
-                    continue;
-                }
-                RoomDef candidate = findRoom(grid.getCellData(center.getX() + dx, center.getY() + dy), square);
-                if (candidate != null && candidate.userDefined) {
-                    return candidate;
-                }
-                if (fallback == null) {
-                    fallback = candidate;
-                }
-            }
-        }
-        return fallback;
-    }
-
-    /** Mirror IsoMetaChunk.getRoomAt precedence: newest room first, user-defined wins. */
-    private static RoomDef findRoom(IsoMetaCell cell, IsoGridSquare square) {
-        if (cell == null) {
-            return null;
-        }
-        RoomDef fallback = null;
-        for (int i = cell.roomList.size() - 1; i >= 0; i--) {
-            RoomDef room = cell.roomList.get(i);
-            if (room.getBuilding() != null && !room.isEmptyOutside()
-                    && room.isInside(square.getX(), square.getY(), square.getZ())) {
-                if (room.userDefined) {
-                    return room;
-                }
-                if (fallback == null) {
-                    fallback = room;
-                }
-            }
-        }
-        return fallback;
     }
 
     private LogFilter() {}

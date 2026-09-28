@@ -25,7 +25,8 @@ import zombie.network.GameServer;
  * 在主執行緒補登記；佇列超過上限退回原版直接呼叫。
  *
  * <p><b>觀測</b>：四個寫入口頭部記錄非主執行緒寫入（前 20 筆＋每 1000 筆附呼叫來源）；每 5 分鐘心跳帶
- * 清單大小、ProcessItems 單次耗時、登記呼叫量與抽樣線性搜尋成本（每 256 次量一次整份 contains）。
+ * 清單大小、ProcessItems 單次耗時與登記呼叫量。（W45 上線後清單 contains 走索引，原本評估用的抽樣線性搜尋
+ * 成本 scanUsAvg／estScanMs 已於 2026-09-28 移除。）
  * kill switch：{@code -Dmdc.processItemsGuard=0}（W40＋觀測）、{@code -Dmdc.processItemsDefer=0}（W41）。
  */
 public final class ProcessItemsGuard {
@@ -36,8 +37,6 @@ public final class ProcessItemsGuard {
     private static final long HEARTBEAT_MS = 300_000L;
     private static final long DETAIL_LIMIT = 20L;
     private static final int DEFER_CAP = 100_000;
-    private static final long SAMPLE_MASK = 255L;
-    private static final Object SENTINEL = new Object();
 
     private static final ConcurrentLinkedQueue<InventoryItem> QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger pending = new AtomicInteger();
@@ -49,7 +48,7 @@ public final class ProcessItemsGuard {
     // 以下只在主執行緒（ProcessItems 與主執行緒的寫入口）。
     private static long calls, nulls, lastBeat;
     private static long passes, passNsTotal, passNsMax, passStartNs, drained;
-    private static long addCalls, addAllItems, scanSamples, scanNsTotal;
+    private static long addCalls, addAllItems;
 
     /** {@code IsoCell.ProcessItems} 頭部：補登記其他執行緒排入的物品並開始計時。 */
     public static void beginPass(IsoCell cell) {
@@ -121,11 +120,8 @@ public final class ProcessItemsGuard {
 
     /** {@code IsoCell.addToProcessItems(InventoryItem)} 頭部。 */
     public static void touchAdd(IsoCell cell) {
-        if (!onMain()) {
-            return;
-        }
-        if ((++addCalls & SAMPLE_MASK) == 0L) {
-            sampleScan(cell);
+        if (onMain()) {
+            addCalls++;
         }
     }
 
@@ -162,22 +158,10 @@ public final class ProcessItemsGuard {
         return false;
     }
 
-    private static void sampleScan(IsoCell cell) {
-        long t0 = System.nanoTime();
-        if (cell.getProcessItems().contains(SENTINEL)) {
-            anomalies.incrementAndGet();
-        }
-        scanNsTotal += System.nanoTime() - t0;
-        scanSamples++;
-    }
-
     private static void beat(IsoCell cell) {
-        double scanUs = scanSamples == 0 ? 0 : scanNsTotal / 1000.0 / scanSamples;
-        long scans = addCalls + addAllItems;
         DebugLog.log(TAG + "beat updates=" + calls + " nulls=" + nulls + " size=" + cell.getProcessItems().size()
                 + " passes=" + passes + " passMsAvg=" + fmt(passes == 0 ? 0 : passNsTotal / 1e6 / passes)
                 + " passMsMax=" + fmt(passNsMax / 1e6) + " addCalls=" + addCalls + " addAllItems=" + addAllItems
-                + " scanUsAvg=" + fmt(scanUs) + " estScanMs=" + (long) (scans * scanUs / 1000)
                 + " deferred=" + deferred.get() + " drained=" + drained + " pending=" + pending.get()
                 + " overflow=" + overflow.get() + " offThreadWrites=" + offThread.get() + " anomalies=" + anomalies.get());
     }

@@ -15,6 +15,13 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 
 ## 內容
 
+> **42.21.0（2026-09-28）**：自動更新換 jar 後，殘留的舊 loose class 讓伺服器起不來
+> （`Failed to find class: zombie/network/GameServer`），先整批移走、以原版恢復，再對 42.21 逐項重驗。
+> 官方已修而退役：抑噪 AnimationSet 與 IsoThumpable not found、砸窗無限迴圈保險絲、W22、W24、W27、W28、
+> W10-A、W10-E 與 W9 的兩個 CRC 刀；早已停用的安全屋修復殘留程式碼一併刪除。依 42.21 改寫：W10 的 Lua 建構子
+> 保險絲與參數解析拒絕改為獨立運作、W10-C 只留「被打斷時補送 Reject」、動作封包改為只檢查發送者身分、
+> W37 補撤格子殘留、W29／W31 指紋不再受行號影響。客戶端包重建為 `0.2.0`。規模：57 patched＋58 helper＝115 class、147 命中點。
+>
 > **42.20.2 里程碑**：官方在此版收編了我方三組 patch——P5 IsoCell sidecar（官方伴生 Set）、
 > popman buffer 隔離（官方 readByteBuffer）、VehicleManager 512→256（官方改 per-connection
 > HashMap）。三組已光榮退役，詳見 docs/optimization-summary.md 第四節。
@@ -29,20 +36,15 @@ StackMapFrames 原樣保留；改道 helper 寫成普通 Java 類並由 javac �
 > 對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋。改回原版行為（蛋照清），
 > 受精蛋請養在雞舍孵化。
 
-- **抑噪 10 項**：AnimationSet／SkinningBoneHierarchy／SpriteConfig（exact 白名單 37 名）／
-  ItemPickInfo／NetworkZombieManager／PacketsCache／INetworkPacket.logInconsistentPacket／
-  GameServer.sendToxicBuilding／IsoObject.syncIsoObject（IsoThumpable not found）／
+- **抑噪 8 項**：SkinningBoneHierarchy／SpriteConfig（exact 白名單 37 名）／ItemPickInfo／
+  NetworkZombieManager／PacketsCache／INetworkPacket.logInconsistentPacket／GameServer.sendToxicBuilding／
   IsoChunk.removeFromWorld（車輛卸載正常路徑）——只攔已知噪音樣式，未知警告與反作弊警告照常輸出。
+  AnimationSet 與 IsoObject.syncIsoObject 兩項於 42.21.0 由官方從源頭修掉，已退役。
 - **防崩潰守衛 2 項**：hit/Zombie（guard-before-super）與 hit/Fall（縱深防禦）的 null 頭部守衛。
 - **行為 1 項**：IsoAnimal（動物壓力三調：閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半，
   clamp 與行為路徑不動）。
-- **安全屋修復 1 項**：SafehouseClaimPacket 遇到遺失的 square→room/building 綁定時，從
-  authoritative roomList 補回 roomId，再完整執行原版權限、反作弊與安全屋驗證。
 - **容器刷新修復 1 項**：LootRespawn 對自訂地圖缺少 vanilla TownZone 與黏性 construction flag
   加入窄範圍 fallback；只放行未搬動的原生固定容器，玩家製／搬動容器仍不刷新，安全屋仍由原版動態阻擋。
-- **登入觀測 1 項**：LoginPacket 的三個同步 `ServerWorldDatabase` 寫入各自量測 `elapsedNs`；
-  delegate、return/POP、例外與 auth/protocol 順序不變，log 不含玩家識別資料。這一版只建立歸因證據，
-  不宣稱已優化登入或移除原生 busy 保護。
 - **chunk unload entity removal 1 項**：只改道 `EngineEntityManager` 與 `EntityBucket` 的四個
   unordered identity add/remove callsite，以 weak-key＋primitive sidecar index 把批次卸載的重複
   O(N) 搜尋改成常態 O(1)；碰撞、外部 mutation、ordered/equality/null 路徑都保留原版 fallback。
@@ -138,6 +140,10 @@ bash install.sh     # 內建同源閘——逐 class 驗 jar hash，遊戲更新
 
 0. **更新前先在伺服器 `bash uninstall.sh`**。loose class 不在 Steam depot 內，`app_update`
    只換 jar 不會刪掉它們——殘留的舊 patched class 仍會覆蓋新 jar。
+   正式服另有一道保險：`native-observer/deploy/run-with-pfguard.sh` 每次開服先重跑 `install.sh` 的
+   閘 1（payload SHA）與閘 2（jar 同源），不符就把 `java/zombie` 與 manifest 原子搬到
+   `patch-disabled-<UTC>-autogate/`（不刪檔）並以原版啟動；只有搬不走時才拒絕啟動（exit 78）。
+   這道閘只防「舊 patch 配新 jar」，不取代本步驟與下方的重建驗證。
 1. 重新拉 jar → `.\build.ps1`——命中數全過＝手術座標仍有效，直接重新部署。
 2. 建置失敗＝該 class 已變——重跑對應分析（`work/specs/` 有原始規格與方法論）再更新 `PatchConfig.java`。
 3. **命中數守門有盲點：數量對不代表改對地方。** 常數手術尤其要用 `javap` 確認該常數的**語境**
@@ -208,7 +214,7 @@ Lua 測試為隔離夾具，驗伺服器側物品狀態與同步呼叫，不代�
 ## 客戶端模組化安裝包
 
 `build-client.ps1` 只建置 client 產物，不安裝、不啟動遊戲，也不寫入 server manifest：
-未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.20.4-0.1.0.zip`。
+未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.21.0-0.2.0.zip`。
 
 | 模組 | 用途 |
 |---|---|

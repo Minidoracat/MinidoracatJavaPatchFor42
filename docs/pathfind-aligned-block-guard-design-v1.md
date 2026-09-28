@@ -4,7 +4,7 @@
 不是止血、不是補症狀、不是把 `0x30` 吞掉。
 
 - 事故與證據：`internal-analysis/reports/ops/2026-08-31-B42-pathfind-vehiclerect-pool-poisoning.md`
-- 目標 library：官方 `libPZPathFind64.so`（42.20.4，sha256 `0777dda6…21c4`）——**不修改、不散布**
+- 目標 library：官方 `libPZPathFind64.so`（42.20.4，sha256 `0777dda6…21c4`；**42.21.0，sha256 `e4c7d5c7…07d2`，本工具相關部分同構**，見 §11）——**不修改、不散布**
 - 交付狀態：**2026-09-06 19:38 已安裝正式服（使用者授權），生效待下次重啟**。當日觸發背景：
   同族 native crash 一天 4 次（03:13／03:40／06:44 `malloc(): invalid size (unsorted)` abort；
   19:04 SIGSEGV `__libc_free` on `PathfindNativeThread` in `findPath`——首次直接死在尋路執行緒），
@@ -443,8 +443,9 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 真函式庫測試涵蓋當場 recovery、稍後 duplicate ACK、連續部分 ACK、完整 ACK 與停用對照；
 檢查對端實際會收到的序號及 payload，不以「沒有崩潰」代替資料正確。
 
-- **同源**：Steam SHA256 `d8fbc2925af26522c3316f8bad2ac307b4726391a6174c220ca760fc3a421591`，
-  build ID `df982870f387389583ef1882f42a920ba6918af4`。wrapper 要求 `steamfix.manifest.sha256`
+- **同源**：Steam SHA256 `1a99f39637a505ce2dbfec697dafa118c2d1b8df7dea1412557e2d5ad0a2c7d4`，
+  build ID `04049c668c23a4d6503d811c8a0c703f6855653a`（隨 42.21.0 dedicated server 發佈；
+  原 pin `d8fbc292…1591`／`df982870…` 已退役，見 §11）。wrapper 要求 `steamfix.manifest.sha256`
   精確包含 Steam／修補庫兩個實際路徑各一次，再核 SHA；載入時另驗 ELF 幾何、build ID、
   目標與重傳指令。不同版本不猜座標，印 `DISARMED` 並保留 vanilla。
 - **冷載入**：`la_objopen` 在 relocation／constructor 前執行；只改 base namespace。
@@ -472,3 +473,29 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 `python3 native-observer/tests/test_steamfix.py /path/to/steamclient.so`。
 啟動後必須同時看到 `CORE ARMED` 與 `[mdc-steamfix] APPLIED`；
 只有程序存活／wrapper PASS 不算修補生效，更不能替代長時間的連線與重傳驗收。
+
+## 11. 42.21.0 對版（2026-09-28）
+
+遊戲更新後正式服 wrapper 依設計把兩者都 `DISARMED`（PathFind 與 Steam 的 SHA 都變了），以 vanilla 啟動。
+本機以 42.21.0 dedicated server 的原檔重驗：
+
+- **PathFind（`e4c7d5c7…07d2`）**：`verify-preconditions.sh` 91/91 PASS，每條數值與 42.20.4 相同。
+  逐函式正規化反組譯比對（去位址、rip 位移與函式內偏移）：`VehicleCluster::merge/alloc/release`、
+  `createVehicleCluster(s)`、`VisibilityGraph::release`、`trySplit`、A\* 的 allowlist caller、
+  `reallocate_aligned`／`deallocate_aligned` **逐指令相同**；42.21 的變動集中在 `Square` 旗標 32→64 bit
+  與 `findPath` 半徑常數／`smoothPath(Path&,int)`，不碰本工具的配置與 cluster 族。⇒ merge 洩漏原樣存在，
+  §9-4 的安全論證原樣成立；shim 與 `pfguard.env` 不改，只把 `manifest.sha256` 的 PathFind 行換成新 SHA。
+- **Steam（`1a99f396…c7d4`）**：缺陷原樣存在。部分 ACK 分支 8 bytes（`sub %r15d,%eax; mov %eax,0x14(%r12)`）
+  與其後 13 bytes、重傳 offset 計算 36 bytes 皆逐位元組相同且全檔唯一，只是整段平移 `+0x186570`：
+  SITE `0x240c838`、重傳 `0x240b6f1`（間距仍 `0x1147`）、RX 段 `vaddr 0xd9d850／size 0x1d43c6f／offset 0xd9c850`；
+  覆蓋區間唯一入邊為 `0x240c51c ja`、無重定位落入。`steamfix.c` 只換這些常數與 build note；
+  真函式庫測試（`test_steamfix.py`）16/16：vanilla 在 partial／deferred／repeated 三情境 SIGSEGV、修補後
+  對端收到正確序號與 payload；以舊常數的 `steamfix.c` 對新檔則 DISARMED 且 partial 仍崩潰（負對照）。
+  test harness 的 PseudoTCP 入口改為 `0x240c330`。
+- **Java loose-class 啟動閘**（同日新增於 `run-with-pfguard.sh` 最前段）：若 `java/patch-manifest.txt`
+  存在，每次啟動重跑 `deploy/install.sh` 的閘 1（payload SHA）與閘 2（jar 原版 class SHA）；任一不符就把
+  `java/zombie` 與 manifest 以 rename 搬到 `/home/pzserver/patch-disabled-<UTC>-autogate/`（目的地已存在則加
+  `.1`、`.2`…；先搬 class 樹再搬 manifest），印 `[mdc-javagate] STARTUP DISARMED` 後照常以原版啟動。
+  只有 class 樹搬不走時才拒啟（exit 78），因為那代表舊 patch 會掛在新 jar 上。全數相符印
+  `[mdc-javagate] OK: <n> loose classes verified …; jar sha256 <前 8 碼>`；無 manifest 但有 loose class 只警告。
+  `run-tests.sh` 含 12 條對應行為測試。

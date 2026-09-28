@@ -2,17 +2,22 @@ package zombie.mdc;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
 import zombie.iso.IsoCell;
+import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
+import zombie.iso.IsoObject;
+import zombie.util.list.PZArrayList;
 
 /**
  * W37 AnimalSpawnGuard 行為驗證（無參數＝啟用、{@code off}＝kill switch）。
- * 鎖：建構失敗（data null、帶座標）從 addList／objectList（依 isSafeToAdd）撤出；(IsoCell) 載入用
+ * 鎖：建構失敗（data null、帶座標）從 addList／objectList（依 isSafeToAdd）撤出，並撤出格子的
+ * movingObjects（IsoGameCharacter 建構子的 setMovingSquareNow；留著會被 getAnimals 看到）；(IsoCell) 載入用
  * 0,0,0 與正常建構不碰；grow／addBaby 只吞「本次呼叫有建構失敗」的 NPE，其餘例外穿透；off 全直通。
  */
 public final class AnimalSpawnGuardTest {
@@ -33,18 +38,26 @@ public final class AnimalSpawnGuardTest {
         // update 中（not safe）：IsoGameCharacter 建構子把物件放進 addList。
         cell.setSafeToAdd(false);
         Fake broken = fake(cell, 101, 103);
+        IsoGridSquare sq1 = square();
         adds.add(broken);
+        place(broken, sq1);
         AnimalSpawnGuard.afterCtor(broken);
         expect(off ? "off：失敗物件留在 addList（原版洩漏）" : "unsafe：失敗物件自 addList 撤出",
                 adds.contains(broken) == off);
+        expect(off ? "off：失敗物件留在格子 movingObjects" : "unsafe：失敗物件自格子 movingObjects 撤出",
+                sq1.getMovingObjects().contains(broken) == off && (broken.getCurrentSquare() == sq1) == off);
 
         // update 外（safe）：直接進 objectList。
         cell.setSafeToAdd(true);
         Fake broken2 = fake(cell, 102, 104);
+        IsoGridSquare sq2 = square();
         objects.add(broken2);
+        place(broken2, sq2);
         AnimalSpawnGuard.afterCtor(broken2);
         expect(off ? "off：失敗物件留在 objectList" : "safe：失敗物件自 objectList 撤出",
                 objects.contains(broken2) == off);
+        expect(off ? "off：失敗物件留在格子 movingObjects" : "safe：失敗物件自格子 movingObjects 撤出",
+                sq2.getMovingObjects().contains(broken2) == off);
 
         Fake loading = fake(cell, 0, 0);
         objects.add(loading);
@@ -57,8 +70,8 @@ public final class AnimalSpawnGuardTest {
         AnimalSpawnGuard.afterCtor(healthy);
         expect("正常建構（data 非 null）不碰", objects.contains(healthy));
         if (!off) {
-            expect("ctorFailures=2 removed=2", AnimalSpawnGuard.ctorFailuresForTest() == 2
-                    && AnimalSpawnGuard.removedForTest() == 2);
+            expect("ctorFailures=2 removed=2 squareRemoved=2", AnimalSpawnGuard.ctorFailuresForTest() == 2
+                    && AnimalSpawnGuard.removedForTest() == 2 && AnimalSpawnGuard.squareRemovedForTest() == 2);
         }
 
         // grow：該次建構失敗造成的 NPE。
@@ -176,6 +189,23 @@ public final class AnimalSpawnGuardTest {
         d.parent = parent;
         d.body = body;
         return d;
+    }
+
+    /** 空格子：只填 removeFromSquare／isWaterSquare 會碰到的集合（無地板＝非水格）。 */
+    private static IsoGridSquare square() throws Exception {
+        IsoGridSquare sq = (IsoGridSquare) raw(IsoGridSquare.class);
+        set(sq, "movingObjects", new ArrayList<IsoMovingObject>());
+        set(sq, "staticMovingObjects", new ArrayList<IsoMovingObject>());
+        set(sq, "objects", new PZArrayList<>(IsoObject.class, 2));
+        set(sq, "specialObjects", new ArrayList<IsoObject>());
+        return sq;
+    }
+
+    /** IsoGameCharacter 建構子的 current＝格子＋setMovingSquareNow。 */
+    private static void place(IsoAnimal a, IsoGridSquare sq) throws Exception {
+        set(a, "current", sq);
+        set(a, "movingSq", sq);
+        sq.getMovingObjects().add(a);
     }
 
     private static boolean throwsNpe(Runnable r) {

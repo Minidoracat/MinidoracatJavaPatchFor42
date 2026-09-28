@@ -213,48 +213,8 @@ public final class SmokeCheck {
                     countExactCalls(gSw, Opcodes.INVOKESTATIC, "zombie/iso/IsoChunk", "SafeWrite",
                             "(IILjava/nio/ByteBuffer;)V") == 5);
 
-            // ---- W9 存檔管線隔離：CRC 執行緒私有性＋機制錨＋私有池行為（根治刀的可測核心）----
+            // ---- W9 存檔管線隔離：私有池行為（42.21 起 CRC 兩刀隨官方修正退役，只剩私有池）----
             Class<?> csi = Class.forName("zombie.mdc.ChunkSaveIsolation", true, patched);
-            Method hcM = csi.getMethod("headerCrc", java.util.zip.CRC32.class);
-            Method dcM = csi.getMethod("dedupCrc", java.util.zip.CRC32.class);
-            java.util.zip.CRC32 sharedCrc = new java.util.zip.CRC32();
-            Object hc1 = hcM.invoke(null, sharedCrc);
-            Object hc2 = hcM.invoke(null, sharedCrc);
-            Object dc1 = dcM.invoke(null, sharedCrc);
-            Object[] hcOther = new Object[1];
-            Thread crcWorker = new Thread(() -> {
-                try {
-                    hcOther[0] = hcM.invoke(null, sharedCrc);
-                } catch (ReflectiveOperationException e) {
-                    hcOther[0] = e;
-                }
-            }, "W9-smoke-worker");
-            crcWorker.start();
-            crcWorker.join();
-            failed += check("W9 headerCrc：非共享實例、同緒穩定、跨緒相異（指紋競態消失的充要條件）",
-                    hc1 != null && hc1 != sharedCrc && hc1 == hc2
-                    && hcOther[0] != null && !(hcOther[0] instanceof Throwable)
-                    && hcOther[0] != hc1 && hcOther[0] != sharedCrc);
-            failed += check("W9 dedupCrc：與 headerCrc 分族隔離（同緒序列化中途做去重不互踩）",
-                    dc1 != null && dc1 != sharedCrc && dc1 != hc1);
-            // 機制錨（定罪的最小重演，單緒確定性模擬交錯）：外部 reset 插在 update 與
-            // getValue 之間 → 指紋 0（A 組 16 筆歷史＋W8 首晚 3 筆的簽名）；外部 update
-            // 疊入 → 垃圾值（B 組 27 筆＋5 筆）。body/len 由各自序列化者完整寫入，故
-            // len 恆正確——與 8/8 現行犯觀測相容的唯一機制。
-            java.util.zip.CRC32 anchor = new java.util.zip.CRC32();
-            byte[] anchorBody = new byte[]{1, 2, 3, 4, 5, 6, 7};
-            anchor.update(anchorBody);
-            long anchorCorrect = anchor.getValue();
-            anchor.reset();
-            anchor.update(anchorBody);
-            anchor.reset();
-            long anchorZero = anchor.getValue();
-            anchor.reset();
-            anchor.update(anchorBody);
-            anchor.update(anchorBody);
-            long anchorGarbage = anchor.getValue();
-            failed += check("W9 機制錨：共用 CRC32 遭外部 reset→0（A 組簽名）、遭疊 update→垃圾（B 組簽名）",
-                    anchorZero == 0L && anchorGarbage != anchorCorrect && anchorCorrect != 0L);
             // 私有池行為：殼每次全新（不入池）、buffer 歸還後重用、release 後 bb=null，
             // 且全程不動 ClientChunkRequest 全域池（隔離的定義本身）。
             // 42.20.3 起 vanilla 刪除整個重試機制（Chunk.retriesCount／MAX_CHUNK_SEND_TRIES／
@@ -420,17 +380,6 @@ public final class SmokeCheck {
                 && fh[2].getOpcode() == Opcodes.RETURN;
         failed += check("Fall.process guard 序列在方法最前", fGuard);
 
-        // 安全屋 patch 已停用（只留原版地圖，觸發條件消失）——確認確實沒出貨。
-        // helper 仍保留在 LogFilter 並持續驗證，恢復時只需解除 PatchConfig 的註解。
-        failed += check("SafehouseClaimPacket 未出貨（安全屋 patch 已停用）",
-                !Files.exists(distJava.resolve("zombie/network/packets/safehouse/SafehouseClaimPacket.class")));
-
-        MethodNode repair = method(distJava, "zombie/mdc/LogFilter", "getBuilding",
-                "(Lzombie/iso/IsoGridSquare;)Lzombie/iso/areas/IsoBuilding;");
-        failed += check("安全屋修復會補 roomId 並重新讀 building",
-                countCalls(repair, "zombie/iso/IsoGridSquare", "setRoomID") == 2
-                && countCalls(repair, "zombie/iso/IsoGridSquare", "getBuilding") >= 2);
-
         MethodNode loot = method(distJava, "zombie/LootRespawn", "respawnInChunk", "(Lzombie/iso/IsoChunk;)V");
         failed += check("LootRespawn zone gate 只改道一次",
                 countCalls(loot, "zombie/mdc/LogFilter", "getLootRespawnZone") == 1
@@ -551,7 +500,7 @@ public final class SmokeCheck {
                 && countConstThen(killed, 10.0f, -1) == 2
                 && countConstThen(killed, 30.0f, -1) == 0);
 
-        // 42.20：consistency log 位於 interface default method；W10-E 雖接管 PacketType 的
+        // 42.20：consistency log 位於 interface default method；派送 bridge 雖接管 PacketType 的
         // 最後派送，anticheat warn／sync 仍須保持原版，於下方 dispatch 斷言直接驗證。
         MethodNode inconsistent = method(distJava, "zombie/network/packets/INetworkPacket",
                 "logInconsistentPacket", "(Lzombie/network/IConnection;Lzombie/network/PacketTypes$PacketType;)V");
@@ -984,18 +933,7 @@ public final class SmokeCheck {
 
         // 42.20.2 官方收編：connected[512] 已刪除改 per-connection HashMap，512→256 斷言退役。
 
-        // ---- 假死修復（removeGlassAttachments 無限迴圈保險絲）----
-        String glassGuard = "zombie/mdc/GlassAttachmentGuard";
-        MethodNode smashW = method(distJava, "zombie/iso/objects/IsoWindow", "smashWindow", "(ZZ)V");
-        failed += check("玻璃附掛清除改道恰一次且原呼叫歸零",
-                countExactCalls(smashW, Opcodes.INVOKESTATIC, glassGuard, "removeGlassAttachments",
-                        "(Lzombie/iso/IsoGridSquare;Lzombie/iso/objects/IsoWindow;)V") == 1
-                && countExactCalls(smashW, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoGridSquare",
-                        "removeGlassAttachments", "(Lzombie/iso/objects/IsoWindow;)V") == 0);
-        ClassNode glassNode = classNode(distJava, glassGuard);
-        failed += check("GlassGuard 無狀態（零欄位）且含定位 log 前綴",
-                glassNode.fields.isEmpty()
-                && containsUtf8(distJava, glassGuard, "[MinidoracatJavaPatch][GlassGuard]"));
+        // 42.21.0 官方已修：removeGlassAttachments 改反向迴圈，2l GlassAttachmentGuard 結構斷言隨 patch 退役。
 
         // 42.20.2 官方收編：P5 全家族 15 站結構斷言隨 patch 退役（官方伴生 Set 原生 O(1)）。
 
@@ -1209,7 +1147,7 @@ public final class SmokeCheck {
         failed += check("W8 負對照：IsoChunk 除 Save(Z)V 外零改道（含其他 Save 多載；SafeWrite 本體無遞迴）",
                 safeWriteClean);
 
-        // ---- W9 存檔管線隔離（addLoadedJob 的指紋 CRC＋池租借；SaveLoadedTask 的去重 CRC＋歸還）----
+        // ---- W9 存檔管線隔離（42.21 起只剩私有池：addLoadedJob 租借＋SaveLoadedTask.release 歸還）----
         String sctCls = "zombie/network/ServerChunkLoader$SaveChunkThread";
         String csiCls = "zombie/mdc/ChunkSaveIsolation";
         String ccrRef = "zombie/network/ClientChunkRequest";
@@ -1218,11 +1156,48 @@ public final class SmokeCheck {
         String chunkArgDesc = "(L" + chunkRef + ";)V";
         String addLoadedDesc = "(Lzombie/iso/IsoChunk;)V";
         MethodNode vAdd = methodFromJar(jar, sctCls, "addLoadedJob", addLoadedDesc);
-        failed += check("W9 vanilla 前提：addLoadedJob 內 crc32 讀 x1、getChunk/getByteBuffer/releaseChunk 各 x1",
-                countInstanceFieldReads(vAdd, sctCls, "crc32") == 1
-                && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 1
+        failed += check("W9 vanilla 前提：addLoadedJob 內 getChunk/getByteBuffer/releaseChunk 各 x1",
+                countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
+        // 退役前提（2026-09-28，42.21.0）：W9 之一／之二（共用 CRC32 → ThreadLocal）因官方修正退役。
+        // 釘住官方修法：addLoadedJob、SaveLoadedTask.save 各自 new CRC32（區域變數），且
+        // ServerChunkLoader／SaveChunkThread／SaveLoadedTask／IsoChunk 沒有任何 CRC32 型別欄位。
+        // TIS 若退回共用實例＝這條紅，重新評估是否復活兩刀（git checkout 42d1b15）。
+        String crcDesc = "Ljava/util/zip/CRC32;";
+        boolean noSharedCrc = true;
+        for (String c : new String[]{"zombie/network/ServerChunkLoader", sctCls, sltCls, w8IcCls}) {
+            for (var fn : classNodeFromJar(jar, c).fields) {
+                if (crcDesc.equals(fn.desc)) {
+                    noSharedCrc = false;
+                }
+            }
+        }
+        failed += check("W9 退役前提：addLoadedJob／SaveLoadedTask.save 各 new CRC32 x1，存檔管線四類零 CRC32 欄位",
+                noSharedCrc
+                && countNew(vAdd, "java/util/zip/CRC32") == 1
+                && countNew(vSlt, "java/util/zip/CRC32") == 1);
+        // 之三存在理由：SaveChunkThread.update() 仍以欄位 savedChunks 逐一 release、全程無鎖
+        // （主迴圈與 shutdown hook 並行 updateSaved 可雙重 release），且 ClientChunkRequest
+        // 的 freeChunks／freeBuffers 仍是 static 全域池。TIS 若加鎖或改成 per-instance 池＝這條紅，
+        // 重新評估之三是否可退役。
+        MethodNode vSctUpdate = methodFromJar(jar, sctCls, "update", "()V");
+        boolean updateUnlocked = (vSctUpdate.access & Opcodes.ACC_SYNCHRONIZED) == 0;
+        for (AbstractInsnNode in : vSctUpdate.instructions) {
+            if (in.getOpcode() == Opcodes.MONITORENTER) {
+                updateUnlocked = false;
+            }
+        }
+        ClassNode vCcrNode = classNodeFromJar(jar, ccrRef);
+        boolean ccrPoolsStatic = vCcrNode.fields.stream()
+                .filter(fn -> fn.name.equals("freeChunks") || fn.name.equals("freeBuffers"))
+                .filter(fn -> (fn.access & Opcodes.ACC_STATIC) != 0)
+                .count() == 2;
+        failed += check("W9 之三存在理由：SaveChunkThread.update 無鎖且讀 savedChunks、ClientChunkRequest 兩池仍為 static",
+                updateUnlocked
+                && countInstanceFieldReads(vSctUpdate, sctCls, "savedChunks") >= 1
+                && countCalls(vSctUpdate, "zombie/network/ServerChunkLoader$SaveTask", "release") == 1
+                && ccrPoolsStatic);
         // 零值新殼安全的機械依據（42.20.3 起 vanilla getChunk 不再重置任何欄位）：
         // addLoadedJob 對租出殼「先寫後讀」——wx/wy 各恰一次 PUTFIELD，且兩者都
         // 位於 getByteBuffer 呼叫之前。PZ 若讓存檔路徑讀取未寫欄位或改寫此順序，
@@ -1258,19 +1233,9 @@ public final class SmokeCheck {
                 wxWrites == 1 && wyWrites == 1
                 && wxPutIdx >= 0 && wyPutIdx >= 0 && gbCallIdx >= 0
                 && wxPutIdx < gbCallIdx && wyPutIdx < gbCallIdx);
-        failed += check("W9 vanilla 前提：SaveLoadedTask.save 內 crcSave 讀 x4（reset/update/getValue×2 四連讀）",
-                countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4);
         MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");
         failed += check("W9 vanilla 前提：SaveLoadedTask.release 內 releaseChunk x1",
                 countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
-        // 耦合鎖（codex 對抗審查改為全 jar fail-closed：硬編類別清單掃不到新增的
-        // nestmate 讀者）：兩顆共用 CRC32 的讀者全 jar 總數＝已釘位置的數量——
-        // TIS 在任何 class 新增讀者＝總數超標＝建置失敗強制重新分析
-        failed += check("W9 耦合鎖：全 jar crcSave 讀者恰 4（全在 SaveLoadedTask.save）、crc32 讀者恰 1（全在 addLoadedJob）",
-                jarWideFieldReadCensus(jar, Opcodes.GETFIELD, "zombie/network/ServerChunkLoader", "crcSave") == 4
-                && countInstanceFieldReads(vSlt, "zombie/network/ServerChunkLoader", "crcSave") == 4
-                && jarWideFieldReadCensus(jar, Opcodes.GETFIELD, sctCls, "crc32") == 1
-                && countInstanceFieldReads(vAdd, sctCls, "crc32") == 1);
         // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者恰 2 且逐類分佈釘死（codex 修正：
         // 只比總數會讓「舊點消失＋新點出現」互抵通過）。addLoadedJob＝本刀隔離；
         // PlayerDownloadServer.update 用 per-connection CRC32 且僅主緒＝分析上安全。
@@ -1281,10 +1246,10 @@ public final class SmokeCheck {
                         "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1
                 && classWideCalls(classNodeFromJar(jar, "zombie/network/PlayerDownloadServer"), Opcodes.INVOKEVIRTUAL,
                         "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1);
-        // 手術後：同形替換緊鄰性（GETFIELD 之後必須緊接 helper——隔開＝吃錯堆疊值）＋原呼叫歸零
+        // 手術後：三呼叫改道到位、原呼叫歸零；addLoadedJob 對 helper 的呼叫恰 3（CRC 改道已退役）
         MethodNode pAdd = method(distJava, sctCls, "addLoadedJob", addLoadedDesc);
-        failed += check("W9 手術後：addLoadedJob crc32→headerCrc 緊鄰 x1、三呼叫改道、原 invokevirtual 歸零",
-                swapAdjacency(pAdd, sctCls, "crc32", csiCls, "headerCrc") == 1
+        failed += check("W9 手術後：addLoadedJob 三呼叫改道（helper 呼叫恰 3）、原 invokevirtual 歸零",
+                countCallsToOwner(pAdd, csiCls) == 3
                 && countExactCalls(pAdd, Opcodes.INVOKESTATIC, csiCls, "getChunk",
                         "(L" + ccrRef + ";)L" + chunkRef + ";") == 1
                 && countExactCalls(pAdd, Opcodes.INVOKESTATIC, csiCls, "getByteBuffer",
@@ -1294,8 +1259,8 @@ public final class SmokeCheck {
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 0
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 0
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 0);
-        failed += check("W9 手術後：save() crcSave→dedupCrc 緊鄰 x4",
-                swapAdjacency(pSlt, "zombie/network/ServerChunkLoader", "crcSave", csiCls, "dedupCrc") == 4);
+        failed += check("W9 負對照：SaveLoadedTask.save 零 ChunkSaveIsolation 呼叫（只剩 W8 改道）",
+                countCallsToOwner(pSlt, csiCls) == 0);
         MethodNode pRel = method(distJava, sltCls, "release", "()V");
         failed += check("W9 手術後：release() releaseChunk 改道 x1、原呼叫歸零",
                 countExactCalls(pRel, Opcodes.INVOKESTATIC, csiCls, "releaseChunk",
@@ -1355,7 +1320,7 @@ public final class SmokeCheck {
         // 收益僅 0.06–0.18%，「永不啟用 on」已定案，刀與斷言一併移除。
         // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
-        // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截 ＋ processServer 回覆 state 補正）----
+        // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截；W10-A 已於 42.21 官方修正後退役）----
         String ntaCls = "zombie/core/NetTimedAction";
         String ntaPktCls = "zombie/network/packets/NetTimedActionPacket";
         String ntaGuardCls = "zombie/mdc/NetTimedActionGuard";
@@ -1366,7 +1331,6 @@ public final class SmokeCheck {
                 + "[Ljava/lang/Object;)Lse/krka/kahlua/integration/LuaReturn;";
         String ntaParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
         String bbwDesc = "(Lzombie/core/network/ByteBufferWriter;)V";
-        String writeHelperDesc = "(L" + ntaPktCls + ";Lzombie/core/network/ByteBufferWriter;)V";
         String psDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
         String tsCls = "Lzombie/core/Transaction$TransactionState;";
 
@@ -1388,20 +1352,22 @@ public final class SmokeCheck {
         failed += check("W10 vanilla 前提：parse 內存在 action=null 失敗路徑（B 刀的著力點，非新增語意）",
                 vanillaNullsAction);
 
-        // A 刀的存在理由，釘成結構事實：processServer 對 act（slot 3）設 state，卻用 this（slot 0）
-        // 送出。TIS 修好這個 bug（receiver 換成 act）時本條會紅——提醒撤刀，而不是讓兩份修正疊加。
+        // D 刀／B 刀的 Reject 出口：42.21 原版 processServer 對 act（slot 3）setState 後也以 act 序列化
+        // （42.20.4 用 this.write 送出 Request state，當時由 W10-A 補正；官方修正後 A 刀退役）。
+        // TIS 退回 this.write 時本條紅——那時 action=null 的 Reject 又會帶錯 state，需重估 A 刀。
         MethodNode vNtaProcess = methodFromJar(jar, ntaPktCls, "processServer", psDesc);
-        int writeOnThis = 0;
+        int writeOnAct = 0;
         int writeTotal = 0;
         for (AbstractInsnNode in = vNtaProcess.instructions.getFirst(); in != null; in = in.getNext()) {
             if (!(in instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKEVIRTUAL
-                    || !ntaPktCls.equals(mi.owner) || !"write".equals(mi.name) || !bbwDesc.equals(mi.desc)) {
+                    || !"write".equals(mi.name) || !bbwDesc.equals(mi.desc)) {
                 continue;
             }
             writeTotal++;
             AbstractInsnNode receiver = prevReal(prevReal(in));   // receiver, bbw, write
-            if (receiver instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == 0) {
-                writeOnThis++;
+            if (ntaCls.equals(mi.owner) && receiver instanceof VarInsnNode v
+                    && v.getOpcode() == Opcodes.ALOAD && v.var != 0) {
+                writeOnAct++;
             }
         }
         int setStateOnAct = 0;
@@ -1415,9 +1381,9 @@ public final class SmokeCheck {
                 setStateOnAct++;
             }
         }
-        failed += check("W10 vanilla 前提（A 刀存在理由）：processServer 的 write 兩處 receiver 皆 this，"
-                + "而 setState 兩處 receiver 皆非 this ＝ 該方法的初始回覆必帶 Request state",
-                writeTotal == 2 && writeOnThis == 2 && setStateOnAct == 2);
+        failed += check("W10 vanilla 前提（Reject 出口，W10-A 退役依據）：processServer 的 write 兩處與 setState 兩處"
+                + " receiver 皆為 act（非 this）＝ action=null 的初始回覆帶 Reject state",
+                writeTotal == 2 && writeOnAct == 2 && setStateOnAct == 2);
 
         // 手術後：兩處改道、原呼叫歸零、真指令數不變（1:1 同形替換）
         MethodNode pNtaParse = method(distJava, ntaCls, "parse", ntaParseDesc);
@@ -1427,10 +1393,9 @@ public final class SmokeCheck {
                 && countExactCalls(pNtaParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 0
                 && realInsnCount(pNtaParse) == realInsnCount(vNtaParse) + 2);
         MethodNode pNtaProcess = method(distJava, ntaPktCls, "processServer", psDesc);
-        failed += check("W10 手術後：processServer 改道 x2、原 write 歸零、真指令數不變",
-                countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, ntaGuardCls, "write", writeHelperDesc) == 2
-                && countExactCalls(pNtaProcess, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0
-                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess));
+        failed += check("W10-A 退役：processServer 不經 NetTimedActionGuard、兩個 act.write 原樣保留",
+                countCalls(pNtaProcess, ntaGuardCls, "write") == 0
+                && countExactCalls(pNtaProcess, Opcodes.INVOKEVIRTUAL, ntaCls, "write", bbwDesc) == 2);
 
         // helper 契約 1：catch 型別鎖定 RuntimeException——Error（SOE／OOM）必須穿透，
         // 與 W6 同紀律。放寬成 Throwable 會把致命錯誤變成「靜默 reject」。
@@ -1441,31 +1406,15 @@ public final class SmokeCheck {
         // helper 契約 2：委派回原方法恰 2 處（kill switch 直通＋try 內正常路徑），且 caller 只被呼叫這兩次
         failed += check("W10 helper 契約：protectedCall 委派原呼叫恰 2 處（off 直通＋on 正常路徑）",
                 countExactCalls(guardCall, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 2);
-        // helper 契約 3：state 補正與線路寫入都不得被診斷邏輯吞掉——兩者恰一次且在 try 外
-        MethodNode guardWrite = method(distJava, ntaGuardCls, "write", writeHelperDesc);
-        String setStateDesc = "(Lzombie/core/Transaction$TransactionState;)V";
-        failed += check("W10 helper 契約：setState／write 各恰 1 次且不在 try 範圍內（A 刀 fail-fast）",
-                countExactCalls(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "setState", setStateDesc) == 1
-                && callsInsideTryRange(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls,
-                        "setState", setStateDesc) == 0
-                && countExactCalls(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 1
-                && callsInsideTryRange(guardWrite, Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc) == 0);
 
         // 負對照（相對 vanilla 差值，避免絕對零在 PZ 新增同名呼叫時誤報）：
-        // NetTimedAction 只少一個 protectedCall（getDuration/start/stop/perform 逐一未動），
-        // NetTimedActionPacket 只少兩個 write。
+        // NetTimedAction 只少一個 protectedCall（getDuration/start/stop/perform 逐一未動）。
         failed += check("W10 負對照：NetTimedAction 全 class protectedCall 恰少 1（其餘方法未動）",
                 classWideCalls(classNode(distJava, ntaCls), Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc)
                         == classWideCalls(classNodeFromJar(jar, ntaCls), Opcodes.INVOKEVIRTUAL, luaCaller,
                                 "protectedCall", pcDesc) - 1
                 && classWideCalls(classNode(distJava, ntaCls), Opcodes.INVOKESTATIC, ntaGuardCls,
                         "protectedCall", pcHelperDesc) == 1);
-        failed += check("W10 負對照：NetTimedActionPacket 全 class write 恰少 2、改道恰 2",
-                classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKEVIRTUAL, ntaPktCls, "write", bbwDesc)
-                        == classWideCalls(classNodeFromJar(jar, ntaPktCls), Opcodes.INVOKEVIRTUAL, ntaPktCls,
-                                "write", bbwDesc) - 2
-                && classWideCalls(classNode(distJava, ntaPktCls), Opcodes.INVOKESTATIC, ntaGuardCls,
-                        "write", writeHelperDesc) == 2);
 
         // W10-D：只在本次 NetTimedAction.parse 內處理參數解析失敗，不改共用 table decoder。
         String netTableCls = "zombie/network/PZNetKahluaTableImpl";
@@ -1881,11 +1830,12 @@ public final class SmokeCheck {
                 && countCallsToOwner(method(distJava, hutchCls, "syncIsoObjectSend", w26BbwDesc), hsgCls) == 0
                 && countCallsToOwner(method(distJava, hutchCls, "syncIsoObjectReceive",
                         "(Lzombie/core/network/ByteBufferReader;)V"), hsgCls) == 0);
-        // 通用廣播本體只被 W1 的 println 抑噪改道碰過（1:1）；本刀不得在 IsoObject 留下任何
-        // 呼叫，四步廣播與 hot-save 的形狀也必須與 vanilla 逐項相同——否則「只改誰收、不改
-        // 怎麼送」的承諾就破了，其他上萬個 IsoObject 的 wire 一起被牽動。
-        MethodNode pSyncIso = method(distJava, w26Iso, "syncIsoObject", w26SyncIsoDesc);
-        ClassNode pIsoObjNode = classNode(distJava, w26Iso);
+        // 本刀不得在 IsoObject 留下任何呼叫，四步廣播與 hot-save 的形狀也必須與 vanilla 逐項相同——
+        // 否則「只改誰收、不改怎麼送」的承諾就破了，其他上萬個 IsoObject 的 wire 一起被牽動。
+        // 42.21 抑噪 #9 退役後 IsoObject 不再出貨（＝逐位元 vanilla）；日後若有刀重新改 IsoObject，改驗 dist 版。
+        boolean w26IsoShipped = Files.exists(distJava.resolve(w26Iso + ".class"));
+        MethodNode pSyncIso = w26IsoShipped ? method(distJava, w26Iso, "syncIsoObject", w26SyncIsoDesc) : vSyncIso;
+        ClassNode pIsoObjNode = w26IsoShipped ? classNode(distJava, w26Iso) : classNodeFromJar(jar, w26Iso);
         failed += check("W26 負對照：IsoObject 全 class 零 HutchSyncGate／RecipientWindow 改道、syncIsoObject 四步／hot-save 與 vanilla 同、sync 鏈真指令數不變",
                 classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, hsgCls, "syncUpdate", w26UpdDesc) == 0
                 && classWideCalls(pIsoObjNode, Opcodes.INVOKESTATIC, rwCls,
@@ -1896,8 +1846,10 @@ public final class SmokeCheck {
                 && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Pkt, "send", w26SendDesc) == 3
                 && countExactCalls(pSyncIso, Opcodes.INVOKEVIRTUAL, w26Iso, "flagForHotSave", "()V") == 1
                 && realInsnCount(pSyncIso) == realInsnCount(vSyncIso)
-                && realInsnCount(method(distJava, w26Iso, "sync", "()V")) == realInsnCount(vIsoSync)
-                && realInsnCount(method(distJava, w26Iso, "sync", "(I)V")) == realInsnCount(vIsoSyncI));
+                && realInsnCount(w26IsoShipped ? method(distJava, w26Iso, "sync", "()V") : vIsoSync)
+                        == realInsnCount(vIsoSync)
+                && realInsnCount(w26IsoShipped ? method(distJava, w26Iso, "sync", "(I)V") : vIsoSyncI)
+                        == realInsnCount(vIsoSyncI));
 
         // helper 契約①：被選中的連線仍走原版四步（startPacket→doPacket→syncIsoObjectSend→send）
         // 各恰 1；直通委派涵蓋 off/非 server/client/子類、簿記故障、無效物件。
@@ -2381,74 +2333,8 @@ public final class SmokeCheck {
                 && countExactCalls(gOnItemDesc, Opcodes.INVOKEVIRTUAL, "java/lang/ThreadLocal",
                         "set", "(Ljava/lang/Object;)V") == 1);
 
-        // ---- 抑噪 #9：IsoObject.syncIsoObject 的兩個 System.out.println 改道 ----
-        String ioCls = "zombie/iso/IsoObject";
-        String syncDesc = "(ZBLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)V";
-        String printlnDesc = "(Ljava/lang/String;)V";
-        String filterPrintlnDesc = "(Ljava/io/PrintStream;Ljava/lang/String;)V";
-        MethodNode vSync = methodFromJar(jar, ioCls, "syncIsoObject", syncDesc);
-        // vanilla 前提：恰 2 個 println(String)、恰 1 個 getObjectIndex（not-found 分支的判定源）、
-        // 封包段存在（send ≥1）——TIS 把 println 換成 DebugLog 或加第三句時建置紅，重驗語境。
-        failed += check("抑噪#9 vanilla 前提：syncIsoObject println(String)=2、getObjectIndex=1、封包段存在",
-                countExactCalls(vSync, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 2
-                && countExactCalls(vSync, Opcodes.INVOKEVIRTUAL, ioCls, "getObjectIndex", "()I") == 1
-                && countCalls(vSync, "zombie/network/PacketTypes$PacketType", "send") >= 1);
-        MethodNode pSync = method(distJava, ioCls, "syncIsoObject", syncDesc);
-        failed += check("抑噪#9 手術後：println 改道 x2、原 println 歸零、封包段與真指令數未變",
-                countExactCalls(pSync, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "println", filterPrintlnDesc) == 2
-                && countExactCalls(pSync, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 0
-                && countCalls(pSync, "zombie/network/PacketTypes$PacketType", "send")
-                        == countCalls(vSync, "zombie/network/PacketTypes$PacketType", "send")
-                && countCalls(pSync, "zombie/network/PacketTypes$PacketType", "doPacket")
-                        == countCalls(vSync, "zombie/network/PacketTypes$PacketType", "doPacket")
-                && realInsnCount(pSync) == realInsnCount(vSync));
-        // 負對照：IsoObject 其餘方法的 println（含 Object 多載）一律 vanilla；method-scope 鎖。
-        ClassNode vIo = classNodeFromJar(jar, ioCls);
-        ClassNode pIo = classNode(distJava, ioCls);
-        failed += check("抑噪#9 負對照：IsoObject 其餘 println 保持 vanilla（class-wide 改道恰 2）",
-                classWideCalls(pIo, Opcodes.INVOKESTATIC, "zombie/mdc/LogFilter", "println", filterPrintlnDesc) == 2
-                && classWideCalls(pIo, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc)
-                        == classWideCalls(vIo, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) - 2);
-        // helper 契約：println 恰一個 PrintStream.println 出口（不翻倍、不換 sink）。
-        MethodNode gPrintln = method(distJava, "zombie/mdc/LogFilter", "println", filterPrintlnDesc);
-        failed += check("抑噪#9 helper 契約：LogFilter.println 委派 PrintStream.println 恰 1",
-                countExactCalls(gPrintln, Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", printlnDesc) == 1);
-
-        // ---- W22 面向物件 sprite-grid null 守衛（IsoGameCharacter.faceThisObject）----
-        String fogCls = "zombie/mdc/FaceObjectGuard";
-        String faceDesc = "(Lzombie/iso/IsoObject;)V";
-        String closestDesc = "(FF)Lzombie/iso/IsoObject;";
-        String fogDesc = "(Lzombie/iso/IsoObject;FF)Lzombie/iso/IsoObject;";
-        MethodNode vFace = methodFromJar(jar, igcCls, "faceThisObject", faceDesc);
-        MethodNode vFaceAlt = methodFromJar(jar, igcCls, "faceThisObjectAlt", faceDesc);
-        // vanilla 前提：faceThisObject 內 getClosestSpriteGridObject 恰 1 且緊接 astore_1 →
-        // aload_1 → getFacingPosition（「無條件解參考」的結構事實＝本刀存在理由；TIS 補 null
-        // 檢查時 IFNULL/IFNONNULL 數會變，建置紅提醒撤刀）；faceThisObjectAlt 另 1（負對照）。
-        failed += check("W22 vanilla 前提：faceThisObject getClosestSpriteGridObject=1、getFacingPosition(Vector2)=1、IFNULL/IFNONNULL 合計 5；Alt 另 1",
-                countExactCalls(vFace, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
-                && countExactCalls(vFace, Opcodes.INVOKEVIRTUAL, ioCls, "getFacingPosition",
-                        "(Lzombie/iso/Vector2;)Lzombie/iso/Vector2;") == 1
-                && countOpcode(vFace, Opcodes.IFNULL) + countOpcode(vFace, Opcodes.IFNONNULL) == 5
-                && countExactCalls(vFaceAlt, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
-                && classWideCalls(vIgcNode, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 2);
-        failed += check("W22 vanilla 前提：closest 結果緊接 astore_1→aload_1→getFacingPosition（無條件解參考）",
-                callFollowedByStoreLoadCall(vFace, ioCls, "getClosestSpriteGridObject", closestDesc,
-                        ioCls, "getFacingPosition"));
-        MethodNode pFace = method(distJava, igcCls, "faceThisObject", faceDesc);
-        MethodNode pFaceAlt = method(distJava, igcCls, "faceThisObjectAlt", faceDesc);
-        failed += check("W22 手術後：faceThisObject 改道 x1、原呼叫歸零、真指令不變；Alt 未動；class-wide 改道恰 1",
-                countExactCalls(pFace, Opcodes.INVOKESTATIC, fogCls, "closestSpriteGridObject", fogDesc) == 1
-                && countExactCalls(pFace, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 0
-                && realInsnCount(pFace) == realInsnCount(vFace)
-                && countExactCalls(pFaceAlt, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
-                && realInsnCount(pFaceAlt) == realInsnCount(vFaceAlt)
-                && classWideCalls(pIgcNode, Opcodes.INVOKESTATIC, fogCls, "closestSpriteGridObject", fogDesc) == 1);
-        // helper 契約：恰一次 vanilla 委派、零 NEW（熱路徑零配置；診斷路徑的字串拼接是 indy 不是 NEW）。
-        MethodNode gClosest = method(distJava, fogCls, "closestSpriteGridObject", fogDesc);
-        failed += check("W22 helper 契約：closestSpriteGridObject 委派 vanilla 恰 1、零 NEW、零 DebugLog（診斷在獨立方法）",
-                countExactCalls(gClosest, Opcodes.INVOKEVIRTUAL, ioCls, "getClosestSpriteGridObject", closestDesc) == 1
-                && countOpcode(gClosest, Opcodes.NEW) == 0
-                && countCallsToOwner(gClosest, "zombie/debug/DebugLog") == 0);
+        // 42.21.0 官方已修：IsoThumpable.setHealth 加 getObjectIndex 守衛，抑噪 #9（syncIsoObject println 改道）
+        // 與其結構斷言隨 patch 退役。
 
         // ---- W34 伺服器角色聲音參數跳過（IsoGameCharacter.updateEmitter）----
         // vanilla 前提：updateEmitter 內 FMODParameterList.update 恰 1 且為 class 唯一呼叫點。
@@ -2617,103 +2503,81 @@ public final class SmokeCheck {
                 && countNew(gCsgClinit, "java/util/WeakHashMap") == 1
                 && classNode(distJava, craftSyncCls).methods.stream().allMatch(m -> countNew(m, "java/util/HashMap") == 0));
 
-        // ---- W10-C 卡讀條第二波觀測（processServer 打斷／start 時長／update perform 出口）----
+        // ---- W10-C 靜默打斷觀測（processServer 的 stopPlayerActions）；C／R 兩點於 42.21 對版退役 ----
         String taProbeCls = "zombie/core/MdcTimedActionProbe";
         String amCls = "zombie/core/ActionManager";
         String pidCls2 = "zombie/network/fields/character/PlayerID";
         String stopDesc = "(L" + pidCls2 + ";)V";
-        String connDesc = "(Lzombie/characters/IsoPlayer;)Lzombie/core/raknet/UdpConnection;";
+        String amRemoveDesc = "(L" + pidCls2 + ";BZ)V";
         // vanilla 前提 (B)：processServer 內 stopPlayerActions 恰 1；ActionManager.remove 內
         // startPacket 恰 1（＝client 分支的 GeneralAction Reject；server 分支零封包＝「不通知
         // client」的結構事實）。TIS 在 server 分支補通知時此條紅＝enforce 補送 Reject 撤刀訊號。
-        MethodNode vAmRemove = methodFromJar(jar, amCls, "remove", "(BZ)V");
+        MethodNode vAmRemove = methodFromJar(jar, amCls, "remove", amRemoveDesc);
         failed += check("W10-C vanilla (B)：processServer stopPlayerActions=1；ActionManager.remove startPacket 恰 1（server 分支零封包）",
                 countExactCalls(vNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1
                 && countCalls(vAmRemove, "zombie/core/raknet/UdpConnection", "startPacket") == 1
                 && countExactFields(vAmRemove, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1);
-        // vanilla 前提 (C)：start() 單一 RETURN＋setTimeData 恰 1；Action.setTimeData 內
-        // getDurationMax 恰 1（-1 → durationMax 路徑存在）。
-        MethodNode vNtaStart = methodFromJar(jar, ntaCls, "start", "()V");
-        MethodNode vSetTimeData = methodFromJar(jar, "zombie/core/Action", "setTimeData", "()V");
-        failed += check("W10-C vanilla (C)：start RETURN=1、setTimeData=1；setTimeData 內 getDurationMax=1",
-                countOpcode(vNtaStart, Opcodes.RETURN) == 1
-                && countExactCalls(vNtaStart, Opcodes.INVOKEVIRTUAL, ntaCls, "setTimeData", "()V") == 1
-                && countExactCalls(vSetTimeData, Opcodes.INVOKEVIRTUAL, "zombie/network/server/AnimEventEmulator",
-                        "getDurationMax", "()J") == 1);
-        // vanilla 前提 (R)：update 內 Action.perform 恰 1、getConnectionFromPlayer 恰 2（Done/Reject）。
-        MethodNode vAmUpdate = methodFromJar(jar, amCls, "update", "()V");
-        failed += check("W10-C vanilla (R)：update 內 perform=1、getConnectionFromPlayer=2",
-                countExactCalls(vAmUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 1
-                && countExactCalls(vAmUpdate, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "getConnectionFromPlayer", connDesc) == 2);
-        // Request 上下文沿用 W10-E dispatch；本方法只保留 stopPlayerActions 與 W10 write 改道。
         failed += check("W10-C 手術後：stopPlayerActions 改道 x1、原呼叫歸零",
                 countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, taProbeCls, "stopPlayerActions", stopDesc) == 1
-                && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 0);
-        MethodNode pNtaStart = method(distJava, ntaCls, "start", "()V");
-        failed += check("W10-C 手術後：start 尾部 aload_0→onStart（RETURN 前）、真指令恰 +2",
-                tailCallOk(pNtaStart, taProbeCls, "onStart", "(L" + ntaCls + ";)V")
-                && realInsnCount(pNtaStart) == realInsnCount(vNtaStart) + 2);
-        MethodNode pAmUpdate = method(distJava, amCls, "update", "()V");
-        failed += check("W10-C 手術後：update perform 改道 x1＋connectionOf 改道 x2、原呼叫歸零、真指令不變",
-                countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, taProbeCls, "perform", "(Lzombie/core/Action;)Z") == 1
-                && countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, taProbeCls, "connectionOf", connDesc) == 2
-                && countExactCalls(pAmUpdate, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 0
-                && countExactCalls(pAmUpdate, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "getConnectionFromPlayer", connDesc) == 0
-                && realInsnCount(pAmUpdate) == realInsnCount(vAmUpdate));
-        // helper 契約：三個委派各恰 1（stopPlayerActions／perform／getConnectionFromPlayer）；
-        // enforce 補送 Reject 的 write 恰 1（sendReject）且與 vanilla 同一組 doPacket/send API。
+                && countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 0
+                && realInsnCount(pNtaProcess) == realInsnCount(vNtaProcess));
+        // 退役（42.21 對版）：C 的 start tailCall、R 的 update 三改道；W10-E 的 stop 手術（官方已修）。
+        // ActionManager 因此不再出貨；NetTimedAction.start 回到原版。
+        failed += check("W10-C (C)/(R)＋W10-E 退役：ActionManager 不出貨、NetTimedAction.start 與原版同指令數且不呼叫 helper",
+                !Files.exists(distJava.resolve(amCls + ".class"))
+                && realInsnCount(method(distJava, ntaCls, "start", "()V"))
+                        == realInsnCount(methodFromJar(jar, ntaCls, "start", "()V"))
+                && countCalls(method(distJava, ntaCls, "start", "()V"), taProbeCls, "onStart") == 0);
+        // helper 契約：stopPlayerActions 委派恰 1；enforce 補送 Reject 的 write 恰 1（sendReject）且與 vanilla
+        // 同一組 doPacket/send API。
         MethodNode gStop = method(distJava, taProbeCls, "stopPlayerActions", stopDesc);
-        MethodNode gPerform = method(distJava, taProbeCls, "perform", "(Lzombie/core/Action;)Z");
-        MethodNode gConn = method(distJava, taProbeCls, "connectionOf", connDesc);
         MethodNode gSendReject = method(distJava, taProbeCls, "sendReject", "(Lzombie/core/Action;)Z");
-        failed += check("W10-C helper 契約：三委派各 1；sendReject write=1/doPacket=1/send=1",
+        failed += check("W10-C helper 契約：stopPlayerActions 委派 1；sendReject write=1/doPacket=1/send=1",
                 countExactCalls(gStop, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1
-                && countExactCalls(gPerform, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "perform", "()Z") == 1
-                && countExactCalls(gConn, Opcodes.INVOKESTATIC, "zombie/network/GameServer",
-                        "getConnectionFromPlayer", connDesc) == 1
                 && countExactCalls(gSendReject, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "write",
                         "(Lzombie/core/network/ByteBufferWriter;)V") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
 
-        // W10-E：取消的 owner 由封包派送連線取得；server 內部停止只信任佇列 action 實例。
+        // W10-E 退役依據（42.21 官方修正）：stop 以 (PlayerID,id) 呼叫 remove；remove 的兩個 lambda 同時比 id 與
+        // PlayerID.getID；GeneralActionPacket.setReject 帶 IsoPlayer 並寫入 playerId。退回只比 id 時本條紅＝重估 W10-E。
         String actionCls = "zombie/core/Action";
         String amStopDesc = "(L" + actionCls + ";)V";
-        // 原版取消仍只比 byte id；官方改用 owner 範圍時必須重估撤刀。
         MethodNode vAmStop = methodFromJar(jar, amCls, "stop", amStopDesc);
-        MethodNode vAmStopAll = methodFromJar(jar, amCls, "stopPlayerActions", stopDesc);
-        MethodNode vGapProcess = methodFromJar(jar, "zombie/network/packets/GeneralActionPacket", "processServer", psDesc);
         ClassNode vAmNode = classNodeFromJar(jar, amCls);
         int removeLambdas = 0;
-        boolean removeLambdaIdOnly = true;
+        boolean removeLambdaOwnerKeyed = true;
         for (MethodNode m : vAmNode.methods) {
             if (!m.name.startsWith("lambda$remove$")) {
                 continue;
             }
             removeLambdas++;
-            removeLambdaIdOnly &= countExactFields(m, Opcodes.GETFIELD, actionCls, "id", "B") == 1
-                    && countExactFields(m, Opcodes.GETFIELD, actionCls, "playerId",
-                            "Lzombie/network/fields/character/PlayerID;") == 0;
+            removeLambdaOwnerKeyed &= countExactFields(m, Opcodes.GETFIELD, actionCls, "id", "B") == 1
+                    && countExactFields(m, Opcodes.GETFIELD, actionCls, "playerId", "L" + pidCls2 + ";") == 1
+                    && countExactCalls(m, Opcodes.INVOKEVIRTUAL, pidCls2, "getID", "()S") == 2;
         }
-        failed += check("W10-E vanilla 前提：stop 內 remove=1；stopPlayerActions/GeneralActionPacket 只經 stop；remove 的 lambda 只比 id",
-                countExactCalls(vAmStop, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1
-                && countExactCalls(vAmStopAll, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1
-                && countExactCalls(vAmStopAll, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
-                && countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1
-                && countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
-                && removeLambdas == 2 && removeLambdaIdOnly);
-        // 手術後：stop 頭部 headCall 全序＋remove 改道 x1、原呼叫歸零、真指令恰 +2。
-        MethodNode pAmStop = method(distJava, amCls, "stop", amStopDesc);
-        failed += check("W10-E 手術後：stop headCall 全序＋removeById 改道 x1、原 remove 歸零、真指令恰 +2",
-                headCallOk(pAmStop, taProbeCls, "onStop", amStopDesc)
-                && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, taProbeCls, "removeById", "(BZ)V") == 1
-                && countExactCalls(pAmStop, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 0
-                && realInsnCount(pAmStop) == realInsnCount(vAmStop) + 2);
-        MethodNode gRemove = method(distJava, taProbeCls, "removeById", "(BZ)V");
-        failed += check("W10-E：原版 remove 只保留一個明示 off 退路",
-                countExactCalls(gRemove, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 1);
+        String generalPacketCls = "zombie/network/packets/GeneralActionPacket";
+        MethodNode vSetReject = methodFromJar(jar, generalPacketCls, "setReject", "(BLzombie/characters/IsoPlayer;)V");
+        failed += check("W10-E 退役依據：stop→remove(PlayerID,B,Z) 恰 1、remove lambda 以 (id, PlayerID.getID) 分鍵、setReject 寫入發送者",
+                countExactCalls(vAmStop, Opcodes.INVOKESTATIC, amCls, "remove", amRemoveDesc) == 1
+                && removeLambdas == 2 && removeLambdaOwnerKeyed
+                && countExactCalls(vSetReject, Opcodes.INVOKEVIRTUAL, pidCls2, "set", "(Lzombie/characters/IsoPlayer;)V") == 1);
+
+        // 動作封包身分檢查的存在理由：原版以 wire PlayerID.getID 當查詢／取消鍵，但 PlayerID.isConsistent
+        // 只驗 id != -1 與解析得到 player，不比對該 player 的 onlineID 或所屬連線。TIS 補上比對時本條紅＝重估 bridge 的 owner 檢查。
+        MethodNode vPidConsistent = methodFromJar(jar, pidCls2, "isConsistent", "(Lzombie/network/IConnection;)Z");
+        failed += check("動作封包身分 vanilla 前提：PlayerID.isConsistent 不讀 player 的 onlineID、不查連線",
+                countCalls(vPidConsistent, "zombie/characters/IsoPlayer", "getOnlineID") == 0
+                && countExactFields(vPidConsistent, Opcodes.GETFIELD, "zombie/characters/IsoPlayer", "onlineId", "S") == 0
+                && countCalls(vPidConsistent, "zombie/network/GameServer", "getPlayerFromConnection") == 0);
+        MethodNode vGapProcess = methodFromJar(jar, generalPacketCls, "processServer", psDesc);
+        failed += check("動作封包身分：GeneralActionPacket 取消恰一個 ActionManager.stop（原版取消入口）",
+                countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
+        for (String cancelPacket : new String[]{"BuildActionPacket", "FishingActionPacket", "NetTimedActionPacket"}) {
+            MethodNode cancel = methodFromJar(jar, "zombie/network/packets/" + cancelPacket, "processServer", psDesc);
+            failed += check("動作封包身分：" + cancelPacket + " 取消恰一個 ActionManager.stop（原版取消入口）",
+                    countExactCalls(cancel, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
+        }
 
         String packetTypeCls = "zombie/network/PacketTypes$PacketType";
         String networkPacketCls = "zombie/network/packets/INetworkPacket";
@@ -2721,13 +2585,13 @@ public final class SmokeCheck {
         String dispatchHelperDesc = "(L" + networkPacketCls + ";" + psDesc.substring(1);
         MethodNode vDispatch = methodFromJar(jar, packetTypeCls, "onServerPacket", dispatchDesc);
         MethodNode pDispatch = method(distJava, packetTypeCls, "onServerPacket", dispatchDesc);
-        failed += check("W10-E 負對照：anticheat warn 不經 LogFilter，兩個 sync 出口保留",
+        failed += check("派送 bridge 負對照：anticheat warn 不經 LogFilter，兩個 sync 出口保留",
                 countCalls(vDispatch, "zombie/debug/DebugType", "warn") == 1
                 && countCalls(pDispatch, "zombie/debug/DebugType", "warn") == 1
                 && countCalls(pDispatch, "zombie/mdc/LogFilter", "warnFmt") == 0
                 && countCalls(vDispatch, networkPacketCls, "sync") == 2
                 && countCalls(pDispatch, networkPacketCls, "sync") == 2);
-        failed += check("W10-E dispatch：原版唯一 processServer，在授權、parse、一致性與反作弊檢查之後",
+        failed += check("派送 bridge：原版唯一 processServer，在授權、parse、一致性與反作弊檢查之後",
                 countExactCalls(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) == 1
                 && countCalls(vDispatch, "zombie/network/PacketTypes$PacketAuthorization", "isAuthorized") == 1
                 && countCalls(vDispatch, networkPacketCls, "parseServer") == 1
@@ -2747,44 +2611,20 @@ public final class SmokeCheck {
                 && firstCallIndex(vDispatch, Opcodes.INVOKEVIRTUAL, "zombie/network/anticheats/AntiCheat",
                         "isValid", "(Lzombie/core/raknet/UdpConnection;L" + networkPacketCls + ";)Z")
                         < firstCallIndex(vDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc));
-        failed += check("W10-E dispatch：receiver-first bridge 恰 1、原呼叫歸零、真指令數不變",
+        failed += check("派送 bridge：receiver-first bridge 恰 1、原呼叫歸零、真指令數不變",
                 countExactCalls(pDispatch, Opcodes.INVOKESTATIC, taProbeCls, "processServer", dispatchHelperDesc) == 1
                 && countExactCalls(pDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) == 0
                 && realInsnCount(pDispatch) == realInsnCount(vDispatch));
         MethodNode gDispatch = method(distJava, taProbeCls, "processServer", dispatchHelperDesc);
-        failed += check("W10-E dispatch：保留原封包虛擬派送並以 finally 收尾",
+        failed += check("派送 bridge：保留原封包虛擬派送、Request 上下文以 finally 收尾，且不自行停止動作（取消與 Reject 後續全交原版）",
                 countExactCalls(gDispatch, Opcodes.INVOKEINTERFACE, networkPacketCls, "processServer", psDesc) >= 1
-                && gDispatch.tryCatchBlocks.stream().anyMatch(t -> t.type == null));
+                && gDispatch.tryCatchBlocks.stream().anyMatch(t -> t.type == null)
+                && countCalls(gDispatch, amCls, "stop") == 0
+                && countCalls(gDispatch, amCls, "remove") == 0);
         String clientDispatchDesc = "(Lzombie/core/network/ByteBufferReader;)V";
-        failed += check("W10-E 負對照：client 派送方法不改動",
+        failed += check("派送 bridge 負對照：client 派送方法不改動",
                 realInsnCount(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))
                         == realInsnCount(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc)));
-
-        String generalPacketCls = "zombie/network/packets/GeneralActionPacket";
-        MethodNode vSetReject = methodFromJar(jar, generalPacketCls, "setReject", "(B)V");
-        failed += check("W10-E 原版 wire 缺口：setReject 只寫 id/state，沒有發送者身分",
-                realInsnCount(vSetReject) == 7
-                && countExactFields(vSetReject, Opcodes.PUTFIELD, generalPacketCls, "id", "B") == 1
-                && countExactFields(vSetReject, Opcodes.PUTFIELD, generalPacketCls, "state", tsCls) == 1);
-        boolean generalStopsPacket = false;
-        for (AbstractInsnNode in : vGapProcess.instructions) {
-            if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
-                    && amCls.equals(mi.owner) && "stop".equals(mi.name) && amStopDesc.equals(mi.desc)
-                    && prevReal(in) instanceof VarInsnNode receiver
-                    && receiver.getOpcode() == Opcodes.ALOAD && receiver.var == 0) {
-                generalStopsPacket = true;
-            }
-        }
-        failed += check("W10-E 原版 GeneralAction 取消直接傳 this", generalStopsPacket);
-        for (String cancelPacket : new String[]{"BuildActionPacket", "FishingActionPacket", "NetTimedActionPacket"}) {
-            MethodNode cancel = methodFromJar(jar, "zombie/network/packets/" + cancelPacket, "processServer", psDesc);
-            failed += check("W10-E 取消來源：" + cancelPacket + " 恰一個 ActionManager.stop",
-                    countExactCalls(cancel, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
-        }
-        failed += check("W10-E 全 jar census：stop=5、remove=4、stopPlayerActions=1，防止漏掉新取消入口",
-                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 5
-                && jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "remove", "(BZ)V") == 4
-                && jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1);
 
         // ---- W23 帳號上限登入期執法：兩個登入封包各改道 x1、原呼叫歸零、真指令不變；helper 委派 vanilla 恰 1 ----
         String swdbCls = "zombie/network/ServerWorldDatabase";
@@ -2892,90 +2732,7 @@ public final class SmokeCheck {
                 && countCallsToOwner(gPoll, "zombie/debug/DebugLog") + countCallsToOwner(gOffer, "zombie/debug/DebugLog")
                         + countCallsToOwner(gContains, "zombie/debug/DebugLog") == 0);
 
-        // W27：只換 ACK 迴圈的整數比較；保留正常查找、RequestID 比對與 sendData。
-        String requestDataCls = "zombie/network/RequestDataManager";
-        String ackDesc = "(Lzombie/network/packets/RequestDataPacket$RequestID;Lzombie/core/raknet/UdpConnection;I)V";
-        MethodNode vAck = methodFromJar(jar, requestDataCls, "ACKWasReceived", ackDesc);
-        MethodNode pAck = method(distJava, requestDataCls, "ACKWasReceived", ackDesc);
-        AbstractInsnNode[] ackPrefix = firstReal(vAck, 13);
-        failed += check("W27 vanilla：i=0；i 與 requests.size 比較後 get(i)，唯一 IF_ICMPGT 跳到查找結束",
-                realInsnCount(vAck) >= 13
-                && ackPrefix[2].getOpcode() == Opcodes.ICONST_0
-                && isVar(ackPrefix[3], Opcodes.ISTORE, 5)
-                && isVar(ackPrefix[4], Opcodes.ILOAD, 5)
-                && isVar(ackPrefix[5], Opcodes.ALOAD, 0)
-                && isField(ackPrefix[6], Opcodes.GETFIELD, requestDataCls, "requests", "Ljava/util/ArrayList;")
-                && isCall(ackPrefix[7], Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I")
-                && ackPrefix[8] instanceof JumpInsnNode boundary && boundary.getOpcode() == Opcodes.IF_ICMPGT
-                && isVar(nextReal(boundary.label), Opcodes.ALOAD, 4)
-                && isVar(ackPrefix[9], Opcodes.ALOAD, 0)
-                && isField(ackPrefix[10], Opcodes.GETFIELD, requestDataCls, "requests", "Ljava/util/ArrayList;")
-                && isVar(ackPrefix[11], Opcodes.ILOAD, 5)
-                && isCall(ackPrefix[12], Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;")
-                && countOpcode(vAck, Opcodes.IF_ICMPGT) == 1 && countOpcode(vAck, Opcodes.IF_ICMPGE) == 0);
-        failed += check("W27 patched：僅 IF_ICMPGT→IF_ICMPGE；其餘指令、跳轉目的地、frames/maxs 全同",
-                methodText(vAck).replace("IF_ICMPGT ", "IF_ICMPGE ").equals(methodText(pAck))
-                && countOpcode(pAck, Opcodes.IF_ICMPGT) == 0 && countOpcode(pAck, Opcodes.IF_ICMPGE) == 1);
-
-        // W28：addZombieStanding／addZombieMoving 的 n_addZombie fallback 納入既有 saveLock。
-        // 承重面有三層：(1) vanilla 必須真的是「native x1、saveLock x0」——缺口消失就代表 TIS 自己補了，
-        // 這刀要重評而不是默默疊一層重入；(2) patched 只能是那一個呼叫換名，其餘指令／跳轉／frames
-        // 逐字相同；(3) 已在鎖內的三個既有 n_addZombie 呼叫點與 updateMain／save／stop 一個位元都不准動。
-        String zpmCls = "zombie/popman/ZombiePopulationManager";
-        String addLockCls = "zombie/mdc/PopManAddLock";
-        String nAddDesc = "(FFFBIIII)V";
-        String reentrantLock = "java/util/concurrent/locks/ReentrantLock";
-        String vanillaNAdd = "INVOKESTATIC " + zpmCls + ".n_addZombie " + nAddDesc;
-        String patchedNAdd = "INVOKESTATIC " + addLockCls + ".addZombie " + nAddDesc;
-        ClassNode pZpm = classNode(distJava, zpmCls);
-        String[] addNames = {"addZombieStanding", "addZombieMoving"};
-        String[] addDescs = {
-            "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;)V",
-            "(FFFLzombie/iso/IsoDirections;ILzombie/popman/ZombieStateFlags;II)V",
-        };
-        for (int i = 0; i < addNames.length; i++) {
-            MethodNode vFall = methodFromJar(jar, zpmCls, addNames[i], addDescs[i]);
-            MethodNode pFall = method(distJava, zpmCls, addNames[i], addDescs[i]);
-            failed += check("W28 vanilla 前提：" + addNames[i] + " n_addZombie=1 且 saveLock 讀取=0（缺口本體）",
-                    countExactCalls(vFall, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 1
-                    && countFieldReads(vFall, zpmCls, "saveLock") == 0);
-            failed += check("W28 手術後：" + addNames[i] + " 改道 helper x1、原 n_addZombie 歸零、不自行碰 saveLock；"
-                            + "除該呼叫換名外指令／跳轉／frames/maxs 逐字相同",
-                    countExactCalls(pFall, Opcodes.INVOKESTATIC, addLockCls, "addZombie", nAddDesc) == 1
-                    && countExactCalls(pFall, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 0
-                    && countFieldReads(pFall, zpmCls, "saveLock") == 0
-                    && realInsnCount(pFall) == realInsnCount(vFall)
-                    && methodText(vFall).replace(vanillaNAdd, patchedNAdd).equals(methodText(pFall)));
-        }
-        // 全 jar 呼叫點普查：5＝兩個 fallback＋removeChunkFromWorld x2＋virtualizeZombie x1。
-        // 數量改變就重評範圍；單靠數量不能判斷新增呼叫點是否持鎖。
-        failed += check("W28 全 jar n_addZombie 呼叫點=5；patched class 內原呼叫剩 3（已在 saveLock 內者）、改道恰 2",
-                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 5
-                && classWideCalls(pZpm, Opcodes.INVOKESTATIC, zpmCls, "n_addZombie", nAddDesc) == 3
-                && classWideCalls(pZpm, Opcodes.INVOKESTATIC, addLockCls, "addZombie", nAddDesc) == 2);
-        failed += check("W28 n_addZombie 本身仍是 private static native 同 desc（不動 jar 公開面；helper 走 privateLookupIn）",
-                pZpm.methods.stream().anyMatch(m -> m.name.equals("n_addZombie") && m.desc.equals(nAddDesc)
-                        && (m.access & Opcodes.ACC_NATIVE) != 0 && (m.access & Opcodes.ACC_PRIVATE) != 0
-                        && (m.access & Opcodes.ACC_STATIC) != 0));
-        String[] untouchedNames = {"removeChunkFromWorld", "virtualizeZombie", "updateMain", "save", "stop"};
-        String[] untouchedDescs = {"(Lzombie/iso/IsoChunk;)V", "(Lzombie/characters/IsoZombie;)V", "()V", "()V", "()V"};
-        for (int i = 0; i < untouchedNames.length; i++) {
-            failed += check("W28 未改動：" + untouchedNames[i] + " bytecode 與 vanilla 逐字相同",
-                    methodText(methodFromJar(jar, zpmCls, untouchedNames[i], untouchedDescs[i]))
-                            .equals(methodText(method(distJava, zpmCls, untouchedNames[i], untouchedDescs[i]))));
-        }
-        // helper 契約：鎖只包原生委派、例外不可被吃（finally 解鎖仍成立）、熱路徑零配置。
-        MethodNode pAddLock = method(distJava, addLockCls, "addZombie", nAddDesc);
-        failed += check("W28 helper 契約：lock x1 且在 try 外、invokeExact x1 且在 try 內、unlock>=1、"
-                        + "只有 catch-all（finally）無具型 catch 吞例外、零 NEW",
-                countExactCalls(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "lock", "()V") == 1
-                && callsInsideTryRange(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "lock", "()V") == 0
-                && countCalls(pAddLock, "java/lang/invoke/MethodHandle", "invokeExact") == 1
-                && callsInsideTryRange(pAddLock, Opcodes.INVOKEVIRTUAL,
-                        "java/lang/invoke/MethodHandle", "invokeExact", nAddDesc) == 1
-                && countExactCalls(pAddLock, Opcodes.INVOKEVIRTUAL, reentrantLock, "unlock", "()V") >= 1
-                && pAddLock.tryCatchBlocks.stream().allMatch(t -> t.type == null)
-                && countOpcode(pAddLock, Opcodes.NEW) == 0);
+        // 42.21.0 官方已修：ACKWasReceived 迴圈改 `i < size`（offset 15 if_icmpge），W27 兩條斷言隨 patch 退役。
 
         // W29：接收入口整包驗證；依賴的上游協定一變就重驗，不猜新格式。
         String animalIngress = "zombie/mdc/AnimalUpdateGuard";
@@ -2998,41 +2755,38 @@ public final class SmokeCheck {
                 && countOpcode(gIngress, Opcodes.NEW) == 0
                 && countCalls(gIngress, "zombie/core/raknet/UdpConnection", "forceDisconnect") == 0);
         // 固定共用 wire 實作及兩個側別宣告；TIS 修改時人工判定是否撤刀或更新契約。
+        // 指紋取去 debug（行號／區域變數／SourceFile）的整類文字：含 @PacketSetting、欄位與全部方法，
+        // 只因上游插碼造成的行號位移不再誤報。42.21 對版：AnimalUpdatePacket 只差 client 分支的
+        // setSquare(null)，上行 wire 與伺服器 parse 逐指令未變（docs/patches.md 2aq）。
         String[][] animalProtocol = {
-            {"zombie/network/packets/character/AnimalUpdatePacket", "ece2b020d7a0d2b08ca17698e7eb97c21eac970038f52067e6e16859d58b8c7a"},
-            {"zombie/network/packets/character/AnimalUpdateReliablePacket", "a2c8af71ae6830949782b1c4b3015b4c1cb0dd0e0dc54b4d6a218bbc00d89634"},
-            {"zombie/network/packets/character/AnimalUpdateUnreliablePacket", "434737708d5db2a36d5f4652c4c3ec8ecd68ff12d477b37c6210d9b73323729c"},
+            {"zombie/network/packets/character/AnimalUpdatePacket", "e24d87ca814a5fa8fa477e91f282baff7bbcb2460a306d503831ba41148b0264"},
+            {"zombie/network/packets/character/AnimalUpdateReliablePacket", "1e4a0964828ef29a3cc76129f7d0e9cd3bd38ec2424e3848458b077d3af420af"},
+            {"zombie/network/packets/character/AnimalUpdateUnreliablePacket", "4938c2a522682c53724cd30db5fb98b178dbffffa1bebf032c882889699deefe"},
         };
-        try (ZipFile protocolJar = new ZipFile(jar.toFile())) {
-            java.security.MessageDigest protocolSha = java.security.MessageDigest.getInstance("SHA-256");
-            for (String[] entry : animalProtocol) {
-                byte[] original = protocolJar.getInputStream(protocolJar.getEntry(entry[0] + ".class")).readAllBytes();
-                failed += check("W29 上游協定及側別未漂移：" + entry[0],
-                        java.util.HexFormat.of().formatHex(protocolSha.digest(original)).equals(entry[1]));
-                failed += check("W29 不覆寫動物同步協定類別：" + entry[0],
-                        !Files.exists(distJava.resolve(entry[0] + ".class")));
-            }
+        for (String[] entry : animalProtocol) {
+            failed += check("W29 上游協定及側別未漂移：" + entry[0],
+                    sha256Hex(debuglessClassText(jar, entry[0])).equals(entry[1]));
+            failed += check("W29 不覆寫動物同步協定類別：" + entry[0],
+                    !Files.exists(distJava.resolve(entry[0] + ".class")));
         }
         failed += check("W29 client 接收入口不改動",
                 methodText(methodFromJar(jar, packetTypeCls, "onClientPacket", clientDispatchDesc))
                         .equals(methodText(method(distJava, packetTypeCls, "onClientPacket", clientDispatchDesc))));
 
         // W31：不只數命中；原方法、lambda body、側別與 decoder 漂移即要求重新驗證。
+        // 指紋取去 debug 的 methodText（行號位移不算漂移；42.20.4 與 42.21 值相同）。
         // （W30 的 IsoCell 三條契約隨 W30 退役移除；processItems 的前提改由下方 W45 守門。）
         String[][] batchContracts = {
-            {"zombie/network/GameServer", "transmitFishingData", "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V", "cd54af7a8028e0cc907519b83c052b8b2e8a19e3252dde6d57ea8a20af0e5a79"},
-            {"zombie/network/GameServer", "lambda$transmitFishingData$0", "(Lzombie/core/network/ByteBufferWriter;J)Z", "8c3b6ca114335016a4b5c54b90ba7652ae6ad0f4ac552aa2836186b9199bc098"},
-            {"zombie/network/GameServer", "lambda$transmitFishingData$1", "(Lzombie/core/network/ByteBufferWriter;JLzombie/iso/FishSchoolManager$ChumData;)Z", "ba5ea6e7ee000bab741ca9b8f4f95e3319b8f4c880e975cee234de9823865fdb"},
-            {"zombie/iso/FishSchoolManager", "updateSeed", "()V", "d6d51aa73ca10b7740ff2ffdebd3ff16d29d6a0f63aa308e025457390c3a8a34"},
-            {"zombie/iso/FishSchoolManager", "updateFishingData", "()V", "fda124bc8062a340a9e35c6524604f80e0b66face00822c5383ae32d445b13ab"},
-            {"zombie/iso/FishSchoolManager", "receiveFishingData", "(Lzombie/core/network/ByteBufferReader;)V", "68ad56da450290eddbe8bda78518468c512c6da54b290166207543b45d68e437"}
+            {"zombie/network/GameServer", "transmitFishingData", "(IILgnu/trove/map/hash/TLongIntHashMap;Lgnu/trove/map/hash/TLongObjectHashMap;)V", "967b94d94daac05f9d641d6db44d4e1525636e9cf94c8495722ced523ae78c96"},
+            {"zombie/network/GameServer", "lambda$transmitFishingData$0", "(Lzombie/core/network/ByteBufferWriter;J)Z", "d3590ace917c3ccaac257f757dd4053fd9eeb1fe0fdb1c7a3f085dcd36ba5c11"},
+            {"zombie/network/GameServer", "lambda$transmitFishingData$1", "(Lzombie/core/network/ByteBufferWriter;JLzombie/iso/FishSchoolManager$ChumData;)Z", "56d9129cae1b88469fb451272015db02bdbda617d311decbd731e4e2db7bd1c4"},
+            {"zombie/iso/FishSchoolManager", "updateSeed", "()V", "fe255e44ad29d16664f273b46b09ea392a3e2bc9e71e44083c2e432316065829"},
+            {"zombie/iso/FishSchoolManager", "updateFishingData", "()V", "5ecdda31a5f3ba4666b080fc93ced5e1f33ec38d098691e93f4599e03ffece4a"},
+            {"zombie/iso/FishSchoolManager", "receiveFishingData", "(Lzombie/core/network/ByteBufferReader;)V", "bc09f1e14dbd2710effe11f49f2a7536534fb670d48b28244df9a0dd879cefd1"}
         };
-        java.security.MessageDigest batchSha = java.security.MessageDigest.getInstance("SHA-256");
         for (String[] contract : batchContracts) {
-            byte[] text = methodText(methodFromJar(jar, contract[0], contract[1], contract[2]))
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
             failed += check("W31 上游契約未漂移：" + contract[0] + "." + contract[1],
-                    java.util.HexFormat.of().formatHex(batchSha.digest(text)).equals(contract[3]));
+                    sha256Hex(debuglessMethodText(jar, contract[0], contract[1], contract[2])).equals(contract[3]));
         }
         failed += check("W31 ByteBufferWriter 維持 final，無自訂 writer 回呼改變批次資料",
                 (classNodeFromJar(jar, "zombie/core/network/ByteBufferWriter").access & Opcodes.ACC_FINAL) != 0);
@@ -3293,14 +3047,27 @@ public final class SmokeCheck {
                         .equals(methodText(method(distJava, adCls, "checkPregnancy", "()V"))));
 
         // W37：動物半建構物件守衛＋apop 先序列化再開檔。存在理由三條（TIS 修好時會紅＝撤刀）：
-        // super() 先把角色加進 cell、IsoAnimal 建構子之後才做兩項會跳過 init 的檢查、AnimalCell.save
-        // 先開檔（截斷）才序列化。
+        // super() 先把角色加進 cell 與格子、IsoAnimal 建構子之後才做兩項會跳過 init 的檢查、AnimalCell.save
+        // 先開檔（截斷）才序列化。42.21 起加入 cell 改經 IsoCell.addMovingObject、chickenpocalypse 多一個
+        // replacingAnimal 參數（建構子傳 null）；afterCtor 撤的是 addMovingObject 兩分支＋setMovingSquareNow。
         String animalCls = "zombie/characters/animals/IsoAnimal";
         String spawnHelper = "zombie/mdc/AnimalSpawnGuard";
         String afterCtorDesc = "(L" + animalCls + ";)V";
-        failed += check("W37 vanilla IsoGameCharacter 建構子先把物件加入 cell addList／objectList",
-                countExactCalls(methodFromJar(jar, "zombie/characters/IsoGameCharacter", "<init>", "(Lzombie/iso/IsoCell;FFF)V"),
-                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getAddList", "()Ljava/util/Set;") == 1);
+        MethodNode vCharCtor = methodFromJar(jar, "zombie/characters/IsoGameCharacter", "<init>", "(Lzombie/iso/IsoCell;FFF)V");
+        failed += check("W37 vanilla IsoGameCharacter 建構子先把物件加入 cell（addMovingObject 恰 1）與格子（setMovingSquareNow 恰 1）",
+                countExactCalls(vCharCtor, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "addMovingObject",
+                        "(Lzombie/iso/IsoMovingObject;)V") == 1
+                && countExactCalls(vCharCtor, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoGameCharacter",
+                        "setMovingSquareNow", "()V") == 1);
+        // afterCtor 的逆操作依據：addMovingObject 只有 isSafeToAdd→objectList.add／addList.add 兩分支，別無登記。
+        // vAddMoving 沿用 W47 段已載入的同一個 vanilla 方法。
+        failed += check("W37 vanilla IsoCell.addMovingObject 只有 isSafeToAdd→objectList／addList 兩分支",
+                countExactCalls(vAddMoving, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "isSafeToAdd", "()Z") == 1
+                && countExactFields(vAddMoving, Opcodes.GETFIELD, "zombie/iso/IsoCell", "objectList", "Ljava/util/Set;") == 1
+                && countExactFields(vAddMoving, Opcodes.GETFIELD, "zombie/iso/IsoCell", "addList", "Ljava/util/Set;") == 1
+                && countExactCalls(vAddMoving, Opcodes.INVOKEINTERFACE, "java/util/Set", "add", "(Ljava/lang/Object;)Z") == 2
+                && countOpcode(vAddMoving, Opcodes.INVOKEVIRTUAL) + countOpcode(vAddMoving, Opcodes.INVOKEINTERFACE)
+                        + countOpcode(vAddMoving, Opcodes.INVOKESTATIC) + countOpcode(vAddMoving, Opcodes.INVOKESPECIAL) == 3);
         String[] w37Ctors = {
                 "(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;)V",
                 "(Lzombie/iso/IsoCell;IIILjava/lang/String;Ljava/lang/String;Z)V",
@@ -3314,7 +3081,7 @@ public final class SmokeCheck {
                 if (in.getOpcode() == Opcodes.RETURN) returns++;
             }
             failed += check("W37 vanilla 建構子 " + ctorDesc + " 含 chickenpocalypse＋water 兩項檢查",
-                    countExactCalls(vCtor, Opcodes.INVOKEVIRTUAL, animalCls, "checkForChickenpocalypse", "()Z") == 1
+                    countExactCalls(vCtor, Opcodes.INVOKEVIRTUAL, animalCls, "checkForChickenpocalypse", "(L" + animalCls + ";)Z") == 1
                     && countExactCalls(vCtor, Opcodes.INVOKEVIRTUAL, animalCls, "checkForWater", "()Z") == 1);
             failed += check("W37 建構子 " + ctorDesc + " 每個 RETURN 前 afterCtor、真指令恰 +2×RETURN",
                     tailCallOk(pCtor, spawnHelper, "afterCtor", afterCtorDesc)
@@ -3503,21 +3270,47 @@ public final class SmokeCheck {
                 && countExactCalls(vRnrd, Opcodes.INVOKESTATIC, csoCls, "onReceiveChunkNotReady", csoDesc) == 0);
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（client）",
                 patchInfoOk(distJava, "client"));
+        // 42.21 起 sentRequests→pendingRequests 的 drain 移到 udpUpdate()，receive 兩方法觸碰
+        // sentRequests=0（原釘退化成 0==0）——改釘兩方法都仍在配對的 pendingRequests。
         MethodNode vRcp = methodFromJar(jar, wsCls, "receiveChunkPart", bbrDesc);
-        failed += check("receiveChunkPart 原體保留（sentRequests 觸碰數未變＝head-call 未破壞原邏輯）",
-                countFieldTouches(pRcp, wsCls, "sentRequests")
-                == countFieldTouches(vRcp, wsCls, "sentRequests"));
-        // helper 反射依賴的八個私有欄位契約：名稱＋descriptor 逐一鎖進建置期
-        //（漂移時 helper 會 fail-quiet 降級僅計數——這道守門把「默默降級」變成建置失敗）
+        MethodNode vRnr = methodFromJar(jar, wsCls, "receiveNotRequired", bbrDesc);
+        failed += check("receiveChunkPart/receiveNotRequired 原體保留（pendingRequests 觸碰數未變且非零）",
+                countFieldTouches(vRcp, wsCls, "pendingRequests") > 0
+                && countFieldTouches(pRcp, wsCls, "pendingRequests")
+                        == countFieldTouches(vRcp, wsCls, "pendingRequests")
+                && countFieldTouches(vRnr, wsCls, "pendingRequests") > 0
+                && countFieldTouches(pRnr, wsCls, "pendingRequests")
+                        == countFieldTouches(vRnr, wsCls, "pendingRequests"));
+        // sendGate 標示的前提：42.21 sendRequests 頭部無條件 pendingRequests1.size() <= 20 才送
+        //（getfield pendingRequests1 → size → bipush 20 → if_icmple），helper 門檻常數連動
+        MethodNode vSend = methodFromJar(jar, wsCls, "sendRequests", "()V");
+        boolean gateOk = false;
+        for (AbstractInsnNode in : vSend.instructions) {
+            if (in instanceof IntInsnNode push && push.getOpcode() == Opcodes.BIPUSH && push.operand == 20) {
+                AbstractInsnNode size = prevReal(push);
+                AbstractInsnNode owner = size == null ? null : prevReal(size);
+                AbstractInsnNode cmp = nextReal(push);
+                gateOk = size instanceof MethodInsnNode mi && mi.name.equals("size")
+                        && owner instanceof FieldInsnNode fi && fi.owner.equals(wsCls)
+                        && fi.name.equals("pendingRequests1")
+                        && cmp != null && cmp.getOpcode() == Opcodes.IF_ICMPLE;
+            }
+        }
+        ClassNode pCso = classNode(distJava, csoCls);
+        boolean helperGate = pCso.fields.stream().anyMatch(f -> f.name.equals("SEND_GATE_PENDING1")
+                && f.value instanceof Integer v && v == 20);
+        failed += check("vanilla 前提：sendRequests 停送 gate＝pendingRequests1.size()<=20（恰一個 20）且 helper 常數連動",
+                gateOk && countIntConst(vSend, 20) == 1 && helperGate);
+        // helper 反射依賴的六個私有欄位契約：名稱＋descriptor 逐一鎖進建置期
+        //（漂移時 helper 會 fail-quiet 降級僅計數——這道守門把「默默降級」變成建置失敗）。
+        // 42.21 刪除 requestingLargeArea／largeAreaDownloads，helper 同步不再反射。
         ClassNode vWs = classNodeFromJar(jar, wsCls);
-        failed += check("ChunkStream 反射欄位契約（8 欄位名稱＋型別）",
+        failed += check("ChunkStream 反射欄位契約（6 欄位名稱＋型別）",
                 hasField(vWs, "pendingRequests", "Ljava/util/ArrayList;")
                 && hasField(vWs, "pendingRequests1", "Ljava/util/ArrayList;")
                 && hasField(vWs, "chunkRequests0", "Ljava/util/concurrent/ConcurrentLinkedQueue;")
                 && hasField(vWs, "chunkRequests1", "Ljava/util/ArrayList;")
                 && hasField(vWs, "sentRequests", "Ljava/util/concurrent/ConcurrentLinkedQueue;")
-                && hasField(vWs, "requestingLargeArea", "Z")
-                && hasField(vWs, "largeAreaDownloads", "I")
                 && hasField(vWs, "requestNumber", "I"));
         return failed;
     }
@@ -4330,7 +4123,7 @@ public final class SmokeCheck {
         return count;
     }
 
-    /** GETFIELD 版欄位讀取計數（countFieldReads 是 GETSTATIC 版；W9 的兩顆共用 CRC32 都是 instance 欄位）。 */
+    /** GETFIELD 版欄位讀取計數（countFieldReads 是 GETSTATIC 版）。 */
     static int countInstanceFieldReads(MethodNode method, String owner, String name) {
         int count = 0;
         for (AbstractInsnNode in : method.instructions) {
@@ -4344,7 +4137,7 @@ public final class SmokeCheck {
         return count;
     }
 
-    /** 全 jar 欄位讀取普查（opcode 指定 GETFIELD／GETSTATIC）——W9 耦合鎖的 fail-closed 版。 */
+    /** 全 jar 欄位存取普查（opcode 指定 GETFIELD／GETSTATIC／PUTFIELD）——fail-closed 耦合鎖用。 */
     static int jarWideFieldReadCensus(Path jar, int opcode, String owner, String name) throws Exception {
         int count = 0;
         try (ZipFile zf = new ZipFile(jar.toFile())) {
@@ -4363,25 +4156,6 @@ public final class SmokeCheck {
                             count++;
                         }
                     }
-                }
-            }
-        }
-        return count;
-    }
-
-    /**
-     * 同形替換緊鄰性：GETFIELD owner.name 之後<b>緊接</b> INVOKESTATIC helperOwner.helperName
-     * 的配對數（W9）。FieldGetSwap 的插入語意就是緊鄰——中間隔任何指令＝helper 吃錯堆疊值。
-     */
-    static int swapAdjacency(MethodNode m, String owner, String name, String helperOwner, String helperName) {
-        int count = 0;
-        for (AbstractInsnNode in : m.instructions) {
-            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD
-                    && fi.owner.equals(owner) && fi.name.equals(name)) {
-                AbstractInsnNode next = nextReal(in);
-                if (next instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
-                        && mi.owner.equals(helperOwner) && mi.name.equals(helperName)) {
-                    count++;
                 }
             }
         }
@@ -4722,34 +4496,6 @@ public final class SmokeCheck {
         return null;
     }
 
-    /**
-     * W22 語境錨：{@code call} 之後的真指令序列必須是 ASTORE s → ALOAD s →（一條 ALOAD，
-     * Vector2 參數）→ INVOKEVIRTUAL nextOwner.nextName——「結果存回同 slot 後立刻無條件解參考」。
-     * 任何一步不符（TIS 插入 null 檢查、換 slot、改成直接鏈式呼叫）都回 false 讓建置紅。
-     */
-    static boolean callFollowedByStoreLoadCall(MethodNode m, String owner, String name, String desc,
-                                               String nextOwner, String nextName) {
-        MethodInsnNode call = findExactCall(m, Opcodes.INVOKEVIRTUAL, owner, name, desc);
-        if (call == null) {
-            return false;
-        }
-        AbstractInsnNode store = nextReal(call);
-        if (!(store instanceof VarInsnNode s) || s.getOpcode() != Opcodes.ASTORE) {
-            return false;
-        }
-        AbstractInsnNode load = nextReal(store);
-        if (!(load instanceof VarInsnNode l) || l.getOpcode() != Opcodes.ALOAD || l.var != s.var) {
-            return false;
-        }
-        AbstractInsnNode arg = nextReal(load);
-        if (!(arg instanceof VarInsnNode a) || a.getOpcode() != Opcodes.ALOAD) {
-            return false;
-        }
-        AbstractInsnNode next = nextReal(arg);
-        return next instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
-                && mi.owner.equals(nextOwner) && mi.name.equals(nextName);
-    }
-
     /** 取前 n 條「真指令」（跳過 label/frame/line）。 */
     static AbstractInsnNode[] firstReal(MethodNode m, int n) {
         AbstractInsnNode[] out = new AbstractInsnNode[n];
@@ -4779,6 +4525,30 @@ public final class SmokeCheck {
                     .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    /** 讀 jar 內 class 並略過 debug 資訊，產生的整類文字不含行號、區域變數表與 SourceFile（上游指紋用）。 */
+    static String debuglessClassText(Path jar, String cls) throws Exception {
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            byte[] bytes = jf.getInputStream(jf.getJarEntry(cls + ".class")).readAllBytes();
+            var textifier = new org.objectweb.asm.util.Textifier();
+            new ClassReader(bytes).accept(new org.objectweb.asm.util.TraceClassVisitor(null, textifier, null),
+                    ClassReader.SKIP_DEBUG);
+            var output = new java.io.StringWriter();
+            textifier.print(new java.io.PrintWriter(output));
+            return output.toString();
+        }
+    }
+
+    /** 同 {@link #methodText}，但來源 class 以 SKIP_DEBUG 讀入：行號位移不改變結果（上游指紋用）。 */
+    static String debuglessMethodText(Path jar, String cls, String name, String desc) throws Exception {
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            byte[] bytes = jf.getInputStream(jf.getJarEntry(cls + ".class")).readAllBytes();
+            ClassNode cn = new ClassNode();
+            new ClassReader(bytes).accept(cn, ClassReader.SKIP_DEBUG);
+            return methodText(cn.methods.stream()
+                    .filter(m -> m.name.equals(name) && m.desc.equals(desc)).findFirst().orElseThrow());
         }
     }
 

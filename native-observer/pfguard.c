@@ -1,5 +1,5 @@
 /*
- * libmdcpfguard.so — PZ 42.20.4 libPZPathFind64.so aligned-block guard (observation only).
+ * libmdcpfguard.so — PZ 42.20.4／42.21.0 libPZPathFind64.so aligned-block guard (observation only).
  *
  * Interposes exactly two exported PathFind symbols:
  *     _Z18reallocate_alignedPvmm   reallocate_aligned(void*, unsigned long, unsigned long)
@@ -863,7 +863,9 @@ void pfg_deallocate_aligned(void *p)
 
 /* ------------------------------------------------------------------ merge-release (v5) */
 
-/* VehicleCluster layout (42.20.4, sha 0777dda6…; verified in the two production cores and
+/* VehicleCluster layout (42.20.4 sha 0777dda6… and 42.21.0 sha e4c7d5c7… are isomorphic here:
+ * merge/alloc/release/createVehicleCluster(s) are instruction-identical after address
+ * normalization; 42.20.4 layout verified in the two production cores and
  * the decompile): 0x18 bytes — +0x00 int level, +0x08 int capacity, +0x0c int count,
  * +0x10 VehicleRect** array. The pool (ObjectPool<VehicleCluster>) is a std::deque<void*>
  * of free objects; release() is a bare push, alloc() a bare pop, init() only zeroes count —

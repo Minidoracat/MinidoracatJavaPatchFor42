@@ -15,14 +15,20 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define SITE 0x22862c8u
-#define TEXT_START 0xd14090u
-#define TEXT_SIZE 0x1c4a96fu
+/* Pinned image: steamclient.so shipped with PZ 42.21.0 dedicated server
+ * (SHA256 1a99f396…c7d4, build ID 04049c66…653a). The PseudoTCP partial-ACK
+ * branch and the retransmit offset are byte-identical to the 42.20.4-era build
+ * (df982870…); the whole function moved by +0x186570. */
+#define SITE 0x240c838u
+#define TRANSMIT 0x240b6f1u
+#define TEXT_START 0xd9d850u
+#define TEXT_SIZE 0x1d43c6fu
+#define TEXT_OFFSET 0xd9c850u
 #define PAGE 4096u
 static const unsigned char build_note[] = {
     4,0,0,0,20,0,0,0,3,0,0,0,'G','N','U',0,
-    0xdf,0x98,0x28,0x70,0xf3,0x87,0x38,0x95,0x83,0xef,
-    0x18,0x82,0xf4,0x2a,0x92,0x0b,0xa6,0x91,0x8a,0xf4
+    0x04,0x04,0x9c,0x66,0x8c,0x23,0xa4,0xd6,0x50,0x3d,
+    0x81,0x1c,0x8a,0x0c,0x70,0x3f,0x68,0x55,0x65,0x3a
 };
 static const unsigned char original[] = {0x44,0x29,0xf8,0x41,0x89,0x44,0x24,0x14};
 static const unsigned char continuation[] = {
@@ -86,14 +92,14 @@ static int verify(int sink, uintptr_t base) {
     if (ph[2].p_type != PT_LOAD || ph[2].p_vaddr != 0 || ph[2].p_filesz < 0x2cc ||
         ph[3].p_type != PT_LOAD || ph[3].p_flags != (PF_R|PF_X) ||
         ph[3].p_vaddr != TEXT_START || ph[3].p_memsz != TEXT_SIZE ||
-        ph[3].p_filesz != TEXT_SIZE || ph[3].p_offset != 0xd13090) return 0;
+        ph[3].p_filesz != TEXT_SIZE || ph[3].p_offset != TEXT_OFFSET) return 0;
     return readable(sink, base + 0x2a8, sizeof(build_note)) &&
         !memcmp((void *)(base + 0x2a8), build_note, sizeof(build_note)) &&
         readable(sink, base + SITE, sizeof(original) + sizeof(continuation)) &&
         !memcmp((void *)(base + SITE), original, sizeof(original)) &&
         !memcmp((void *)(base + SITE + sizeof(original)), continuation, sizeof(continuation)) &&
-        readable(sink, base + 0x2285181, sizeof(transmit)) &&
-        !memcmp((void *)(base + 0x2285181), transmit, sizeof(transmit));
+        readable(sink, base + TRANSMIT, sizeof(transmit)) &&
+        !memcmp((void *)(base + TRANSMIT), transmit, sizeof(transmit));
 }
 
 static int matches(uintptr_t base) {
@@ -178,7 +184,7 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
     /* ponytail: retain 4 KiB per load until process exit; never reclaim while
      * Steam's text remains mapped. Revisit only if repeated reloads become real.
      */
-    LOG("APPLIED v1: PseudoTCP partial-ACK seq repair; build=df982870; disk image unchanged");
+    LOG("APPLIED v1: PseudoTCP partial-ACK seq repair; build=04049c66; disk image unchanged");
     return 0;
 }
 

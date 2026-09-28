@@ -70,18 +70,7 @@ public final class LogFilterNoiseTest {
         require(!LogFilter.suppressesLog("IsoChunk.removeFromWorld: vehicle was removed from world id=42"),
                 "改字的訊息必須放行");
         require(!LogFilter.suppressesLog(null), "suppressesLog(null) 必須放行（不得 NPE）");
-        // 抑噪 #9 println 名單：只攔 IsoThumpable 的 not-found；同方法的 square-is-null、
-        // 其他 class 的 not-found（破損訊號）、null 一律放行
-        require(LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on square 8769,15252,0"),
-                "IsoThumpable not-found 必須被攔");
-        require(!LogFilter.suppressesPrintln("ERROR: IsoThumpable square is null"),
-                "square-is-null 必須放行");
-        require(!LogFilter.suppressesPrintln("ERROR: IsoDoor not found on square 1,2,0"),
-                "其他 class 的 not-found 必須放行");
-        require(!LogFilter.suppressesPrintln("ERROR: IsoThumpable not found on squar"),
-                "截斷前綴必須放行");
-        require(!LogFilter.suppressesPrintln(null), "null 必須放行（不得 NPE）");
-        System.out.println("log-filter OK  雙向鏡像 37+5／equals 紀律／名單防呆／prefix 行為／println 名單全數通過");
+        System.out.println("log-filter OK  雙向鏡像 37+5／equals 紀律／名單防呆／prefix 行為全數通過");
     }
 
     private static void requireSuppressed(String msg) {

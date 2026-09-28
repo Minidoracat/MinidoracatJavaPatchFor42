@@ -5,6 +5,7 @@ package zombie.mdc;
  * 節流、periodic、靜默抑制、閒置後新請求不假報、心跳斷檔重置。時間全部注入。
  * 取樣點依 Claude 審查的突變分析選定：235s 取樣讓「接收基準」單獨擋不住，
  * 只有「上升沿基準」能擋——鎖住斷檔重置的回歸保護。
+ * 另有一案對真實 WorldStreamer 走 production 反射讀態（42.21 刪欄位時此案即紅）。
  */
 public final class ChunkStreamObserverBehaviorTest {
 
@@ -21,21 +22,72 @@ public final class ChunkStreamObserverBehaviorTest {
         notReadyIndependentBaseline();
         notReadyOnlyPeriodicActivity();
         productionWiringOrder();
+        sendGateMarking();
+        realReflectionAgainstGameJar();
         System.out.println("chunk-stream OK  STALL 雙基準/節流、periodic、閒置不假報、斷檔重置、"
-                + "ChunkNotReady 獨立基準/分型、notReady-only periodic、production 接線全數通過");
+                + "ChunkNotReady 獨立基準/分型、notReady-only periodic、production 接線、sendGate、"
+                + "真實反射讀態全數通過");
     }
 
-    private static String decide(long nowNs, int pending, int pending1, int reqQ1, boolean largeArea) {
+    /** 42.21 sendRequests 停送 gate：pendingRequests1>20 標 closed、恰 20 仍 open、反射停用標 ?。 */
+    private static void sendGateMarking() {
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);
+        String open = decide(61 * S, 0, 20, 0);
+        require(open != null && open.contains("sendGate=open"), "pending1=20 仍可送：" + open);
+        String closed = decide(122 * S, 0, 21, 0);
+        require(closed != null && closed.contains("sendGate=closed"), "pending1=21 停送：" + closed);
+        ChunkStreamObserver.resetForTest();
+        ChunkStreamObserver.primeForTest(0);
+        ChunkStreamObserver.recordReceiveForTest(0);
+        String off = decideReflectionOff(61 * S);
+        require(off != null && off.contains("sendGate=?"), "反射停用不猜 gate：" + off);
+    }
+
+    /**
+     * 對遊戲 jar 的真實 WorldStreamer 走 readAndDecide（production 反射讀態＋接線）：
+     * pendingRequests1 塞 21 筆後 31 秒無接收必出 STALL，且佇列值是真讀到的（非 -1 降級）。
+     */
+    @SuppressWarnings("unchecked")
+    private static void realReflectionAgainstGameJar() {
+        try {
+            zombie.iso.WorldStreamer ws = zombie.iso.WorldStreamer.instance;
+            java.lang.reflect.Field f = zombie.iso.WorldStreamer.class.getDeclaredField("pendingRequests1");
+            f.setAccessible(true);
+            java.util.List<Object> pending1 = (java.util.List<Object>) f.get(ws);
+            ChunkStreamObserver.resetForTest();
+            ChunkStreamObserver.primeForTest(0);
+            ChunkStreamObserver.recordReceiveForTest(0);
+            for (int i = 0; i < 21; i++) {
+                pending1.add(null);
+            }
+            try {
+                require(ChunkStreamObserver.readAndDecide(1 * S, ws) == null, "上升沿起算（真實反射）");
+                String line = ChunkStreamObserver.readAndDecide(31 * S, ws);
+                require(line != null && line.contains("STALL") && line.contains("pending1=21")
+                                && line.contains("sendGate=closed") && line.contains("pending=0")
+                                && line.contains("anomalies=0"),
+                        "真實反射讀態未降級且標出停送：" + line);
+            } finally {
+                pending1.clear();
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError("WorldStreamer 反射失敗（欄位漂移？）", e);
+        }
+    }
+
+    private static String decide(long nowNs, int pending, int pending1, int reqQ1) {
         return ChunkStreamObserver.decide(nowNs,
                 ChunkStreamObserver.partsForTest(), 0, ChunkStreamObserver.notReadyForTest(), 0,
                 ChunkStreamObserver.lastReceiveForTest(), ChunkStreamObserver.lastNotReadyForTest(),
-                pending, pending1, 0, reqQ1, 0, largeArea, 0, 0);
+                pending, pending1, 0, reqQ1, 0, 0);
     }
 
     private static String decideReflectionOff(long nowNs) {
         return ChunkStreamObserver.decide(nowNs, 1, 0, 0, 0,
                 ChunkStreamObserver.lastReceiveForTest(), 0,
-                -1, -1, -1, -1, -1, false, -1, -1);
+                -1, -1, -1, -1, -1, -1);
     }
 
     /**
@@ -60,9 +112,9 @@ public final class ChunkStreamObserverBehaviorTest {
                 "payload 基準不受 NotReady 影響（獨立基準）");
         // (2)(3) 注入時間軸：先建立 outstanding 上升沿，payload 凍結 40s、NotReady 39s
         // 才來過 → STALL 照出且分型正確
-        require(decide(1 * S, 3, 1, 0, false) == null, "上升沿起算");
+        require(decide(1 * S, 3, 1, 0) == null, "上升沿起算");
         ChunkStreamObserver.primeNotReadyForTest(39 * S);
-        String line = decide(40 * S, 3, 1, 0, false);
+        String line = decide(40 * S, 3, 1, 0);
         require(line != null && line.contains("STALL"),
                 "server 持續回 NotReady 仍無 payload → STALL 不被靜音：" + line);
         require(line.contains("noReceiveMs=40000") && line.contains("notReadyAgoMs=1000")
@@ -72,8 +124,8 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        decide(1 * S, 2, 0, 0, false);
-        String dead = decide(45 * S, 2, 0, 0, false);
+        decide(1 * S, 2, 0, 0);
+        String dead = decide(45 * S, 2, 0, 0);
         require(dead != null && dead.contains("STALL") && dead.contains("notReadyAgoMs=-1"),
                 "全斷流（零 NotReady）→ notReadyAgoMs=-1：" + dead);
         // lock-free 時序邊界：nowNs 取樣後網路緒才寫入時戳（lastNotReadyNs > nowNs）
@@ -81,9 +133,9 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        decide(1 * S, 2, 0, 0, false);
+        decide(1 * S, 2, 0, 0);
         ChunkStreamObserver.primeNotReadyForTest(41 * S);   // 未來時戳（跨緒競態形狀）
-        String future = decide(40 * S, 2, 0, 0, false);
+        String future = decide(40 * S, 2, 0, 0);
         require(future != null && future.contains("STALL") && future.contains("notReadyAgoMs=0"),
                 "未來時戳 clamp 0（不得為負）：" + future);
     }
@@ -94,7 +146,7 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.onReceiveChunkNotReady(null);   // parts=0、notReq=0、notReady=1
         ChunkStreamObserver.primeNotReadyForTest(1 * S);    // 時戳改注入值（隔離真 nanoTime）
-        String line = decide(61 * S, 0, 0, 0, false);       // 無 outstanding、僅 notReady 活動
+        String line = decide(61 * S, 0, 0, 0);       // 無 outstanding、僅 notReady 活動
         require(line != null && line.contains("periodic") && line.contains(" notReady=1"),
                 "notReady-only 活動仍出 periodic 行：" + line);
     }
@@ -109,9 +161,9 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);       // payload 基準=0
         ChunkStreamObserver.primeNotReadyForTest(39 * S);  // notReady 基準=39s
-        require(ChunkStreamObserver.dispatchDecide(1 * S, 3, 1, 0, 0, 0, false, 0, 0) == null,
+        require(ChunkStreamObserver.dispatchDecide(1 * S, 3, 1, 0, 0, 0, 0) == null,
                 "上升沿起算（production 接線）");
-        String line = ChunkStreamObserver.dispatchDecide(40 * S, 3, 1, 0, 0, 0, false, 0, 0);
+        String line = ChunkStreamObserver.dispatchDecide(40 * S, 3, 1, 0, 0, 0, 0);
         require(line != null && line.contains("STALL")
                         && line.contains("noReceiveMs=40000") && line.contains("notReadyAgoMs=1000"),
                 "production 接線：兩基準各就各位（交換即不 STALL 或值錯）：" + line);
@@ -122,7 +174,7 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         for (long t = 0; t < 300 * S; t += 10 * S) {
-            require(decide(t, 0, 0, 0, false) == null, "quiet 不出行 t=" + t);
+            require(decide(t, 0, 0, 0) == null, "quiet 不出行 t=" + t);
         }
     }
 
@@ -131,15 +183,15 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        require(decide(1 * S, 5, 20, 3, true) == null, "上升沿起算");
-        require(decide(29 * S, 5, 20, 3, true) == null, "29 秒未達門檻");
-        String line = decide(31 * S, 5, 20, 3, true);
+        require(decide(1 * S, 5, 20, 3) == null, "上升沿起算");
+        require(decide(29 * S, 5, 20, 3) == null, "29 秒未達門檻");
+        String line = decide(31 * S, 5, 20, 3);
         require(line != null && line.contains("STALL") && line.contains("noReceiveMs=31000")
                         && line.contains("outstandingMs=30000")
-                        && line.contains("largeArea=true") && line.contains("pending1=20"),
+                        && line.contains("sendGate=open") && line.contains("pending1=20"),
                 "31 秒出 STALL 行且含關鍵欄位：" + line);
-        require(decide(36 * S, 5, 20, 3, true) == null, "10 秒節流內不重複");
-        String line2 = decide(42 * S, 5, 20, 3, true);
+        require(decide(36 * S, 5, 20, 3) == null, "10 秒節流內不重複");
+        String line2 = decide(42 * S, 5, 20, 3);
         require(line2 != null && line2.contains("STALL") && line2.contains("noReceiveMs=42000"),
                 "節流視窗過後再報：" + line2);
     }
@@ -150,18 +202,18 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
         for (long t = 10 * S; t <= 300 * S; t += 10 * S) {
-            require(notStall(decide(t, 0, 0, 0, false)), "閒置期不得 STALL t=" + t);
+            require(notStall(decide(t, 0, 0, 0)), "閒置期不得 STALL t=" + t);
         }
         // 301 秒：新請求出現，noReceive=301s 但 outstanding 剛上升→不得 STALL
-        require(notStall(decide(301 * S, 4, 0, 0, false)), "上升沿 30 秒內不假報");
-        require(notStall(decide(320 * S, 4, 0, 0, false)), "19 秒仍不得 STALL");
-        String line = decide(332 * S, 4, 0, 0, false);
+        require(notStall(decide(301 * S, 4, 0, 0)), "上升沿 30 秒內不假報");
+        require(notStall(decide(320 * S, 4, 0, 0)), "19 秒仍不得 STALL");
+        String line = decide(332 * S, 4, 0, 0);
         require(line != null && line.contains("STALL") && line.contains("outstandingMs=31000"),
                 "上升沿滿 30 秒且無接收才報：" + line);
         // outstanding 歸零→邊沿重置；再出現要重新起算（periodic 行合法，STALL 不得出現）
-        require(notStall(decide(340 * S, 0, 0, 0, false)), "清空解除");
-        require(notStall(decide(350 * S, 2, 0, 0, false)), "重新上升沿起算");
-        require(notStall(decide(370 * S, 2, 0, 0, false)), "邊沿重起後 20 秒不得 STALL");
+        require(notStall(decide(340 * S, 0, 0, 0)), "清空解除");
+        require(notStall(decide(350 * S, 2, 0, 0)), "重新上升沿起算");
+        require(notStall(decide(370 * S, 2, 0, 0)), "邊沿重起後 20 秒不得 STALL");
     }
 
     /** 接收恢復後不再 STALL，回到 periodic 模式。 */
@@ -169,11 +221,11 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        decide(1 * S, 3, 1, 0, false);
-        require(decide(40 * S, 3, 1, 0, false) != null, "先進入 STALL");
+        decide(1 * S, 3, 1, 0);
+        require(decide(40 * S, 3, 1, 0) != null, "先進入 STALL");
         ChunkStreamObserver.recordReceiveForTest(45 * S);
-        require(decide(50 * S, 3, 1, 0, false) == null, "接收後 STALL 解除");
-        String line = decide(61 * S, 3, 1, 0, false);
+        require(decide(50 * S, 3, 1, 0) == null, "接收後 STALL 解除");
+        String line = decide(61 * S, 3, 1, 0);
         require(line != null && line.contains("periodic"), "恢復後出 periodic：" + line);
     }
 
@@ -182,12 +234,12 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.primeForTest(0);
         ChunkStreamObserver.recordReceiveForTest(0);
-        String first = decide(61 * S, 0, 0, 0, false);
+        String first = decide(61 * S, 0, 0, 0);
         require(first != null && first.contains("periodic") && first.contains("parts=1"),
                 "60 秒出 periodic：" + first);
-        require(decide(90 * S, 0, 0, 0, false) == null, "60 秒內不重複");
+        require(decide(90 * S, 0, 0, 0) == null, "60 秒內不重複");
         ChunkStreamObserver.recordReceiveForTest(100 * S);
-        require(decide(122 * S, 1, 0, 0, false) != null, "下一視窗照報");
+        require(decide(122 * S, 1, 0, 0) != null, "下一視窗照報");
     }
 
     /**
@@ -199,15 +251,15 @@ public final class ChunkStreamObserverBehaviorTest {
         ChunkStreamObserver.resetForTest();
         ChunkStreamObserver.noteGapForTest(0);          // 首心跳＝基準初始化
         ChunkStreamObserver.recordReceiveForTest(0);
-        decide(1 * S, 5, 0, 0, false);                  // 上升沿=1s
+        decide(1 * S, 5, 0, 0);                  // 上升沿=1s
         ChunkStreamObserver.noteGapForTest(10 * S);     // 連續心跳，不重置
         // 心跳斷檔 190 秒（>30s）於 t=200s 恢復：基準應全部重置為 200s
         ChunkStreamObserver.noteGapForTest(200 * S);
         require(ChunkStreamObserver.lastReceiveForTest() == 200 * S, "lastReceive 重置");
-        require(notStall(decide(210 * S, 5, 0, 0, false)), "新生命週期上升沿重新起算，不假報");
-        require(notStall(decide(235 * S, 5, 0, 0, false)),
+        require(notStall(decide(210 * S, 5, 0, 0)), "新生命週期上升沿重新起算，不假報");
+        require(notStall(decide(235 * S, 5, 0, 0)),
                 "noReceive=35s 已跨接收基準，僅上升沿(25s)擋住——斷檔重置的回歸鎖");
-        String line = decide(241 * S, 5, 0, 0, false);
+        String line = decide(241 * S, 5, 0, 0);
         require(line != null && line.contains("STALL"), "新基準滿 30 秒才報：" + line);
     }
 

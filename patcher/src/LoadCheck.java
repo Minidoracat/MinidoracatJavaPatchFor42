@@ -112,13 +112,10 @@ public final class LoadCheck {
             Class<?> square = Class.forName("zombie.iso.IsoGridSquare", false, cl);
             Class<?> object = Class.forName("zombie.iso.IsoObject", false, cl);
             Class<?> zone = Class.forName("zombie.iso.zones.Zone", false, cl);
-            Class<?> player = Class.forName("zombie.characters.IsoPlayer", false, cl);
             if (lf.getDeclaredMethod("getLootRespawnZone", square).getReturnType() != zone) {
                 throw new NoSuchMethodException("getLootRespawnZone return type");
             }
             lf.getDeclaredMethod("getLootRespawnContainerCount", object);
-            lf.getDeclaredMethod("getBuilding", square);
-            lf.getDeclaredMethod("canBeSafehouse", square, player);
             System.out.println("helper OK 所有改道簽名一致");
 
             // 退役（2026-09-02）：登入量測 wrapper 的精確簽名／checked exception／stateless

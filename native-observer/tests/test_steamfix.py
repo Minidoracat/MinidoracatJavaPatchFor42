@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 
-SHA256 = 'd8fbc2925af26522c3316f8bad2ac307b4726391a6174c220ca760fc3a421591'
+SHA256 = '1a99f39637a505ce2dbfec697dafa118c2d1b8df7dea1412557e2d5ad0a2c7d4'
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT_SOURCE = Path(os.environ.get('MDC_STEAMFIX_SOURCE') or ROOT / 'steamfix.c')
 
@@ -118,7 +118,7 @@ def main():
         # Same build ID but changed continuation: dupACK=7 still takes the
         # original recovery path, but the repair must reject the changed image.
         data[0x2b8] ^= 1
-        data[0x22862c8 + 8 + 6 - 0x1000] = 3
+        data[0x240c838 + 8 + 6 - 0x1000] = 3
         other.write_bytes(data)
         run(other, '1', 'partial', -signal.SIGSEGV)
         if hashlib.sha256(source.read_bytes()).hexdigest() != SHA256:

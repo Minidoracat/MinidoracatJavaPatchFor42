@@ -24,5 +24,8 @@
     }
   ],
   "behaviorNotes": "純 log 抑制，不改變 GetState 語意：查無 state 時仍回傳 new AnimState()（空 fallback），呼叫端行為完全不變。全 class 僅此一處 DebugType.warn（Load 走 debugln、不受影響），expectedCount=1 可做 patch 完整性驗證。helper 收到的堆疊參數與原呼叫相同：DebugType receiver、format String、Object[] args；比對僅用 format 字串（varargs 內容不需展開）。",
-  "verification": "部署後啟動遊戲進入存檔（尤其含自訂動畫 MOD 的角色/殭屍動作觸發時），console.txt 不應再出現 'AnimState not found:' 行；同時確認 'Loading AnimSet:' 等其他 Animation 頻道訊息（debug 模式下）仍正常輸出，且動畫 fallback 行為（缺 state 時不 crash、播放預設）與 patch 前一致。"
+  "verification": "部署後啟動遊戲進入存檔（尤其含自訂動畫 MOD 的角色/殭屍動作觸發時），console.txt 不應再出現 'AnimState not found:' 行；同時確認 'Loading AnimSet:' 等其他 Animation 頻道訊息（debug 模式下）仍正常輸出，且動畫 fallback 行為（缺 state 時不 crash、播放預設）與 patch 前一致。",
+  "status": "retired-42.21.0",
+  "retiredReason": "42.21.0 退役：TIS 把 GetState 的 'AnimState not found: %s' 從 DebugType.Animation.warn 降級為 trace（javap 42.21：offset 37 invokevirtual DebugType.trace），非 debug server 預設門檻 Warning 不再輸出；warn 呼叫點消失（命中 0/1）。",
+  "retiredAt": "42.21.0"
 }

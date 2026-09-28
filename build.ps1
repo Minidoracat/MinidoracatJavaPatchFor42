@@ -60,7 +60,6 @@ $helperEntries = @(
     'zombie/mdc/FastIdentityArrayRemoval.class',
     'zombie/mdc/FastIdentityArrayRemoval$State.class',
     'zombie/mdc/VehicleIntersectPrefilter.class',
-    'zombie/mdc/GlassAttachmentGuard.class',
     'zombie/mdc/ZombieAuthThrottle.class',
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
@@ -83,7 +82,6 @@ $helperEntries = @(
     'zombie/mdc/AnimalLosScan.class',
     'zombie/mdc/VehicleRemoveGuard.class',
     'zombie/mdc/ClothingSyncGuard.class',
-    'zombie/mdc/FaceObjectGuard.class',
     'zombie/mdc/EmitterParamGate.class',
     'zombie/entity/MdcUsingPlayerIndex.class',
     'zombie/core/MdcTimedActionProbe.class',
@@ -95,7 +93,6 @@ $helperEntries = @(
     'zombie/mdc/RecipientWindow.class',
     'zombie/mdc/GameEntityBroadcastGate.class',
     'zombie/entity/components/crafting/MdcCraftSyncGate.class',
-    'zombie/mdc/PopManAddLock.class',
     'zombie/mdc/AnimalUpdateGuard.class',
     'zombie/mdc/FishingDataBroadcast.class',
     'zombie/mdc/AnimalAwayProbe.class',
@@ -211,14 +208,12 @@ Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不�
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
 
-Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸（四組態，獨立 JVM）..."
-# 出貨、Lua 保險絲關閉、Reject 補正關閉、參數守衛關閉；每組皆自驗旗標。
+Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸（三組態，獨立 JVM）..."
+# 出貨、Lua 保險絲關閉、參數守衛關閉；每組皆自驗旗標。缺 component 的封包走 42.21 原版 processServer 驗 Reject bytes。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest
 Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
 java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest guard-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionGuard=0 kill switch）"
-java "-Dmdc.netTimedActionState=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest state-off
-Assert-Ok "NetTimedActionGuardTest（netTimedActionState=0 kill switch）"
 java "-Dmdc.netTimedActionArgs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest args-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionArgs=0 kill switch，W10-D 直通）"
 
@@ -356,13 +351,6 @@ Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
 java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
 Assert-Ok "ClothingSyncGuardTest（兩把 kill switch 全關，純直通）"
 
-Write-Host "[9r/10] 面向物件 sprite-grid null 守衛（W22）行為驗證＋kill switch（獨立 JVM）..."
-# on＝預設出貨（null→回原 object、非 null 逐位元轉發、委派例外穿透）；off＝純直通（null 照回）。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest
-Assert-Ok "FaceObjectGuardTest（on，出貨組態）"
-java "-Dmdc.faceObjectGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FaceObjectGuardTest off
-Assert-Ok "FaceObjectGuardTest（faceObjectGuard=0 kill switch）"
-
 Write-Host "[9q2/10] 伺服器角色聲音參數跳過（W34）三態行為驗證（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.EmitterParamGateTest observe
 Assert-Ok "EmitterParamGateTest（observe，預設出貨）"
@@ -425,16 +413,16 @@ Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
 java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest nodefer
 Assert-Ok "ProcessItemsGuardTest（processItemsDefer=0，W41 回原版直接寫）"
 
-Write-Host "[9s/10] W10-C／W10-E 連線身分與取消隔離回歸（獨立 JVM）..."
-# 觀測模式不控制安全取消開關；涵蓋真 wire、同 id 不同連線、合法取消與上下文收尾。
+Write-Host "[9s/10] W10-C 打斷觀測＋動作封包 owner 檢查回歸（獨立 JVM）..."
+# 觀測模式不控制 owner 檢查；涵蓋真 wire 偽造取消／Request、合法取消交回原版（含 Fishing 後續事件）與上下文收尾。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe
 Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
 java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest enforce
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
 java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
-Assert-Ok "MdcTimedActionProbeTest（觀測 off，取消隔離仍有效）"
-java "-Dmdc.actionRemoveScope=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe scope-vanilla
-Assert-Ok "MdcTimedActionProbeTest（actionRemoveScope=0，明示回原版取消行為）"
+Assert-Ok "MdcTimedActionProbeTest（觀測 off，owner 檢查仍有效）"
+java "-Dmdc.actionOwnerCheck=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe owner-off
+Assert-Ok "MdcTimedActionProbeTest（actionOwnerCheck=0，原版信任邊界負對照）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、
@@ -443,16 +431,6 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPool
 Assert-Ok "IoPoolIsolationTest（on，出貨組態）"
 java "-Dmdc.ioPoolIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest off
 Assert-Ok "IoPoolIsolationTest（ioPoolIsolation=0 kill switch）"
-
-Write-Host "[9u/10] RequestData ACK 邊界與正常傳送（W27）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.RequestDataAckTest
-Assert-Ok "RequestDataAckTest（空佇列、未知連線、重複 ACK、完整傳送與例外穿透）"
-
-Write-Host "[9v/10] PopMan 缺格回退補鎖（W28）互斥、例外解鎖與停用對照..."
-java -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" PopManAddLockTest "$R\dist\java" "$R\work\projectzomboid.jar" on
-Assert-Ok "PopManAddLockTest（on，兩條真 caller 與例外解鎖）"
-java "-Dmdc.popmanAddLock=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" PopManAddLockTest "$R\dist\java" "$R\work\projectzomboid.jar" off
-Assert-Ok "PopManAddLockTest（off，原 native 委派仍執行）"
 
 Write-Host "[9w/10] 動物同步接收驗證（W29）與原版回退對照..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest enforce

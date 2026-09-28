@@ -19,7 +19,12 @@ import zombie.iso.IsoGridSquare;
  * 且 grow 在 parent.delete() 之前拋出，小雞留在世界每幀重試、每次再漏一個。
  *
  * <p><b>手術</b>：(1) 四個帶座標建構子每個 RETURN 前 {@link #afterCtor}：data 為 null 且物件是
- * 以座標建構時，做 {@code IsoGameCharacter} 建構子加入動作的逆操作（同一個 isSafeToAdd 分支）。
+ * 以座標建構時，做 {@code IsoGameCharacter} 建構子加入動作的逆操作：{@code addMovingObject}
+ * （同一個 isSafeToAdd 分支撤 objectList／addList）與 {@code setMovingSquareNow}（撤出格子的
+ * movingObjects；42.21 建構子新增這一步）。只撤 cell 時，water／noInit 物件仍留在格子上，
+ * {@code getAnimals} 會回傳它——建構子的 chickenpocalypse 檢查早於 init、新物件 animalId 恆為 -1，
+ * 4 格內之後每次建構都與它的 -1 相等而失敗；chunk 卸載時 {@code unloaded()} 對它 NPE。
+ * chickenpocalypse 分支原版 {@code delete()} 已含 removeFromSquare，不重做。
  * (2) {@code checkStages} 的 grow 與 W33 的 addBaby 委派包在 {@link #grow}／{@link #addBaby}：
  * 呼叫期間有建構失敗且拋 NPE 時吞掉這次（小雞維持原狀，下次 update 由原版重試），
  * 其餘例外原樣穿透。成功路徑行為不變。kill switch {@code -Dmdc.animalSpawnGuard=0}。
@@ -31,7 +36,7 @@ public final class AnimalSpawnGuard {
     private static final long DETAIL_LIMIT = 64L;
 
     // 帶座標的動物建構與 grow／addBaby 都在主執行緒。
-    private static long ctorFailures, removed, swallowed, anomalies;
+    private static long ctorFailures, removed, squareRemoved, swallowed, anomalies;
 
     /** IsoAnimal 帶座標建構子每個 RETURN 前。 */
     public static void afterCtor(IsoAnimal animal) {
@@ -44,9 +49,21 @@ public final class AnimalSpawnGuard {
             return;
         }
         ctorFailures++;
+        IsoCell cell = null;
+        String reason = "unknown";
+        boolean hit = false, onSquare = false;
         try {
-            IsoCell cell = animal.getCell();
-            boolean hit = false;
+            cell = animal.getCell();
+            // 先定 reason：撤出格子後 current 會清成 null。
+            IsoGridSquare sq = animal.getCurrentSquare();
+            reason = sq != null && sq.isWaterSquare() ? "water"
+                    : cell != null && cell.getRemoveList().contains(animal) ? "chickenpocalypse"
+                    : "noInit";
+            onSquare = sq != null && sq.getMovingObjects().contains(animal);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+        try {
             if (cell != null) {
                 if (cell.isSafeToAdd()) {
                     hit = cell.getObjectList().remove(animal);
@@ -56,14 +73,17 @@ public final class AnimalSpawnGuard {
             if (hit) {
                 removed++;
             }
+            if (!"chickenpocalypse".equals(reason)) {
+                animal.removeFromSquare();
+                if (onSquare) {
+                    squareRemoved++;
+                }
+            }
             if (ctorFailures <= DETAIL_LIMIT || ctorFailures % 1000 == 0) {
-                IsoGridSquare sq = animal.getCurrentSquare();
-                String reason = sq != null && sq.isWaterSquare() ? "water"
-                        : cell != null && cell.getRemoveList().contains(animal) ? "chickenpocalypse"
-                        : "noInit";
                 DebugLog.log(TAG + "ctor failed reason=" + reason + " pos=" + (int) x + "," + (int) y + "," + (int) z
-                        + " removedFromWorld=" + hit + " failures=" + ctorFailures + " removed=" + removed
-                        + " swallowed=" + swallowed + "（原版會留下 adef/data 為 null 的動物，每 tick 打斷世界更新）");
+                        + " removedFromWorld=" + hit + " removedFromSquare=" + onSquare + " failures=" + ctorFailures
+                        + " removed=" + removed + " squareRemoved=" + squareRemoved + " swallowed=" + swallowed
+                        + "（原版會留下 adef/data 為 null 的動物，每 tick 打斷世界更新）");
             }
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
@@ -116,6 +136,7 @@ public final class AnimalSpawnGuard {
     static boolean enabledForTest() { return ENABLED; }
     static long ctorFailuresForTest() { return ctorFailures; }
     static long removedForTest() { return removed; }
+    static long squareRemovedForTest() { return squareRemoved; }
     static long swallowedForTest() { return swallowed; }
     static long anomaliesForTest() { return anomalies; }
 

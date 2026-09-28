@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
     if (!lib) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     struct link_map *map = NULL;
     assert(dlinfo(lib, RTLD_DI_LINKMAP, &map) == 0);
-    int (*process)(void *, struct segment *) = (void *)(map->l_addr + 0x2285dc0);
+    int (*process)(void *, struct segment *) = (void *)(map->l_addr + 0x240c330);
     void *callbacks[] = {(void *)unexpected,(void *)unexpected,(void *)unexpected,
                          (void *)unexpected,(void *)packet};
     struct { void **vtable; } receiver = {callbacks};

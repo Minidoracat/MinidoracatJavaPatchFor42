@@ -2,7 +2,6 @@ package zombie.mdc;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.zip.CRC32;
 
 import zombie.network.ClientChunkRequest;
 
@@ -15,8 +14,8 @@ import zombie.network.ClientChunkRequest;
  * 自我驗證 property 真的到位——property 名稱打錯會在這裡炸，而不是默默跑 enabled
  * 版再回報綠燈（W6 kill switch 測試的教訓沿用）。
  *
- * <p>斷言：兩個 CRC helper 原樣回傳共用實例；三個池 helper 完全委派 vanilla 全域池
- * （以預埋 marker 實例驗證同一性，非只驗計數）；私有 buffer 池全程零使用。
+ * <p>斷言：三個池 helper 完全委派 vanilla 全域池（以預埋 marker 實例驗證同一性，
+ * 非只驗計數）；私有 buffer 池全程零使用。（42.21 起 CRC 兩刀隨官方修正退役。）
  */
 public final class ChunkSaveIsolationTest {
 
@@ -27,11 +26,6 @@ public final class ChunkSaveIsolationTest {
         }
 
         int failed = 0;
-
-        // CRC helper：off 模式必須原樣回傳共用實例（identity，非 equals）
-        CRC32 shared = new CRC32();
-        failed += check("off：headerCrc 原樣回傳共用實例", ChunkSaveIsolation.headerCrc(shared) == shared);
-        failed += check("off：dedupCrc 原樣回傳共用實例", ChunkSaveIsolation.dedupCrc(shared) == shared);
 
         // 池 helper：以預埋 marker 驗證「真的走 vanilla 全域池」——
         // vanilla getChunk 是 freeChunks.poll()，預埋的殼必須被原封取回
@@ -59,7 +53,7 @@ public final class ChunkSaveIsolationTest {
         if (failed > 0) {
             System.exit(1);
         }
-        System.out.println("csi-off OK  kill switch 委派路徑：CRC identity、全域池同一性、私有池零使用全數通過");
+        System.out.println("csi-off OK  kill switch 委派路徑：全域池同一性、私有池零使用全數通過");
     }
 
     private static int check(String name, boolean ok) {

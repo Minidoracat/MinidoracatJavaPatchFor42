@@ -10,8 +10,8 @@ $JAVAC = Join-Path $JDK 'bin/javac.exe'
 if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
-$GAME_VERSION = '42.20.4'
-$PACKAGE_VERSION = '0.1.0'
+$GAME_VERSION = '42.21.0'
+$PACKAGE_VERSION = '0.2.0'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'

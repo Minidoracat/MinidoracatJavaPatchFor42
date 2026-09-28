@@ -1,4 +1,4 @@
-# 優化項目與原理詳解（42.20.3）
+# 優化項目與原理詳解（42.21.0）
 
 > 本文檔是給維運者看的完整說明：每一項優化「為什麼做、動了什麼、為什麼安全、怎麼驗證」。
 > bytecode 層的逐項原始證據（javap 反組譯摘錄）在 [specs/](specs/) JSON。
@@ -33,7 +33,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
-## 1. 抑噪類（9 項）——為什麼值得做
+## 1. 抑噪類（現役 8 項：表列 #2–#8＋§2bf 的 #10；#1、#9 已於 42.21.0 退役）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：
 (a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與
@@ -41,21 +41,27 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 | # | 位置 | 攔掉的訊息 | 觸發原因 | 保留了什麼 |
 |---|---|---|---|---|
-| 1 | AnimationSet.GetState | `AnimState not found: X` | MOD 動畫集缺 state，引擎本就回傳空 fallback | fallback 行為不變；Load 路徑 log 不動 |
+| 1 | ~~AnimationSet.GetState~~（**42.21.0 退役**） | `AnimState not found: X` | MOD 動畫集缺 state，引擎本就回傳空 fallback | 42.21 官方把這行從 `warn` 降級為 `trace`（server 預設門檻 Warning 不輸出），改道點消失 |
 | 2 | SkinningBoneHierarchy.buildBoneHierarchy | `SkeletonBone not resolved for bone: X` | MOD 模型骨架非標準骨名，開機刷屏 | 骨架建構結果完全不變 |
-| 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **exact 白名單 19 名**（初版 MetalBigWireFence／WoodFloorLvl3／Wooden_Windows；42.20 加 DoubleWireGate／BrickWallLvl2／MetalSmallWireFence／BrickWindowFrameLvl2／Piano／WoodenWallLvl3；42.20.3 加 SandFloor／WoodenDarkWallLvl3／GravelFloor／Floor_SpringGrass／DoubleDoor／WoodenWindowFrameLvl3／WoodFloorLvl2／Wood_DoubleDoorDark／WoodDoorFrameLvl3／Fences_MetalFarmGate，完整訊息 equals；入列門檻 ≥4 筆/h 見 AGENTS.md 手術鐵則，名單行為由 LogFilterNoiseTest 鎖） | 特定物件載入必刷（42.20 六名為 5.5h 實測 1183 筆；42.20.3 十名為 26h 實測 23,517 筆＝當時最大殘留噪音源，17 個 ≤86 筆低量名依門檻刻意不收） | **其他名稱（含 null 與低量名）照常警告**；resetObjectInfo 清理照跑 |
+| 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **exact 白名單 37 名**（初版 MetalBigWireFence／WoodFloorLvl3／Wooden_Windows；42.20 加 DoubleWireGate／BrickWallLvl2／MetalSmallWireFence／BrickWindowFrameLvl2／Piano／WoodenWallLvl3；42.20.3 加 SandFloor／WoodenDarkWallLvl3／GravelFloor／Floor_SpringGrass／DoubleDoor／WoodenWindowFrameLvl3／WoodFloorLvl2／Wood_DoubleDoorDark／WoodDoorFrameLvl3／Fences_MetalFarmGate；42.20.4 加 Commercial_FullGlassBlackWall／Commercial_GridGlassBlackWall／Commercial_HalfGlassRedWall／Commercial_FullGlassRedWall／Commercial_HalfGlassBlackWall／Commercial_GridGlassRedWall／MetalFloorLvl1／Wood_Crate_Lvl2／Floor_SummerGrass／WoodFloorLvl1／WoodenDarkDoorFrameLvl3／Composter／BrickFloorLvl1／Floor_SummerGrassCorner／ComposterShoddy／DoubleFenceGate／WoodenDarkWindowFrameLvl3／Floor_Concrete，見 §2bf；完整訊息 equals；入列門檻 ≥4 筆/h 見 AGENTS.md 手術鐵則，名單行為由 LogFilterNoiseTest 鎖） | 特定物件載入必刷（42.20 六名為 5.5h 實測 1183 筆；42.20.3 十名為 26h 實測 23,517 筆＝當時最大殘留噪音源，17 個 ≤86 筆低量名依門檻刻意不收）。37 名的生效定義都來自建築 MOD 的 entity 覆寫（其中 22 名與 vanilla 同名、15 名為 MOD 專屬），名單的退役訊號跟著該 MOD 更新走，不跟 PZ 版本走（42.21.0 審計：觸發程式碼位元不變，無名稱可移除） | **其他名稱（含 null 與低量名）照常警告**；resetObjectInfo 清理照跑 |
 | 4 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
 | 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
 | 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
-| 9 | IsoObject.syncIsoObject | `ERROR: IsoThumpable not found on square x,y,z`（`System.out.println`，訊息 invokedynamic 組成 → 前綴 startsWith；2026-09-02） | B42 建造流程每次 `ISBuildIsoEntity -> consume success` 後對已被 IsoEntity 取代的 IsoThumpable 送 sync，`getObjectIndex()==-1` 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 門檻 4/h） | 同方法的 `square is null` 與其他 class（IsoDoor／IsoWindow／IsoStove…）的 not-found 是破損訊號，照常印；sync 封包段逐指令未動（SmokeCheck 釘 send/doPacket 數與真指令數）；方法內兩處 println 同改道、class 其餘 println 保持 vanilla |
+| 9 | ~~IsoObject.syncIsoObject~~（**42.21.0 退役**） | `ERROR: IsoThumpable not found on square x,y,z`（`System.out.println`，訊息 invokedynamic 組成 → 前綴 startsWith；2026-09-02） | B42 建造流程在 IsoThumpable 加進 square 前就呼叫 `setHealth` → server 端 `sync()` → `getObjectIndex()==-1` 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 門檻 4/h） | 42.21 官方把 `IsoThumpable.setHealth` 改為 `server && getObjectIndex() != -1` 才 sync，噪音源頭消失；剩下的 not-found 是低頻破損訊號，回歸原版照常印 |
 
 > **42.20 變更**：`ActionStateContainer.tryInsertChildState` 的抑噪已移除——TIS 自己把那兩個
 > `DebugType.warn` 降級為 `trace`（全 class warn 8→6、trace 1→3），噪音源由官方修掉。
 > 第 7 項的 consistency log 也從 `PacketTypes$PacketType.onServerPacket` 搬到
 > `INetworkPacket.logInconsistentPacket`（interface default method，訊息文字未變），改道目標隨之搬家；
 > `PlayerHitZombiePacket` 的 override 只多一層前置過濾，最後仍呼叫 super，兩條路徑都涵蓋。
+
+> **42.21.0 變更（2026-09-28）**：第 1 項 `AnimationSet.GetState` 被 TIS 降級為 `trace`（javap 42.21 offset 37
+> `invokevirtual DebugType.trace`），第 9 項的噪音源被 `IsoThumpable.setHealth` 的 `getObjectIndex() != -1` 守衛
+> 從源頭消除（javap 42.21 setHealth offset 21–25），兩項退役；LogFilter 的 `FMT_EXACT` 第 1 筆與
+> `PRINTLN_PREFIX`／`println`／`suppressesPrintln` 一併刪除。其餘 7 項（＋§2bf 的 #10）審計確認觸發程式碼與
+> 頻率前提仍成立。復活：`git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`。
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，
 先 `uninstall.sh` 還原再觀察。每份 spec 的 `verification` 段都寫了正反向驗證法。
@@ -148,6 +154,12 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 ---
 
 ## 2d. 安全屋 room/building 綁定修復
+
+> **退役（2026-09-28）**：本刀 2026-07-29 起停用（觸發條件是自訂大地圖，正式服已只跑原版地圖），42.21 對版時
+> 把殘留的 `LogFilter.getBuilding`／`canBeSafehouse`／`findRoom` helper、LoadCheck 簽名檢查與 SmokeCheck 斷言
+> 一併刪除。42.21.0 沒有改動 `SafehouseClaimPacket` 與 room 綁定路徑（patch notes 的「Safehouse exploits
+> remedied」在 Java 側找不到對應改動），原根因是否仍在無法從程式碼判定。復活：
+> `git checkout 42d1b15 -- patcher/game/zombie/mdc/LogFilter.java`，並重新驗證兩個座標。
 
 **症狀**：B42.19 正式服擴充大型 `Map=` 後，玩家申請安全屋時大量出現
 `SafehouseClaimPacket.isConsistent > building not found`。失敗座標的原始 lotheader 仍有合法
@@ -495,7 +507,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
 **與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、
-`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.20.4-0.1.0.zip`，
+`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.0.zip`（42.20.4 時為 `-42.20.4-0.1.0`），
 不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，
 由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），
@@ -555,6 +567,34 @@ install/uninstall.bat 改為 payload 逐檔生成閘門(5 檔:來源預檢/衝�
 createSteamAvatarFixed 裸 JVM 不可測(結構鎖+人工 QA);ensureData 的 lazy-init
 競態與原版同形不加劇。
 
+### 2026-09-28 42.21 對版
+
+**門檻與五個洩漏點官方都沒修，兩刀原樣保留**（重建即可）：
+- `TextureIDAssetManager.waitFileTask()V` bytecode 與 42.20.4 完全相同（javap：
+  `getBytesAllocated` → `ldc2_w 52428800` → `lcmp/ifle` → `sleep(20)`）；
+  `TextureIDAssetManager`、`DirectBufferAllocator`、`zombie/asset/**`、`zombie/fileSystem/**`
+  兩版一致。
+- `ImageData.dispose`／`getData`／`getMipMapCount`、`TextureID.freeMemory`／`createSteamAvatar`
+  五個目標方法 bytecode 全同：dispose 不碰 frames、getData 仍 `ldc 67108864`、avatar 失敗路徑
+  仍直接 return null、freeMemory 仍只斷引用。只載 42.21 jar 的原版實跑重現：dispose 後幀
+  buffer 仍在；frames-only 實例 `getMipMapCount()==0`；`getMipMapData(-1)` 拋 AIOOBE 且殘留
+  64MB＋mip 鏈。
+- 42.21 對 `ImageData` 的變更只有 `ImageData(String)` 改用 stb `NativeImage`（取代 ImageIO／
+  PNGDecoder）與 power-of-two 函式替換，都不在實體貼圖主路徑
+  （`FileTask_LoadImageData → waitFileTask → ImageData(InputStream,boolean)`）上。
+
+**官方修的「只剩影子」是另一條鏈**（依程式碼推論）：`ZomboidFileSystem.getAllModFolders`
+改為 `synchronized`＋`volatile`、清單填完才發布，`resetModFolders()` 同時重置 `modFolders` 與
+`allowedPrefixes`。舊版競態下 `allowedPrefixes` 可能以半成品清單計算並被快取，worker 緒
+`FileTask_LoadMesh` 等的 `validatePrefix` 會對 mod 路徑拋
+`IllegalArgumentException("Invalid prefix found …")` → mesh 載入失敗 → 只剩影子。這條鏈**會留
+log**，我方這條（水位門檻讓載入執行緒無限 sleep）**零 log**。
+
+**回報分流**：42.21 之後的「只剩影子／名牌」回報，先看 console：
+- 有 `Invalid prefix found` → 官方那條（42.21 理應已修；若仍出現，回報官方）。
+- 有 `TexPipelineGuard` 的 stall 行（`vanillaStallSamples`／`patchedStallSamples` 上升）→ 我方這條。
+- 兩者都沒有 → 另闢分析，不要把「官方說修了」當成本節兩刀可退役的依據。
+
 ---
 
 ## 2k. 效能第一波：載具視線預篩＋VehicleManager 512→256
@@ -601,6 +641,13 @@ index≥256 反例，立即 uninstall 並推翻界限分析。
 dist/java 所以測不到）。已補雙向守門：dist/java 與 manifest 不一致＝建置中止。
 
 ## 2l. 假死修復：removeGlassAttachments 無限迴圈保險絲
+
+> **退役（2026-09-28，42.21.0 官方已修）**：官方把 `IsoGridSquare.removeGlassAttachments` 改寫成反向迴圈
+> （`for (n = size-1; n >= 0; n--)`，命中後只呼叫 `RemoveTileObject`、沒有 `n--` 補償；javap 42.21 offset 54
+> `iflt` 出口、205 `iinc 3,-1`），不論移除是否生效都在 size 次迭代內結束，無限迴圈從結構上消失。
+> `RemoveTileObject(IsoObject,Z)` 的 DIFF 只是 `specialObjects` 改宣告為 `List`。保留 helper 反而會以舊的正向迴圈
+> 蓋掉官方新寫法，故刪除 `GlassAttachmentGuard` 與 SmokeCheck 斷言。復活：
+> `git checkout 42d1b15 -- patcher/game/zombie/mdc/GlassAttachmentGuard.java`（並回填 PatchConfig／SmokeCheck／build.ps1）。
 
 **事故**：2026-08-02 17:48 全服假死（幀計數凍結 f:15924、所有玩家靜止、重登卡驗證、
 graceful stop 無效、pkill -9 恢復）。兩份間隔 4 秒的 thread dump 主執行緒皆 RUNNABLE
@@ -875,11 +922,59 @@ STALL 行帶 `notReadyAgoMs` 分型（初版「NotReady 也算接收」設計會
 指向 `bytesAllocatedObservedLowMem`（effective 門檻 50MB 烘進 helper，橫幅與 stall 分類
 以實際生效值計），觀測與洩漏根治線全保留。
 
+### 2026-09-28 42.21 對版
+
+**官方改寫了請求生命週期**（javap 對 42.21 jar）：`WorldStreamer` 刪除 `requestingLargeArea`、
+`largeAreaDownloads` 與 `requestLargeAreaZip`；`sentRequests→pendingRequests` 的 drain 與
+`flagsWs&1` 取消收割從 `receiveChunkPart`／`receiveNotRequired` 移到新的 `udpUpdate()`，
+由 `GameClient.addIncoming` 在每個進來的封包前呼叫；`sendRequests` 頭部停送 gate
+（`pendingRequests1.size() <= 20` 才送，`bipush 20; if_icmple`）改為**無條件**，原本只在
+largeArea 期間才有的假說 (a) 變成常態。四個 headCall 的掛點語意不變（`updateMain`／
+`receiveChunkNotReady` 方法 SAME，兩個 receive 方法頭仍是 payload 到達）。
+
+**改了什麼**：
+- helper 不再反射已刪的兩個欄位。舊版在 42.21 會 `NoSuchFieldException` → 反射永久停用 →
+  佇列全是 -1 → STALL 永不判定，觀測線被靜默閹割。STALL／periodic 行移除
+  `largeArea=`／`largeDl=`，新增 `sendGate=open|closed|?`（`pendingRequests1>20`＝closed；
+  反射停用時 `?`），門檻常數 `SEND_GATE_PENDING1=20` 只用於標示、不改判定。
+- 反射讀態抽成 `readAndDecide(now, ws)`（`onUpdateMain` 行為不變），供行為測試走真實路徑。
+- SmokeCheck：欄位契約改為 6 欄位；原「receiveChunkPart sentRequests 觸碰數不變」在 42.21
+  恆為 0==0，改釘 `receiveChunkPart`／`receiveNotRequired` 的 `pendingRequests` 觸碰數不變且
+  非零；新增 vanilla 前提「sendRequests 停送 gate＝`getfield pendingRequests1 → size →
+  bipush 20 → if_icmple`、方法內恰一個 20，且 helper 常數＝20」。
+- 行為測試新增 sendGate 標示案例，以及一個對遊戲 jar 真實 `WorldStreamer.instance` 走
+  `readAndDecide` 的案例（pendingRequests1 塞 21 筆，31 秒無接收必出 `STALL … pending1=21
+  sendGate=closed`）。反射任一已刪欄位的突變體會讓此案變紅。
+
+**判讀更新**：`STALL … sendGate=closed` → client 因在途上限完全停送新請求；搭配 `pending1`
+長期卡在 21 以上且 parts 凍結＝在途請求沒收尾（server 未回或回覆被丟）。上方判讀指南中
+`largeArea=true` 一條只適用 42.20.x。
+
 ## 2p. chunk 供給併包（W4-1 v2，server）＋請求逾時 8s→15s（W4-2，client，已撤刀）
 
 > **2026-09-07 復活為 v2（預設 observe）**。9/2 的退役（「packed 47–82/session、skip[short]
 > 99.3%＝效益≈0」）是誤判，翻案證據見 2p-1、v2 設計見 2p-2；v1 分析全文保留於 2p-v1。
 > v1 最後一版：2fda295。
+
+### 2026-09-28 42.21 對版（程式碼不動，待重新 observe）
+
+server 端沒變：`PlayerDownloadServer.update()`／`removeOlderDuplicateRequests()` 方法體與 42.20.4
+相同，仍是 ready 閘內每幀 `ccrWaiting.remove(0)` 一個 ccr；`ClientChunkRequest.isChunksFilled`
+的 20 分割門檻與 `RequestZipListPacket.parse`「每包新配 ccr、同包滿 20 才換」也沒變。三個掛點
+命中數不變。
+
+**client 端新增在途上限**：42.21 的 `WorldStreamer.sendRequests` 對所有請求都套用
+「`pendingRequests1` ≤20 才補單、補到 ≥40 就停」（42.20.4 只在 largeArea 下載時才有這兩個門檻，
+一般請求在途無上限）；`refs` 為空的 chunk 也改成一律剔除、不送出。`pendingRequests1` 要等
+chunk 收齊才移除，所以每個玩家同時在途最多 40 chunk，server 端的 `ccrWaiting` 實務上最多 2 個
+（至多 3 個部分填滿的）ccr。
+
+影響：下方 2p-0 的供給模型（「client 每幀把一列打成一包、在途無上限」）與 42.20.4 期間蒐集的
+`[ChunkPacker]` observe 數據（`depth`、`would.merge`）在 42.21 不再適用。server 端「每幀一個 ccr」
+的上限仍在，enforce 理論上仍可把每幀交付從 20 提到約 38（`batch` >40 在 42.21 用不到），但
+瓶頸也可能改落在 client 視窗。維持 observe 預設，等 42.21 晚峰重新蒐集 heartbeat 後再決定是否
+enforce；判讀時改看 `depth=2` 的比例（`depth≥3` 幾乎不會出現）。另外 `RequestLargeAreaZipPacket`
+在 42.21 已刪除；helper 裡的 largeArea 分支在 42.20.4 就已不可達，屬死碼，本次不動。
 
 ### 2p-0. 真正的供給模型（2026-09-06 22:50 實案，42.20.4 反編譯）
 
@@ -1514,6 +1609,10 @@ payload preflight、以及開機健檢（驗證清單 11a）。
 2. **兩種簽名**：A 組 16 筆 header CRC=0＋len 正確＋body 完整自洽（被捕捉在 `Save()`
    尾端「回填 len」與「回填 crc」相鄰兩行之間的狀態）；B 組 27 筆 header CRC 屬於
    別份 body（寫檔與重填撕裂）。A 組資料 100% 可救（改寫 header 8 bytes 後還原）。
+   **42.21 起佔位值改變**：`Save(ByteBuffer,CRC32,Z)` 的 header CRC 佔位由 `putLong(0L)` 改為
+   `putLong(-1L)`（len 佔位仍是 0，之後才回填），所以 42.21 的「回填前被撕裂」會是 CRC=-1
+   （`0xFFFFFFFFFFFFFFFF`）而非 0。判讀 BLOCKED log 與 `blamguard/` 傾印時，CRC=-1 也屬 A 組，
+   不要當成 B 組的垃圾值。
 3. **正常 chunk 的 CRC 都是好的**（抽樣 25/25 相符）——這不是系統性「不寫 CRC」，
    是個案級的寫入競態。
 
@@ -1669,6 +1768,43 @@ CRC 檢查會擋下並重新請求，不落盤；黑邊／重送觀測歸 W4-1 �
 重排（同 chunk 新舊存檔順序可顛倒）與 `run()` 例外路徑的 task 洩漏是兩個獨立的
 vanilla 缺陷，影響小、暫不動刀，記錄於此供 TIS 回報。
 
+### 2026-09-28 42.21 對版
+
+**CRC 兩刀退役（官方已修）**。42.21.0 把存檔管線所有共用 CRC32 拿掉，改成每次呼叫
+`new CRC32()` 的區域變數，執行緒之間沒有共用實例可競爭：
+
+- 欄位：42.20.4 的 `ServerChunkLoader.crcSave`、`SaveChunkThread.crc32`、`IsoChunk` 的
+  static `crcLoad`／`crcSave` 在 42.21 全部不存在（`javap -p` 對照）。
+- `SaveChunkThread.addLoadedJob`：42.20.4 在 offset 35 `getfield crc32`；42.21 在 32 `new CRC32`、
+  39 `astore_3`，43 `SaveLoadedChunk(Chunk,CRC32)` 傳的就是這個區域實例。
+- `SaveLoadedTask.save()`：42.20.4 在 22／32／64／95 四次 `getfield ServerChunkLoader.crcSave`；
+  42.21 在 18 `new CRC32`、25 `astore_3`，之後的 update／getValue 都讀區域變數。
+- `IsoChunk.Save(ByteBuffer,CRC32,Z)` 仍只用參數傳入的 CRC32 回填 header，呼叫端給區域實例
+  ＝header 指紋沒有共用狀態。
+
+所以 `addLoadedJob` 的 `crc32 → headerCrc` 與 `save()` 的 `crcSave → dedupCrc ×4` 兩個同形替換
+一併刪除（目標欄位已不存在），helper 的兩個 ThreadLocal 也拿掉。命中數：`SaveLoadedTask.save`
+5→1（只剩 W8 的 SafeWrite 改道）、`addLoadedJob` 4→3、`release()` 維持 1。首次生效橫幅從
+`headerCrc` 移到私有池的 `getChunk`，上線驗證仍是 `grep ChunkSaveIsolation` 看到「首次生效」一行。
+
+**第三刀（私有池）保留**。42.21 的 `ClientChunkRequest` 兩個全域 static 池
+（`freeChunks`／`freeBuffers`）與 `SaveChunkThread.update()` 都沒變：`update()` 仍用欄位
+`savedChunks` 逐一 `release()`、整個方法沒有鎖。主迴圈（`ServerMap.postupdate → updateSaved`）
+與 shutdown hook（`QueuedQuit → QueuedSaveAll → SaveAll` 輪詢 `updateSaved`）同時跑時，同一個 task
+可能被 release 兩次，全域池就會把同一顆殼／buffer 租給兩個主人（其中一個可能是發送端的
+WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整重填成別塊 chunk 的自洽資料」；
+私有池讓這條路徑不存在，成本近乎零。
+
+**SmokeCheck 改釘**：刪除 crc32／crcSave 前提、全 jar 耦合鎖、swap 緊鄰性與 CRC 行為 smoke；
+新增「退役前提」（`addLoadedJob`／`save()` 各 `new CRC32` ×1，`ServerChunkLoader`／
+`SaveChunkThread`／`SaveLoadedTask`／`IsoChunk` 零 CRC32 欄位——TIS 退回共用實例即紅，
+復活兩刀用 `git checkout 42d1b15`）與「之三存在理由」（`update()` 無鎖且讀 `savedChunks`、
+`ClientChunkRequest` 兩池仍為 static——TIS 加鎖或改成 per-instance 池即紅，重新評估之三）。
+`save()` 加負對照：零 `ChunkSaveIsolation` 呼叫。build 步驟 9d 的 off 路徑測試只剩三個池 helper。
+
+**驗證閉環不變**：W8 `flagged` 在 42.21 應恆 0；不為 0 代表還有官方修正與私有池都沒涵蓋的
+機制，看 BLOCKED stack。
+
 ## 2v. 抑噪第 8 項—— toxic log 改道
 
 **根因**：MOD PSR（Plysken Solar Revolution）在每個遊戲分鐘（~2.5 真實秒）無條件呼叫
@@ -1819,6 +1955,10 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
 ---
 
 ## 2x. 卡讀條根治（W10，server）
+
+> **W10-A 退役（2026-09-28，42.21.0 官方已修）**：`NetTimedActionPacket.processServer` 兩處改以 `act.write` 送出
+> （javap offset 81／142 `aload_3`），`Action.write／parse／copyFrom` 也無條件帶 playerId，initial Accept／Reject 都能被
+> client 認領。B 刀（Lua 建構子保險絲）與 D1 保留，見本節末「2026-09-28 42.21 對版」。
 
 **症狀**：MP 玩家的進度條走到 100% 後停住，動作動畫繼續 loop（「小人不停操弄手部」），
 成品不產出，被消耗的 input item 維持綠色 job 標記；且該玩家**後續所有排隊動作一起堵死**
@@ -2015,6 +2155,25 @@ SmokeCheck 鎖住原 decoder 十位元組欄位順序與無 catch 的回傳鏈�
 heap／direct、唯讀 slice、不同 byte order 與未知例外。**wire 身分不是目前世界物件存在的證據**。
 
 TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**尚未提交**。
+
+### 2026-09-28 42.21 對版
+
+- **A 刀退役**：42.21 原版 reject 分支已由 `act` 序列化 Reject（官方修法與本刀相同）；`processServer` 內的
+  `NetTimedActionPacket.write` 呼叫點不復存在（改道命中 0）。刪除 `NetTimedActionGuard.write`、`takeCause`、
+  `-Dmdc.netTimedActionState`，`NetTimedActionPacket.processServer` 只剩 W10-C 的 1 個改道（expectedHits 3→1）。
+- **B／D1 保留並與 A 解耦**：`loadInventoryItem` 靜默回 null、`loadComponent` 對缺席 entity 直接 NPE、
+  `LuaCaller.protectedCall` 不攔例外，三者在 42.21 逐位元未變（`parse` 命中 3/3、方法 SAME）。D 刀以前
+  以 `ARGS_GUARD && STATE_FIX` 啟用（沒有 A 就沒有正確 Reject 出口）；42.21 原版就是正確出口，改為只看
+  `-Dmdc.netTimedActionArgs`。失敗原因的生命週期改為「`beginParse` 清空、`loadArgs` 設定、`protectedCall`
+  取用即清」，`parse` 走完後不留任何上下文。
+- **log 變化**：`reject serialized cause=` 行隨 A 刀移除（原版送 Reject 不經 helper）；解析失敗仍由
+  `args parse failed`／`lua ctor failed` 逐筆記錄。heartbeat 節拍改為每 2048 次 `parse`：
+  `parses caught argsFailed argsRejected suppressed anomalies guard args`。
+- **驗證**：`NetTimedActionGuardTest` 三組態（出貨／B off／D off）。缺 component 的 Request 在 D 刀下 parse 走完、
+  不呼叫建構子，接著執行 dist 內的真 `processServer`（只替換 RakNet 送出端），擷取到恰 1 包、
+  bytes 為同 action／player id 的 Reject。SmokeCheck 改釘「`processServer` 的 write 與 setState 兩處 receiver
+  皆為 act」（TIS 退回 `this.write` 時紅＝重估 A 刀）與「processServer 不經 `NetTimedActionGuard`」。
+- 復活 A 刀：`git checkout 42d1b15 -- <檔案>`（PatchConfig／NetTimedActionGuard／SmokeCheck／測試／build.ps1）。
 
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
 
@@ -3109,9 +3268,32 @@ super 之前合法，`-Xverify:all` 通過），nullVisual 行改印 `item=<full
 helper 純 `ThreadLocal.set`（零 NEW／零 DebugLog／零 WornItem 呼叫）。部署後第一筆
 `nullVisual#N player=Player-G item=…` 即物品歸因；MirageWardrobe 假說由 fullType 直接證實或排除。
 
+### 2026-09-28 42.21 對版
+
+三個掛點（`SyncClothingPacket.set`、`ItemDescription.<init>`、`SyncVisualsPacket.parse`）逐指令未變，
+ctor 的 tint 仍無 `getVisual()==null` 守衛（IFNONNULL 仍 2），`WornItems.getItemVisuals` 仍跳過 null visual，
+本刀原樣保留、不改碼。patch notes 的「Clothing condition is now handled server-side」是新增的
+`BloodClothingType.setConditionAndSync`，不碰 visual／tint。
+
+**觀察（待量測）**：42.21 的 `SyncVisualsPacket.processServer` 由手寫迴圈（排除發送者＋`isRelevantTo`）
+改為 `sendToClients(SyncVisuals, connection)`，只排除發送者並要求 fully-connected，**不再依距離過濾**——
+這是 patch notes「Synchronized players' appearance between chunks」的實作。每次外觀同步的出向封包數因此
+從「附近玩家」變成「全部在線玩家」，屬新的頻寬放大點。不影響本刀的 mismatch 判定（在 parse，每個上行包一次）。
+要不要比照 W26／W36 以 `RecipientWindow` 過濾，須先抓包量測 `SyncVisuals` 出向流量再評估；
+貿然依距離過濾會把 TIS 剛修掉的跨 chunk 外觀不同步帶回來。
+
 ---
 
 ## 2ai. 面向物件 sprite-grid null 守衛（W22，server，預設 on）
+
+> **退役（2026-09-28，42.21.0 官方已修）**：42.21 的 `IsoGameCharacter.faceThisObject` 開頭改為
+> `object instanceof IsoGameCharacter` 轉 `faceThisObjectAlt`，否則要求 `object != null &&
+> object.getObjectIndex() != -1` 才繼續（javap offset 17–25：`getObjectIndex` → `iconst_m1` →
+> `if_icmpne`／`return`）。守衛通過代表物件仍列在其 square 的 `objects` 中，
+> `getSpriteGridObjects(…, true)` 必含 self，`getClosestSpriteGridObject` 不再回 null——
+> 本節記錄的 stale 食槽 NPE 前提已消失。下方「IFNULL/IFNONNULL=5」撤刀訊號因官方改用不同形狀的
+> 守衛而沒有觸發，是人工審計判定退役。改道、`FaceObjectGuard` helper、SmokeCheck W22 四項與
+> `FaceObjectGuardTest` 一併移除；復活：`git checkout 42d1b15 -- <檔案>`。以下原文保留當歷史。
 
 ### 立案（2026-09-02 全 patch 巡檢，log 最大單一例外源）
 
@@ -3170,6 +3352,10 @@ kill switch `-Dmdc.faceObjectGuard=0`（純直通，null 照回＝vanilla 語意
 ---
 
 ## 2aj. 卡讀條第二波觀測（W10-C，server，預設 observe；enforce＝打斷時補送 Reject）
+
+> **2026-09-28 42.21 對版**：C（`NetTimedAction.start` tailCall）與 R（`ActionManager.update` 三改道）退役；
+> W10-E（`ActionManager.stop` headCall＋`remove(BZ)` 改道）因官方已修退役；派送 bridge 精簡為動作封包 owner 檢查。
+> 詳見本節末「2026-09-28 42.21 對版」。
 
 ### 立案（2026-08-28 回報、2026-09-02 落地）
 
@@ -3331,6 +3517,51 @@ identity、重入與 nested context；scope off 負對照**真的刪掉雙方同
 
 TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R2，**尚未提交**。
 
+### 2026-09-28 42.21 對版
+
+**W10-E 退役（42.21.0 官方已修）**：`ActionManager` 全面改以 (PlayerID, id) 分鍵——`stop` 呼叫
+`remove(action.playerId, action.id, true)`，`remove` 的兩個 lambda 同時比 `Action.id` 與 `PlayerID.getID()`；
+`isDone／isRejected／isLooped／getDuration／getAction` 同改；`GeneralActionPacket.setReject(B, IsoPlayer)` 寫入發送者，
+client `LuaTimedActionNew` 以自己的 `playerId` 取消；`FishingAction.getLuaTable` 改用本封包 owner。`Action.write／parse`
+無條件帶 playerId（local player 的 index≥0，server 以本連線 slot 解析）。本刀掛點 `remove(BZ)V` 已不存在，
+`onStop／removeById／removeForConnection／CURRENT_STOP／-Dmdc.actionRemoveScope` 全數刪除，`ActionManager` 不再出貨。
+
+**C／R 退役**：§2bf 已記 1,600 筆負時長全是動畫動作的合法 -1、709 次打斷中 653 次是 ISWaitWhileGettingUp，
+R（perform false／connection null）沒有非零事證。刪 `NetTimedAction.start` tailCall 與 `ActionManager.update` 的
+`perform`／`getConnectionFromPlayer`×2 改道（原版三條路徑仍在，只是不再量）。
+
+**B 保留**：`processServer` 的 `stopPlayerActions` 改道與 observe／enforce／off 三態不變。42.21 的 server 端
+`remove(PlayerID,B,Z)` 仍只移出＋`stop()`，唯一 `startPacket` 在 client 分支（SmokeCheck 改查新 descriptor）。
+原版 `stopPlayerActions` 已以 onlineID 過濾，舊的 connection scope 分支刪除；同 id 重送判定改用 bridge 綁定的
+NetTimedAction 封包（只有這一種封包綁定）。heartbeat 改由每 256 次 `stopPlayerActions` 帶動（300 秒一行）：
+`interruptCalls interruptedAccepted sameIdResend rejectsSent rejectsSkippedNoConn unknownRefused logged suppressed anomalies mode ownerCheck`。
+
+**派送 bridge 精簡（動作封包 owner 檢查）**：42.21 原版以 wire 上的 `PlayerID.getID()` 為查詢／取消鍵，但
+`PlayerID.isConsistent` 只驗 `id != -1` 且解析得到玩家，不比對 onlineID 或所屬連線；`playerIndex=-1` 時 server
+以 `IDToPlayerMap` 直接解析成其他連線的玩家，四個動作封包也沒有 anticheat。改造 client 因此能以他人 onlineID
+取消他人動作，或送 Request 讓 `stopPlayerActions` 無聲打斷他人所有讀條。bridge 現在只做三件事：
+
+1. 所有 `Action` 封包（GeneralAction／NetTimedAction／BuildAction／FishingAction，任何 state）派送前要求 owner 物件以
+   identity 屬於本連線 `players`，且 wire onlineID 等於 owner 的 onlineID；不符就不派送，計 `unknownRefused`，
+   逐筆 `untrustedAction#`（10 秒 20 行）。MODE_OFF 時照樣拒絕、不記錄。`-Dmdc.actionOwnerCheck=0|off` 回原版直通。
+2. 通過者一律交回原版 `processServer`：取消、NetTimedAction 的 `getAction／copyFrom`、Fishing Reject 後的
+   `OnFishingActionMPUpdate` 都照原版執行（舊版的 Reject 早退與 scoped stop 已刪）。
+3. NetTimedAction 封包派送期間綁定為 W10-C 的 Request 上下文（try/finally 還原、可重入）；`WorldSoundPacket`
+   照舊交給 §2at 觀測器。
+
+**驗證**：`MdcTimedActionProbeTest` 四組態（observe／enforce／off／`actionOwnerCheck=0`）。四種動作封包以真 write→parse
+產生帶他人 onlineID 的 Reject（GeneralAction 走 `setReject(id, player)` 的本地 slot，其餘走 index -1）：檢查開著時雙方
+同 id 動作不動；owner-off 負對照中原版確實取消了他人動作。合法取消交回原版只移除自己的同 id 動作，Fishing
+Reject＋bobber flag 的事件資料屬於本人。偽造 Request（index 0／-1）在 `getAction／copyFrom` 前拒絕；owner-off 下原版把
+他人的動作改成 Reject。另驗同機多人 index 1、過期 owner 物件、owner 屬本連線但 wire onlineID 是同機另一人、
+空連線與缺連線。SmokeCheck 釘 W10-E 退役依據（`remove` 以 (id, PlayerID.getID) 分鍵、`setReject` 寫入發送者）、
+owner 檢查存在理由（`PlayerID.isConsistent` 不讀 onlineID／不查連線）、四個封包的原版取消入口、bridge 不呼叫
+`ActionManager.stop／remove`，以及 `ActionManager` 不出貨。
+
+**命中數**：`NetTimedActionPacket.processServer` 3→1、`NetTimedAction` 4→3（start 移除）、`ActionManager` 5→0（不再是
+patched class）、`PacketTypes$PacketType.onServerPacket` 1 不變。部署時用舊 manifest 完整卸載，避免殘留舊的
+`ActionManager.class`（它呼叫已刪除的 helper 方法）。
+
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
 
 ### 立案（2026-09-06）
@@ -3391,6 +3622,11 @@ loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未
 ---
 
 ## 2al. `%ld` 格式字串修正（W24，server，無旋鈕）
+
+> **退役（2026-09-28，42.21.0 官方已修）**：官方把兩個字面值改為 `idToEntityMap(%d)=%s, expected %s` 與
+> `idToEntityMap(%d)=%s, expected null for %s`（javap 42.21 offset 72／158；第二條 3 個 spec 對 3 個 arg），
+> 格式例外不可能再發生；另外 storedNew 為 `getEntityNetID()==-1` 的 IsoObject 時先 `remove(newID)`，清掉過期對應
+> （舊版是丟棄結果的空呼叫）。42.21 命中 0/2，PatchConfig 段刪除。驗收 grep 改看 42.21 原文 `idToEntityMap(`。
 
 ### 立案（2026-09-06，從 minor 升級）
 
@@ -3609,6 +3845,12 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 
 ## 2ao. RequestData ACK 迴圈邊界（W27，server）
 
+> **退役（2026-09-28，42.21.0 官方已修）**：patch notes「Fixed incorrect for loop condition in ACKWasReceived」。
+> javap 42.21 offset 15 由 `if_icmpgt 64` 變為 `if_icmpge 64`，其餘 0–85 指令、運算元、跳轉目的地逐行相同——
+> 與本刀產物逐指令一致，空佇列／查無連線／重複 ACK／RequestID 不符四種邊界語意等價。PatchConfig 段、SmokeCheck
+> 兩條斷言、`RequestDataAckTest` 與 build.ps1 步驟刪除；`Patcher.IntComparisonChange` 失去唯一使用者，一併移除。
+> 復活：`git checkout 42d1b15 -- patcher/src/Patcher.java patcher/tests/request-data-ack`（並回填 PatchConfig／SmokeCheck／build.ps1）。
+
 `RequestDataManager.ACKWasReceived` 用 `i <= requests.size()` 逐項查找連線；
 空佇列或查無該連線時必定存取 `get(size)` 而拋 `IndexOutOfBoundsException`。
 修正只把該方法唯一的 `IF_ICMPGT` 改成 `IF_ICMPGE`，即 `<=` 改 `<`。
@@ -3626,6 +3868,17 @@ SmokeCheck 同時鎖住 `i=0 → i/size 比較 → get(i)` 語境，並比對整
 ---
 
 ## 2ap. PopMan 缺格生成與背景存檔互斥（W28，server，預設 on）
+
+> **退役（2026-09-28，42.21.0 官方已修）**：42.21 的 Java 側兩個缺格 fallback 仍在 `saveLock`
+> 外呼叫 `n_addZombie`（desc 改為 `(FFFBIIIII)V`，多了 persistentId），但鎖的另一端已不再碰同一個池：
+> native 反編譯（`libPZPopMan64.so` 42.21）顯示 `ManagerWorker::saveCell` 不再動
+> `ManagerMain::m_zombiePool`。舊版把 `saveRealZombieHack` 的 `Zombie*` 推回 Main 池的路徑，以及
+> `n_saveRealZombies`／`beginSaveRealZombies`，都已刪除。Main 池只剩主執行緒的 `n_addZombie`／
+> `n_registerZombie`／`n_getAddZombieData` 與 `ManagerMain::stop`，worker 端 `addRealZombie`
+> 以 id 去重，關機 double free 的前提不再成立，補鎖已無可保護的對象。改道、`PopManAddLock`
+> helper、SmokeCheck W28 全部斷言與 `PopManAddLockTest` 一併移除；復活：`git checkout 42d1b15 -- <檔案>`。
+> **上線後**以關機 log 觀察是否仍出現 `double free`／`ObjectPool::clear` 相關 crash；若再現，
+> 代表損毀另有來源，需重開調查而不是直接復活本刀。以下原文保留當歷史。
 
 `ZombiePopulationManager.addZombieStanding`／`addZombieMoving` 在方格未載入時直接呼叫
 `n_addZombie`，卻沒有取得既有 `saveLock`；背景 `processPendingSaveCells` 在該鎖內執行
@@ -3677,6 +3930,12 @@ SmokeCheck 鎖唯一接收入口、精確同形改道、上游協定指紋與 cl
 本機完整建置與兩輪隔離安裝／移除通過；不代表已部署或已證明歷史動物遺失的原因，
 也不會自動復原既有存檔。
 
+**2026-09-28 42.21 對版**：伺服器 `AnimalUpdatePacket.parse` 驗證缺口仍在，上行 wire
+（細節不公開）與 client writer 逐指令未變，helper 不改。42.21 對這個類別唯一的語意差
+是 client 分支的 `removeFromSquare()` 後多 `setSquare(null)`；原本的整類 SHA 因此與行號位移一起誤報。
+SmokeCheck 指紋改為略過 debug 資訊（行號、區域變數、SourceFile）的整類文字雜湊，仍涵蓋 `@PacketSetting`、
+欄位與全部方法，值更新為 42.21。
+
 ## 2ar. 容器大批物品登記（W30，server，預設 on）
 
 `ItemContainer.addItemsToProcessItems` 內唯一的批次登記呼叫，同形改道至
@@ -3726,6 +3985,11 @@ ByteBufferWriter final，並確認 FishSchoolManager 其他方法未變。
 封包管線證據，不是多客戶端實機或正式服收益驗收。兩刀只加入 server 出包，
 完成本機出包不代表已部署；正式安裝／回退與重啟仍須遵循既有維護流程。
 
+**2026-09-28 42.21 對版**：`transmitFishingData`、兩個 lambda、兩個 caller 與 client
+`receiveFishingData` 逐指令未變（收件人仍是全部連線、body 欄位順序相同），helper 的共用 body 仍逐位元等價，
+不改碼。原 SmokeCheck 的三條 FAIL 只是 `GameServer.java` 行號位移；契約指紋改為略過 debug 資訊的
+methodText 雜湊，42.20.4 與 42.21 算出同值。
+
 ## 2at. 聲音封包慢呼叫觀測（server，預設 observe）
 
 只在既有已認證封包派送器中包住 `WorldSoundPacket.processServer`；
@@ -3754,6 +4018,9 @@ Error 刻意 fail-fast，若診斷 Error 與原例外同時發生，仍可能由
 原 RuntimeException／Error 身分、巢套／外來執行緒、限流及無後續封包的批次結算。
 累積門檻以注入完成樣本避免 sleep 上界假設；另以真原版零半徑封包走整合派送煙霧。
 這些不是實際慢包的線上驗收；生效後須核對 banner，並把 slowCall／slowBatch 與同時段堆疊對照。
+
+**2026-09-28 42.21 對版**：派送 bridge 精簡（§2aj 末）後，`WorldSoundPacket` 仍由同一個 `MdcTimedActionProbe.processServer`
+交給本觀測器，呼叫點與行為不變（SmokeCheck「只由既有派送器呼叫一次」照舊）。
 
 ## 2au. 動物離線補算觀測（W32，server，預設 observe）
 
@@ -3825,7 +4092,7 @@ server 上實際走到 `updateEmitter` 的只有動物：`IsoAnimal.update` 每 
 無其他讀者。
 
 **手術**：`updateEmitter` 內唯一 `FMODParameterList.update()` 1:1 改道 `EmitterParamGate.update`
-（併入既有 W7／W22 的 `IsoGameCharacter` ClassPatch）。三態 `-Dmdc.emitterParamGate`：
+（併入既有 W7 的 `IsoGameCharacter` ClassPatch；同 ClassPatch 的 W22 已於 42.21.0 退役）。三態 `-Dmdc.emitterParamGate`：
 `2|observe`（預設，照常計算，每 16 次取樣計時一次）、`1|enforce`（`GameServer.server` 時跳過）、
 `0|off`（純直通）；未知值落回 observe。需重啟。每 5 分鐘一行
 `[EmitterParamGate] mode= server= calls= skipped= sampled= avgNs= estSavedMs= anomalies=`。
@@ -4025,6 +4292,37 @@ off 重現原版例外外拋＋檔案 0 bytes，on 例外不外拋、舊檔逐�
 `AnimalData.getBreed` NPE、`AnimalCell.load> Exception` 新增檔案不再出現；`[AnimalCellSave] serialize failed`
 應為 0，出現代表仍有其他壞動物進到存檔，舊檔已保住。
 
+### 2026-09-28 42.21 對版
+
+**官方沒有修掉半建構問題**：42.21 四個帶座標建構子仍是 `if (!checkForChickenpocalypse(null) && !checkForWater())`
+才 `init()`，water 分支仍不撤出；`AnimalData.grow` 仍在建構後立刻 `newAnimal.getData()`。patch notes 的
+「animals not spawning due to an error on the server」對應的是 `AnimalManagerMain.fromWorker` 補登記
+`AnimalInstanceManager` 與新方法 `IsoAnimal.removeFromUpdateLists()`，不碰建構流程。
+
+**42.21 的相關變動**：
+1. `IsoGameCharacter` 建構子加入 cell 改成呼叫 `IsoCell.addMovingObject`（本體仍是 isSafeToAdd→objectList／addList
+   兩分支），並在 `cell != null` 時**新增** `setMovingSquareNow()`：物件在建構子內就進了格子的 `movingObjects`
+   （42.20.4 只設 `current`）。
+2. `checkForChickenpocalypse` 多一個 `replacingAnimal` 參數：建構子傳 null，只有 `grow` 傳新成體，
+   避免原動物看到格子上同 ID 的新成體而誤刪兩者——這是 TIS 為第 1 點補的配套。
+
+**第 1 點對本刀的影響**：只撤 objectList／addList 已不夠。water／noInit 失敗的物件仍留在格子上：
+`IsoGridSquare.getAnimals` 會回傳它；建構子的 chickenpocalypse 檢查早於 `init()`，新物件的 animalId 恆為初值 -1，
+與格子上這隻殘留物件（同為 -1）相等，4 格內之後每次建構都判定 chickenpocalypse 而失敗（grow 每次 update 重試、
+每次失敗）；chunk 卸載時 `removeChunkFromWorld` 對它呼叫 `unloaded()`，`getData()` 為 null 直接 NPE。
+
+**改了什麼**：
+- `afterCtor` 先判定 reason（撤出格子後 `current` 會清空），撤 cell 之後對非 chickenpocalypse 分支呼叫
+  `removeFromSquare()`（撤 current／last／movingSq 的 `movingObjects` 與 `staticMovingObjects`）；chickenpocalypse
+  分支原版 `delete()` 已含 removeFromSquare，不重做。log 多 `removedFromSquare`、`squareRemoved`。reason 判定自身
+  出錯時記 anomalies 並照樣撤出。
+- SmokeCheck 存在理由改釘：`IsoGameCharacter` 建構子內 `IsoCell.addMovingObject` 恰 1、`setMovingSquareNow`
+  恰 1；`IsoCell.addMovingObject` 本體只有 isSafeToAdd／objectList／addList／兩次 `Set.add`（共 3 個呼叫，
+  官方日後在裡面加其他登記時會紅＝逆操作要跟著補）；四個建構子改數 `checkForChickenpocalypse(IsoAnimal)Z`。
+  TailCall 命中數不變（RETURN 數 3/3/2/2）。
+- `AnimalSpawnGuardTest` 兩個失敗建構案例掛上格子，新增「自格子 movingObjects 撤出」斷言與 `squareRemoved=2`；
+  舊 helper 在這兩條與計數上失敗、新 helper 通過；off 組態確認原版殘留。
+
 ## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
 
 **現象**：玩家回報動物經常異常死亡。W32 觀測 9/25 00:06–9/26 12:2x（約 36 小時）補算後當場死亡約 133 隻；
@@ -4088,6 +4386,11 @@ headCall 與真指令 +2、`IsoCell` 其餘方法逐指令不變。`ProcessItems
 （20:06 session 到 23:59 共 8,384 次），抽樣明細（前 20 筆＋每 1000 筆，28 行）全是 `ServerPlayersVehicles` 執行緒載入車輛：`VehiclesDB2$SQLStore.loadChunk` →
 `BaseVehicle.load` → `setCurrentKey` → `ItemContainer.AddItem` → `IsoCell.addToProcessItems`。修法見 W41（2bd）。
 
+**2026-09-28 42.21 對版**：W45（2bh）上線後 `processItems.contains` 走索引，§2bd 為評估改 HashSet 而加的抽樣線性搜尋
+（`touchAdd` 每 256 次 `contains(SENTINEL)`）與 beat 欄位 `scanUsAvg／estScanMs` 已無意義，一併移除；`addCalls`、
+`addAllItems` 等登記量照舊。§2bd／§2bh 提到的 `scanUsAvg` 驗收訊號從此不再輸出。42.21 的 `IsoCell.ProcessItems`／
+四個寫入口逐指令未變，其餘行為不變。
+
 ## 2bd. 非主執行緒物品登記改道主執行緒（W41，server，預設 on）
 
 **根因**：W40 抓到的唯一跨執行緒寫入者是 `ServerPlayersVehicles`。它在背景載入車輛時把鑰匙放進車內容器，
@@ -4105,7 +4408,7 @@ headCall 與真指令 +2、`IsoCell` 其餘方法逐指令不變。`ProcessItems
 `touchAdd` 計登記次數，每 256 次抽樣量一次整份清單 `contains` 的耗時；`addToProcessItems(ArrayList)` 頭部
 `touchAddAll` 計批次件數（原版逐件 `contains`）。beat 新增 `passes passMsAvg passMsMax addCalls addAllItems
 scanUsAvg estScanMs deferred drained pending overflow`；`estScanMs`＝登記次數×抽樣平均，用來判斷是否值得把清單
-換成 HashSet。
+換成 HashSet。（42.21.0 起 `scanUsAvg`／`estScanMs` 已移除，見 §2bc 對版段。）
 
 SmokeCheck：`BaseVehicle.setCurrentKey` 經 `ItemContainer` 加鑰匙（存在理由）、兩個 `AddItem` 同形改道其餘指令與
 frames 不變、`AddItemBlind` 不動、`ProcessItems` 頭 beginPass＋尾 endPass 真指令 +4、四個寫入口 headCall 形狀。
@@ -4287,7 +4590,7 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 
 **W40 心跳語意變化**：W40 的 `scanUsAvg`／`estScanMs` 以 `getProcessItems().contains(SENTINEL)` 抽樣。W45 上線後
 這個呼叫走索引，只有每 4096 次一次的抽驗會線性掃描，應從約 30 µs 降到 1 µs 以下，可直接當驗收訊號。
-`estScanMs` 從此只代表索引查表成本。
+`estScanMs` 從此只代表索引查表成本。（42.21.0 起兩個欄位已移除、不再輸出，見 §2bc 對版段。）
 
 **驗證**：
 - SmokeCheck（上游前提，TIS 修好即紅＝撤刀訊號）：`processItems` 是 private final ArrayList 且無伴生索引欄位；
@@ -4307,7 +4610,7 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 - 獨立審查（critic）：無 blocking；四項 SHOULD-FIX（批次操作例外與回呼、removeAll 別名、永久線性未釋放索引、
   守門未擋合流點）與四項 NIT 均已修正並補上對應案例，修正前的 helper 跑新測試會失敗。
 - 線上驗收：首次生效行 `owner=` 為主執行緒；beat `divergences=0 anomalies=0 disabled=false views=0`；
-  W40 `scanUsAvg` 從約 30 µs 降到 1 µs 以下；低 FPS dump 不再出現 `ArrayList.indexOfRange ← IsoCell.addToProcessItems`。
+  W40 `scanUsAvg` 從約 30 µs 降到 1 µs 以下（42.21.0 起此欄位已移除）；低 FPS dump 不再出現 `ArrayList.indexOfRange ← IsoCell.addToProcessItems`。
 
 **官方回報**：`docs/report/2026-09-27-processitems-linear-contains-tis.md`（草稿，未送出）。
 

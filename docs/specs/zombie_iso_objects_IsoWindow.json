@@ -19,5 +19,8 @@
     }
   ],
   "behaviorNotes": "helper 使用之 API 全為 public：IsoGridSquare.getObjects()/RemoveTileObject(IsoObject)/getX/getY/getZ、IsoWindow.getNorth()、IsoObject.getSprite()/getProperties()/getFacing()、IsoSprite.getName()、IsoPropertyType（zombie.core.properties）。判定式與原版逐條對應：sprite 非 null、ATTACHED_TO_GLASS、IS_MOVE_ABLE+(IS_HIGH|MOVE_TYPE=WallObject)+facing 在窗側、IsoLightSwitch instanceof。無狀態（零欄位），無快取。與 hit/Zombie、hit/Fall 頭部守衛同屬防假死/防崩潰家族。",
-  "verification": "部署後：(1) 開機健檢無 VerifyError/NoSuchMethodError；(2) 玩家正常砸窗：窗碎、玻璃附掛物照常清除、警報照響（handleAlarm 順序未動）；(3) 若 console 出現 [MinidoracatJavaPatch][GlassGuard] stuck glass attachment skipped at x,y,z sprite=…＝原版會死鎖的案例被保險絲接住——記下座標回報並檢查該物件；(4) 假死不再由砸窗觸發（f: 幀計數持續前進）。負對照：SmokeCheck 斷言改道恰一次、原呼叫歸零、helper 零欄位＋log 前綴存在。回退：uninstall.sh（TIS 官方修復後建議回歸原版）。"
+  "verification": "部署後：(1) 開機健檢無 VerifyError/NoSuchMethodError；(2) 玩家正常砸窗：窗碎、玻璃附掛物照常清除、警報照響（handleAlarm 順序未動）；(3) 若 console 出現 [MinidoracatJavaPatch][GlassGuard] stuck glass attachment skipped at x,y,z sprite=…＝原版會死鎖的案例被保險絲接住——記下座標回報並檢查該物件；(4) 假死不再由砸窗觸發（f: 幀計數持續前進）。負對照：SmokeCheck 斷言改道恰一次、原呼叫歸零、helper 零欄位＋log 前綴存在。回退：uninstall.sh（TIS 官方修復後建議回歸原版）。",
+  "status": "retired-42.21.0",
+  "retiredReason": "42.21.0 退役：TIS 把 IsoGridSquare.removeGlassAttachments 改寫成反向迴圈（for n = size-1; n >= 0; n--，命中後只呼叫 RemoveTileObject、無 n-- 補償），不論移除是否生效都在 size 次迭代內結束，無限迴圈從結構上消失；保留 helper 反而會以舊的正向迴圈蓋掉官方新寫法。",
+  "retiredAt": "42.21.0"
 }

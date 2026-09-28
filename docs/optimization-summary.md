@@ -14,7 +14,7 @@
 > ——29 刀逐指令重驗**全數存續**、僅 SmokeCheck retriesCount 斷言退場；client v2.2 包全面失效。
 > 完整存續判定與官方變更分析見 [report/pz-42.20.3-update-analysis.md](report/pz-42.20.3-update-analysis.md)。
 
-## 全 Patch 清單（42.20.3 現役）
+## 全 Patch 清單（42.21.0 對版；本表只列到 W9／W3 波次，W10 之後各刀見 docs/patches.md）
 
 | 類別 | Patch 項目 | 對象 class | 命中 | Runtime helper | 一句話 |
 |---|---|---|---|---|---|
@@ -26,15 +26,14 @@
 | 效能 | W4-1 chunk 供給併包 | `PlayerDownloadServer`（removeOlderDuplicateRequests） | 1 | ChunkRequestPacker | 供給只跑到設計值 15% 造成黑邊 livelock，佇列前段併包到批次上限 |
 | 效能 | 食材重量記憶化（**實測後決定不啟用 on**） | `InventoryItem`（getExtraItemsWeight） | 1 | ItemWeightMemo | Moodle HEAVY_LOAD 每 tick 遞迴走訪整棵背包樹，每個 extraItem 都完整建構一個 InventoryItem 只為讀重量就丟棄。observe 實測（4 session／累計 9.68h）：命中率 99.997% 但呼叫速率僅 271–732/s、單次 2.1µs ⇒ 收益 0.06–0.18% 主迴圈（≈0.006–0.018 fps），不足以承擔 RNG 序列位移與首次執行共用實例的風險；維持 observe |
 | 行為 | 動物壓力三調 | `IsoAnimal`（3 常數） | 3 | — | 閒置衰減×2、聲音壓力÷3、屠宰連鎖上限減半 |
-| 修復 | 玻璃假死保險絲 | `IsoWindow` | 1 | GlassAttachmentGuard | removeGlassAttachments 無限迴圈改跳過＋定位 log |
 | 修復 | 容器刷新修復 | `LootRespawn` | 2 | （LogFilter 兼任） | 自訂地圖無 TownZone 的原生固定容器恢復刷新 |
 | 防崩潰 | null 頭部守衛 ×2 | `hit/Zombie`＋`hit/Fall` | 1+1 | — | 損壞封包 NPE 崩潰的 guard-before-super |
 | 防崩潰 | W5 容器環守衛 ×2 | `ItemContainer`（getCharacter／isInCharacterInventory） | 1+1 | ContainerCycleGuard | 容器互裝成環的 StackOverflow 假死，identity 路徑偵測環＋深度保險絲切斷 |
 | 防凍結 | W6 地圖格載入捕手 | `IsoChunk`（doLoadGridsquare） | 2 | ChunkLoadGuard | 「Entity is already registered」每 0.1 秒重撞的活鎖，記座標＋sprite 後跳過該物件 |
 | 防資損 | W7 朝向暫存執行緒隔離 | `IsoGameCharacter` | 2 | ForwardVectorGuard | 共用 static `tempVector2_2` 競態致 chunk 載入失敗被 Blam 抹除，換執行緒私有替身 |
 | 防資損 | W8 chunk 寫入閘 | `IsoChunk`（Save）＋`ServerChunkLoader$SaveLoadedTask`（save） | 2+1 | ChunkWriteGuard | 寫入前快照驗 len/CRC，損毀就擋下（磁碟保留上一版）＋蒐證＋checksum 歸零重試 |
-| 防資損 | W9 存檔管線隔離 | `ServerChunkLoader$SaveChunkThread`（addLoadedJob）＋`$SaveLoadedTask`（save／release） | 4+4+1 | ChunkSaveIsolation | 共用 CRC32 與全域 chunk 池的存檔競態根治（CRC-blam 家族根因） |
-| 抑噪 | 已知噪音樣式過濾 ×8 | `AnimationSet`/`SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding） | 1+1+1+9+1+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條抑噪前佔 console **45.5%**（15.41h／8 session 實測 164,176／360,669 行；PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
+| 防資損 | W9 存檔管線隔離 | `ServerChunkLoader$SaveChunkThread`（addLoadedJob）＋`$SaveLoadedTask`（release） | 3+1 | ChunkSaveIsolation | 存檔管線改用私有池，退出全域 chunk 池（雙重 release 孔）；共用 CRC32 兩刀 42.21 官方已修、已退役 |
+| 抑噪 | 已知噪音樣式過濾 ×7 | `SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`PacketsCache`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding） | 1+1+9+1+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條抑噪前佔 console **45.5%**（15.41h／8 session 實測 164,176／360,669 行；PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
 | 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
 
@@ -51,7 +50,9 @@
 | popman buffer 隔離 v3（11 站） | 42.20.2 官方收編 |
 | VehicleManager 512→256 | 42.20.2 官方收編 |
 | W3-2 ECS memo | microbenchmark 實測淨劣化，撤刀 |
-| 安全屋 room/building 修復 | 停用（觸發條件已移除，座標保留可隨時恢復） |
+| 安全屋 room/building 修復 | 2026-07-29 停用；2026-09-28 連同 LogFilter helper 刪除（觸發條件已移除） |
+| 玻璃假死保險絲（2l） | 42.21.0 官方改反向迴圈，退役 |
+| AnimationSet 抑噪 | 42.21.0 官方降級 warn→trace，退役 |
 | ActionStateContainer 抑噪 | 42.20 官方降級 warn→trace，退役 |
 | ZombieCountOptimiser 回收加速 | 42.20 官方重寫壓力模型，定案不恢復 |
 | 受精蛋清除豁免（IsoGridSquare） | 2026-08-08 退役——server 端實測有效，但 client 端無對應改道且清單由 server 完整同步，玩家看不到也撿不起被豁免的蛋；改回原版（蛋照清），受精蛋請用雞舍孵 |
@@ -157,10 +158,10 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 
 | 項 | 問題 | 修法 | 效果/狀態 |
 |---|---|---|---|
-| 玻璃假死保險絲（`IsoWindow.smashWindow`，2l） | vanilla `removeGlassAttachments` 移除失敗時無限迴圈——2026-08-02 全服凍結實案（100 條堆疊零 patch 類） | 重實作迴圈：移除失敗跳過並印出問題物件座標，不再卡死 | 上線後同型凍結零復發 |
+| 玻璃假死保險絲（`IsoWindow.smashWindow`，2l） | vanilla `removeGlassAttachments` 移除失敗時無限迴圈——2026-08-02 全服凍結實案（100 條堆疊零 patch 類） | 重實作迴圈：移除失敗跳過並印出問題物件座標，不再卡死 | **42.21.0 官方已修、退役**——官方改反向迴圈（無 `n--` 補償），移除失敗也不可能無限迴圈 |
 | 受精蛋清除豁免（`IsoGridSquare.load`，2n） | 世界清理只比對 item type，分不出受精蛋；24hr 清除門檻 << 1260hr 孵化時間，地上孵化被封死 | 改道唯一豁免判定點，只對「可孵化且在孵化視窗內」追加豁免；視窗天花板保證不無界堆積 | **2026-08-08 退役**——server 端實測有效（keptLoads 3649／expired 0／anomalies 0，單顆蛋 progress 推進至 1148/1260），但清除區塊無 `GameClient.client` 守衛且 SandboxOptions 由 server 完整同步，client 每次 chunk 載入都自行濾掉那顆蛋（玩家看不到也撿不起來）。改回原版：蛋照清，引導玩家用雞舍孵化 |
 | 原生固定容器刷新修復（`LootRespawn`，2e） | 自訂地圖缺 vanilla TownZone＋黏性 construction 旗標 → 固定容器永不刷新 | 窄範圍 fallback：只放行未搬動的原生固定容器 | 生效中 |
-| 安全屋 room/building 綁定修復（2d） | B42.19 自訂大地圖的 binding 遺失 | 從 authoritative roomList 補回 roomId 再走完整原版驗證 | **2026-07-29 停用**——正式服已回歸原版地圖，觸發條件消失；座標已驗 42.20 仍有效，可隨時解註解恢復 |
+| 安全屋 room/building 綁定修復（2d） | B42.19 自訂大地圖的 binding 遺失 | 從 authoritative roomList 補回 roomId 再走完整原版驗證 | **2026-07-29 停用、2026-09-28 刪除**——正式服已回歸原版地圖，觸發條件消失；LogFilter 內的 helper 一併刪除，需要時從 git 歷史取回並重新驗證座標 |
 | Client 貼圖管線（2j，獨立 client 包） | 50MB DirectBuffer 硬門檻讓載入執行緒無限 sleep → 實體隱形；另有四處洩漏根因（S1/S2/S4/S6） | 門檻觀測＋洩漏根治第一波 | v2.0 出貨於 output\（玩家自選安裝） |
 
 ### W4–W9：2026-08-13～14 事故修復六刀（全部是 vanilla 缺陷，非本專案所致）
@@ -176,7 +177,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | W6 地圖格載入捕手（`IsoChunk.doLoadGridsquare`，2r） | 2026-08-14 01:34 frame 永久停在 `f:46186`，**凍結 114 分鐘**，靠排程 mod 更新重啟才結束（沒人是為了救它而重啟）。`IllegalArgumentException: Entity is already registered` 由 `IsoObject.addToWorld` 拋出，`GameServer.main` 的攔截點在迴圈最上方 → 這一圈剩下的工作（更新世界、處理封包、推進 frame）全跳過，而該地圖格還在待載入佇列，每 0.1 秒重撞一次。**活鎖非崩潰，「進程掛掉就重啟」救不了**；8/07 18:05 有逐行相同的前例 | 改道 `doLoadGridsquare` 內兩處通往同一 throw 點的 `addToWorld`（`IsoObject` ×1、`IsoMovingObject` ×1），catch 後記座標＋sprite 名跳過該物件。降級極小：throw 點在 offset 0，後續 container／items／generator 步驟本來就沒執行，且會拋出正代表先前成功那次已做過 | 生效中。`BaseVehicle.addToWorld` 那處**刻意留 vanilla**（自帶早退守衛、方法體另含 parts/engine 掛載，包住等於吞更大範圍）——有意識取捨，SmokeCheck 把它的呼叫數釘在 1，出現第四處即建置失敗 |
 | W7 朝向暫存執行緒隔離（`IsoGameCharacter`，2s） | 2026-08-13 19:55 玩家 Player-A 的雞舍連水桶整組消失：chunk <chunk-A> 載入失敗被 vanilla `Blam + LoadBrandNew` 抹除重生，46,142 → 8,549 bytes（雞舍＋32 隻家禽的完整基因組全滅，只剩草地）。根因是 `setForwardDirectionFromIsoDirection` 用全域共用 `tempVector2_2` 當暫存，而 `getVectorFromDirection` 開頭無條件歸零再填值——主執行緒與 `LoaderThread` 同時走這段就讀到 (0,0)，`normalize()` 長度 0 → `IllegalStateException` | 方法內兩處 `getstatic tempVector2_2` 各接一個 `invokestatic` 到 helper，回傳執行緒私有替身（3 bytes、堆疊 1→1，形狀最單純的一類手術；vanilla 方法體只有 8 條指令、無分支無 frame） | 生效中。**範圍界定**：只治「毀存檔」那條路徑；全 log 保留期 67 次同一例外中另 66 次走 `IsoDirections.TEMP` → `createRealZombieAlways` 的**獨立**競態（落在主執行緒、被 `IngameState.UpdateStuff` 吞掉、每次只帶掉一個 tick、無資料損失）。`IsoDirections` 是全遊戲高流量核心 enum，爆炸半徑不同級，另案評估 |
 | W8 chunk 寫入閘（`IsoChunk.Save`＋`SaveLoadedTask.save`，2t） | 累計 **43 個 chunk** 因 `SANITY CHECK FAIL` 被 Blam 抹除重生，損失約 143KB 玩家建造資料且持續發生。鑑識定案：43/43 筆 log 值與磁碟檔逐位元組相符＝**載入側無辜、檔案寫入時就壞了**（A 組 16 筆 crc=0＋body 自洽＝被捕捉在回填 len 與 crc 兩行之間；B 組 27 筆 header 屬於別份 body＝寫檔與重填撕裂） | 閘門**刻意不依賴根因**：全 jar 恰 5 個 `SafeWrite` 呼叫點（SmokeCheck census 釘死），伺服器實際可達的 3 個全改道到「快照→驗 len/CRC→放行或擋下」的 helper。擋下＝跳過寫入（磁碟保留上一版）＋stack 蒐證＋checksum 歸零自癒重試。掛點必須在**進入 `SafeWrite` 之前**（它的 `new FileOutputStream` 建構當下就 truncate 舊檔） | 生效中，預設 enforce（`-Dmdc.chunkWriteGuard=0` 停用／`=2` observe）。首晚攔下 8 筆損毀寫入、零資料損失，且 BLOCKED stack 直接指認寫入路徑——這 8 筆現行犯就是 W9 定罪的證據 |
-| W9 存檔管線隔離（`SaveChunkThread`＋`SaveLoadedTask`，2u） | **CRC-blam 家族根治刀**。W8 首晚 8 筆 BLOCKED 全走 `SaveLoadedTask` 路徑、簽名全為「len 正確＋crc 0/垃圾」——唯一相容機制是 header 指紋競態：`addLoadedJob` 用的 `SaveChunkThread.crc32` 是單一共用實例，而 `addLoadedJob` 可在主迴圈（`ServerCell.update`→`saveChunk`）與 `GameServer$1`（shutdown hook 的 `QueuedSaveAll`）並行；對方 `reset()` 插在我 update 與 getValue 之間 → 指紋 0（A 組），update 交錯 → 垃圾（B 組）。另 `SaveLoadedTask.save` 四連讀外層 `ServerChunkLoader.crcSave` 共用實例，可在 `SaveChunkThread` 與 `LoaderThread` 並行 | 三刀：(1) `crc32` GETFIELD → 執行緒私有（根絕 header 指紋競態）；(2) `crcSave` 四個 GETFIELD 同形替換為執行緒私有（去重誤判＝陳舊跳寫、客戶端校驗錯亂＝重送）；(3) `getChunk`／`getByteBuffer`／`releaseChunk` 改道私有池，讓存檔管線退出與 N 條發送 WorkerThread 共用的 `ClientChunkRequest` 全域 static 池，恢復單一所有權鏈 | 生效中（`-Dmdc.chunkSaveIsolation=0` 停用）。**驗證閉環＝W8 的 `flagged` 計數器應歸零**；不歸零代表機制另有分支，用 BLOCKED stack 續查。W8 閘不拆，永久保險絲 |
+| W9 存檔管線隔離（`SaveChunkThread`＋`SaveLoadedTask`，2u） | **CRC-blam 家族根治刀**。W8 首晚 8 筆 BLOCKED 全走 `SaveLoadedTask` 路徑、簽名全為「len 正確＋crc 0/垃圾」——唯一相容機制是 header 指紋競態：`addLoadedJob` 用的 `SaveChunkThread.crc32` 是單一共用實例，而 `addLoadedJob` 可在主迴圈（`ServerCell.update`→`saveChunk`）與 `GameServer$1`（shutdown hook 的 `QueuedSaveAll`）並行；對方 `reset()` 插在我 update 與 getValue 之間 → 指紋 0（A 組），update 交錯 → 垃圾（B 組）。另 `SaveLoadedTask.save` 四連讀外層 `ServerChunkLoader.crcSave` 共用實例，可在 `SaveChunkThread` 與 `LoaderThread` 並行 | 三刀：(1) `crc32` GETFIELD → 執行緒私有（根絕 header 指紋競態）；(2) `crcSave` 四個 GETFIELD 同形替換為執行緒私有（去重誤判＝陳舊跳寫、客戶端校驗錯亂＝重送）；(3) `getChunk`／`getByteBuffer`／`releaseChunk` 改道私有池，讓存檔管線退出與 N 條發送 WorkerThread 共用的 `ClientChunkRequest` 全域 static 池，恢復單一所有權鏈 | **42.21（2026-09-28）**：官方把共用 CRC32 全改成區域 `new CRC32()`，(1)(2) 退役；(3) 私有池保留（`update()` 無同步雙重 release 與全域池未變）。生效中（`-Dmdc.chunkSaveIsolation=0` 停用）。**驗證閉環＝W8 的 `flagged` 計數器應歸零**；不歸零代表機制另有分支，用 BLOCKED stack 續查。W8 閘不拆，永久保險絲 |
 
 ## 三、防崩潰與抑噪
 
@@ -185,10 +186,10 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **遞迴／活鎖／資損守衛 5 項**（W5 `ItemContainer`、W6 `IsoChunk.doLoadGridsquare`、
   W7 `IsoGameCharacter`、W8 `IsoChunk.Save`＋`SaveLoadedTask.save`、W9 存檔管線）：
   全部帶計數器＋不需重新部署的旋鈕，明細與已知降級見第二節「W4–W9」小節。
-- **抑噪 8 項**（AnimationSet／SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／
-  PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding）：只攔
+- **抑噪 7 項**（SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／
+  PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding；AnimationSet 已於 42.21.0 退役）：只攔
   已知噪音樣式，未知警告與**反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的
-  訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的第 8 項是
+  訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的 toxic 抑噪是
   最大單一噪音源：`Send Toxic Building at [ … ]` 抑噪前佔 console **45.5%**（15.41 小時／8 session
   實測 164,176／360,669 行，逐 session 35.5%–80.8%），
   來源是 PSR 的 `PBSystem.suppressToxic` 掛 `Events.EveryOneMinute`（Day Length=1h → 每 2.5
@@ -204,7 +205,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 |---|---|
 | ActionStateContainer 抑噪 | TIS 官方自己把 warn 降級為 trace，噪音源已消失 |
 | ZombieCountOptimiser 回收加速 | 重新分析已完成、定案不恢復：42.20 的 culling 只掃 per-connection 的有主殭屍，碰不到無主殭屍（記憶體壓力主源），加速取樣與原始目標脫鉤（patches.md 2a） |
-| SafehouseClaimPacket 修復 | 觸發條件（自訂地圖）已從正式服移除，無症狀不介入驗證路徑 |
+| SafehouseClaimPacket 修復 | 觸發條件（自訂地圖）已從正式服移除，無症狀不介入驗證路徑；2026-09-28 helper 一併刪除 |
 | W3-2 ECS memo | microbenchmark 實測淨劣化，撤刀 |
 | P5 IsoCell sidecar（15 站） | **42.20.2 官方收編**：官方伴生 Set 原生 O(1)＋isEmpty 快速路徑，優於我方 O(P+R)；IsoDeadBody 旁路變異亦被官方 root fix |
 | popman buffer 隔離 v3（11 站） | **42.20.2 官方收編**：官方 readByteBuffer 讀寫隔離與 v3 完全同構，clamp 保險絲失去防護對象 |

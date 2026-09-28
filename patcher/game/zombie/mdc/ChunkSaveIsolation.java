@@ -3,50 +3,31 @@ package zombie.mdc;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.zip.CRC32;
 
 import zombie.debug.DebugLog;
 import zombie.network.ClientChunkRequest;
 
 /**
- * W9 存檔管線隔離（2026-08-14；CRC-blam 家族根治刀——共用 CRC32 競態＋共用物件池斷絕）。
+ * W9 存檔管線隔離（2026-08-14 上線；2026-09-28 對 42.21.0 縮為「私有池」一刀）。
  *
- * <p><b>定罪證據鏈</b>（bytecode 實證，docs/patches.md 2u）：
+ * <p><b>原三刀</b>（定罪證據鏈見 docs/patches.md 2u）：
  * <ol>
- *   <li>W8 閘上線首晚攔下 8 筆損毀寫入，8/8 呼叫堆疊一致：
- *       {@code SaveChunkThread → SaveLoadedTask.save}；8/8 簽名一致：len 欄位正確、
- *       CRC 欄位＝0（3 筆）或垃圾值（5 筆）——與歷史 43 筆屍體同款兩簽名。</li>
- *   <li>{@code IsoChunk.Save(ByteBuffer,CRC32,Z)} 的 header 指紋用<b>呼叫者傳入的
- *       CRC32</b> 計算（reset → update body → getValue → 回填）。序列化入口
- *       {@code SaveChunkThread.addLoadedJob} 傳入的是 <b>SaveChunkThread.crc32 單一共用
- *       實例</b>。兩執行緒同時序列化：對方 reset() 插在我 update 與 getValue 之間 →
- *       我讀到 <b>0</b>（＝A 組簽名）；update 交錯 → <b>混合垃圾</b>（＝B 組簽名）。
- *       body 與 len 由各自執行緒完整寫入 → <b>len 永遠正確</b>——與 8/8 觀測鐵律唯一相容
- *       的機制（buffer 竊用假說無法解釋 len 恆正確）。</li>
- *   <li>並行序列化實證：{@code QueuedSaveAll}（全圖存檔）可在 {@code GameServer$1}
- *       （shutdown hook 執行緒）執行，與主迴圈的 {@code ServerCell.update → saveChunk}
- *       同時進入 addLoadedJob——歷史 blam 集中於重啟窗口（0.8 筆/重啟）由此解釋。
- *       運行中爆發（8/14 晚 21:50、22:15 兩波）之第二執行緒未逐一指認，但本修法
- *       不依賴指認：任何並行呼叫者都被 ThreadLocal 隔離。</li>
- *   <li>第二處同款競態：{@code SaveLoadedTask.save()} 的去重比對用外層
- *       {@code ServerChunkLoader.crcSave} 共用實例，而 save() 可在 SaveChunkThread 與
- *       LoaderThread（經 {@code saveNow}，載入前沖存檔）並行執行——污染
- *       ChunkChecksum（去重誤判＝陳舊跳寫；客戶端校驗錯亂＝重送風暴，疑與黑邊案
- *       「crc 恆 0」同根）。</li>
+ *   <li>{@code addLoadedJob} 的共用 {@code SaveChunkThread.crc32}（header 指紋競態）→
+ *       ThreadLocal——<b>42.21 官方已修，已退役</b>：欄位刪除，改為每次
+ *       {@code new CRC32()} 的區域變數；</li>
+ *   <li>{@code SaveLoadedTask.save()} 的共用 {@code ServerChunkLoader.crcSave}（去重競態）→
+ *       ThreadLocal——<b>42.21 官方已修，已退役</b>：同上；</li>
+ *   <li>{@code getChunk／getByteBuffer／releaseChunk} → 本類私有池（<b>保留</b>）。</li>
  * </ol>
  *
- * <p><b>三刀</b>（全部只動存檔管線，發送路徑一概不碰）：
- * <ol>
- *   <li>{@code addLoadedJob} 的 GETFIELD crc32 → {@link #headerCrc}（ThreadLocal）——
- *       header 指紋競態根絕；</li>
- *   <li>{@code SaveLoadedTask.save()} 的 GETFIELD crcSave ×4 → {@link #dedupCrc}
- *       （ThreadLocal）——去重／ChunkChecksum 競態根絕；</li>
- *   <li>{@code getChunk／getByteBuffer／releaseChunk} → 本類私有池——存檔管線徹底退出
- *       {@code ClientChunkRequest} 的全域 static 共用池（與 N 條 PlayerDownloadServer
- *       WorkerThread、RequestZipListPacket.parse 共用），恢復單一所有權鏈。
- *       同時關閉 W8 閘的理論盲區：池若把同一 buffer 發給兩個主人，「完整重填成別塊
- *       chunk 的自洽資料」可通過 CRC 驗證——私有化後此路徑物理上不存在。</li>
- * </ol>
+ * <p><b>為什麼第三刀仍需要</b>：42.21 的 {@code ClientChunkRequest} 全域 static 池
+ * （{@code freeChunks} private static／{@code freeBuffers} public static）與
+ * {@code SaveChunkThread.update()} 的無同步 {@code savedChunks} ArrayList 都未變。主迴圈
+ * （{@code ServerMap.postupdate → updateSaved}）與 shutdown hook（{@code QueuedQuit →
+ * SaveAll} 輪詢 {@code updateSaved}）並行時，同一 task 可被 release 兩次——全域池就會把
+ * 同一顆殼／buffer 同時出租給兩個主人（其一可能是 N 條 PlayerDownloadServer WorkerThread
+ * 的發送序列化）。W8 閘攔得住不自洽的寫入，攔不住「buffer 被完整重填成別塊 chunk 的
+ * 自洽資料」；存檔管線改用私有池後這條路徑物理上不存在。
  *
  * <p><b>私有池語意</b>（codex 對抗審查後收緊為 exactly-once）：Chunk 殼<b>不入池</b>
  * ——每次 new，雙重歸還的殼自然 GC、物理上無法二次出租；buffer 歸還走
@@ -56,20 +37,14 @@ import zombie.network.ClientChunkRequest;
  * 才收，否則丟棄給 GC——vanilla 全域池無界，本池反而更緊）。
  *
  * <p><b>驗證閉環</b>：W8 ChunkWriteGuard 的 {@code flagged} 計數器是現成 A/B 儀表——
- * 本刀上線後 flagged 應歸零；不歸零＝機制另有分支，BLOCKED stack 續查。
- * W8 閘不拆，永久保險絲。
+ * 42.21 官方修掉 CRC 競態後 flagged 應恆 0；不為 0＝還有別的機制，BLOCKED stack 續查。
  *
  * <p><b>Kill switch</b>：{@code -Dmdc.chunkSaveIsolation=0} 完全停用——helper 全部
- * 原樣委派回 vanilla 共用實例／共用池（redirect 帶著原 receiver，off 路徑就是原始碼）。
+ * 原樣委派回 vanilla 共用池（redirect 帶著原 receiver，off 路徑就是原始碼）。
  */
 public final class ChunkSaveIsolation {
 
     private static final boolean ENABLED = !"0".equals(System.getProperty("mdc.chunkSaveIsolation"));
-
-    /** 序列化 header 指紋用（addLoadedJob → IsoChunk.SaveLoadedChunk → Save）。 */
-    private static final ThreadLocal<CRC32> HEADER_CRC = ThreadLocal.withInitial(CRC32::new);
-    /** 去重比對用（SaveLoadedTask.save 的 reset/update/getValue×2 四連讀）。 */
-    private static final ThreadLocal<CRC32> DEDUP_CRC = ThreadLocal.withInitial(CRC32::new);
 
     /**
      * 存檔管線私有 buffer 池——與 ClientChunkRequest 的全域 static 池零交集。
@@ -93,20 +68,6 @@ public final class ChunkSaveIsolation {
 
     private static final AtomicBoolean banner = new AtomicBoolean();
 
-    /** GETFIELD SaveChunkThread.crc32 的同形替換目標（吃共用實例、回執行緒私有）。 */
-    public static CRC32 headerCrc(CRC32 shared) {
-        if (!ENABLED) {
-            return shared;
-        }
-        firstUse();
-        return HEADER_CRC.get();
-    }
-
-    /** GETFIELD ServerChunkLoader.crcSave 的同形替換目標。 */
-    public static CRC32 dedupCrc(CRC32 shared) {
-        return ENABLED ? DEDUP_CRC.get() : shared;
-    }
-
     /**
      * INVOKEVIRTUAL ClientChunkRequest.getChunk 改道目標（receiver 僅 off 路徑使用）。
      * 殼永遠是新的。安全依據＝消費端先寫後讀（addLoadedJob 使用前寫 wx/wy、getByteBuffer
@@ -118,6 +79,7 @@ public final class ChunkSaveIsolation {
         if (!ENABLED) {
             return ccr.getChunk();
         }
+        firstUse();
         return new ClientChunkRequest.Chunk();
     }
 
@@ -168,7 +130,7 @@ public final class ChunkSaveIsolation {
         if (banner.compareAndSet(false, true)) {
             try {
                 DebugLog.log("[MinidoracatJavaPatch][ChunkSaveIsolation] 首次生效"
-                        + "（header/dedup CRC 執行緒隔離＋存檔管線私有池；-Dmdc.chunkSaveIsolation=0 停用）");
+                        + "（存檔管線私有池；-Dmdc.chunkSaveIsolation=0 停用）");
             } catch (RuntimeException | LinkageError ignored) {
                 // 橫幅只是驗證便利，失敗不得影響存檔路徑
             }

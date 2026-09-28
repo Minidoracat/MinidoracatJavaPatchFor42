@@ -35,14 +35,6 @@ public final class Patcher {
         }
     }
     record ConstChange(Object from, Object to) {}
-    record IntComparisonChange(int from, int to) {
-        IntComparisonChange {
-            if (from < Opcodes.IF_ICMPEQ || from > Opcodes.IF_ICMPLE
-                    || to < Opcodes.IF_ICMPEQ || to > Opcodes.IF_ICMPLE) {
-                throw new IllegalArgumentException("integer comparison opcodes required");
-            }
-        }
-    }
 
     /**
      * 分頁筆數 clamp：鎖定「INVOKESTATIC site → istore C → iload O → iload C → iadd → istore O」
@@ -153,7 +145,6 @@ public final class Patcher {
         FieldGetSwap fieldGetSwap = null;
         final List<FieldPutWrap> fieldPutWraps = new ArrayList<>();
         VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
-        IntComparisonChange intComparison = null;
         int expectedHits = 0;
         int actualHits = 0;
         MethodOps(String name, String desc) { this.name = name; this.desc = desc; }
@@ -323,11 +314,6 @@ public final class Patcher {
 
         @Override
         public void visitJumpInsn(int opcode, org.objectweb.asm.Label label) {
-            IntComparisonChange change = ops.intComparison;
-            if (change != null && opcode == change.from()) {
-                opcode = change.to();
-                ops.actualHits++;
-            }
             super.visitJumpInsn(opcode, label);
             clampState = 0;
             vehicleChunkState = 0;
