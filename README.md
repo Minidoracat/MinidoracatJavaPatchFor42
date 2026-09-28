@@ -214,7 +214,7 @@ Lua 測試為隔離夾具，驗伺服器側物品狀態與同步呼叫，不代�
 ## 客戶端模組化安裝包
 
 `build-client.ps1` 只建置 client 產物，不安裝、不啟動遊戲，也不寫入 server manifest：
-未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.21.0-0.2.0.zip`。
+未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.21.0-0.2.1.zip`。
 
 | 模組 | 用途 |
 |---|---|

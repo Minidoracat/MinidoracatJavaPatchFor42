@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.0'
+$PACKAGE_VERSION = '0.2.1'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -70,10 +70,10 @@ Assert-Ok 'javac common/profiler helpers'
 
 Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
-    @{ id='core'; mode='client-core'; name='Minidoracat patch core'; version=$coreVersion; requires=@() },
-    @{ id='profiler'; mode='client-profiler'; name='DevProfiler'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='Client fixes (standard 4 GiB)'; version="v3.0($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='Client fixes (lowmem 50 MiB)'; version="v3.0-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; version=$coreVersion; requires=@() },
+    @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; version=$coreVersion; requires=@('core') },
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; version="v3.0($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; version="v3.0-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -173,16 +173,39 @@ Write-Utf8 "$pkg\manifest.json" (($manifest | ConvertTo-Json -Depth 12) + "`n")
 $instructions = @"
 Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
-安裝與移除
-1. 修改 patch 前，先關閉 Project Zomboid 與本機測試伺服器。
-2. 完整解壓縮，保留 manifest.json、payload 與三個管理程式在同一資料夾。
-3. 雙擊 Install-Patches.bat，選擇 Profiler、client 修復包，或兩者。
-4. lowmem 保留原版 50 MiB 貼圖等待門檻；standard 放寬至 4 GiB，只給有需要的
-   高記憶體電腦。Profiler 不依賴修復包，不會自行更改貼圖門檻。
-5. 效能分析介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
-6. 正常啟動遊戲；主選單短暫顯示已安裝模組與掛點活動。
-   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
-7. 雙擊 Uninstall-Patches.bat，可移除指定模組或全部自家模組。
+【這是什麼】
+修「隊友、殭屍、車輛看不到，只剩影子和名牌」的問題。只改你自己電腦上的遊戲。
+沒遇過這個問題的人可以不用裝。
+
+【怎麼安裝】
+1. 關閉遊戲。
+2. 把整個壓縮檔解壓縮到一個資料夾（不要只拉出其中一個檔案）。
+3. 雙擊 Install-Patches.bat。
+4. 輸入 1 按 Enter（安裝或更新修補）。
+5. 輸入 1 按 Enter（修復隱形問題）。
+6. 選版本時直接按 Enter，程式會依你的電腦自動選好。
+7. 問「確定要安裝嗎？」時，輸入 Y 按 Enter。
+8. 看到安裝完成後按 Enter，再輸入 0 按 Enter 關閉，就可以開遊戲了。
+
+【遊戲要更新時】
+1. 關閉遊戲。
+2. 雙擊 Uninstall-Patches.bat，輸入 A 按 Enter（全部移除），再輸入 Y 按 Enter 確認。
+3. 讓 Steam 更新遊戲。
+4. 等新版修補包發布後，再照上面的步驟裝回去。
+沒先移除就更新，可能會進不了伺服器，或一連線就出錯。
+
+【以前裝過舊版】
+- 裝過有 Uninstall-Patches.bat 的版本：直接照上面安裝即可，會自動換成新版。
+- 裝過只有 uninstall.bat 的 TexPipeline 舊版：先執行舊包裡的 uninstall.bat，再裝這包。
+
+=====================================================================
+以下是給開發者與進階使用者的說明，一般玩家不用看。
+
+模組說明
+- 客戶端修復：標準版把貼圖等待門檻放寬到 4 GiB（建議 32GB 以上 RAM）；
+  省記憶體版保留原版 50 MiB 門檻。兩者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
+- DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
+  installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。

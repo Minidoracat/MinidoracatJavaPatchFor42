@@ -1148,7 +1148,7 @@ function Invoke-Install {
         }
 
         if ($Interactive) {
-            $ans = Read-Host '確定要套用嗎？(Y/N)'
+            $ans = Read-Host '確定要安裝嗎？輸入 Y 按 Enter 開始（輸入 N 取消）'
             if ($ans -notmatch '^[Yy]') { Write-Info '已取消。'; return }
         }
 
@@ -1281,7 +1281,7 @@ function Invoke-Uninstall {
         }
 
         if ($Interactive) {
-            $ans = Read-Host '確定要卸載嗎？(Y/N)'
+            $ans = Read-Host '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）'
             if ($ans -notmatch '^[Yy]') { Write-Info '已取消。'; return }
         }
 
@@ -1371,9 +1371,10 @@ function Invoke-Status {
 }
 
 # ---------------------------------------------------------------- 互動選單
-function Read-Choice([string]$prompt, [string[]]$valid) {
+function Read-Choice([string]$prompt, [string[]]$valid, [string]$default = '') {
     while ($true) {
         $ans = (Read-Host $prompt).Trim()
+        if ($ans -eq '' -and $default) { return $default }
         if ($valid -contains $ans) { return $ans }
         Write-Bad "請輸入：$($valid -join ' / ')"
     }
@@ -1384,41 +1385,52 @@ function Select-InstallModules($Manifest) {
     $hasProfiler = $ids -contains 'profiler'
     $variants = @($ids | Where-Object { $_ -like 'client-fixes-*' })
 
-    Write-Head '要安裝哪些模組？（核心 core 會自動一起安裝）'
+    Write-Head '要安裝什麼？'
     $opts = @('0')
-    if ($hasProfiler) { Write-Info "  [1] 只裝 $(Get-ModuleLabel $Manifest 'profiler')"; $opts += '1' }
-    if ($variants.Count -gt 0) { Write-Info '  [2] 只裝 客戶端修復 (client-fixes)'; $opts += '2' }
-    if ($hasProfiler -and $variants.Count -gt 0) { Write-Info '  [3] 兩者都裝'; $opts += '3' }
+    if ($variants.Count -gt 0) { Write-Info '  [1] 修復隱形問題（一般玩家選這個）'; $opts += '1' }
+    if ($hasProfiler) { Write-Info '  [2] 開發者工具 DevProfiler（一般玩家不用裝）'; $opts += '2' }
+    if ($hasProfiler -and $variants.Count -gt 0) { Write-Info '  [3] 兩個都裝（開發者用）'; $opts += '3' }
     Write-Info '  [0] 返回'
-    $c = Read-Choice '請選擇' $opts
+    $c = Read-Choice '請輸入數字後按 Enter' $opts
     if ($c -eq '0') { return @() }
 
     $picked = @()
-    if ($c -eq '1' -or $c -eq '3') { $picked += 'profiler' }
-    if ($c -eq '2' -or $c -eq '3') {
-        Write-Head '客戶端修復要用哪個變體？'
+    if ($c -eq '2' -or $c -eq '3') { $picked += 'profiler' }
+    if ($c -eq '1' -or $c -eq '3') {
+        $ramGb = 0
+        try { $ramGb = [int][Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) } catch { }
+        Write-Head '要用哪個版本？'
         $vopts = @()
+        $recommend = ''
         $i = 0
         foreach ($v in $variants) {
             $i++
-            Write-Info "  [$i] $(Get-ModuleLabel $Manifest $v)"
+            $text = if ($v -eq 'client-fixes-standard') { '標準版（電腦記憶體 32GB 以上）' } elseif ($v -eq 'client-fixes-lowmem') { '省記憶體版（電腦記憶體 32GB 以下）' } else { Get-ModuleLabel $Manifest $v }
+            Write-Info "  [$i] $text"
             $vopts += "$i"
+            if (($ramGb -ge 32 -and $v -eq 'client-fixes-standard') -or ($ramGb -gt 0 -and $ramGb -lt 32 -and $v -eq 'client-fixes-lowmem')) { $recommend = "$i" }
         }
-        Write-Info '  說明：standard 放寬貼圖管線記憶體門檻（建議 32GB 以上 RAM）；lowmem 保持原版門檻（16GB 以下）。'
-        $vc = Read-Choice '請選擇' $vopts
+        if ($recommend) {
+            Write-Info "  你的電腦記憶體約 $ramGb GB，建議選 [$recommend]，直接按 Enter 就會選它。"
+        } else {
+            Write-Info '  不知道記憶體多大就選省記憶體版。'
+        }
+        $vc = Read-Choice '請輸入數字後按 Enter' $vopts $recommend
         $picked += $variants[[int]$vc - 1]
     }
     return $picked
 }
 
 function Select-UninstallModules([string[]]$installed) {
-    Write-Head '要卸載哪些模組？'
+    Write-Head '要移除哪些修補？'
+    Write-Info '  遊戲要更新前，輸入 A 按 Enter 全部移除即可。'
+    $names = @{ 'core' = '核心元件'; 'client-fixes-standard' = '修復隱形問題（標準版）'; 'client-fixes-lowmem' = '修復隱形問題（省記憶體版）'; 'profiler' = '開發者工具 DevProfiler' }
     $i = 0
-    foreach ($id in $installed) { $i++; Write-Info "  [$i] $id" }
-    Write-Info '  [A] 全部移除'
+    foreach ($id in $installed) { $i++; $label = if ($names.ContainsKey($id)) { $names[$id] } else { $id }; Write-Info "  [$i] $label" }
+    Write-Info '  [A] 全部移除（遊戲更新前選這個）'
     Write-Info '  [0] 返回'
     while ($true) {
-        $ans = (Read-Host '請輸入編號（可用逗號分隔多個）').Trim()
+        $ans = (Read-Host '請輸入 A 或編號後按 Enter').Trim()
         if ($ans -eq '0') { return @() }
         if ($ans -match '^[Aa]$') { return @($installed) }
         $picked = @()
@@ -1442,12 +1454,12 @@ function Invoke-Menu {
             # 光是開選單不會動任何檔案；復原一律等到真的要安裝／卸載時才做
             Write-Warn2 '偵測到未完成的安裝／卸載交易，執行安裝或卸載時會先自動復原（請先關閉遊戲）。'
         }
-        Write-Info '  [1] 安裝／更新模組'
-        Write-Info '  [2] 卸載部分模組'
-        Write-Info '  [3] 卸載全部自家模組'
-        Write-Info '  [4] 查看目前狀態'
+        Write-Info '  [1] 安裝或更新修補'
+        Write-Info '  [2] 移除部分修補'
+        Write-Info '  [3] 全部移除（遊戲要更新前選這個）'
+        Write-Info '  [4] 查看目前安裝狀態'
         Write-Info '  [0] 離開'
-        $c = Read-Choice '請選擇' @('0', '1', '2', '3', '4')
+        $c = Read-Choice '請輸入數字後按 Enter' @('0', '1', '2', '3', '4')
         try {
             switch ($c) {
                 '1' {
