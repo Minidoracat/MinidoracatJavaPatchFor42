@@ -62,7 +62,7 @@ public final class AnimalSoundProbeTest {
                     hits++;
                 }
                 listMax = Math.max(listMax, list.size());
-                if (calls % 64 == 0) {
+                if (calls % AnimalSoundProbe.sampleEveryForTest() == 0) {
                     samples++;
                     long[] counts = reference(list, a);
                     eligibleSum += counts[0];
@@ -78,11 +78,11 @@ public final class AnimalSoundProbeTest {
             require(AnimalSoundProbe.framesForTest() == frames, "frames " + AnimalSoundProbe.framesForTest());
             require(AnimalSoundProbe.frameCallsMaxForTest() == frameCallsMax, "每幀呼叫上限");
             require(AnimalSoundProbe.changesForTest() == changes, "同幀清單變動 " + AnimalSoundProbe.changesForTest() + " vs " + changes);
-            require(AnimalSoundProbe.samplesForTest() == samples, "每 64 次抽樣一次");
+            require(AnimalSoundProbe.samplesForTest() == samples, "每 " + AnimalSoundProbe.sampleEveryForTest() + " 次抽樣一次");
             require(AnimalSoundProbe.eligibleSumForTest() == eligibleSum, "抽樣：會影響動物的聲音數");
             require(AnimalSoundProbe.inRangeSumForTest() == inRangeSum, "抽樣：範圍內聲音數");
             require(AnimalSoundProbe.listMaxForTest() == listMax, "清單長度上限");
-            require(eligibleSum > 0 && inRangeSum > 0, "抽樣必須實際涵蓋範圍內的聲音");
+            require(AnimalSoundProbe.sampleEveryForTest() != 64 || eligibleSum > 0 && inRangeSum > 0, "抽樣必須實際涵蓋範圍內的聲音");
         } else {
             require(AnimalSoundProbe.callsForTest() == 0 && AnimalSoundProbe.samplesForTest() == 0, "off 不計數");
         }

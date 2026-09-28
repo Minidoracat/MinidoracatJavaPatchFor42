@@ -4429,7 +4429,7 @@ rebuilds rebuildUsAvg disabled modifiedExits nested anomalies`。
 - 線上驗收：首次生效行；beat `auditMisses=0 lateFixes=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；
   W18 `losAvgUs` 從約 64 µs 降到個位數。
 
-## 2bk. 動物聽覺掃描量測（W48，server，純觀測，預設開）
+## 2bk. 動物聽覺量測（W48）與空間索引（W48-2，server，預設開）
 
 **原版**：伺服器每隻動物每個 tick 在 `IsoAnimal.updateInternal → respondToSound` 呼叫一次 `WorldSoundManager.getSoundAnimal`。
 client 只看動物所在 chunk 的聲音清單（`chunk.soundList`），伺服器（`GameServer.server`）卻整份掃過全域 `soundList`，
@@ -4454,13 +4454,66 @@ list=平均/最大 samples eligible=平均/最大 inRange=平均/最大 hits cha
 
 **開關**：`-Dmdc.animalSoundProbe=0|off` 直接委派，不計時也不計數；需重啟。
 
+**9/28 06:1x 實測**（06:00 重啟後、清晨非尖峰）：`windowPct` 2.66–4.80%、`frameUsAvg` 3.2–4.1 ms（最大 15 ms）、
+每幀約 452–525 次（最大 709）、`list` 約 4,000–4,300（最大 4,761）、`eligible` 約 98%、`inRange` 平均 12–14（最大 278）、
+`hits` 約 51%、`changesPerFrame` 約 50–54、`anomalies=0`。會影響動物的聲音幾乎是全部，精簡清單沒用；在範圍內的極少，
+故 W48-2 依位置分區。
+
+### W48-2 空間索引
+
+**做法**（`AnimalSoundIndex`，由 `AnimalSoundProbe` 呼叫，量測照舊包住它）：只找可能在範圍內的聲音，逐一照原版算式
+（同一個 `IsoUtils.DistanceToSquared(float×6)`、z×3、半徑×野生 3 倍、`!(distSq > r²)`、`volume × (1 − distSq/r²)`）
+取最大者；音量相同取清單中較前者——原版依序掃描「嚴格大於才換」，結果就是最大值中索引最小者，所以不必照清單順序走。
+聲音依「半徑×3＋2」分三類：≤64 放 64 格網格、≤512 放 512 格網格（各查動物所在格與周圍 8 格），更大的（環境音 600／5000、
+警報、直升機）每次都查。不在周圍格內的聲音，水平距離已大於「半徑×3＋2」，原版的浮點距離不可能落在範圍內。
+不影響動物、音量 ≤ 0、半徑 0 的聲音原版永遠選不到（半徑 0 時 `delta` 為 NaN），不入索引。
+
+**清單變動**：`WorldSoundManager` 建構子唯一的 `PUTFIELD soundList` 前插 `wrapSoundList`（FieldPutWrap），把新 ArrayList 換成
+同實作的子類 `SoundList`，多記追加與 `set` 次數；其餘結構變動看 ArrayList 自己的 `modCount`。每次查詢前比對：只有尾端追加
+（`addSound`，每幀約 50 次）就把新元素補進索引，其他任何變動（`update()` 移除到期聲音——每幀都會發生、`KillCell` 清空、插入、
+`set`、`removeIf`）整份重建。`replaceAll`、`sort`、`removeAll`、`retainAll` 會在回呼途中直接改寫內部陣列、最後才遞增 `modCount`
+（回呼拋出時根本不遞增），`subList`／`reversed` 視圖的寫入也繞過計數，所以一被呼叫就把清單標成不可信、從此改走原版
+（全 jar 讀 `soundList` 的地方只用 `size/get/add/remove(int)/clear/iterator`，原版從不呼叫它們）。
+先讀好動物座標，再在清單鎖內（與 `addSound` 的 `synchronized(soundList)` 同一把）完成索引維護、查詢與抽樣比對，
+其他執行緒的追加不會插在索引與原版比對之間（critic 審查抓到：否則合法的並行追加會被當成不一致而永久停用）。
+
+**改走原版的情況**：非伺服器、清單不是 `SoundList` 或已不可信、清單含 null（原版會拋 NPE，照原樣）、動物座標非有限值或
+絕對值 ≥ 1e7。
+
+**監看**：聲音在清單中時，座標、半徑、音量、旗標不會被原地改寫。SmokeCheck 守門的部分：全 jar 對這些欄位的寫入全部在
+`WorldSound.init` 多載內；唯一例外是 `BodyDamage.TriggerSneezeCough` 在 `addSound` 後把 `stressAnimals` 設 `false`（索引每次即時
+重查旗標，關掉只會少一個候選，與原版一致）；`getNew` 呼叫 2 處、`release` 呼叫 3 處。42.20.4 人工查核、未由結構檢查保障的前提：
+`init` 只作用在剛從物件池取出的物件、`update()` 先移出清單再回收、`KillCell` 回收後立刻清空——升版時上述呼叫數一變就要重新核對。
+另每 256 次查詢比對一次原版結果，不一致即本次啟動永久停用、記錄前 10 筆明細。
+
+**開關**：`-Dmdc.animalSoundIndex`：`1|on`（預設）、`2|observe`（每次都比對，回傳原版）、`0|off`（不包清單、全走原版）；需重啟。
+索引開啟時 W48 的抽樣改為每 1024 次一次（抽樣本身要整份重掃）。
+
+**心跳** `[AnimalSoundIndex]`（首次生效一行，之後每 5 分鐘）：`calls fast candAvg rebuilds rebuildUsAvg tailAppends entries far
+fallback[notServer untrusted null coords] audits auditMisses observeMismatches disabled anomalies`。
+
 **驗證**：
 - SmokeCheck：原版前提（`getSoundAnimal` 讀 `GameServer.server` 一次、全域 `soundList` 一次；全 jar 呼叫點恰 1 個且在
-  `respondToSound`）；改道後原呼叫歸零、改道恰 1、真指令數不變；helper 只委派原版一次、catch 只接 `RuntimeException`、零 Rand。
+  `respondToSound`）；改道後原呼叫歸零、改道恰 1、真指令數不變；probe 只經索引查詢一次、不直接呼叫原版、零 Rand。
+  W48-2：原版 `getSoundAnimal` 的指令文字 SHA-256 與核對時相同（TIS 改任何一處都紅，須重新核對等價）；全 jar
+  `PUTFIELD soundList` 恰 1、原版前為 `new ArrayList`、手術後緊接 wrap、移除 wrap 後逐字等於原版、真指令 +1；
+  helper 的逐聲音算式呼叫同一個 `DistanceToSquared(FFFFFF)F`、只接 `RuntimeException`、零 Rand；聲音欄位寫入逐方法全在
+  `init` 多載內、`getNew`／`release` 呼叫數（見「監看」）。
 - `AnimalSoundProbeTest`（`-Xverify:all`）：400 幀隨機聲音清單（含半徑 0、三種旗標、z 差、無方格動物、幀內追加），每次呼叫回傳值
   與原版為同一物件；calls／hits／frames／每幀上限／幀內變動／抽樣次數與 eligible／inRange 合計對得上獨立重算；清單含 null 時
-  與原版同型例外且不計入；off 模式不計數。
-- 線上驗收：首次生效行、`anomalies=0`；晚峰取三個以上心跳判讀。
+  與原版同型例外且不計入；off 模式不計數。索引開、關兩種抽樣間隔各跑一次。
+- `AnimalSoundIndexTest`（`-Xverify:all`，四組態）：on 模式 240 個隨機世界、約 7 萬次查詢，每次與原版比對同一物件；清單變動涵蓋
+  幀內追加、真 `update()` 到期移除、中間移除、插入、`set`、交換、反轉、`removeIf`、`addAll`、清空、同值雙胞胎、移除後插入；
+  另測 64／512 格線邊界、負座標、負半徑、音量 ≤ 0、半徑 0、NaN 與超大座標、無方格、含 null（同型 NPE）、取過 `subList`
+  後改走原版。bulk 操作：`replaceAll` 部分完成後拋出、寫入 null（同型 NPE）、回呼中重入查詢，`sort` 比較器中途拋出，
+  `removeAll`／`retainAll` 在 `contains` 回呼中重入查詢，全部與原版相同。並行：另一執行緒在查詢讀動物座標時以同一把鎖追加更大聲的
+  聲音 600 次，全部與原版相同且不觸發停用。observe 每次比對零不一致；off 不包清單；原地改寫聲音座標時抽樣比對發現並停用。
+  16 個 mutant（取捨去掉索引比較或反向、去掉野生 ×3、只查中心格、忽略 `set`／`modCount`／不可信旗標、排除負半徑、整數除法、
+  放大近距上限、距離 z 不乘 3；`replaceAll`／`sort`／`removeAll`／`retainAll` 不標不可信；在鎖內才讀動物座標）全數被測試抓到。
+- 本機基準（一次性，不入 build）：4,300 聲音、每幀 525 次查詢、每 10 次追加一個、每幀 `update()`：原版每幀約 2.18 ms、
+  索引約 0.19 ms（含每幀一次重建），命中數相同。
+- 線上驗收：首次生效行；beat `auditMisses=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；W48 的 `frameUsAvg`／
+  `windowPct` 對照 9/28 基線。
 
 ---
 

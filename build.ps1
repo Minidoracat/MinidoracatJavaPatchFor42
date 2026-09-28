@@ -112,6 +112,9 @@ $helperEntries = @(
     'zombie/mdc/AnimalLosIndex.class',
     'zombie/mdc/AnimalLosIndex$ObjectSet.class',
     'zombie/mdc/AnimalSoundProbe.class',
+    'zombie/mdc/AnimalSoundIndex.class',
+    'zombie/mdc/AnimalSoundIndex$CellTable.class',
+    'zombie/mdc/AnimalSoundIndex$SoundList.class',
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
     'zombie/mdc/PatchInfo.class'
 )
@@ -513,6 +516,17 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "AnimalSoundProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.animalSoundProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest off
 Assert-Ok "AnimalSoundProbeTest（0，直接委派不計數）"
+Write-Host "[9zd/10] 動物聽覺空間索引（W48-2）：與原版逐次差分（幀內追加、到期移除、任意結構變動、格線邊界、負座標、null）、observe、off、停用..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest on
+Assert-Ok "AnimalSoundIndexTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.animalSoundIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest observe
+Assert-Ok "AnimalSoundIndexTest（observe，每次比對回傳原版）"
+java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest off
+Assert-Ok "AnimalSoundIndexTest（0，不包清單全走原版）"
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest violation
+Assert-Ok "AnimalSoundIndexTest（聲音原地改寫由抽樣比對發現並停用）"
+java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest on
+Assert-Ok "AnimalSoundProbeTest（索引 off 時每 64 次抽樣）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

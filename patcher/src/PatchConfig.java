@@ -195,9 +195,9 @@ public final class PatchConfig {
         // 沿用舊座標會通過命中數守門卻改到逃跑距離。改乘數才是原本的「聲音壓力 ÷3」。
         Patcher.MethodOps a2 = animal.method("respondToSound", "()V");
         a2.consts.add(new Patcher.ConstChange(0.05f, 1.0f / 60.0f));
-        // W48 動物聽覺掃描量測（docs/patches.md 2bk）：伺服器每隻動物每 tick 經 getSoundAnimal 整份掃全域
-        // soundList。唯一呼叫點 1:1 改道 AnimalSoundProbe，委派原版並計時、抽樣統計，純觀測不改回傳。
-        // -Dmdc.animalSoundProbe=0|off 停用。
+        // W48 動物聽覺掃描量測＋W48-2 空間索引（docs/patches.md 2bk）：伺服器每隻動物每 tick 經 getSoundAnimal 整份掃全域
+        // soundList。唯一呼叫點 1:1 改道 AnimalSoundProbe（計時、抽樣統計），查詢交給 AnimalSoundIndex（依位置只算
+        // 可能在範圍內的聲音，回傳值與原版相同）。-Dmdc.animalSoundProbe=0|off 停量測；-Dmdc.animalSoundIndex=0|off 回原版。
         a2.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/WorldSoundManager", "getSoundAnimal",
                 "(Lzombie/characters/animals/IsoAnimal;)Lzombie/WorldSoundManager$WorldSound;",
@@ -238,6 +238,14 @@ public final class PatchConfig {
                 "zombie/mdc/AnimalLosGate", "updateLOS"));
         a5.expectedHits = 1;
         patches.add(animal);
+        // W48-2：WorldSoundManager 建構子唯一 PUTFIELD soundList 之前包成 AnimalSoundIndex.SoundList（ArrayList 子類，
+        // 記追加與 set 次數，其餘變動看 modCount），索引才知道何時只需補尾端、何時整份重建。
+        Patcher.ClassPatch worldSound = new Patcher.ClassPatch("zombie/WorldSoundManager");
+        Patcher.MethodOps wsmInit = worldSound.method("<init>", "()V");
+        wsmInit.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/WorldSoundManager", "soundList",
+                "Ljava/util/List;", "zombie/mdc/AnimalSoundIndex", "wrapSoundList"));
+        wsmInit.expectedHits = 1;
+        patches.add(worldSound);
 
         // 42.20.2 官方收編，退役：popman buffer 隔離 v3（fieldGetSwap ×10＋count-clamp）。
         // 官方新增 readByteBuffer = allocateDirect(1024) 專用讀 buffer，updateMain 全部 10 處

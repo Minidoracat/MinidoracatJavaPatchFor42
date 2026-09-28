@@ -22,11 +22,13 @@ import zombie.iso.IsoUtils;
  * 只含會影響動物的精簡清單就夠，還是需要依位置分區。
  *
  * <p>計數只在主執行緒更新。簿記失敗只計 {@code anomalies}，不影響回傳；原版例外原樣上拋（不計入 calls）。
- * kill switch {@code -Dmdc.animalSoundProbe=0|off}：直接委派，不計時也不計數。
+ * 查詢本身交給 {@link AnimalSoundIndex}（W48-2，預設走空間索引，回傳值與原版相同）；計時涵蓋它，心跳即可看出成效。
+ * 索引開啟時抽樣改為每 1024 次一次（抽樣本身要整份重掃）。
+ * kill switch {@code -Dmdc.animalSoundProbe=0|off}：不計時也不計數。
  */
 public final class AnimalSoundProbe {
     static final boolean ENABLED = parseEnabled(System.getProperty("mdc.animalSoundProbe"));
-    private static final int SAMPLE_MASK = 63;
+    private static final int SAMPLE_MASK = AnimalSoundIndex.MODE == AnimalSoundIndex.MODE_ON ? 1023 : 63;
     private static final long BEAT_NS = 300_000_000_000L;
     private static final String TAG = "[MinidoracatJavaPatch][AnimalSoundProbe] ";
 
@@ -67,7 +69,7 @@ public final class AnimalSoundProbe {
     /** 取代 {@code IsoAnimal.respondToSound} 內的 {@code WorldSoundManager.getSoundAnimal(this)}。 */
     public static WorldSoundManager.WorldSound getSoundAnimal(WorldSoundManager manager, IsoAnimal animal) {
         long t0 = ENABLED ? System.nanoTime() : 0L;
-        WorldSoundManager.WorldSound result = manager.getSoundAnimal(animal);
+        WorldSoundManager.WorldSound result = AnimalSoundIndex.getSoundAnimal(manager, animal);
         if (ENABLED) {
             long ns = System.nanoTime() - t0;
             try {
@@ -231,5 +233,9 @@ public final class AnimalSoundProbe {
 
     static long anomaliesForTest() {
         return anomalies;
+    }
+
+    static int sampleEveryForTest() {
+        return SAMPLE_MASK + 1;
     }
 }

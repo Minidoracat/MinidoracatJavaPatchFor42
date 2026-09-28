@@ -476,14 +476,65 @@ public final class SmokeCheck {
                 && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1
                 && countExactCalls(vSound, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1);
         MethodNode probeGet = method(distJava, animalSoundProbe, "getSoundAnimal", animalSoundProbeDesc);
-        failed += check("W48 改道：respondToSound 原呼叫歸零、改道恰 1、真指令數不變；helper 只委派原版一次、零 Rand",
+        String animalSoundIndex = "zombie/mdc/AnimalSoundIndex";
+        failed += check("W48 改道：respondToSound 原呼叫歸零、改道恰 1、真指令數不變；probe 只經索引查詢一次、不直接呼叫原版、零 Rand",
                 countExactCalls(sound, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 0
                 && countExactCalls(sound, Opcodes.INVOKESTATIC, animalSoundProbe, "getSoundAnimal", animalSoundProbeDesc) == 1
                 && realInsnCount(sound) == realInsnCount(vSound)
-                && countExactCalls(probeGet, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 1
+                && countExactCalls(probeGet, Opcodes.INVOKESTATIC, animalSoundIndex, "getSoundAnimal", animalSoundProbeDesc) == 1
+                && countExactCalls(probeGet, Opcodes.INVOKEVIRTUAL, wsm, "getSoundAnimal", soundDesc) == 0
                 && probeGet.tryCatchBlocks.stream().allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type))
                 && classNode(distJava, animalSoundProbe).methods.stream()
                         .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+        // W48-2 空間索引：索引照抄原版的逐聲音算式，原版 getSoundAnimal 任何改動（算式、條件、比較方向）都要重新核對等價，
+        // 故釘整個方法的指令文字雜湊；soundList 只由建構子寫入一次且包裝緊接在 new ArrayList() 之後。
+        MethodNode vWsmInit = methodFromJar(jar, wsm, "<init>", "()V");
+        MethodNode pWsmInit = method(distJava, wsm, "<init>", "()V");
+        String soundListWrapDesc = "(Ljava/util/List;)Ljava/util/List;";
+        failed += check("W48-2 原版 getSoundAnimal 指令文字與核對時相同（sha256 " + GET_SOUND_ANIMAL_SHA.substring(0, 12) + "…）",
+                sha256Hex(methodText(vGetSoundAnimal)).equals(GET_SOUND_ANIMAL_SHA));
+        failed += check("W48-2 建構子唯一 PUTFIELD soundList：原版前為 new ArrayList()，手術後緊接 wrap、真指令恰 +1、移除 wrap 後逐字不變",
+                jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, wsm, "soundList") == 1
+                && putWrapOk(vWsmInit, pWsmInit, wsm, "soundList", "java/util/ArrayList",
+                        animalSoundIndex, "wrapSoundList", soundListWrapDesc)
+                && wrapsStripToVanilla(vWsmInit, pWsmInit, new String[][]{{animalSoundIndex, "wrapSoundList", soundListWrapDesc}})
+                && realInsnCount(pWsmInit) == realInsnCount(vWsmInit) + 1);
+        MethodNode indexConsider = method(distJava, animalSoundIndex, "consider", "(I)V");
+        MethodNode indexGet = method(distJava, animalSoundIndex, "getSoundAnimal", animalSoundProbeDesc);
+        MethodNode indexLocked = classNode(distJava, animalSoundIndex).methods.stream()
+                .filter(m -> m.name.equals("lockedQuery")).findFirst().orElseThrow();
+        failed += check("W48-2 helper：逐聲音算式呼叫原版同一個 DistanceToSquared(FFFFFF)F 一次；查詢只接 RuntimeException、入口只有鎖的 handler；零 Rand",
+                countExactCalls(indexConsider, Opcodes.INVOKESTATIC, "zombie/iso/IsoUtils", "DistanceToSquared", "(FFFFFF)F") == 1
+                && countExactCalls(vGetSoundAnimal, Opcodes.INVOKESTATIC, "zombie/iso/IsoUtils", "DistanceToSquared", "(FFFFFF)F") == 1
+                && indexLocked.tryCatchBlocks.stream().allMatch(tcb -> "java/lang/RuntimeException".equals(tcb.type))
+                && indexGet.tryCatchBlocks.stream().allMatch(tcb -> tcb.type == null)
+                && countOpcode(indexGet, Opcodes.MONITORENTER) == 1
+                && classNode(distJava, animalSoundIndex).methods.stream()
+                        .mapToInt(m -> countCallsToOwner(m, "zombie/core/random/Rand")).sum() == 0);
+        // 索引依賴「聲音在清單中時位置／半徑／音量不被原地改寫、旗標只可能被關掉」。(1) 這些欄位的全 jar PUTFIELD 全部位於
+        // WorldSound 的 init 多載內（逐方法加總等於全 jar 總數）；唯一例外是 BodyDamage.TriggerSneezeCough 在 addSound 後把
+        // stressAnimals 設 false——consider() 每次即時重查旗標，關掉只會少一個候選，與原版一致。(2) 物件池呼叫數：全 jar getNew 2
+        // （addSound、IsoAnimal 自己的複本）、release 3（update、IsoAnimal 複本兩處）。「init 只作用在剛取出的物件、update 先 remove 再
+        // release、KillCell releaseAll 後立刻 clear」是 42.20.4 人工查核的前提，這裡只釘呼叫數；數字一變即紅，需重新人工核對。
+        String wsound = wsm + "$WorldSound";
+        ClassNode vWorldSound = classNodeFromJar(jar, wsound);
+        boolean soundFieldsInitOnly = true;
+        for (String f : new String[]{"x", "y", "z", "radius", "volume", "stresshumans", "stressAnimals"}) {
+            String fDesc = f.startsWith("stress") ? "Z" : "I";
+            int inInit = vWorldSound.methods.stream().filter(m -> m.name.equals("init"))
+                    .mapToInt(m -> countExactFields(m, Opcodes.PUTFIELD, wsound, f, fDesc)).sum();
+            int census = jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, wsound, f);
+            soundFieldsInitOnly &= inInit == 2 && census == (f.equals("stressAnimals") ? 3 : 2);
+        }
+        MethodNode sneeze = methodFromJar(jar, "zombie/characters/BodyDamage/BodyDamage", "TriggerSneezeCough", "()V");
+        String soundRet = ")L" + wsound + ";";
+        failed += check("W48-2 原版前提：WorldSound 位置／半徑／音量／旗標只在 init 多載內寫入（stressAnimals 另只有 TriggerSneezeCough 寫 false）；"
+                        + "getNew 呼叫 2、release 呼叫 3",
+                soundFieldsInitOnly
+                && countExactFields(sneeze, Opcodes.PUTFIELD, wsound, "stressAnimals", "Z") == 1
+                && prevReal(onlyPutField(sneeze, wsound, "stressAnimals")).getOpcode() == Opcodes.ICONST_0
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, wsm, "getNew", "(" + soundRet) == 2
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, wsm, "release", "(L" + wsound + ";" + soundRet) == 3);
 
         MethodNode stress = method(distJava, animal, "updateStress", "()V");
         failed += check("閒置衰減常數落在 FDIV→FNEG→changeStress 這條路徑",
@@ -4717,6 +4768,18 @@ public final class SmokeCheck {
         var output = new java.io.StringWriter();
         textifier.print(new java.io.PrintWriter(output));
         return output.toString();
+    }
+
+    /** W48-2：42.20.4 原版 WorldSoundManager.getSoundAnimal 的 methodText SHA-256（索引等價性的依據；變了就要重新核對）。 */
+    static final String GET_SOUND_ANIMAL_SHA = "621614eac1cfd27a800f3bb14dd619a3bba7d4494d6deb305b074b2fe26787e1";
+
+    static String sha256Hex(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** 方法內「真指令」總數（1:1 替換的手術後必須與 vanilla 相同）。 */
