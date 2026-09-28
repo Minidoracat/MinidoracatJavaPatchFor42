@@ -4515,6 +4515,18 @@ fallback[notServer untrusted null coords] audits auditMisses observeMismatches d
 - 線上驗收：首次生效行；beat `auditMisses=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；W48 的 `frameUsAvg`／
   `windowPct` 對照 9/28 基線。
 
+**9/28 線上驗收**（12:06:58 生效；12:07–13:25 與 13:27–13:58 兩個 session，下午非尖峰，兩次重啟都是排程／MOD 更新的正常流程）：
+- `[AnimalSoundIndex]` 抽樣比對合計 130,438 次零不一致（`auditMisses=0`、`disabled=false`、`anomalies=0`），四種 fallback 全為 0；
+  `calls` 與 `fast` 的差額是動物沒有所在方格、依原版第一步回 null 的呼叫。`candAvg` 139–197（清單約 3,900–4,700），
+  約為本機基準的兩倍，所以正式服的加速比基準小。
+- W48 心跳換算成每 5 分鐘邊際值，取規模相近的窗口（`list` 4,000–4,450、每幀呼叫 480–660）：每次呼叫中位 7.76 µs
+  （7.17–8.52，n=17）→ 1.21 µs（1.09–1.38，n=9），每幀 4.34 ms → 0.69 ms，佔主執行緒 4.29% → 0.61%，前後範圍不重疊；
+  每幀最大值 12.5–16.4 ms → 2.3–3.8 ms。當時伺服器大多接近 10 fps 上限，省下的是主執行緒餘裕，不代表 fps 會等比例上升。
+- 命中率（hits/calls）12:07 session 0.284、13:27 session 0.315，與上線前 11:17 session 的 0.278 相近；06:07 session 的 0.363
+  是清晨世界狀態不同，不是索引漏抓（漏抓會在抽樣比對出現不一致）。
+- 每幀整份重建的邊際成本在同一 session 內逐漸上升：12:07 session 110→190 µs、13:27 session 80→131 µs，目前每幀不到 0.2 ms；
+  晚峰再看是否持續上升。
+
 ---
 
 ## 3. 部署後驗證清單
