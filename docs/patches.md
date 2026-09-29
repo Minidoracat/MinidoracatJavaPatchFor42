@@ -4871,8 +4871,9 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 - `TreeRoomGuardBehaviorTest`（兩個變體各跑一次）：以 Unsafe 配置真 IsoTree／IsoPlayer／IsoGridSquare，真
   `IsoWorldRegion`（封閉、屋頂全滿）經格子的區域快取接上。自建房間回 false、不拋例外；預製房間在範圍內回 true、
   範圍外回 false；室外回 false。同一組狀態在原版 jar 上會拋出與玩家 log 一字不差的 NPE（拋棄式探針對照，未入庫）。
-- 未做：遊戲內畫面驗證（要在遊戲裡蓋出貼著預製建築的封閉房間）。驗收看玩家裝 0.2.2 後 console.txt 不再出現上述
-  NPE、`TreeRoomGuard` 行至多一行、家具與室外物件恢復顯示。
+- 實機驗收（2026-09-29 晚，Player-I，省記憶體版）：console.txt 載入 `client patch v3.1-lowmem(a0bbfd6)`，進入遊戲第 11 幀
+  在自建二樓印出一行 `TreeRoomGuard`；之後約 6.5 分鐘（含四處移動，chunk 串流 parts 446→1372）零 `isPlayerInsideARoom`
+  NPE、零 `FBORenderCell.renderInternal` 例外，玩家回報家具與室外物件恢復顯示。修補前同一棟房子在遊戲中每幀拋一次。
 
 **退場**：官方版本修掉後 SmokeCheck 的 vanilla 前提會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper
 與測試。
