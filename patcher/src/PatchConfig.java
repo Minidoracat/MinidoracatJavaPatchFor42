@@ -27,7 +27,7 @@ public final class PatchConfig {
         // （全 class warn 8→6、trace 1→3），噪音源已由官方修掉，不需要我方 patch。
 
         // 退役（2026-09-28，42.21.0 官方已修）：AnimationSet.GetState 的 `AnimState not found` 被 TIS 降級為
-        // trace（server 預設門檻 Warning，不再輸出）；復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java
+        // trace（server 預設門檻 Warning，不再輸出）；復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java
 
         Patcher.ClassPatch bone = new Patcher.ClassPatch("zombie/core/skinnedmodel/model/SkinningBoneHierarchy");
         Patcher.MethodOps boneM = bone.method("buildBoneHierarchy",
@@ -57,7 +57,7 @@ public final class PatchConfig {
 
         // 退役（2026-09-28，42.21.0 官方已修）：抑噪 #9 IsoObject.syncIsoObject 的 `IsoThumpable not found`
         // ——IsoThumpable.setHealth 改為 `server && getObjectIndex() != -1` 才 sync，建造流程加入 square 前
-        // 不再觸發；復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java
+        // 不再觸發；復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java
         patches.add(nzm);
 
         Patcher.ClassPatch cache = new Patcher.ClassPatch("zombie/network/PacketsCache");
@@ -79,7 +79,7 @@ public final class PatchConfig {
 
         // 退役（2026-09-28）：SafehouseClaimPacket room/building 綁定修復（2026-07-29 起停用，觸發條件
         // 隨自訂地圖移除而消失），LogFilter 的 getBuilding/canBeSafehouse helper 一併刪除；
-        // 復活：git checkout 42d1b15 -- patcher/game/zombie/mdc/LogFilter.java（並重新驗證座標）
+        // 復活：git checkout 8d2bee8 -- patcher/game/zombie/mdc/LogFilter.java（並重新驗證座標）
 
         // B42.19 定期刷新只認三種 vanilla Zone，且 construction 是黏性的 Zone 級旗標：
         // 只對含未搬動原生固定容器的垂直欄位放寬 gate；安全屋與其他原版條件完整保留
@@ -96,7 +96,7 @@ public final class PatchConfig {
         // CreatePlayerPacket 尾段四個重活、Connect/ConnectCoopPacket 與 GameServer
         // .receivePlayerConnect 的 REJOIN 兩層）。join 卡頓歸因任務已完成，正式服
         // REJOIN_TOTAL 常態 5–13ms＝已無待答問題。詳見 docs/patches.md 2i；
-        // 復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         Patcher.ClassPatch gameServer = new Patcher.ClassPatch("zombie/network/GameServer");
 
@@ -147,7 +147,7 @@ public final class PatchConfig {
         // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
         // CreateItem 改道）。observe 實測收益僅 0.06–0.18%，「永不啟用 on」已定案——
         // W3-2 的教訓是「只有量測證明有收益」，這次量測的答案是沒有。
-        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- 行為（method 範圍內常數替換；ClassWriter 產新常數池條目，不動共享條目）----
 
@@ -267,7 +267,7 @@ public final class PatchConfig {
 
         // 退役（2026-09-28，42.21.0 官方已修）：2l 假死修復 GlassAttachmentGuard——官方把
         // IsoGridSquare.removeGlassAttachments 改寫為反向迴圈（無 n-- 補償），移除失敗也不可能無限迴圈；
-        // 復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/GlassAttachmentGuard.java
+        // 復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/GlassAttachmentGuard.java
 
         // ---- 防崩潰頭部守衛（codex 對抗審查定案：guard-before-super、最小頭部插入）----
 
@@ -534,7 +534,7 @@ public final class PatchConfig {
         // （faceThisObject 的 getClosestSpriteGridObject 改道）。42.21 faceThisObject 開頭新增
         // `object.getObjectIndex() != -1` 早退，物件已不在其 square 的 objects 清單時不再進
         // sprite-grid 分支，原 NPE 前提消失。詳見 docs/patches.md 2ai；
-        // 復活：git checkout 42d1b15 -- <檔案>。
+        // 復活：git checkout 8d2bee8 -- <檔案>。
 
         // ---- W34 伺服器角色聲音參數跳過（2026-09-25；docs/patches.md 2aw）----
         // updateEmitter 第一行無條件 getFMODParameters().update()；server 上只有動物走到
@@ -579,7 +579,7 @@ public final class PatchConfig {
                 "zombie/iso/IsoChunk", "SafeWrite", "(IILjava/nio/ByteBuffer;)V",
                 "zombie/mdc/ChunkWriteGuard", "safeWrite"));
         // 退役（2026-09-28，42.21.0 官方已修）：W9 之二 crcSave ×4 → dedupCrc（官方刪除共用
-        // ServerChunkLoader.crcSave，save() 改用區域 new CRC32）；復活：git checkout 42d1b15 -- <檔案>
+        // ServerChunkLoader.crcSave，save() 改用區域 new CRC32）；復活：git checkout 8d2bee8 -- <檔案>
         sclSaveM.expectedHits = 1;   // W8 SafeWrite 改道 ×1
         // W9 之三（後半）：release() 歸還改道私有池（與 addLoadedJob 的租用配對）
         Patcher.MethodOps sclRelM = sclSave.method("release", "()V");
@@ -592,7 +592,7 @@ public final class PatchConfig {
 
         // ---- W9 存檔管線隔離（2026-08-14；CRC-blam 家族根治刀；docs/patches.md 2u）----
         // 退役（2026-09-28，42.21.0 官方已修）：之一 GETFIELD crc32 → headerCrc（官方刪除共用
-        // SaveChunkThread.crc32，addLoadedJob 改用區域 new CRC32）；復活：git checkout 42d1b15 -- <檔案>
+        // SaveChunkThread.crc32，addLoadedJob 改用區域 new CRC32）；復活：git checkout 8d2bee8 -- <檔案>
         // 之三（前半，保留）：getChunk/getByteBuffer/releaseChunk 改道私有池——存檔管線退出
         // ClientChunkRequest 全域 static 共用池（與 N 條發送 WorkerThread 共用）。42.21 的
         // SaveChunkThread.update() 仍以無同步 savedChunks 歸還，主迴圈與 shutdown hook 並行
@@ -619,7 +619,7 @@ public final class PatchConfig {
         // 再由既有 action=null 路徑拒絕，Reject 由 42.21 原版 processServer 以 act.write 送出。
         // 不得在共用 table decoder 猜測替代物件。beginParse 將失敗原因綁定本次 parse、protectedCall 取用即清。
         // 退役（2026-09-28，42.21.0 官方已修）：W10-A processServer 兩個 write 改道（原版改用 act.write）；
-        // 復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/NetTimedActionGuard.java
+        // 復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/NetTimedActionGuard.java
         String ntaGuard = "zombie/mdc/NetTimedActionGuard";
         Patcher.ClassPatch nta = new Patcher.ClassPatch("zombie/core/NetTimedAction");
         Patcher.MethodOps ntaParse = nta.method("parse",
@@ -650,7 +650,7 @@ public final class PatchConfig {
         // perform／getConnectionFromPlayer×2 改道（負時長全是動畫合法 -1、R 無事證）；
         // 退役（2026-09-28，42.21.0 官方已修）：W10-E ActionManager.stop headCall＋remove(BZ) 改道（原版改以
         // (PlayerID,id) 分鍵、GeneralActionPacket.setReject 帶發送者）；
-        // 復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java
+        // 復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java
         String taProbe = "zombie/core/MdcTimedActionProbe";
         ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/core/ActionManager", "stopPlayerActions",
@@ -750,7 +750,7 @@ public final class PatchConfig {
         // （s2Missed／queueFailures／sourceGap／cellNull／chunkNull／duplicateRemoved 全 0，
         // clearShortfall 的 handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測
         // 結論已達；heartbeat 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。
-        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W17 hutch 載入回傳檢查 enforce（靜態已定罪；docs/patches.md 2ae）----
         // IsoHutch.load 逐隻 addAnimalInside(animal,false) 忽略 boolean 回傳（offset 526：
@@ -891,7 +891,7 @@ public final class PatchConfig {
         }
 
         // 退役（2026-09-28，42.21.0 官方已修）：W24 checkEntityIDChange 的 `%ld`——官方改為 `%d`，第二條補
-        // `expected null for %s`；復活：git checkout 42d1b15 -- patcher/src/PatchConfig.java（詳 docs/patches.md 2al）
+        // `expected null for %s`；復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java（詳 docs/patches.md 2al）
 
         // ---- W25 序列化物件池執行緒隔離（2026-09-06；docs/patches.md 2am）----
         // SaveAll 量測：4 條 worker 各 ~100% CPU、jcmd 樣本 80% 在 ConcurrentLinkedDeque.pollFirst/
@@ -930,14 +930,14 @@ public final class PatchConfig {
         patches.add(byteBlock);
 
         // 退役（2026-09-28，42.21.0 官方已修）：W27 RequestDataManager.ACKWasReceived 迴圈邊界——官方改為
-        // `i < size`（offset 15 if_icmpge，與我方修正逐指令相同）；復活：git checkout 42d1b15 --
+        // `i < size`（offset 15 if_icmpge，與我方修正逐指令相同）；復活：git checkout 8d2bee8 --
         // patcher/src/PatchConfig.java patcher/tests/request-data-ack（詳 docs/patches.md 2ao）
 
         // 退役（2026-09-28，42.21.0 官方已修）：W28 PopMan 缺格 fallback 補 saveLock
         // （addZombieStanding／addZombieMoving 的 n_addZombie 改道）。42.21 native 重構後
         // ManagerWorker::saveCell 不再動 ManagerMain::m_zombiePool（舊版 saveRealZombieHack
         // 回池路徑與 n_saveRealZombies 已刪），Main 池只剩主執行緒改動，補鎖已無可保護對象。
-        // 詳見 docs/patches.md 2ap；復活：git checkout 42d1b15 -- <檔案>。
+        // 詳見 docs/patches.md 2ap；復活：git checkout 8d2bee8 -- <檔案>。
 
         // W29：動物同步接收驗證；在既有 GameServer ClassPatch 上整包攔截，不改共用 wire 類別。
         Patcher.MethodOps animalIngress = gameServer.method("mainLoopDealWithNetData",

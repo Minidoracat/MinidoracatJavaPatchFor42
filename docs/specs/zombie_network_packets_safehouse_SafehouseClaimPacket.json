@@ -40,6 +40,6 @@
   "behaviorNotes": "不修改全域 IsoGridSquare.getBuilding 或 IsoMetaGrid.getRoomAt，只影響安全屋 claim。fallback 鏡像 IsoMetaChunk.getRoomAt 的 user-defined 優先與反向順序，掃描中心 metacell 加相鄰八格以涵蓋跨 cell 房屋。",
   "verification": "build：兩個 redirect 各命中 1；LoadCheck 驗 helper descriptor；CheckClassAdapter 通過；SmokeCheck 斷言 patched class 已無兩個原呼叫且各只改道一次，helper 含 setRoomID 後重新讀 building。部署後以曾失敗房屋驗 repair log，並以室外座標做負對照。",
   "status": "retired-2026-09-28",
-  "retiredReason": "2026-07-29 起停用（觸發條件是自訂大地圖，正式服已只跑原版地圖）；2026-09-28 連同 LogFilter.getBuilding／canBeSafehouse／findRoom helper、LoadCheck 簽名檢查與 SmokeCheck 斷言一併刪除。42.21.0 未改動 SafehouseClaimPacket 與 room 綁定路徑，原根因是否仍在無法從程式碼判定；復活需從 git 42d1b15 取回 helper 並重新驗證座標。",
+  "retiredReason": "2026-07-29 起停用（觸發條件是自訂大地圖，正式服已只跑原版地圖）；2026-09-28 連同 LogFilter.getBuilding／canBeSafehouse／findRoom helper、LoadCheck 簽名檢查與 SmokeCheck 斷言一併刪除。42.21.0 未改動 SafehouseClaimPacket 與 room 綁定路徑，原根因是否仍在無法從程式碼判定；復活需從 git 8d2bee8 取回 helper 並重新驗證座標。",
   "retiredAt": "2026-09-28"
 }

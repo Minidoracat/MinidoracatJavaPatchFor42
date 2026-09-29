@@ -63,7 +63,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 > `invokevirtual DebugType.trace`），第 9 項的噪音源被 `IsoThumpable.setHealth` 的 `getObjectIndex() != -1` 守衛
 > 從源頭消除（javap 42.21 setHealth offset 21–25），兩項退役；LogFilter 的 `FMT_EXACT` 第 1 筆與
 > `PRINTLN_PREFIX`／`println`／`suppressesPrintln` 一併刪除。其餘 7 項（＋§2bf 的 #10）審計確認觸發程式碼與
-> 頻率前提仍成立。復活：`git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`。
+> 頻率前提仍成立。復活：`git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`。
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，
 先 `uninstall.sh` 還原再觀察。每份 spec 的 `verification` 段都寫了正反向驗證法。
@@ -166,7 +166,7 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 > 把殘留的 `LogFilter.getBuilding`／`canBeSafehouse`／`findRoom` helper、LoadCheck 簽名檢查與 SmokeCheck 斷言
 > 一併刪除。42.21.0 沒有改動 `SafehouseClaimPacket` 與 room 綁定路徑（patch notes 的「Safehouse exploits
 > remedied」在 Java 側找不到對應改動），原根因是否仍在無法從程式碼判定。復活：
-> `git checkout 42d1b15 -- patcher/game/zombie/mdc/LogFilter.java`，並重新驗證兩個座標。
+> `git checkout 8d2bee8 -- patcher/game/zombie/mdc/LogFilter.java`，並重新驗證兩個座標。
 
 **症狀**：B42.19 正式服擴充大型 `Map=` 後，玩家申請安全屋時大量出現
 `SafehouseClaimPacket.isConsistent > building not found`。失敗座標的原始 lotheader 仍有合法
@@ -432,7 +432,7 @@ release——JVM 若回 copy 則寫入被丟棄（HotSpot 實務上回直接指�
 > `GameServer.receivePlayerConnect` 的 `serverLoadNetworkCharacter` ×2）已移除。
 > join 卡頓歸因任務完成：正式服 8/30–9/2 巡檢 REJOIN_TOTAL 常態 5–13ms，
 > 已無待答問題，量測 wrapper 不再需要常駐 patch 表面。
-> 復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **動機**:正式服主迴圈實測 6–11 秒停頓集中在玩家 join／死亡重生換角(例:17:20:33–17:20:39
 的 6.6s 正值 Player-C「replacing dead player」),但無法從 log 分辨時間花在哪一段。
@@ -662,7 +662,7 @@ dist/java 所以測不到）。已補雙向守門：dist/java 與 manifest 不�
 > `iflt` 出口、205 `iinc 3,-1`），不論移除是否生效都在 size 次迭代內結束，無限迴圈從結構上消失。
 > `RemoveTileObject(IsoObject,Z)` 的 DIFF 只是 `specialObjects` 改宣告為 `List`。保留 helper 反而會以舊的正向迴圈
 > 蓋掉官方新寫法，故刪除 `GlassAttachmentGuard` 與 SmokeCheck 斷言。復活：
-> `git checkout 42d1b15 -- patcher/game/zombie/mdc/GlassAttachmentGuard.java`（並回填 PatchConfig／SmokeCheck／build.ps1）。
+> `git checkout 8d2bee8 -- patcher/game/zombie/mdc/GlassAttachmentGuard.java`（並回填 PatchConfig／SmokeCheck／build.ps1）。
 
 **事故**：2026-08-02 17:48 全服假死（幀計數凍結 f:15924、所有玩家靜止、重登卡驗證、
 graceful stop 無效、pkill -9 恢復）。兩份間隔 4 秒的 thread dump 主執行緒皆 RUNNABLE
@@ -973,7 +973,7 @@ largeArea 期間才有的假說 (a) 變成常態。四個 headCall 的掛點語�
 
 > **2026-09-07 復活為 v2（預設 observe）**。9/2 的退役（「packed 47–82/session、skip[short]
 > 99.3%＝效益≈0」）是誤判，翻案證據見 2p-1、v2 設計見 2p-2；v1 分析全文保留於 2p-v1。
-> v1 最後一版：2fda295。
+> v1 最後一版：13650e1。
 
 ### 2026-09-28 42.21 對版（程式碼不動，待重新 observe）
 
@@ -1820,7 +1820,7 @@ WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整�
 **SmokeCheck 改釘**：刪除 crc32／crcSave 前提、全 jar 耦合鎖、swap 緊鄰性與 CRC 行為 smoke；
 新增「退役前提」（`addLoadedJob`／`save()` 各 `new CRC32` ×1，`ServerChunkLoader`／
 `SaveChunkThread`／`SaveLoadedTask`／`IsoChunk` 零 CRC32 欄位——TIS 退回共用實例即紅，
-復活兩刀用 `git checkout 42d1b15`）與「之三存在理由」（`update()` 無鎖且讀 `savedChunks`、
+復活兩刀用 `git checkout 8d2bee8`）與「之三存在理由」（`update()` 無鎖且讀 `savedChunks`、
 `ClientChunkRequest` 兩池仍為 static——TIS 加鎖或改成 per-instance 池即紅，重新評估之三）。
 `save()` 加負對照：零 `ChunkSaveIsolation` 呼叫。build 步驟 9d 的 off 路徑測試只剩三個池 helper。
 
@@ -1872,7 +1872,7 @@ WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整�
 > **退役（2026-09-02）**：本刀（`InventoryItem.getExtraItemsWeight` 的 `CreateItem`
 > 改道）已移除。observe 實測收益僅 0.06–0.18%，「永不啟用 `on`」既已定案，
 > 留著 observe 只是白背一個 patch 表面與每次更新的重驗成本。
-> 復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 **浪費**：`InventoryItem.getExtraItemsWeight ()F` 對 `extraItems` 内每個 fullType 字串完整建構
 一個 InventoryItem，只為讀 `getActualWeight()` 就丟棄。單次建構含 `ScriptManager.FindItem`（兩次
@@ -2185,7 +2185,7 @@ TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**
   不呼叫建構子，接著執行 dist 內的真 `processServer`（只替換 RakNet 送出端），擷取到恰 1 包、
   bytes 為同 action／player id 的 Reject。SmokeCheck 改釘「`processServer` 的 write 與 setState 兩處 receiver
   皆為 act」（TIS 退回 `this.write` 時紅＝重估 A 刀）與「processServer 不經 `NetTimedActionGuard`」。
-- 復活 A 刀：`git checkout 42d1b15 -- <檔案>`（PatchConfig／NetTimedActionGuard／SmokeCheck／測試／build.ps1）。
+- 復活 A 刀：`git checkout 8d2bee8 -- <檔案>`（PatchConfig／NetTimedActionGuard／SmokeCheck／測試／build.ps1）。
 
 <a id="2y"></a>
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
@@ -2719,7 +2719,7 @@ heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticks
 > 2 redirect＋TailCall）已移除。8 天全零遺失（s2Missed／queueFailures／sourceGap／
 > cellNullAdd／chunkNullAdd／duplicateRemoved／cellNullSave 全 0；clearShortfall 1–4 但
 > handedOff=scanSeen 故非遺失）⇒ vanilla 卸載接手鏈無辜、觀測結論已達；其 heartbeat
-> 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+> 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
 ### 立案（2026-08-24～25，全服流失定罪）
 
@@ -3316,7 +3316,7 @@ ctor 的 tint 仍無 `getVisual()==null` 守衛（IFNONNULL 仍 2），`WornItem
 > `getSpriteGridObjects(…, true)` 必含 self，`getClosestSpriteGridObject` 不再回 null——
 > 本節記錄的 stale 食槽 NPE 前提已消失。下方「IFNULL/IFNONNULL=5」撤刀訊號因官方改用不同形狀的
 > 守衛而沒有觸發，是人工審計判定退役。改道、`FaceObjectGuard` helper、SmokeCheck W22 四項與
-> `FaceObjectGuardTest` 一併移除；復活：`git checkout 42d1b15 -- <檔案>`。以下原文保留當歷史。
+> `FaceObjectGuardTest` 一併移除；復活：`git checkout 8d2bee8 -- <檔案>`。以下原文保留當歷史。
 
 ### 立案（2026-09-02 全 patch 巡檢，log 最大單一例外源）
 
@@ -3878,7 +3878,7 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 > javap 42.21 offset 15 由 `if_icmpgt 64` 變為 `if_icmpge 64`，其餘 0–85 指令、運算元、跳轉目的地逐行相同——
 > 與本刀產物逐指令一致，空佇列／查無連線／重複 ACK／RequestID 不符四種邊界語意等價。PatchConfig 段、SmokeCheck
 > 兩條斷言、`RequestDataAckTest` 與 build.ps1 步驟刪除；`Patcher.IntComparisonChange` 失去唯一使用者，一併移除。
-> 復活：`git checkout 42d1b15 -- patcher/src/Patcher.java patcher/tests/request-data-ack`（並回填 PatchConfig／SmokeCheck／build.ps1）。
+> 復活：`git checkout 8d2bee8 -- patcher/src/Patcher.java patcher/tests/request-data-ack`（並回填 PatchConfig／SmokeCheck／build.ps1）。
 
 `RequestDataManager.ACKWasReceived` 用 `i <= requests.size()` 逐項查找連線；
 空佇列或查無該連線時必定存取 `get(size)` 而拋 `IndexOutOfBoundsException`。
@@ -3906,7 +3906,7 @@ SmokeCheck 同時鎖住 `i=0 → i/size 比較 → get(i)` 語境，並比對整
 > `n_saveRealZombies`／`beginSaveRealZombies`，都已刪除。Main 池只剩主執行緒的 `n_addZombie`／
 > `n_registerZombie`／`n_getAddZombieData` 與 `ManagerMain::stop`，worker 端 `addRealZombie`
 > 以 id 去重，關機 double free 的前提不再成立，補鎖已無可保護的對象。改道、`PopManAddLock`
-> helper、SmokeCheck W28 全部斷言與 `PopManAddLockTest` 一併移除；復活：`git checkout 42d1b15 -- <檔案>`。
+> helper、SmokeCheck W28 全部斷言與 `PopManAddLockTest` 一併移除；復活：`git checkout 8d2bee8 -- <檔案>`。
 > **上線後**以關機 log 觀察是否仍出現 `double free`／`ObjectPool::clear` 相關 crash；若再現，
 > 代表損毀另有來源，需重開調查而不是直接復活本刀。以下原文保留當歷史。
 

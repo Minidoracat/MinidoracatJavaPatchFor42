@@ -513,7 +513,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：登入／join 卡頓量測的全部結構斷言（LoginPacket 三個 DB
         // wrapper、CreatePlayerPacket 四個重活、REJOIN_TOTAL／REJOIN_LOAD_CHARACTER）。
         // 歸因任務已完成、正式服 REJOIN_TOTAL 常態 5–13ms，量測刀隨斷言一併移除。
-        // 詳見 docs/patches.md 2i；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2i；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         String array = "zombie/entity/util/Array";
         String fastRemoval = "zombie/mdc/FastIdentityArrayRemoval";
@@ -1163,7 +1163,7 @@ public final class SmokeCheck {
         // 退役前提（2026-09-28，42.21.0）：W9 之一／之二（共用 CRC32 → ThreadLocal）因官方修正退役。
         // 釘住官方修法：addLoadedJob、SaveLoadedTask.save 各自 new CRC32（區域變數），且
         // ServerChunkLoader／SaveChunkThread／SaveLoadedTask／IsoChunk 沒有任何 CRC32 型別欄位。
-        // TIS 若退回共用實例＝這條紅，重新評估是否復活兩刀（git checkout 42d1b15）。
+        // TIS 若退回共用實例＝這條紅，重新評估是否復活兩刀（git checkout 8d2bee8）。
         String crcDesc = "Ljava/util/zip/CRC32;";
         boolean noSharedCrc = true;
         for (String c : new String[]{"zombie/network/ServerChunkLoader", sctCls, sltCls, w8IcCls}) {
@@ -1318,7 +1318,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：食材重量記憶化（InventoryItem.getExtraItemsWeight 的
         // CreateItem 改道）的全部 vanilla 前提、負對照與 helper 契約斷言。observe 實測
         // 收益僅 0.06–0.18%，「永不啟用 on」已定案，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2w；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W10 卡讀條根治（NetTimedAction.parse 例外攔截；W10-A 已於 42.21 官方修正後退役）----
         String ntaCls = "zombie/core/NetTimedAction";
@@ -1686,7 +1686,7 @@ public final class SmokeCheck {
         // 退役（2026-09-02）：W16 動物卸載接手守衛 observe 的全部 census、掛點與 helper
         // 契約斷言。8 天正式服全零遺失 ⇒ vanilla 卸載接手鏈無辜、觀測結論已達；
         // heartbeat 每 256 unload 一行佔正式服 log 7.3%，刀與斷言一併移除。
-        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 2fda295 取回（`git checkout 2fda295 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
+        // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
         // ---- W17 hutch 載入回傳檢查 ----
         String isoAnimalCls = "zombie/characters/animals/IsoAnimal";

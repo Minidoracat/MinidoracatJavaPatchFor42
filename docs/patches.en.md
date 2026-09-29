@@ -87,7 +87,7 @@ synchronization cost on hot call paths.
 > retired; `LogFilter`'s first `FMT_EXACT` entry and `PRINTLN_PREFIX` / `println` /
 > `suppressesPrintln` were deleted. The audit confirmed the trigger code and frequency premise of
 > the other 7 (+ #10 in §2bf) still hold. Revive with
-> `git checkout 42d1b15 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`.
+> `git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`.
 
 Trade-off: these messages disappear from the log. To diagnose exactly the problem one of them
 describes, run `uninstall.sh` first and observe vanilla. Each spec's `verification` section lists
@@ -184,7 +184,7 @@ building was null, rescanned the current and 8 neighboring metacells' `roomList`
 It was disabled once production returned to vanilla maps; the 42.21 port deleted the leftover
 helpers, LoadCheck and SmokeCheck entries. 42.21.0 did not change `SafehouseClaimPacket` or room
 binding, so whether the root cause remains cannot be determined from code. Revive:
-`git checkout 42d1b15 -- patcher/game/zombie/mdc/LogFilter.java` and re-verify.
+`git checkout 8d2bee8 -- patcher/game/zombie/mdc/LogFilter.java` and re-verify.
 
 ---
 
@@ -350,7 +350,7 @@ packet `write`) and the normal rejoin path `GameServer.receivePlayerConnect` (to
 `serverLoadNetworkCharacter`), logging `[MinidoracatJavaPatch][JoinMetrics] op=… elapsedNs=…`.
 Retired once the question was answered: production checks from 8/30–9/2 showed `REJOIN_TOTAL`
 routinely 5–13 ms, so the wrapper no longer needed to stay in the patch surface. Revive from
-commit `2fda295` (`git checkout 2fda295 -- <file>` plus the matching PatchConfig/SmokeCheck/build.ps1 sections).
+commit `13650e1` (`git checkout 13650e1 -- <file>` plus the matching PatchConfig/SmokeCheck/build.ps1 sections).
 
 ---
 
@@ -565,7 +565,7 @@ logging `[MinidoracatJavaPatch][GlassGuard] stuck glass attachment skipped at x,
 42.21.0 rewrote the method as a reverse loop without `n--` compensation (javap 42.21: offset 54
 `iflt` exit, 205 `iinc 3,-1`), which always terminates within size iterations; keeping the helper
 would override the new vanilla code, so it and its SmokeCheck asserts were deleted. Revive:
-`git checkout 42d1b15 -- patcher/game/zombie/mdc/GlassAttachmentGuard.java` (plus PatchConfig/SmokeCheck/build.ps1).
+`git checkout 8d2bee8 -- patcher/game/zombie/mdc/GlassAttachmentGuard.java` (plus PatchConfig/SmokeCheck/build.ps1).
 
 ---
 
@@ -639,7 +639,7 @@ Hypotheses under test: (a) while `requestingLargeArea`, the `sendRequests` head 
 <a id="2p"></a>
 ## 2p. Chunk supply batching (W4-1 v2, server, default observe) + request timeout 8 s→15 s (W4-2, client; retired: target method removed in 42.20.3)
 
-> **Revived as v2 on 2026-09-07 (default observe).** The 2026-09-02 retirement ("packed 47–82/session, skip[short] 99.3% ⇒ benefit ≈ 0") was a misdiagnosis — see 2p-1; v2 design in 2p-2; v1 analysis in 2p-v1. Last v1 commit: 2fda295.
+> **Revived as v2 on 2026-09-07 (default observe).** The 2026-09-02 retirement ("packed 47–82/session, skip[short] 99.3% ⇒ benefit ≈ 0") was a misdiagnosis — see 2p-1; v2 design in 2p-2; v1 analysis in 2p-v1. Last v1 commit: 13650e1.
 
 ### 42.21 re-validation (2026-09-28; code unchanged, observe data to be recollected)
 
@@ -1042,7 +1042,7 @@ The `crc32 → headerCrc` and `crcSave → dedupCrc ×4` shape-preserving swaps 
 
 **Patch 3 (private pool) kept.** In 42.21 `ClientChunkRequest`'s two global static pools (`freeChunks`/`freeBuffers`) and `SaveChunkThread.update()` are unchanged: `update()` still `release()`s each entry of the `savedChunks` field with no lock. When the main loop (`ServerMap.postupdate → updateSaved`) and the shutdown hook (`QueuedQuit → QueuedSaveAll → SaveAll` polling `updateSaved`) run together, a task can be released twice and the global pool can rent the same shell/buffer to two owners (one possibly a send-side WorkerThread). W8 blocks inconsistent writes but not "buffer fully refilled with another chunk's self-consistent data"; the private pool removes that path at near-zero cost.
 
-**SmokeCheck re-pinned**: removed the crc32/crcSave preconditions, jar-wide coupling pin, swap adjacency and CRC behavior smoke. Added "retirement preconditions" (`addLoadedJob`/`save()` each have exactly one `new CRC32`; `ServerChunkLoader`/`SaveChunkThread`/`SaveLoadedTask`/`IsoChunk` have zero CRC32 fields — goes red if TIS reintroduces a shared instance; revive the two patches with `git checkout 42d1b15`) and "reason for patch 3" (`update()` is unlocked and reads `savedChunks`; both `ClientChunkRequest` pools are still static — goes red if TIS adds a lock or per-instance pools, prompting re-evaluation). Negative control: `save()` has zero `ChunkSaveIsolation` calls. Build step 9d's off-path test now covers only the three pool helpers.
+**SmokeCheck re-pinned**: removed the crc32/crcSave preconditions, jar-wide coupling pin, swap adjacency and CRC behavior smoke. Added "retirement preconditions" (`addLoadedJob`/`save()` each have exactly one `new CRC32`; `ServerChunkLoader`/`SaveChunkThread`/`SaveLoadedTask`/`IsoChunk` have zero CRC32 fields — goes red if TIS reintroduces a shared instance; revive the two patches with `git checkout 8d2bee8`) and "reason for patch 3" (`update()` is unlocked and reads `savedChunks`; both `ClientChunkRequest` pools are still static — goes red if TIS adds a lock or per-instance pools, prompting re-evaluation). Negative control: `save()` has zero `ChunkSaveIsolation` calls. Build step 9d's off-path test now covers only the three pool helpers.
 
 **Verification loop unchanged**: W8 `flagged` should stay 0 on 42.21; non-zero means a mechanism covered by neither the upstream fix nor the private pool — check the BLOCKED stacks.
 
@@ -1071,7 +1071,7 @@ The `crc32 → headerCrc` and `crcSave → dedupCrc ×4` shape-preserving swaps 
 
 Redirected `InventoryItemFactory.CreateItem` inside `InventoryItem.getExtraItemsWeight ()F` (which builds a full `InventoryItem` per `extraItems` entry just to read `getActualWeight()`, reached every tick per player via the `Moodle.Update` HEAVY_LOAD path) to a memo helper with `-Dmdc.itemWeightMemo=observe|on|off`. The observe run (2026-08-17, 4 sessions / 9.68 h) measured a 99.997% hit rate, 271–732 calls/s and ~2.1 µs per vanilla construction — a gain of only **0.06–0.18%** of the main-loop budget (≈0.006–0.018 fps). `on` would shift the global RNG sequence (skipped `Rand.Next` calls) and would be the first real exercise of shared-instance reuse, so the risk outweighed the gain; `on` was never enabled and the patch was removed to save its patch surface and per-update re-validation cost.
 Lessons kept: hit rate is a ratio, not a gain — absolute benefit = hit rate × call rate × per-call cost; and each patch's sample window must start at its own first-activation banner, not borrow another analysis's window.
-Revive: restore from the last pre-retirement commit `2fda295` (`git checkout 2fda295 -- <files>` plus the matching PatchConfig / SmokeCheck / build.ps1 sections).
+Revive: restore from the last pre-retirement commit `13650e1` (`git checkout 13650e1 -- <files>` plus the matching PatchConfig / SmokeCheck / build.ps1 sections).
 
 ---
 
@@ -1200,7 +1200,7 @@ A TIS follow-up report draft exists (items R1/R3), **not yet submitted**.
 - **B and D1 kept, decoupled from A**: `loadInventoryItem` silently returning null, `loadComponent` NPE-ing on an absent entity, and `LuaCaller.protectedCall` not catching exceptions are byte-identical in 42.21 (`parse` hits 3/3, method SAME). D used to be enabled by `ARGS_GUARD && STATE_FIX` (no correct Reject exit without A); 42.21 vanilla is now the correct exit, so D depends only on `-Dmdc.netTimedActionArgs`. The cause lifecycle is now "`beginParse` clears, `loadArgs` sets, `protectedCall` takes and clears", leaving no context after `parse`.
 - **Log changes**: the "reject serialized" line disappears with A (vanilla sends the Reject without the helper); parse failures are still logged per event as `args parse failed` / `lua ctor failed`. The heartbeat now fires every 2048 `parse` calls: `parses caught argsFailed argsRejected suppressed anomalies guard args`.
 - **Verification**: `NetTimedActionGuardTest` in three configurations (shipping / B off / D off). A Request with a missing component completes `parse` under D without calling the constructor, then the real `processServer` from the dist runs (only the RakNet send side replaced); exactly one packet is captured and its bytes are a Reject with the same action/player id. SmokeCheck now pins "both `write` and `setState` receivers in `processServer` are `act`" (red if TIS reverts to `this.write` → re-evaluate A) and "`processServer` does not go through `NetTimedActionGuard`".
-- Revive A: `git checkout 42d1b15 -- <files>` (PatchConfig / NetTimedActionGuard / SmokeCheck / tests / build.ps1).
+- Revive A: `git checkout 8d2bee8 -- <files>` (PatchConfig / NetTimedActionGuard / SmokeCheck / tests / build.ps1).
 
 <a id="2y"></a>
 ## 2y. Animal sound sort livelock catcher (W11, server, default on)
@@ -1549,7 +1549,7 @@ fuse and stays.
 >
 > It instrumented the vanilla silent-failure points found via javap on 42.20.3: `AnimalManagerWorker.addAnimal` returning silently when `getCellFromSquarePos` (offset 15) or `AnimalCell.getOrCreateChunkFromSquarePos` (offset 44) returns null; `removeChunkFromWorld` missing animals during the moving-object scan; the `virtualId==0` dedupe branch in `addAnimal` dropping animals via `remove(j--)`; `AnimalManagerWorker.removeFromWorld(IsoAnimal)` making zero `addAnimal` calls; and `saveRealAnimals` skipping animals when the cell lookup (offset 39) returns null.
 >
-> After 8 days every loss counter stayed at zero (`s2Missed`, `queueFailures`, `sourceGap`, `cellNullAdd`, `chunkNullAdd`, `duplicateRemoved`, `cellNullSave`; `clearShortfall` 1–4 but with `handedOff == scanSeen`, so not a loss). Conclusion: the vanilla unload hand-off chain is not the culprit. The heartbeat line (one per 256 unloads) was 7.3% of production log volume, so the probe was removed. Kill switch was `-Dmdc.animalPersistGuard` (0=off, 2/unset=observe). To revive: restore files from commit `2fda295` and re-add the matching PatchConfig / SmokeCheck / build.ps1 sections.
+> After 8 days every loss counter stayed at zero (`s2Missed`, `queueFailures`, `sourceGap`, `cellNullAdd`, `chunkNullAdd`, `duplicateRemoved`, `cellNullSave`; `clearShortfall` 1–4 but with `handedOff == scanSeen`, so not a loss). Conclusion: the vanilla unload hand-off chain is not the culprit. The heartbeat line (one per 256 unloads) was 7.3% of production log volume, so the probe was removed. Kill switch was `-Dmdc.animalPersistGuard` (0=off, 2/unset=observe). To revive: restore files from commit `13650e1` and re-add the matching PatchConfig / SmokeCheck / build.ps1 sections.
 
 <a id="2ae"></a>
 ## 2ae. Hutch load return-value guard (W17, server, default enforce)
@@ -1773,7 +1773,7 @@ The three hooks (`SyncClothingPacket.set`, `ItemDescription.<init>`, `SyncVisual
 
 The patch redirected that single call (1:1, shape-preserving) to `FaceObjectGuard.closestSpriteGridObject`, which fell back to the original `object` when the result was null. Kill switch: `-Dmdc.faceObjectGuard=0`.
 
-42.21 changed `faceThisObject`: `IsoGameCharacter` targets now go to `faceThisObjectAlt`, and everything else must pass `object != null && object.getObjectIndex() != -1` (javap offsets 17–25). The object is therefore still in its square, `getSpriteGridObjects(…, true)` always includes it, and the null result cannot happen. TIS used a different guard shape, so the build-time retirement signal (`IFNULL+IFNONNULL`=5) never fired; retirement was decided by manual audit. The redirect, `FaceObjectGuard`, the four W22 SmokeCheck pins, and `FaceObjectGuardTest` are removed. To restore: `git checkout 42d1b15 -- <files>`.
+42.21 changed `faceThisObject`: `IsoGameCharacter` targets now go to `faceThisObjectAlt`, and everything else must pass `object != null && object.getObjectIndex() != -1` (javap offsets 17–25). The object is therefore still in its square, `getSpriteGridObjects(…, true)` always includes it, and the null result cannot happen. TIS used a different guard shape, so the build-time retirement signal (`IFNULL+IFNONNULL`=5) never fired; retirement was decided by manual audit. The redirect, `FaceObjectGuard`, the four W22 SmokeCheck pins, and `FaceObjectGuardTest` are removed. To restore: `git checkout 8d2bee8 -- <files>`.
 
 ---
 
@@ -2018,7 +2018,7 @@ Production acceptance: correct package loaded, mode=1, the anomaly counters abov
 
 `RequestDataManager.ACKWasReceived` searched connections with `i <= requests.size()`, so an empty queue or unknown connection always hit `get(size)` and threw `IndexOutOfBoundsException` (late ACKs for completed/removed requests). The patch changed the method's single `IF_ICMPGT` to `IF_ICMPGE` (`<=` → `<`): same length, stack, branch target and frames, no runtime helper; RequestID matching, ACK protocol, send window and connection lifecycle untouched. It was a boundary fix, not a stuck-progress-bar or download-pipeline fix.
 
-**Retired 2026-09-28**: 42.21.0 patch notes say "Fixed incorrect for loop condition in ACKWasReceived"; javap shows offset 15 changed from `if_icmpgt 64` to `if_icmpge 64` with instructions 0–85, operands and targets otherwise identical — matching our patched output instruction-for-instruction (empty queue / unknown connection / duplicate ACK / RequestID mismatch are equivalent). The PatchConfig entry, both SmokeCheck assertions, `RequestDataAckTest`, the build step and the now-unused `Patcher.IntComparisonChange` were removed. Revive: `git checkout 42d1b15 -- patcher/src/Patcher.java patcher/tests/request-data-ack` (and restore PatchConfig / SmokeCheck / build.ps1).
+**Retired 2026-09-28**: 42.21.0 patch notes say "Fixed incorrect for loop condition in ACKWasReceived"; javap shows offset 15 changed from `if_icmpgt 64` to `if_icmpge 64` with instructions 0–85, operands and targets otherwise identical — matching our patched output instruction-for-instruction (empty queue / unknown connection / duplicate ACK / RequestID mismatch are equivalent). The PatchConfig entry, both SmokeCheck assertions, `RequestDataAckTest`, the build step and the now-unused `Patcher.IntComparisonChange` were removed. Revive: `git checkout 8d2bee8 -- patcher/src/Patcher.java patcher/tests/request-data-ack` (and restore PatchConfig / SmokeCheck / build.ps1).
 
 ---
 
@@ -2027,7 +2027,7 @@ Production acceptance: correct package loaded, mode=1, the anomaly counters abov
 
 `ZombiePopulationManager.addZombieStanding` / `addZombieMoving` called `n_addZombie` for unloaded squares without taking `saveLock`, while background `processPendingSaveCells` ran `n_saveRealZombies` / `n_saveCell` under that lock; a core dump showed `ObjectPool<popman::Zombie*>::clear` deleting the same pointer twice (shutdown `double free`). The patch redirected those two fallback calls to `PopManAddLock.addZombie`, holding the same `saveLock` around the native call (`-Dmdc.popmanAddLock`, default on).
 
-**Retired 2026-09-28**: in 42.21 the two Java fallbacks still call `n_addZombie` outside `saveLock` (descriptor now `(FFFBIIIII)V`, adds a persistentId), but native analysis of 42.21 `libPZPopMan64` shows `ManagerWorker::saveCell` no longer touches `ManagerMain::m_zombiePool`; the path that pushed `saveRealZombieHack`'s `Zombie*` back into the Main pool and `n_saveRealZombies` / `beginSaveRealZombies` are gone, and the worker's `addRealZombie` deduplicates by id. The lock no longer protects anything, so the redirect, `PopManAddLock`, all W28 SmokeCheck assertions and `PopManAddLockTest` were removed (revive: `git checkout 42d1b15 -- <files>`). If `double free` / `ObjectPool::clear` crashes reappear at shutdown, the corruption has another source and needs fresh investigation rather than reviving this patch.
+**Retired 2026-09-28**: in 42.21 the two Java fallbacks still call `n_addZombie` outside `saveLock` (descriptor now `(FFFBIIIII)V`, adds a persistentId), but native analysis of 42.21 `libPZPopMan64` shows `ManagerWorker::saveCell` no longer touches `ManagerMain::m_zombiePool`; the path that pushed `saveRealZombieHack`'s `Zombie*` back into the Main pool and `n_saveRealZombies` / `beginSaveRealZombies` are gone, and the worker's `addRealZombie` deduplicates by id. The lock no longer protects anything, so the redirect, `PopManAddLock`, all W28 SmokeCheck assertions and `PopManAddLockTest` were removed (revive: `git checkout 8d2bee8 -- <files>`). If `double free` / `ObjectPool::clear` crashes reappear at shutdown, the corruption has another source and needs fresh investigation rather than reviving this patch.
 
 ---
 
