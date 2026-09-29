@@ -3312,6 +3312,46 @@ public final class SmokeCheck {
                 && hasField(vWs, "chunkRequests1", "Ljava/util/ArrayList;")
                 && hasField(vWs, "sentRequests", "Ljava/util/concurrent/ConcurrentLinkedQueue;")
                 && hasField(vWs, "requestNumber", "I"));
+
+        // ---- 42.21.0 自建房間 XL 樹例外（docs/patches.md 2bl）----
+        // 存在理由兩條：isPlayerInsideARoom 對 getRoom() 的結果不驗 null（TIS 補上檢查時紅＝撤刀），
+        // 以及 IsoGridSquare.isInARoom() 仍含 IsoRegions isPlayerRoom 分支（格子沒有 IsoRoom 也回 true）。
+        String treeCls = "zombie/iso/objects/IsoTree";
+        String playerCls = "zombie/characters/IsoPlayer";
+        String squareCls = "zombie/iso/IsoGridSquare";
+        String playerArgDesc = "(L" + playerCls + ";)Z";
+        String treeRenderDesc = "(FFFLzombie/core/textures/ColorInfo;ZZLzombie/core/opengl/Shader;)V";
+        MethodNode vInside = methodFromJar(jar, treeCls, "isPlayerInsideARoom", playerArgDesc);
+        boolean unguardedRoom = false;
+        for (AbstractInsnNode in : vInside.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(squareCls) && mi.name.equals("getRoom")) {
+                unguardedRoom = nextReal(in) instanceof MethodInsnNode next
+                        && next.owner.equals("zombie/iso/areas/IsoRoom") && next.name.equals("getRectsBounds");
+            }
+        }
+        failed += check("自建房間 XL 樹 vanilla 前提：isPlayerInsideARoom 恰一個 isInARoom，getRoom 後直接 getRectsBounds",
+                countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, playerCls, "isInARoom", "()Z") == 1
+                && countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, squareCls, "getRoom",
+                        "()Lzombie/iso/areas/IsoRoom;") == 1
+                && unguardedRoom);
+        failed += check("自建房間 XL 樹 vanilla 前提：IsoGridSquare.isInARoom 含 IsoRegions isPlayerRoom 分支",
+                countExactCalls(methodFromJar(jar, squareCls, "isInARoom", "()Z"), Opcodes.INVOKEINTERFACE,
+                        "zombie/iso/areas/isoregion/regions/IWorldRegion", "isPlayerRoom", "()Z") == 1);
+        MethodNode pInside = method(distJava, treeCls, "isPlayerInsideARoom", playerArgDesc);
+        AbstractInsnNode[] insideHead = firstReal(pInside, 3);
+        failed += check("自建房間 XL 樹改道：aload_1→TreeRoomGuard.isInARoom→ifne，原呼叫歸零、真指令數不變",
+                insideHead[0] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ALOAD && load.var == 1
+                && insideHead[1] instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC
+                        && call.owner.equals("zombie/mdc/TreeRoomGuard") && call.name.equals("isInARoom")
+                        && call.desc.equals("(L" + playerCls + ";)Z")
+                && insideHead[2] != null && insideHead[2].getOpcode() == Opcodes.IFNE
+                && countExactCalls(pInside, Opcodes.INVOKEVIRTUAL, playerCls, "isInARoom", "()Z") == 0
+                && realInsnCount(pInside) == realInsnCount(vInside));
+        failed += check("自建房間 XL 樹負對照：isPlayerCloseToARoom 與 render 未改動",
+                methodText(method(distJava, treeCls, "isPlayerCloseToARoom", playerArgDesc))
+                        .equals(methodText(methodFromJar(jar, treeCls, "isPlayerCloseToARoom", playerArgDesc)))
+                && methodText(method(distJava, treeCls, "render", treeRenderDesc))
+                        .equals(methodText(methodFromJar(jar, treeCls, "render", treeRenderDesc))));
         return failed;
     }
 

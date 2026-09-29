@@ -163,6 +163,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 原生固定容器刷新修復（`LootRespawn`，2e） | 自訂地圖缺 vanilla TownZone＋黏性 construction 旗標 → 固定容器永不刷新 | 窄範圍 fallback：只放行未搬動的原生固定容器 | 生效中 |
 | 安全屋 room/building 綁定修復（2d） | B42.19 自訂大地圖的 binding 遺失 | 從 authoritative roomList 補回 roomId 再走完整原版驗證 | **2026-07-29 停用、2026-09-28 刪除**——正式服已回歸原版地圖，觸發條件消失；LogFilter 內的 helper 一併刪除，需要時從 git 歷史取回並重新驗證座標 |
 | Client 貼圖管線（2j，獨立 client 包） | 50MB DirectBuffer 硬門檻讓載入執行緒無限 sleep → 實體隱形；另有四處洩漏根因（S1/S2/S4/S6） | 門檻觀測＋洩漏根治第一波 | v2.0 出貨於 output\（玩家自選安裝） |
+| Client 自建房間 XL 樹例外（2bl，client 包 0.2.2） | 42.21.0 新增的 XL 樹室內淡化對「IsoRegions 判定為房間、卻沒有 IsoRoom」的格子直取 `getRoom().getRectsBounds()`，緊貼或疊在預製建築上的封閉自建房間每幀 NPE，`FBORenderCell` 接住後整幀剩餘物件不畫（家具、樹、圍籬消失） | 改道方法內唯一的 `isInARoom`：原版不拋例外時同值，原版會 NPE 時回 false | 出貨於 output\（玩家自選安裝）；官方 QA 稱已內部修好，官方版本修掉即撤 |
 
 ### W4–W9：2026-08-13～14 事故修復六刀（全部是 vanilla 缺陷，非本專案所致）
 

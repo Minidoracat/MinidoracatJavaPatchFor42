@@ -507,7 +507,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
 **與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、
-`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.0.zip`（42.20.4 時為 `-42.20.4-0.1.0`），
+`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.2.zip`（42.20.4 時為 `-42.20.4-0.1.0`），
 不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，
 由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），
@@ -4829,6 +4829,53 @@ fallback[notServer untrusted null coords] audits auditMisses observeMismatches d
   是清晨世界狀態不同，不是索引漏抓（漏抓會在抽樣比對出現不一致）。
 - 每幀整份重建的邊際成本在同一 session 內逐漸上升：12:07 session 110→190 µs、13:27 session 80→131 µs，目前每幀不到 0.2 ms；
   晚峰再看是否持續上升。
+
+## 2bl. 自建房間 XL 樹例外（client，42.21.0；client 包 0.2.2）
+
+**症狀**（2026-09-29 Player-I、Player-J 回報；官方 bug report
+[101887](https://theindiestone.com/forums/topic/101887-42210-entering-player-built-rooms-adjoining-pre-built-structures-causes-exceptions-visibility-glitches/)、
+[101955](https://theindiestone.com/forums/topic/101955-bugged-house-when-building-under-watchtower-b42/) 同一問題）：
+在預製建築旁邊加蓋、或疊在預製平房上的封閉自建房間，一走進去家具、樹、圍籬、路燈、窗戶都看不見（仍可互動），
+右下角 ERROR 每幀往上跳。兩份 client log 只有同一條例外：`Cannot invoke "IsoRoom.getRectsBounds()" because the
+return value of "IsoGridSquare.getRoom()" is null at IsoTree.isPlayerInsideARoom(IsoTree.java:327)`，由
+`FBORenderCell.renderInternal` 接住（一份 580 次，另一份 7 秒內 415 次，約每幀一次）。官方 QA 在 101887 回覆
+已於內部修好、會在之後的版本推出（2026-09-28），沒有日期。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `IsoTree.isPlayerInsideARoom(IsoPlayer)Z` 是 42.21 新增的 XXL 樹室內淡化判斷（42.20.4 沒有這個方法）：offset 1
+  `invokevirtual IsoPlayer.isInARoom()Z` 為真，就在 offset 10–16 依序呼叫 `getSquare()`、`getRoom()`、
+  `getRectsBounds()`，中間不檢查 null（line 327）。
+- `IsoGridSquare.isInARoom()Z` 是 `getRoom() != null`，**或** `getIsoWorldRegion().isPlayerRoom()`
+  （`IsoWorldRegion.isFogMask()`＝封閉且 `roofCnt == squareSize`）。
+- 自建房間要有 IsoRoom，靠 client 端 `WorldRegionToMetaGrid.clientProcessBuildings` 把封閉、屋頂 ≥50% 的區域轉成
+  user-defined building；`isAdjacentToOrOverlappingAPredefinedBuilding` 會丟掉緊貼或重疊預製建築的那些，而
+  `isAdjacent`／`overlaps` 都以 `bIgnoreZ=true` 比對，所以疊在預製平房上的二樓也算。這些格子 `getRoom()` 為 null，
+  `isInARoom()` 卻為 true。
+- `FBORenderCell.renderInternal` 用 try/catch 包住整段 `RenderTiles`，例外讓該幀排在第一棵 XL 樹之後的物件都不畫。
+  只有 sprite 名稱含 `XL` 的樹會走到這個判斷，而且前面「瞄準中且看得到樹」「在車上」兩個條件都不成立。
+- 42.20.4→42.21.0 新增的 `getRoom().…`／`isInARoom()` 用法只有 IsoTree 這幾行，沒有其他同型呼叫點。
+
+**手術**：`isPlayerInsideARoom` 內唯一的 `invokevirtual IsoPlayer.isInARoom()Z` 1:1 改道
+`invokestatic zombie/mdc/TreeRoomGuard.isInARoom(IsoPlayer)Z`（3 bytes 換 3 bytes、堆疊 1→1、frames 原樣）。
+helper 回傳 `isInARoom() && getSquare() != null && getSquare().getRoom() != null`：原版不拋例外時結果相同；
+原版會 NPE 時回 false，這種房間裡的 XL 樹就不做室內淡化（同 42.20.4），`isPlayerCloseToARoom` 不受影響。
+第一次遇到時在 console.txt 記一行 `[MinidoracatJavaPatch][TreeRoomGuard] room without IsoRoom at x,y,z; XL tree
+room fade skipped`（每次啟動至多一行）。標準版與省記憶體版都含這刀，模組版本 `v3.1`。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：vanilla 前提兩條——`isPlayerInsideARoom` 恰一個 `isInARoom`、`getRoom` 之後直接接
+  `getRectsBounds`（官方補上 null 檢查時轉紅＝撤刀訊號），以及 `IsoGridSquare.isInARoom` 含
+  `IWorldRegion.isPlayerRoom`；手術後 `aload_1→TreeRoomGuard.isInARoom→ifne` 全序鎖、原呼叫歸零、真指令數不變；
+  負對照 `isPlayerCloseToARoom` 與 `render` 的 methodText 與原版相同。
+- LoadCheck：`TreeRoomGuard.isInARoom(IsoPlayer)` 為 public static boolean。
+- `TreeRoomGuardBehaviorTest`（兩個變體各跑一次）：以 Unsafe 配置真 IsoTree／IsoPlayer／IsoGridSquare，真
+  `IsoWorldRegion`（封閉、屋頂全滿）經格子的區域快取接上。自建房間回 false、不拋例外；預製房間在範圍內回 true、
+  範圍外回 false；室外回 false。同一組狀態在原版 jar 上會拋出與玩家 log 一字不差的 NPE（拋棄式探針對照，未入庫）。
+- 未做：遊戲內畫面驗證（要在遊戲裡蓋出貼著預製建築的封閉房間）。驗收看玩家裝 0.2.2 後 console.txt 不再出現上述
+  NPE、`TreeRoomGuard` 行至多一行、家具與室外物件恢復顯示。
+
+**退場**：官方版本修掉後 SmokeCheck 的 vanilla 前提會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper
+與測試。
 
 ---
 

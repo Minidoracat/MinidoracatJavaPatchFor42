@@ -1279,6 +1279,19 @@ public final class PatchConfig {
         // （盲等逾時重發由 ChunkNotReady 主動通知根治），手術目標方法不存在。
         patches.add(streamer);
 
+        // ---- 42.21.0 自建房間 XL 樹例外（docs/patches.md 2bl）----
+        // isPlayerInsideARoom（42.21 新增的 XXL 樹室內淡化）在 isInARoom() 為真時直接取
+        // getSquare().getRoom().getRectsBounds()；IsoGridSquare.isInARoom() 另含 IsoRegions
+        // 「封閉且屋頂全滿」分支，緊貼或疊在預製建築上的自建房間沒有 IsoRoom → 每幀 NPE，
+        // FBORenderCell.renderInternal 接住後該幀剩下的物件（家具、樹、圍籬）都不畫。
+        // 改道方法內唯一的 isInARoom：原版不拋例外時同值，原版會 NPE 時回 false。
+        Patcher.ClassPatch tree = new Patcher.ClassPatch("zombie/iso/objects/IsoTree");
+        Patcher.MethodOps inside = tree.method("isPlayerInsideARoom", "(Lzombie/characters/IsoPlayer;)Z");
+        inside.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
+                "isInARoom", "()Z", "zombie/mdc/TreeRoomGuard", "isInARoom"));
+        inside.expectedHits = 1;
+        patches.add(tree);
+
         return patches;
     }
 

@@ -98,6 +98,13 @@ public final class LoadCheck {
                     }
                 }
                 System.out.println("leak guard OK 四個手術簽名一致");
+                Class<?> treeGuard = Class.forName("zombie.mdc.TreeRoomGuard", false, cl);
+                Class<?> player = Class.forName("zombie.characters.IsoPlayer", false, cl);
+                var inRoom = treeGuard.getDeclaredMethod("isInARoom", player);
+                if (inRoom.getReturnType() != boolean.class || (inRoom.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("TreeRoomGuard.isInARoom signature");
+                }
+                System.out.println("tree room guard OK isInARoom(IsoPlayer) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

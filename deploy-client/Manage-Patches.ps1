@@ -1387,7 +1387,7 @@ function Select-InstallModules($Manifest) {
 
     Write-Head '要安裝什麼？'
     $opts = @('0')
-    if ($variants.Count -gt 0) { Write-Info '  [1] 修復隱形問題（一般玩家選這個）'; $opts += '1' }
+    if ($variants.Count -gt 0) { Write-Info '  [1] 修復隱形、自建房間看不到東西（一般玩家選這個）'; $opts += '1' }
     if ($hasProfiler) { Write-Info '  [2] 開發者工具 DevProfiler（一般玩家不用裝）'; $opts += '2' }
     if ($hasProfiler -and $variants.Count -gt 0) { Write-Info '  [3] 兩個都裝（開發者用）'; $opts += '3' }
     Write-Info '  [0] 返回'
@@ -1424,7 +1424,7 @@ function Select-InstallModules($Manifest) {
 function Select-UninstallModules([string[]]$installed) {
     Write-Head '要移除哪些修補？'
     Write-Info '  遊戲要更新前，輸入 A 按 Enter 全部移除即可。'
-    $names = @{ 'core' = '核心元件'; 'client-fixes-standard' = '修復隱形問題（標準版）'; 'client-fixes-lowmem' = '修復隱形問題（省記憶體版）'; 'profiler' = '開發者工具 DevProfiler' }
+    $names = @{ 'core' = '核心元件'; 'client-fixes-standard' = '客戶端修復（標準版）'; 'client-fixes-lowmem' = '客戶端修復（省記憶體版）'; 'profiler' = '開發者工具 DevProfiler' }
     $i = 0
     foreach ($id in $installed) { $i++; $label = if ($names.ContainsKey($id)) { $names[$id] } else { $id }; Write-Info "  [$i] $label" }
     Write-Info '  [A] 全部移除（遊戲更新前選這個）'

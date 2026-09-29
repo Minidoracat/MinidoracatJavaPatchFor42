@@ -214,13 +214,13 @@ Lua 測試為隔離夾具，驗伺服器側物品狀態與同步呼叫，不代�
 ## 客戶端模組化安裝包
 
 `build-client.ps1` 只建置 client 產物，不安裝、不啟動遊戲，也不寫入 server manifest：
-未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.21.0-0.2.1.zip`。
+未壓縮套件在 `dist-client-modular/pkg/`，ZIP 在 `output/MinidoracatClientPatches-42.21.0-0.2.2.zip`。
 
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證、主選單啟動狀態；依賴它的模組會自動帶入 |
 | `profiler` | Java→Lua callback 計時、具名區段、CSV／metadata／JFR 匯出；搭配獨立的 `MinidoracatDevProfilerFor42` 介面 MOD |
-| `client-fixes-standard` | 既有貼圖管線修復與 chunk 串流觀測，使用較高貼圖門檻 |
+| `client-fixes-standard` | 貼圖管線修復、chunk 串流觀測、42.21.0 自建房間 XL 樹例外修補（docs/patches.md 2bl），使用較高貼圖門檻 |
 | `client-fixes-lowmem` | 同一組修復，保留原版 50 MiB 門檻；與 standard 互斥 |
 
 關閉遊戲後解壓完整套件，執行 `Install-Patches.bat` 選擇模組。
