@@ -22,19 +22,19 @@ public final class VehicleChunkIndexGuardTest {
         expect("負座標向下取整", VehicleChunkIndexGuard.chunkCoord(-0.1F) == -1);
 
         BaseVehicle vehicle = (BaseVehicle) rawInstance(BaseVehicle.class);
-        vehicle.sqlId = 152;
+        vehicle.sqlId = 7;
         vehicle.chunk = (IsoChunk) rawInstance(IsoChunk.class);
-        vehicle.chunk.wx = 1168;
-        vehicle.chunk.wy = 969;
+        vehicle.chunk.wx = 1000;
+        vehicle.chunk.wy = 900;
 
-        int wx = VehicleChunkIndexGuard.wx(vehicle, 9432.8359375F, 1168);
-        int wy = VehicleChunkIndexGuard.wy(vehicle, 11207.0537109375F, 969);
+        int wx = VehicleChunkIndexGuard.wx(vehicle, 8100.5F, 1000);
+        int wy = VehicleChunkIndexGuard.wy(vehicle, 7300.25F, 900);
         if (enabled) {
-            expect("enabled：wx 由 captured x 推導", wx == 1179);
-            expect("enabled：wy 由 captured y 推導", wy == 1400);
+            expect("enabled：wx 由 captured x 推導", wx == 1012);
+            expect("enabled：wy 由 captured y 推導", wy == 912);
         } else {
-            expect("off：wx 回傳 captured vanilla 值", wx == 1168);
-            expect("off：wy 回傳 captured vanilla 值", wy == 969);
+            expect("off：wx 回傳 captured vanilla 值", wx == 1000);
+            expect("off：wy 回傳 captured vanilla 值", wy == 900);
         }
 
         expect("NaN 回退 captured vanilla", VehicleChunkIndexGuard.wx(vehicle, Float.NaN, 77) == 77);

@@ -3,6 +3,7 @@
 > 本文檔是給維運者看的完整說明：每一項優化「為什麼做、動了什麼、為什麼安全、怎麼驗證」。
 > bytecode 層的逐項原始證據（javap 反組譯摘錄）在 [specs/](specs/) JSON。
 
+<a id="0"></a>
 ## 0. 總機制：為什麼「裝了就生效」
 
 PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之前——JVM 找 class
@@ -33,6 +34,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
+<a id="1"></a>
 ## 1. 抑噪類（現役 8 項：表列 #2–#8＋§2bf 的 #10；#1、#9 已於 42.21.0 退役）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：
@@ -68,8 +70,10 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 
 ---
 
+<a id="2"></a>
 ## 2. 行為類（1 項）——動了什麼、為什麼是安全的
 
+<a id="2a"></a>
 ### 2a.（42.20 移除，重新分析後決定不恢復）殭屍超額回收加速 `10 → 6`
 
 TIS 在 42.20 重寫了整個 class。重新分析結論：**這個手術在新模型下已與原始目標脫鉤，不恢復。**
@@ -100,6 +104,7 @@ TIS 在 42.20 重寫了整個 class。重新分析結論：**這個手術在新�
 > 證據等級：作用域與條件為反編譯語意判讀（`NetworkZombiePacker`、`UdpConnection.RelevantTo`），
 > 常數換算為 `AdjustForFramerate` default method ＋算術驗證。結論是不動 bytecode，故未做 javap 逐指令驗證。
 
+<a id="2b"></a>
 ### 2b. 動物壓力模型三調（IsoAnimal）
 
 **背景原理**：動物的 `stressLevel`（0-100）進出全走 `changeStress`（含基因放大與
@@ -133,6 +138,7 @@ clamp）。MP 的結構性問題是「**進水快、出水慢**」：多玩家�
 
 ---
 
+<a id="2c"></a>
 ## 2c. 防崩潰頭部守衛（2 項，codex 對抗審查定案）
 
 **原理**：MP 的 hit 封包用 CharacterID 延遲解析目標角色；stale／型別混淆的參照會讓
@@ -153,6 +159,7 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 
 ---
 
+<a id="2d"></a>
 ## 2d. 安全屋 room/building 綁定修復
 
 > **退役（2026-09-28）**：本刀 2026-07-29 起停用（觸發條件是自訂大地圖，正式服已只跑原版地圖），42.21 對版時
@@ -184,6 +191,7 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 
 ---
 
+<a id="2e"></a>
 ## 2e. 原生固定容器週期刷新修復
 
 **根因**：B42.19 的 `LootRespawn.respawnInChunk` 先用地面格的 Zone 擋整個 `(x,y)` 垂直欄位；
@@ -213,6 +221,7 @@ chunk 的**下一個正常 `HoursForLootRespawn` 週期**恢復。`explored`、`
 
 ---
 
+<a id="2f"></a>
 ## 2f. 玩家登入同步 DB 寫入耗時量測（觀測 patch）
 
 **目的**：玩家登入時曾伴隨 `Server is too busy`，但目前證據只能確認主執行緒在登入流程中做同步工作，
@@ -244,6 +253,7 @@ sink，不新增檔案 writer、thread、flush、cache、queue、retry、SQL 或
 
 ---
 
+<a id="2g"></a>
 ## 2g. chunk unload entity removal 索引化
 
 **正式服根因證據**：玩家回報卡頓與黑邊的時段，主機仍有約 85% CPU idle、低 I/O、充足可用記憶體，
@@ -304,6 +314,7 @@ full remove、ns/entity、倍增比與可用時的 thread allocation；時間只
 
 ---
 
+<a id="2h"></a>
 ## 2h.（42.20.2 官方收編，退役）popman 共享 buffer 執行緒競爭修復（v3 buffer 隔離）
 
 **正式服根因證據**：2026-07-30 全日 11 個 log set 共 77 筆
@@ -413,6 +424,7 @@ release——JVM 若回 copy 則寫入被丟棄（HotSpot 實務上回直接指�
 
 ---
 
+<a id="2i"></a>
 ## 2i. join 卡頓量測（觀測 patch）
 
 > **退役（2026-09-02）**：本刀（LoginPacket ×3、CreatePlayerPacket ×4、
@@ -463,6 +475,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 
 ---
 
+<a id="2j"></a>
 ## 2j. Client 端貼圖管線門檻修復＋觀測（實體隱形，第一個 client patch）
 
 **症狀與根因**:B42 MP 已知未修 bug——受害 client 看到隊友/殭屍/車輛「只剩影子和名牌、
@@ -597,6 +610,7 @@ log**，我方這條（水位門檻讓載入執行緒無限 sleep）**零 log**�
 
 ---
 
+<a id="2k"></a>
 ## 2k. 效能第一波：載具視線預篩＋VehicleManager 512→256
 
 **立案依據**：fps-dip-sampler（低谷觸發 kill -3）累積 66 份 thread dump 聚合——載具幾何主題佔
@@ -640,6 +654,7 @@ index≥256 反例，立即 uninstall 並推翻界限分析。
 `install.sh` 不會複製、上線即 `NoClassDefFoundError`（SmokeCheck 的 URLClassLoader 吃整個
 dist/java 所以測不到）。已補雙向守門：dist/java 與 manifest 不一致＝建置中止。
 
+<a id="2l"></a>
 ## 2l. 假死修復：removeGlassAttachments 無限迴圈保險絲
 
 > **退役（2026-09-28，42.21.0 官方已修）**：官方把 `IsoGridSquare.removeGlassAttachments` 改寫成反向迴圈
@@ -672,6 +687,7 @@ server tick。100 條執行緒堆疊**零我方 patch 類**——純原版 42.20
 ＋一行定位 log——**下次觸發直接知道問題物件在哪**。helper 無狀態零欄位，全 public API。
 TIS 官方修復後 uninstall 即回歸原版。
 
+<a id="2m"></a>
 ## 2m.（42.20.2 官方收編，退役）效能第二波 P5：IsoCell 三清單 identity membership sidecar
 
 **立案**：第一波後低谷頻率一度塌陷至 1–2 次/日，但 2026-08-03 晚間人數衝上 80（新高）後
@@ -712,6 +728,7 @@ removeAll 四情境、補償迭代重入的訪問序列黃金比對）＋10 個�
 歸零、S3 負對照 `size×2/get×1` 原樣、S4 負對照 `ProcessStaticUpdaters` 零改道、S5 六個
 contains 後綴必為 IFNE/IFEQ、全 jar hierarchy walk 斷言 IsoObject 全後代零 equals/hashCode 覆寫）。
 
+<a id="2n"></a>
 ## 2n.（2026-08-08 退役：client 端無對應改道）受精蛋世界清除豁免（IsoGridSquare.load）
 
 > **退役結論（2026-08-08）**：patch 本身有效，**退役原因是 server-only 改道在此路徑必然
@@ -844,6 +861,7 @@ offset 589 的 `aload 13` 是整條清除鏈上**唯一一個 `worldItem` 在堆
 **全程零 anomalies**——沒有最後這條，期望 `false` 的斷言在「helper 全程吞例外」時也會綠燈）。
 逐項 javap 證據見 `docs/specs/zombie_iso_IsoGridSquare.json`。
 
+<a id="2o"></a>
 ## 2o. Client chunk 串流觀測（v2.1→v3.0，黑邊事件鑑識）
 
 **動機**：2026-08-11 同一玩家兩起「黑邊」實案（凌晨 3 點卡死 10 分鐘不可恢復需重開遊戲、
@@ -950,6 +968,7 @@ largeArea 期間才有的假說 (a) 變成常態。四個 headCall 的掛點語�
 長期卡在 21 以上且 parts 凍結＝在途請求沒收尾（server 未回或回覆被丟）。上方判讀指南中
 `largeArea=true` 一條只適用 42.20.x。
 
+<a id="2p"></a>
 ## 2p. chunk 供給併包（W4-1 v2，server）＋請求逾時 8s→15s（W4-2，client，已撤刀）
 
 > **2026-09-07 復活為 v2（預設 observe）**。9/2 的退役（「packed 47–82/session、skip[short]
@@ -1120,6 +1139,7 @@ pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 
 完整分析：docs/report/pz-42.20.3-update-analysis.md。
 
 
+<a id="2q"></a>
 ## 2q. 容器環防崩潰守衛（W5，server）
 
 **事故**：2026-08-13 21:31:10 正式服主迴圈死於 `java.lang.StackOverflowError`，堆疊 1024 層
@@ -1190,6 +1210,7 @@ rollback，不可借道 containsID=true（誤導 error＋`getItemWithID` null）
 測試以 `sun.reflect.ReflectionFactory` 分配未初始化物件造環（`InventoryItem` 建構子會拉起
 ZomboidFileSystem），classpath 中 `dist\java` 排在 jar 前，故測到的是**改道後**的方法。
 
+<a id="2r"></a>
 ## 2r. 地圖格載入捕手（W6，server）
 
 **事故**：2026-08-14 01:34:56 正式服主迴圈 frame 永久停在 `f:46186`，直到 03:28 排程的
@@ -1449,6 +1470,7 @@ log 輸出用快照在鎖外做。
 `catch (RuntimeException)` → `catch (Throwable)` ⇒ `struct FAIL 主 catch 型別鎖定`；
 刪掉 production log 行 ⇒ `應恰好輸出一行，實得 0`。
 
+<a id="2s"></a>
 ## 2s. 朝向暫存執行緒隔離（W7，server）
 
 **事故**：2026-08-13 19:55:03，玩家 Player-A 的雞舍連同旁邊的水桶整組消失。chunk <chunk-A>
@@ -1472,10 +1494,8 @@ java.lang.RuntimeException: java.lang.IllegalStateException:
 **vanilla 缺陷**：`setForwardDirectionFromIsoDirection()` 用一個 **JVM 全域共用**的
 `private static final Vector2 tempVector2_2` 當暫存：
 
-```java
-this.getVectorFromDirection(tempVector2_2);   // ① 寫入共用 static
-this.setForwardDirection(tempVector2_2);      // ② 讀回來 normalize()
-```
+先呼叫 `getVectorFromDirection(tempVector2_2)`（① 寫入共用 static），再呼叫
+`setForwardDirection(tempVector2_2)`（② 讀回來 normalize()）。
 
 而 `IsoMovingObject.getVectorFromDirection(Vector2, IsoDirections)` 的第一件事是
 **把 x、y 都歸零**再依方向填回真值。主執行緒（每 tick 為殭屍／動物／玩家呼叫）與
@@ -1594,6 +1614,7 @@ payload preflight、以及開機健檢（驗證清單 11a）。
 那才是正確的粒度。唯一無法被旋鈕挽救的情境（helper 載入失敗）也不需要旋鈕——
 見上方降級分析，那是吵鬧的執行緒死亡而非資料損失。
 
+<a id="2t"></a>
 ## 2t. chunk 寫入閘（W8，server）
 
 **事故家族**：正式服累計 **43 個 chunk** 因 `SANITY CHECK FAIL`（CRC／長度不符）在載入時
@@ -1699,6 +1720,7 @@ B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還�
 否則還原完可能再被同一缺陷吃掉。
 （2026-08-14 18:11 已執行：A 組 16/16 全數還原成功，含 Player-B 基地 <chunk-B>。）
 
+<a id="2u"></a>
 ## 2u. 存檔管線隔離（W9，server）
 
 **根治刀**。W8 閘上線首晚攔下 8 筆損毀寫入（零資料損失），現行犯證據把根因從
@@ -1805,6 +1827,7 @@ WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整�
 **驗證閉環不變**：W8 `flagged` 在 42.21 應恆 0；不為 0 代表還有官方修正與私有池都沒涵蓋的
 機制，看 BLOCKED stack。
 
+<a id="2v"></a>
 ## 2v. 抑噪第 8 項—— toxic log 改道
 
 **根因**：MOD PSR（Plysken Solar Revolution）在每個遊戲分鐘（~2.5 真實秒）無條件呼叫
@@ -1843,6 +1866,7 @@ WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整�
 
 ---
 
+<a id="2w"></a>
 ## 2w. 食材重量記憶化（**實測後決定不啟用 `on`，維持 observe**）
 
 > **退役（2026-09-02）**：本刀（`InventoryItem.getExtraItemsWeight` 的 `CreateItem`
@@ -1954,6 +1978,7 @@ observe 期的歷史值 2.1 µs 去比 `on` 期的 `memoNsAvg`，不能期待同
 
 ---
 
+<a id="2x"></a>
 ## 2x. 卡讀條根治（W10，server）
 
 > **W10-A 退役（2026-09-28，42.21.0 官方已修）**：`NetTimedActionPacket.processServer` 兩處改以 `act.write` 送出
@@ -1994,15 +2019,8 @@ zombie.network.GameServer.main:909
 
 **缺陷 1——靜默的 null 穿到 Lua**。`InventoryItem` 在封包中以「容器 ID＋item ID」傳輸：
 
-```java
-// PZNetKahluaTableImpl.java:473-477
-private InventoryItem loadInventoryItem(ByteBufferReader input, IConnection connection) {
-   ContainerID container = new ContainerID();
-   container.parse(input, connection);
-   int itemId = input.getInt();
-   return container.getContainer() != null ? container.getContainer().getItemWithID(itemId) : null;
-}
-```
+`PZNetKahluaTableImpl.loadInventoryItem(ByteBufferReader, IConnection)` 先解析 `ContainerID`、再讀 itemId，
+容器存在才回 `getItemWithID(itemId)`，否則回 null。
 
 容器找不到、或容器內沒有那個 itemId → **回 null，不 log、不拒絕**。該 null 成為
 `NetTimedAction.parse` 組出的 `arguments[]` 的一員，餵進 Lua 的 `<Type>.new(...)`，而那些
@@ -2010,14 +2028,8 @@ private InventoryItem loadInventoryItem(ByteBufferReader input, IConnection conn
 `protectedCall`** → `parse` 中斷 → `processServer` 從未執行 → server 既不回 Accept 也不回
 Reject。諷刺的是 vanilla 本來就寫好了失敗處理，只是例外繞過了它：
 
-```java
-// NetTimedAction.java:161-165（vanilla）
-LuaReturn result = LuaManager.caller.protectedCall(LuaManager.thread, functionObject, arguments);
-if (!result.isSuccess() || result.getFirst() == null) {
-   this.action = null;
-   return;                  // ← 這條路徑存在，但例外讓它到不了
-}
-```
+`NetTimedAction.parse` 對 `protectedCall` 的回傳本來就有處理：不成功或第一個回傳值為 null 時，把 `action`
+設為 null 後返回。這條路徑存在，但例外讓它到不了。
 
 **缺陷 2——回覆封包帶錯 state**。`javap` 對真實 jar（`NetTimedActionPacket.processServer`）：
 
@@ -2175,6 +2187,7 @@ TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**
   皆為 act」（TIS 退回 `this.write` 時紅＝重估 A 刀）與「processServer 不經 `NetTimedActionGuard`」。
 - 復活 A 刀：`git checkout 42d1b15 -- <檔案>`（PatchConfig／NetTimedActionGuard／SmokeCheck／測試／build.ps1）。
 
+<a id="2y"></a>
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
 
 **事故**：2026-08-23 19:25:45 起（W10 部署後第一晚，與 W10 無關——stack 全程不經
@@ -2234,6 +2247,7 @@ catch 型別鎖 IAE、委派恰 2 處（off 直通＋on）、class-wide 差值�
 全服不卡讀條、不需重啟。`anomalies` 恆 0。
 
 
+<a id="2z"></a>
 ## 2z. 車輛 DB chunk 索引一致性守衛（W12，server）
 
 **事故**：2026-08-23～24 正式服連續三輛車在卡車／仍坐車斷線／21:58 crash 後不可見；
@@ -2288,6 +2302,7 @@ Helper 以 `PZMath.fastfloor(coordinate / 8.0F)` 推導；off／非 finite 回�
 
 ---
 
+<a id="2aa"></a>
 ## 2aa. 動物同步範圍對齊（W13，server）
 
 **現象**：正式服穩態出向流量中，帶動物完整快照特徵（`maxWeight`／`ageToGrow`／
@@ -2446,6 +2461,7 @@ streaming 空窗或 connectArea 載入窗；不得歸因於 `<8 squares` under-s
 ---
 
 
+<a id="2ab"></a>
 ## 2ab. 動物 requested 冷卻＋範圍閘（W14，server）
 
 **動機（實測）**：W13 上線後跨 transport 重量測（60 秒穩態、s2c entry coverage 100%、
@@ -2584,6 +2600,7 @@ full/s 是否由 ~1/s/tuple 降為 ~1/冷卻窗；殘留不得歸因於首發。
 
 ---
 
+<a id="2ac"></a>
 ## 2ac. 主迴圈凍結看門狗（W15，server，純觀測）
 
 ### 背景（2026-08-24 兩波卡頓事件的觀測缺口）
@@ -2693,6 +2710,7 @@ heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticks
 `anomalies` 必須恆 0。快照的 stack 直接餵回 216s 三假說裁決；若長期零凍結事件，
 本刀就是零成本保險絲，不撤。
 
+<a id="2ad"></a>
 ## 2ad. 動物卸載接手守衛（W16，server，observe）
 
 > **退役（2026-09-02）**：本刀（APM `removeChunkFromWorld` headCall＋4 redirect、
@@ -2810,6 +2828,7 @@ save-start 的 `cellNullSave` 是累積到上一個完成 save 的值，不作�
 明確不做：鹿瞬移（`fromWorker` 對 id=0 setForceX/Y）、PathfindNativeThread native crash、
 阻止 chunk unload、任何序列化格式改動。W15 掛點與 property 零重疊。
 
+<a id="2ae"></a>
 ## 2ae. hutch 載入回傳守衛（W17，server，預設 enforce）
 
 ### 缺陷（靜態已定罪）
@@ -2872,6 +2891,7 @@ skip 動物 blob，迴圈不執行；且 loose class 只部署 server，無 serv
 
 ---
 
+<a id="2af"></a>
 ## 2af. 動物 LOS 節流閘（W18，server，預設 observe）
 
 ### 立案（2026-08-25 晚峰黑邊診斷的副產品）
@@ -3031,6 +3051,7 @@ physics／vehicle／grapple-only／self 順序不動；有效目標走訪順序�
 
 ---
 
+<a id="2ag"></a>
 ## 2ag. 車輛永久移除授權守衛（W19，server，預設 observe；本版純觀測）
 
 ### 立案（2026-08-23 Player-F 案＋2026-08-28 三方核實）
@@ -3136,6 +3157,7 @@ observe-alias**，比照 W16）／`0|off`（純早退）；文字別名＋未知
   規則（MVCK 認領）處理。**
 ---
 
+<a id="2ah"></a>
 ## 2ah. 衣物同步守衛（W20，server，預設 observe；(b) 附可開的 enforce）
 
 ### 立案（2026-08-28 三方核實的三個 log 叢集）
@@ -3284,6 +3306,7 @@ ctor 的 tint 仍無 `getVisual()==null` 守衛（IFNONNULL 仍 2），`WornItem
 
 ---
 
+<a id="2ai"></a>
 ## 2ai. 面向物件 sprite-grid null 守衛（W22，server，預設 on）
 
 > **退役（2026-09-28，42.21.0 官方已修）**：42.21 的 `IsoGameCharacter.faceThisObject` 開頭改為
@@ -3351,6 +3374,7 @@ kill switch `-Dmdc.faceObjectGuard=0`（純直通，null 照回＝vanilla 語意
   由 W17 之後的 apop 對照觀察，本刀不宣稱根治動物消失。
 ---
 
+<a id="2aj"></a>
 ## 2aj. 卡讀條第二波觀測（W10-C，server，預設 observe；enforce＝打斷時補送 Reject）
 
 > **2026-09-28 42.21 對版**：C（`NetTimedAction.start` tailCall）與 R（`ActionManager.update` 三改道）退役；
@@ -3562,6 +3586,7 @@ owner 檢查存在理由（`PlayerID.isConsistent` 不讀 onlineID／不查連�
 patched class）、`PacketTypes$PacketType.onServerPacket` 1 不變。部署時用舊 manifest 完整卸載，避免殘留舊的
 `ActionManager.class`（它呼叫已刪除的 helper 方法）。
 
+<a id="2ak"></a>
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
 
 ### 立案（2026-09-06）
@@ -3621,6 +3646,7 @@ loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未
 - `fail-open` 行 ≠ 0 ⇒ SQL 或 schema 變了，先 `-Dmdc.accountGate=0` 再查。
 ---
 
+<a id="2al"></a>
 ## 2al. `%ld` 格式字串修正（W24，server，無旋鈕）
 
 > **退役（2026-09-28，42.21.0 官方已修）**：官方把兩個字面值改為 `idToEntityMap(%d)=%s, expected %s` 與
@@ -3668,6 +3694,7 @@ Lua 修不安全（例外時移除封包已送出、`idToEntityMap` 可能已被
 「印一行、動作照常完成」。
 ---
 
+<a id="2am"></a>
 ## 2am. 序列化物件池執行緒隔離（W25，server，預設 on）
 
 ### 立案（2026-09-06，SaveAll 量測）
@@ -3766,6 +3793,7 @@ helper 不認識任何欄位名：以傳入的池實例做 identity 分槽（每
 
 ---
 
+<a id="2an"></a>
 ## 2an. 雞舍自發同步收件人過濾（W26，server，預設 enforce）
 
 ### 問題與手術範圍（2026-09-09）
@@ -3843,6 +3871,7 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 
 ---
 
+<a id="2ao"></a>
 ## 2ao. RequestData ACK 迴圈邊界（W27，server）
 
 > **退役（2026-09-28，42.21.0 官方已修）**：patch notes「Fixed incorrect for loop condition in ACKWasReceived」。
@@ -3867,6 +3896,7 @@ SmokeCheck 同時鎖住 `i=0 → i/size 比較 → get(i)` 語境，並比對整
 
 ---
 
+<a id="2ap"></a>
 ## 2ap. PopMan 缺格生成與背景存檔互斥（W28，server，預設 on）
 
 > **退役（2026-09-28，42.21.0 官方已修）**：42.21 的 Java 側兩個缺格 fallback 仍在 `saveLock`
@@ -3908,6 +3938,7 @@ core 沒有重複入池當下的執行時序，故不能宣稱本次兩處缺鎖
 
 ---
 
+<a id="2aq"></a>
 ## 2aq. 動物同步接收驗證（W29，server，預設 enforce）
 
 強化伺服器端驗證：不合法的動物同步請求在修改任何遊戲狀態前整包拒絕；
@@ -3930,12 +3961,13 @@ SmokeCheck 鎖唯一接收入口、精確同形改道、上游協定指紋與 cl
 本機完整建置與兩輪隔離安裝／移除通過；不代表已部署或已證明歷史動物遺失的原因，
 也不會自動復原既有存檔。
 
-**2026-09-28 42.21 對版**：伺服器 `AnimalUpdatePacket.parse` 驗證缺口仍在，上行 wire
-（細節不公開）與 client writer 逐指令未變，helper 不改。42.21 對這個類別唯一的語意差
+**2026-09-28 42.21 對版**：驗證缺口在 42.21.0 仍在，上行 wire 與 client writer 逐指令未變，helper 不改
+（缺口細節另以私下管道回報 TIS，不在公開文件描述）。42.21 對這個類別唯一的語意差
 是 client 分支的 `removeFromSquare()` 後多 `setSquare(null)`；原本的整類 SHA 因此與行號位移一起誤報。
 SmokeCheck 指紋改為略過 debug 資訊（行號、區域變數、SourceFile）的整類文字雜湊，仍涵蓋 `@PacketSetting`、
 欄位與全部方法，值更新為 42.21。
 
+<a id="2ar"></a>
 ## 2ar. 容器大批物品登記（W30，server，預設 on）
 
 `ItemContainer.addItemsToProcessItems` 內唯一的批次登記呼叫，同形改道至
@@ -3960,6 +3992,7 @@ SmokeCheck 鎖 IsoCell final、原批次方法與純 getter 指紋、唯一改�
 （`BulkItemRegistration`）、SmokeCheck 契約與行為測試一併移除，ItemContainer 剩 W5（2）＋W41（2）共 4 個命中點。
 要復活請從 git 歷史取回。
 
+<a id="2as"></a>
 ## 2as. 魚群廣播內容共用（W31，server，預設 on）
 
 `FishSchoolManager.updateSeed`／`updateFishingData` 內的兩個廣播呼叫各改道一次至
@@ -3990,6 +4023,7 @@ ByteBufferWriter final，並確認 FishSchoolManager 其他方法未變。
 不改碼。原 SmokeCheck 的三條 FAIL 只是 `GameServer.java` 行號位移；契約指紋改為略過 debug 資訊的
 methodText 雜湊，42.20.4 與 42.21 算出同值。
 
+<a id="2at"></a>
 ## 2at. 聲音封包慢呼叫觀測（server，預設 observe）
 
 只在既有已認證封包派送器中包住 `WorldSoundPacket.processServer`；
@@ -4022,6 +4056,7 @@ Error 刻意 fail-fast，若診斷 Error 與原例外同時發生，仍可能由
 **2026-09-28 42.21 對版**：派送 bridge 精簡（§2aj 末）後，`WorldSoundPacket` 仍由同一個 `MdcTimedActionProbe.processServer`
 交給本觀測器，呼叫點與行為不變（SmokeCheck「只由既有派送器呼叫一次」照舊）。
 
+<a id="2au"></a>
 ## 2au. 動物離線補算觀測（W32，server，預設 observe）
 
 **事故（2026-09-24）**：同一個玩家牧場兩次在 chunk 重新載入時出事——
@@ -4054,6 +4089,7 @@ SmokeCheck 釘三個呼叫點 census、兩個方法同形改道，以及原版�
 （TIS 改用動物自身時間時該條會紅＝重估本刀）。`AnimalAwayProbeTest` 覆蓋 observe／off、
 陳舊 zone、無時間戳、zone 路徑與例外穿透。
 
+<a id="2av"></a>
 ## 2av. 分娩品種守衛（W33，server，預設 on）
 
 **事故（2026-09-24 18:03:06）**：`AnimalData.checkPregnancy → IsoAnimal.addBaby` NPE
@@ -4076,6 +4112,7 @@ SmokeCheck 釘全 jar 4 個呼叫點、`checkPregnancy` 同形改道，以及原
 
 **2026-09-26 更正**：上面「null 品種→data null」的歸因不成立，真因是建構子檢查失敗（見 2az）。
 
+<a id="2aw"></a>
 ## 2aw. 伺服器角色聲音參數跳過（W34，server，預設 observe）
 
 **依據（2026-09-25 晚峰 JFR，5 分鐘，主執行緒 13,966 取樣）**：224 取樣（1.6%）落在
@@ -4109,6 +4146,7 @@ entity bucket，只為清掉離開 10 格的 usingPlayer）、`WorldSoundManager
 4.7%（行號落在單純算距離的第 372 行，推論實際成本是前一個呼叫 `getSoundAnimal` 對全域
 soundList 的逐動物線性掃描，因為沒開 `DebugNonSafepoints` 所以歸屬不精確）。
 
+<a id="2ax"></a>
 ## 2ax. 使用中玩家索引（W35，server，預設 observe）
 
 **依據（同一份 2026-09-25 晚峰 JFR）**：主執行緒 5.9% 在 `UsingPlayerUpdateSystem.update`，熱點落在
@@ -4138,6 +4176,7 @@ SmokeCheck 釘 usingPlayer 為 private、putfield 7 個的分佈（TIS 新增寫
 
 ---
 
+<a id="2ay"></a>
 ## 2ay. GameEntity 廣播收件範圍＋CraftLogic 同步變化閘（W36，server，預設 enforce）
 
 **依據（2026-09-26 03:11–03:13 正式服抓包，internal-analysis
@@ -4236,6 +4275,7 @@ send；手術後改道 x1、client 與單連線 send 原樣、真指令數不變
 （GameEntity）封包佔出向 UDP 的比例（修補前 17.5%，下限），並實地看曬草架：從遠處走近與開車抵達時的
 tooltip 進度、下雨暫停與濕度、完成後出貨。不能由 `skipped` 比例直接宣稱同比例的頻寬改善。
 
+<a id="2az"></a>
 ## 2az. 動物半建構物件守衛＋apop 先序列化再開檔（W37，server，預設 on）
 
 **事故（2026-09-26 10:04–11:10）**：某玩家小型圈舍離線 86 小時後重新串流，原版 `doMeta`
@@ -4323,6 +4363,7 @@ off 重現原版例外外拋＋檔案 0 bytes，on 例外不外拋、舊檔逐�
 - `AnimalSpawnGuardTest` 兩個失敗建構案例掛上格子，新增「自格子 movingObjects 撤出」斷言與 `squareRemoved=2`；
   舊 helper 在這兩條與計數上失敗、新 helper 通過；off 組態確認原版殘留。
 
+<a id="2ba"></a>
 ## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
 
 **現象**：玩家回報動物經常異常死亡。W32 觀測 9/25 00:06–9/26 12:2x（約 36 小時）補算後當場死亡約 133 隻；
@@ -4345,6 +4386,7 @@ swap 位置與真指令 +12、W32 兩個改道。`AnimalMetaSnapshotTest` 以原
 
 線上驗收：W32 明細中同一（幀、動物、座標）重複的組數應歸零；`died` 佔 `calls` 的比例應下降。
 
+<a id="2bb"></a>
 ## 2bb. 動物死亡帳本（W39，server，純觀測）
 
 取代開 `DebugType.Animal`（water 分支原版不印字、debugln／noise 量大）。`IsoAnimal.OnDeath()` 頭部
@@ -4354,6 +4396,7 @@ thirst zone hutch [catchUp=次數x/時數h catchUpAgoMs] via=前 4 個遊戲幀`
 `beat deaths domestic wild afterCatchUp suppressed anomalies`。不改行為，kill switch `-Dmdc.animalDeathLedger=0`。
 SmokeCheck 釘 OnDeath 頭部 aload_0→onDeath、真指令 +2；`AnimalDeathLedgerTest` 驗補算標記、上限與 data null。
 
+<a id="2bc"></a>
 ## 2bc. 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40，server，預設 on）
 
 **事故（2026-09-26 13:52–15:21）**：20–29 人時 fps 從 9.8 掉到 2–3，14:40 起單幀凍結 15–16 秒。
@@ -4391,6 +4434,7 @@ headCall 與真指令 +2、`IsoCell` 其餘方法逐指令不變。`ProcessItems
 `addAllItems` 等登記量照舊。§2bd／§2bh 提到的 `scanUsAvg` 驗收訊號從此不再輸出。42.21 的 `IsoCell.ProcessItems`／
 四個寫入口逐指令未變，其餘行為不變。
 
+<a id="2bd"></a>
 ## 2bd. 非主執行緒物品登記改道主執行緒（W41，server，預設 on）
 
 **根因**：W40 抓到的唯一跨執行緒寫入者是 `ServerPlayersVehicles`。它在背景載入車輛時把鑰匙放進車內容器，
@@ -4416,6 +4460,7 @@ frames 不變、`AddItemBlind` 不動、`ProcessItems` 頭 beginPass＋尾 endPa
 補登記且當幀處理。線上驗收：`off-main-thread write` 歸零（改道後其他執行緒不再進 `IsoCell`）、`deferred≈drained`、
 `pending` 小、`overflow=0`、`nulls=0`。
 
+<a id="2be"></a>
 ## 2be. 動物補算時數上限（W42，server，預設 on）
 
 **證據（20:06 session，3.3h）**：W32 記到 650 筆補算，174 筆的 zone 時數比動物自身離線時間多 ≥24h；38 隻死亡中
@@ -4444,6 +4489,7 @@ SmokeCheck：原版 `AnimalData` 全 class 零寫入動物時鐘、`update` 內 
 `nocap` 驗全部回原版時數且不刷新。線上驗收：`capped` 與 `cappedHours` 成長、`mismatch` 明細的 `applied` 接近
 `animalHoursAway`、補算後 60 秒內的死亡明顯減少。
 
+<a id="2bf"></a>
 ## 2bf. 2026-09-27 log 精簡、探針退役與量測補強（server）
 
 20:06 session（3.8h、53,126 行）的 patch log 以 TimedActionProbe 2,863、AnimalRelevancy 2,542、ChunkWriteGuard
@@ -4472,6 +4518,7 @@ SmokeCheck：原版 `AnimalData` 全 class 零寫入動物時鐘、`update` 內 
 - **雞舍同步變化量測**（W26，純觀測）：每次自發 sync 的 payload 與同一雞舍上一次逐位元比較，beat 新增
   `unchanged unchangedBytes`。蛋的 Food age 每秒可變，只有 payload 完全相同才算；數據出來前不做 W36 式變化閘。
 
+<a id="2bg"></a>
 ## 2bg. 地面物品過期清除時機同步＋物品搬移失敗即時回報（W43／W44，server，預設 on）
 
 **症狀（2026-09-27 01:40 玩家回報）**：畜牧場的糞便「撿不起來」，讀條走滿後空等、東西沒進背包，同一件重試多次都一樣；
@@ -4524,6 +4571,7 @@ chunk 由 client 讀檔、伺服器稍後自行載入時多清的部分不通知
 等價（含兩個原版怪處）與旋鈕解析。沒有本機可執行的 dedicated server 端到端情境；線上驗收＝`can't find world item`
 每 session 行數大幅下降、`WorldItemExpiry removed` 成長且 `anomalies=0`、`TransactionReject sent` 對應剩餘的撿物失敗。
 
+<a id="2bh"></a>
 ## 2bh. 物品處理清單身分索引（W45，server，預設 on；W30 同批退役）
 
 **症狀（2026-09-27 晚峰）**：三張新地圖首次生成＋40–51 人時主迴圈 FPS 1–2。低 FPS thread dump 約 10% 主執行緒
@@ -4614,6 +4662,7 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 
 **官方回報**：`docs/report/2026-09-27-processitems-linear-contains-tis.md`（草稿，未送出）。
 
+<a id="2bi"></a>
 ## 2bi. VehicleCollide 歸還後強制重送授權（W46，server，預設 on）
 
 **症狀（2026-09-27 晚上）**：`Packets limit has exceeded for VehicleCollide` 兩小時約 18 萬行，佔 console 86%，
@@ -4669,6 +4718,7 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
 - 線上驗收：用 `temp/vc_trace.py`（gitignore）重抓入站 30 秒，只送 `collide=0` 的迴圈應消失（每台車最多數十包）；
   卡頓後的 `VehicleCollide` 警告尖峰應大幅下降；beat `invalidated` 成長、`anomalies=0`。
 
+<a id="2bj"></a>
 ## 2bj. 動物視線空間預篩（W47，server，預設 on）
 
 **數據（2026-09-28 01:0x，約 50 人、約 6 FPS）**：W18 心跳每幀約 254 次實際視線檢查、每次 64 µs，合計約 16 ms／幀
@@ -4732,6 +4782,7 @@ rebuilds rebuildUsAvg disabled modifiedExits nested anomalies`。
 - 線上驗收：首次生效行；beat `auditMisses=0 lateFixes=0 disabled=false anomalies=0`、`fast` 佔 `calls` 大宗；
   W18 `losAvgUs` 從約 64 µs 降到個位數。
 
+<a id="2bk"></a>
 ## 2bk. 動物聽覺量測（W48）與空間索引（W48-2，server，預設開）
 
 **原版**：伺服器每隻動物每個 tick 在 `IsoAnimal.updateInternal → respondToSound` 呼叫一次 `WorldSoundManager.getSoundAnimal`。
@@ -4830,6 +4881,7 @@ fallback[notServer untrusted null coords] audits auditMisses observeMismatches d
 - 每幀整份重建的邊際成本在同一 session 內逐漸上升：12:07 session 110→190 µs、13:27 session 80→131 µs，目前每幀不到 0.2 ms；
   晚峰再看是否持續上升。
 
+<a id="2bl"></a>
 ## 2bl. 自建房間 XL 樹例外（client，42.21.0；client 包 0.2.2）
 
 **症狀**（2026-09-29 Player-I、Player-J 回報；官方 bug report
@@ -4880,6 +4932,7 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 
 ---
 
+<a id="3"></a>
 ## 3. 部署後驗證清單
 
 1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。

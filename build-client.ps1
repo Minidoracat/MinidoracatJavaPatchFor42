@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.2'
+$PACKAGE_VERSION = '0.2.3'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -70,10 +70,10 @@ Assert-Ok 'javac common/profiler helpers'
 
 Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
-    @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; version=$coreVersion; requires=@() },
-    @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; version="v3.1($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; version="v3.1-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
+    @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.1($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.1-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -106,7 +106,7 @@ foreach ($recipe in $recipes) {
         $fields = $_.Split("`t")
         [ordered]@{ path=$fields[0]; source="payload/$id/$($fields[0])"; sha256=$fields[2] }
     })
-    $module = [ordered]@{ id=$id; name=$recipe.name; version=$recipe.version; requires=@($recipe.requires); files=$files }
+    $module = [ordered]@{ id=$id; name=$recipe.name; nameEn=$recipe.nameEn; version=$recipe.version; requires=@($recipe.requires); files=$files }
     if ($recipe.group) { $module.exclusiveGroup = $recipe.group }
     $modules += $module
 }
@@ -170,8 +170,77 @@ $manifest = [ordered]@{
     legacyPackages=@(Get-Content -LiteralPath "$R\deploy-client\legacy-packages.json" -Raw | ConvertFrom-Json)
 }
 Write-Utf8 "$pkg\manifest.json" (($manifest | ConvertTo-Json -Depth 12) + "`n")
-$instructions = @"
+$repoUrl = 'https://github.com/Minidoracat/MinidoracatJavaPatchFor42'
+$zipName = "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION.zip"
+$instructionsEn = @"
+Minidoracat Client Patches $PACKAGE_VERSION / Project Zomboid $GAME_VERSION
+(繁體中文說明：README-INSTALL.zh-TW.txt)
+
+WHAT THIS IS
+Unofficial client-side fixes that only change the game on your own PC. They are
+loose .class files placed next to projectzomboid.jar; the jar itself is not modified.
+- Players, zombies and vehicles turn invisible (only the shadow and name tag remain).
+- Enclosed player-built rooms next to or on top of a pre-built building: as soon as
+  you walk in, furniture, trees and fences disappear and the ERROR counter in the
+  bottom-right keeps climbing (a 42.21.0 bug; TIS has fixed it internally).
+If you have never seen these problems, you do not need this package.
+
+INSTALL
+1. Close the game.
+2. Extract the whole zip into a folder (do not drag single files out of it).
+3. Double-click Install-Patches.bat.
+4. Type 1 and press Enter (install or update patches).
+5. Type 1 and press Enter (client fixes).
+6. When asked for the version, just press Enter: the recommended one is picked
+   from your PC's memory.
+7. When asked to confirm, type Y and press Enter.
+8. When it says it is done, press Enter, then type 0 and Enter to exit.
+The menus follow your Windows display language (Chinese or English). Press L in
+the main menu to switch, or start it with: Install-Patches.bat -Lang en
+
+BEFORE A GAME UPDATE
+1. Close the game.
+2. Double-click Uninstall-Patches.bat, type A and Enter (remove everything), then Y and Enter.
+3. Let Steam update the game.
+4. Wait for a package that matches the new game version, then install again.
+Updating without removing the patches first can stop you from joining servers
+or cause errors right after connecting.
+
+SAFETY
+- The installer only works on the exact game version it was built for: it checks the
+  SHA-256 of your projectzomboid.jar and of every file before writing it.
+- It only manages its own files. Unknown or modified loose classes are never
+  overwritten or deleted, and an interrupted install can be rolled back.
+- Check your download: compare the SHA-256 of $zipName with SHA256SUMS.txt on the
+  release page (PowerShell: Get-FileHash .\$zipName).
+- Source code and technical details: $repoUrl
+
+=====================================================================
+Advanced
+
+Modules
+- Client fixes: the standard variant raises the texture wait limit to 4 GiB (use it with
+  32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one.
+  Both include the texture leak fixes, a chunk-streaming log for black-edge reports
+  (logging only) and the 42.21.0 player-built room fix (XL trees are simply not faded
+  inside such rooms).
+- DevProfiler: performance tool for mod developers; its interface is the separate mod
+  MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
+  this game session actually reached the hook.
+
+Boundaries
+- Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
+  never removes other authors' tools.
+- Does not change the game jar, the JVM launch JSON or any Java agent.
+- Old v3.0 packages are taken over only when every SHA matches; otherwise remove them with
+  their own uninstaller first.
+- Never remove patches while the game is running. If an install was interrupted, run the
+  installer again before starting the game.
+- Nothing is uploaded. Profiler captures stay in Zomboid/Lua/MinidoracatDevProfiler/captures/.
+"@
+$instructionsZh = @"
 Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
+(English: README-INSTALL.txt)
 
 【這是什麼】
 只改你自己電腦上的遊戲，修兩個畫面問題：
@@ -189,6 +258,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 6. 選版本時直接按 Enter，程式會依你的電腦自動選好。
 7. 問「確定要安裝嗎？」時，輸入 Y 按 Enter。
 8. 看到安裝完成後按 Enter，再輸入 0 按 Enter 關閉，就可以開遊戲了。
+選單語言跟著 Windows 顯示語言；主選單按 L 可切換中文／英文。
 
 【遊戲要更新時】
 1. 關閉遊戲。
@@ -200,6 +270,12 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 【以前裝過舊版】
 - 裝過有 Uninstall-Patches.bat 的版本：直接照上面安裝即可，會自動換成新版。
 - 裝過只有 uninstall.bat 的 TexPipeline 舊版：先執行舊包裡的 uninstall.bat，再裝這包。
+
+【安全驗證】
+- 安裝器只接受對應版本的遊戲：會比對 projectzomboid.jar 與每個檔案的 SHA-256，不符就不寫入。
+- 下載後可比對 $zipName 的 SHA-256 與發布頁的 SHA256SUMS.txt
+  （PowerShell：Get-FileHash .\$zipName）。
+- 原始碼與技術說明：$repoUrl
 
 =====================================================================
 以下是給開發者與進階使用者的說明，一般玩家不用看。
@@ -221,16 +297,9 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
 資料僅保存本機：Zomboid/Lua/MinidoracatDevProfiler/captures/。
 本包不含自動 log 上傳、正式服監控或玩家回報收集。
-
-English quick guide
-Close the game, extract the entire ZIP, then run Install-Patches.bat.
-Profiler and Client fixes are independent modules. The two fixes variants are
-mutually exclusive. Enable the DevProfiler Lua MOD separately for its interface.
-Run Uninstall-Patches.bat to remove selected modules or all our modules.
-Remove loose patches before updating the game; never uninstall while the JVM runs.
-This package does not replace third-party ZombieBuddy APIs or upload diagnostics.
 "@
-Write-Utf8 "$pkg\README-INSTALL.txt" $instructions
+Write-Utf8 "$pkg\README-INSTALL.txt" $instructionsEn
+Write-Utf8 "$pkg\README-INSTALL.zh-TW.txt" $instructionsZh
 
 Write-Host '[7/7] 打包（不發布、不安裝）'
 $outDir = Join-Path $R 'output'

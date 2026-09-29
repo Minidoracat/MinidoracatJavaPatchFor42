@@ -27,10 +27,23 @@ param(
     [string]$PackageDir,
     [string[]]$Modules,
     [switch]$All,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [ValidateSet('auto', 'zh', 'en')]
+    [string]$Lang = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---------------------------------------------------------------- 語言
+# auto：Windows 顯示語言是中文就用中文，其它一律英文。選單可用 [L] 切換。
+if ($Lang -eq 'auto') {
+    $script:Lang = if ([System.Globalization.CultureInfo]::CurrentUICulture.Name -like 'zh*') { 'zh' } else { 'en' }
+}
+
+function L([string]$zh, [string]$en) {
+    if ($script:Lang -eq 'en') { return $en }
+    return $zh
+}
 
 # ---------------------------------------------------------------- 結束代碼
 # 每個失敗都有專屬非 0 代碼，批次檔／自動化可以據此分辨原因。
@@ -57,8 +70,8 @@ $BACKUP_REL = '.mdc-patches/backup'
 function Write-Head([string]$m) { Write-Host ''; Write-Host $m -ForegroundColor Cyan }
 function Write-Info([string]$m) { Write-Host $m }
 function Write-Good([string]$m) { Write-Host $m -ForegroundColor Green }
-function Write-Warn2([string]$m) { Write-Host "[警告] $m" -ForegroundColor Yellow }
-function Write-Bad([string]$m) { Write-Host "[錯誤] $m" -ForegroundColor Red }
+function Write-Warn2([string]$m) { Write-Host "$(L '[警告]' '[Warning]') $m" -ForegroundColor Yellow }
+function Write-Bad([string]$m) { Write-Host "$(L '[錯誤]' '[Error]') $m" -ForegroundColor Red }
 
 function Fail([int]$code, [string]$message) {
     $script:FailCode = $code
@@ -89,7 +102,7 @@ function Get-Sha256([string]$path) {
         return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     } catch {
         # 讀不到就無法判斷該不該碰它——當成「目錄狀態不允許動作」處理，不要往下猜
-        Fail $EXIT_CONFLICT "無法讀取檔案（可能被其它程式佔用或權限不足）：$path`n  $($_.Exception.Message)"
+        Fail $EXIT_CONFLICT (L "無法讀取檔案（可能被其它程式佔用或權限不足）：$path`n  $($_.Exception.Message)" "Cannot read file (it may be in use by another program, or access is denied): $path`n  $($_.Exception.Message)")
     }
 }
 
@@ -105,7 +118,7 @@ function Get-BytesSha256([byte[]]$bytes) {
 
 # 發布完整影像，不原地覆寫 leaf；hardlink 的其他名稱仍保留原內容。
 function Publish-File([string]$path, [byte[]]$bytes, [string]$SourcePath, [string]$ExpectedSha) {
-    if (Test-Path -LiteralPath $path -PathType Container) { throw "目標不是檔案：$path" }
+    if (Test-Path -LiteralPath $path -PathType Container) { throw (L "目標不是檔案：$path" "Target is not a file: $path") }
     $dir = Split-Path -Parent $path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $tmp = Join-Path $dir ([Guid]::NewGuid().ToString('N') + '.tmp')
@@ -123,7 +136,7 @@ function Publish-File([string]$path, [byte[]]$bytes, [string]$SourcePath, [strin
             }
             $stream.Flush($true)
         } finally { $stream.Dispose() }
-        if ($ExpectedSha -and (Get-Sha256 $tmp) -ne $ExpectedSha) { throw "發布前指紋不符：$path" }
+        if ($ExpectedSha -and (Get-Sha256 $tmp) -ne $ExpectedSha) { throw (L "發布前指紋不符：$path" "Checksum mismatch before writing: $path") }
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             [System.IO.File]::Replace($tmp, $path, [NullString]::Value)
         } else {
@@ -132,7 +145,7 @@ function Publish-File([string]$path, [byte[]]$bytes, [string]$SourcePath, [strin
     } finally {
         if ($created -and [System.IO.File]::Exists($tmp)) {
             try { [System.IO.File]::Delete($tmp) }
-            catch { Write-Warn2 "暫存檔未能清除（$tmp）：$($_.Exception.Message)" }
+            catch { Write-Warn2 (L "暫存檔未能清除（$tmp）：$($_.Exception.Message)" "Could not remove temporary file ($tmp): $($_.Exception.Message)") }
         }
     }
 }
@@ -150,31 +163,31 @@ function Read-JsonFile([string]$path) {
 # manifest／state／journal 內的 path 一律是「遊戲根相對、正斜線」；檔案再多一條 .class 限制。
 function Assert-SafeRelBase([string]$rel, [string]$origin) {
     if ([string]::IsNullOrWhiteSpace($rel)) {
-        Fail $EXIT_CONFLICT "$origin 有空白路徑。"
+        Fail $EXIT_CONFLICT (L "$origin 有空白路徑。" "$origin contains an empty path.")
     }
     if ($rel -match '[\\]') {
-        Fail $EXIT_CONFLICT "$origin 的路徑必須用正斜線：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑必須用正斜線：$rel" "$origin path must use forward slashes: $rel")
     }
     if ($rel -match '^[/]' -or $rel -match '^[A-Za-z]:') {
-        Fail $EXIT_CONFLICT "$origin 的路徑不可為絕對路徑：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑不可為絕對路徑：$rel" "$origin path must not be absolute: $rel")
     }
     if ($rel -match '(^|/)\.\.(/|$)' -or $rel -match '(^|/)\.(/|$)') {
-        Fail $EXIT_CONFLICT "$origin 的路徑含相對跳脫，拒絕處理：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑含相對跳脫，拒絕處理：$rel" "$origin path escapes its folder; refused: $rel")
     }
     if ($rel -match '//' -or $rel.EndsWith('/')) {
-        Fail $EXIT_CONFLICT "$origin 的路徑含空白區段：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑含空白區段：$rel" "$origin path has an empty segment: $rel")
     }
     # 區段結尾的點與空白會被 Windows 吃掉（a./b 等於 a/b），等於同一個檔案的另一種寫法；
     # 所有權比對是逐字串比的，接受別名就等於放行沒被登記過的檔案。
     if ($rel -match '[ .](/|$)') {
-        Fail $EXIT_CONFLICT "$origin 的路徑區段結尾不可為空白或點：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑區段結尾不可為空白或點：$rel" "$origin path segments must not end with a space or dot: $rel")
     }
     if ($rel -match '[\x00-\x1f:*?"<>|]') {
-        Fail $EXIT_CONFLICT "$origin 的路徑含非法字元：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 的路徑含非法字元：$rel" "$origin path contains invalid characters: $rel")
     }
     foreach ($segment in ($rel -split '/')) {
         if ($segment -match '^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(\.|$)') {
-            Fail $EXIT_CONFLICT "$origin 的路徑含 Windows 保留裝置名稱：$rel"
+            Fail $EXIT_CONFLICT (L "$origin 的路徑含 Windows 保留裝置名稱：$rel" "$origin path contains a reserved Windows device name: $rel")
         }
     }
 }
@@ -183,7 +196,7 @@ function Assert-SafeRelPath([string]$rel, [string]$origin) {
     Assert-SafeRelBase $rel $origin
     if ($rel -notmatch '\.class$') {
         # 只允許 loose class：從根本上擋掉改 jar／啟動 JSON／其它 agent 檔的可能
-        Fail $EXIT_CONFLICT "$origin 只允許 .class 檔，拒絕處理：$rel"
+        Fail $EXIT_CONFLICT (L "$origin 只允許 .class 檔，拒絕處理：$rel" "$origin only allows .class files; refused: $rel")
     }
 }
 
@@ -192,7 +205,7 @@ function Get-FullTargetPath([string]$gameRoot, [string]$rel) {
     $rootFull = [System.IO.Path]::GetFullPath($gameRoot)
     if (-not $rootFull.EndsWith('\')) { $rootFull += '\' }
     if (-not $full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Fail $EXIT_CONFLICT "路徑解析後跑出遊戲目錄，拒絕處理：$rel"
+        Fail $EXIT_CONFLICT (L "路徑解析後跑出遊戲目錄，拒絕處理：$rel" "Path resolves outside the game folder; refused: $rel")
     }
     return $full
 }
@@ -205,7 +218,7 @@ function Assert-NoReparsePoint([string]$gameRoot, [string]$rel) {
         if (Test-Path -LiteralPath $cur) {
             $item = Get-Item -LiteralPath $cur -Force
             if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                Fail $EXIT_CONFLICT "路徑上有符號連結／接點（$cur），拒絕處理：$rel"
+                Fail $EXIT_CONFLICT (L "路徑上有符號連結／接點（$cur），拒絕處理：$rel" "Path contains a symbolic link or junction ($cur); refused: $rel")
             }
         }
     }
@@ -252,7 +265,7 @@ function Test-GameDir([string]$dir) {
 function Resolve-GameDir([string]$explicit, [string]$scriptDir, [bool]$interactive) {
     if ($explicit) {
         if (Test-GameDir $explicit) { return (Get-Item -LiteralPath $explicit).FullName }
-        Fail $EXIT_GAMEDIR "指定的 -GameDir 不是 Project Zomboid 遊戲目錄（找不到 ProjectZomboid64.exe）：$explicit"
+        Fail $EXIT_GAMEDIR (L "指定的 -GameDir 不是 Project Zomboid 遊戲目錄（找不到 ProjectZomboid64.exe）：$explicit" "The -GameDir folder is not a Project Zomboid game folder (ProjectZomboid64.exe not found): $explicit")
     }
     $candidates = @()
     if ($env:PZ_GAMEDIR) { $candidates += $env:PZ_GAMEDIR }
@@ -260,21 +273,21 @@ function Resolve-GameDir([string]$explicit, [string]$scriptDir, [bool]$interacti
     foreach ($c in $candidates) {
         if (Test-GameDir $c) { return (Get-Item -LiteralPath $c).FullName }
     }
-    Write-Info '正在透過 Steam 尋找 Project Zomboid...'
+    Write-Info (L '正在透過 Steam 尋找 Project Zomboid...' 'Looking for Project Zomboid through Steam...')
     $steamDir = Find-SteamGameDir
     if ($steamDir) { return $steamDir }
     if (-not $interactive) {
-        Fail $EXIT_GAMEDIR '找不到 Project Zomboid 遊戲目錄。請用 -GameDir 指定，或設定環境變數 PZ_GAMEDIR。'
+        Fail $EXIT_GAMEDIR (L '找不到 Project Zomboid 遊戲目錄。請用 -GameDir 指定，或設定環境變數 PZ_GAMEDIR。' 'Project Zomboid game folder not found. Pass it with -GameDir, or set the PZ_GAMEDIR environment variable.')
     }
-    Write-Warn2 '自動偵測失敗。遊戲目錄可從 Steam → Project Zomboid → 管理 → 瀏覽本機檔案 取得。'
+    Write-Warn2 (L '自動偵測失敗。遊戲目錄可從 Steam → Project Zomboid → 管理 → 瀏覽本機檔案 取得。' 'Could not find the game automatically. In Steam, right-click Project Zomboid > Manage > Browse local files to find the game folder.')
     while ($true) {
-        $ans = Read-Host '請貼上遊戲目錄完整路徑（直接按 Enter 取消）'
+        $ans = Read-Host (L '請貼上遊戲目錄完整路徑（直接按 Enter 取消）' 'Paste the full path of the game folder (press Enter to cancel)')
         if ([string]::IsNullOrWhiteSpace($ans)) {
-            Fail $EXIT_GAMEDIR '使用者取消：沒有提供遊戲目錄。'
+            Fail $EXIT_GAMEDIR (L '使用者取消：沒有提供遊戲目錄。' 'Cancelled: no game folder was given.')
         }
         $ans = $ans.Trim('"').Trim()
         if (Test-GameDir $ans) { return (Get-Item -LiteralPath $ans).FullName }
-        Write-Bad "「$ans」裡沒有 ProjectZomboid64.exe，請再試一次。"
+        Write-Bad (L "「$ans」裡沒有 ProjectZomboid64.exe，請再試一次。" "ProjectZomboid64.exe was not found in `"$ans`". Please try again.")
     }
 }
 
@@ -286,7 +299,7 @@ function Assert-GameNotRunning([string]$gameRoot) {
         $procs = @(Get-Process -ErrorAction Stop)
     } catch {
         # 列舉失敗就 fail-closed：寧可不裝，也不要在遊戲跑的時候動 class 檔
-        Fail $EXIT_RUNNING "無法列舉系統行程，無法確認遊戲已關閉（fail-closed）：$($_.Exception.Message)"
+        Fail $EXIT_RUNNING (L "無法列舉系統行程，無法確認遊戲已關閉（fail-closed）：$($_.Exception.Message)" "Cannot list running processes, so cannot confirm the game is closed (fail-closed): $($_.Exception.Message)")
     }
     $blockNames = @('ProjectZomboid64', 'ProjectZomboid32', 'ProjectZomboid', 'PZLauncher')
     $hits = @()
@@ -306,14 +319,15 @@ function Assert-GameNotRunning([string]$gameRoot) {
                 $info[[int]$w.ProcessId] = @{ Cmd = [string]$w.CommandLine; Exe = [string]$w.ExecutablePath }
             }
         } catch {
-            Fail $EXIT_RUNNING ("有 java／javaw 行程在跑，但無法查詢它們的命令列以判斷是不是 Project Zomboid（fail-closed）：" +
+            Fail $EXIT_RUNNING ((L "有 java／javaw 行程在跑，但無法查詢它們的命令列以判斷是不是 Project Zomboid（fail-closed）：" "A java/javaw process is running, but its command line cannot be read to tell whether it is Project Zomboid (fail-closed): ") +
                 $_.Exception.Message)
         }
         foreach ($p in $javaProcs) {
             $meta = $info[[int]$p.Id]
             if ($null -eq $meta -or ([string]::IsNullOrWhiteSpace($meta.Cmd) -and [string]::IsNullOrWhiteSpace($meta.Exe))) {
-                Fail $EXIT_RUNNING ("讀不到 $($p.ProcessName) (PID $($p.Id)) 的執行檔／命令列，無法確認它不是 Project Zomboid" +
-                    "（fail-closed）。請關閉所有 java 行程，或用系統管理員身分再執行一次。")
+                Fail $EXIT_RUNNING (L ("讀不到 $($p.ProcessName) (PID $($p.Id)) 的執行檔／命令列，無法確認它不是 Project Zomboid" +
+                    "（fail-closed）。請關閉所有 java 行程，或用系統管理員身分再執行一次。") ("Cannot read the program path or command line of $($p.ProcessName) (PID $($p.Id)), so cannot confirm it is not Project Zomboid" +
+                    " (fail-closed). Close all java processes, or run this again as administrator."))
             }
             $isPz = $false
             if ($meta.Exe -and $meta.Exe.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { $isPz = $true }
@@ -327,7 +341,7 @@ function Assert-GameNotRunning([string]$gameRoot) {
         }
     }
     if ($hits.Count -gt 0) {
-        Fail $EXIT_RUNNING ("Project Zomboid 或它的 JVM 還在執行，請先完全關閉遊戲：" + ($hits -join ', '))
+        Fail $EXIT_RUNNING ((L "Project Zomboid 或它的 JVM 還在執行，請先完全關閉遊戲：" "Project Zomboid or its Java process is still running. Close the game completely first: ") + ($hits -join ', '))
     }
 }
 
@@ -339,7 +353,7 @@ function Enter-GameRootLock([string]$gameRoot) {
         return [System.IO.File]::Open((Join-Path $gameRoot 'ProjectZomboid64.exe'),
             [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
     } catch {
-        Fail $EXIT_RUNNING "遊戲程式或另一個管理器正在使用此目錄，或無法取得獨占鎖：$gameRoot`n$($_.Exception.Message)"
+        Fail $EXIT_RUNNING (L "遊戲程式或另一個管理器正在使用此目錄，或無法取得獨占鎖：$gameRoot`n$($_.Exception.Message)" "The game or another copy of this manager is using this folder, or an exclusive lock could not be taken: $gameRoot`n$($_.Exception.Message)")
     }
 }
 
@@ -362,41 +376,41 @@ function Resolve-PackageDir([string]$explicit, [string]$scriptDir) {
         }
     }
     if ($explicit) {
-        Fail $EXIT_PACKAGE "指定的 -PackageDir 裡沒有 manifest.json：$explicit"
+        Fail $EXIT_PACKAGE (L "指定的 -PackageDir 裡沒有 manifest.json：$explicit" "No manifest.json in the -PackageDir folder: $explicit")
     }
     return $null
 }
 
 function Read-Manifest([string]$packageDir) {
     $path = Join-Path $packageDir 'manifest.json'
-    try { $m = Read-JsonFile $path } catch { Fail $EXIT_PACKAGE "manifest.json 無法解析：$($_.Exception.Message)" }
+    try { $m = Read-JsonFile $path } catch { Fail $EXIT_PACKAGE (L "manifest.json 無法解析：$($_.Exception.Message)" "manifest.json cannot be read: $($_.Exception.Message)") }
     if ([int](Get-Prop $m 'schemaVersion' 0) -ne 1) {
-        Fail $EXIT_PACKAGE "manifest.json 的 schemaVersion 不是 1（實際：$(Get-Prop $m 'schemaVersion' '(缺)')）——請換用對應版本的安裝器。"
+        Fail $EXIT_PACKAGE (L "manifest.json 的 schemaVersion 不是 1（實際：$(Get-Prop $m 'schemaVersion' '(缺)')）——請換用對應版本的安裝器。" "manifest.json schemaVersion is not 1 (found: $(Get-Prop $m 'schemaVersion' '(missing)')). Use the matching installer version.")
     }
-    if (-not (Get-Prop $m 'jarSha256')) { Fail $EXIT_PACKAGE 'manifest.json 缺 jarSha256。' }
+    if (-not (Get-Prop $m 'jarSha256')) { Fail $EXIT_PACKAGE (L 'manifest.json 缺 jarSha256。' 'manifest.json is missing jarSha256.') }
     $mods = ConvertTo-Array (Get-Prop $m 'modules')
-    if ($mods.Count -eq 0) { Fail $EXIT_PACKAGE 'manifest.json 沒有任何 module。' }
+    if ($mods.Count -eq 0) { Fail $EXIT_PACKAGE (L 'manifest.json 沒有任何 module。' 'manifest.json has no modules.') }
     $seenId = @{}
     $ownerOf = @{}
     foreach ($mod in $mods) {
         $id = Get-Prop $mod 'id'
-        if (-not $id) { Fail $EXIT_PACKAGE 'manifest.json 有 module 缺 id。' }
-        if ($seenId.ContainsKey($id)) { Fail $EXIT_PACKAGE "manifest.json 有重複的 module id：$id" }
+        if (-not $id) { Fail $EXIT_PACKAGE (L 'manifest.json 有 module 缺 id。' 'manifest.json has a module without an id.') }
+        if ($seenId.ContainsKey($id)) { Fail $EXIT_PACKAGE (L "manifest.json 有重複的 module id：$id" "manifest.json has a duplicate module id: $id") }
         $seenId[$id] = $true
         $group = Get-Prop $mod 'exclusiveGroup'
         foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
             $p = Get-Prop $f 'path'
-            Assert-SafeRelPath $p "manifest.json 的 module「$id」"
-            if (-not (Get-Prop $f 'sha256')) { Fail $EXIT_PACKAGE "manifest.json 的 $id / $p 缺 sha256。" }
+            Assert-SafeRelPath $p (L "manifest.json 的 module「$id」" "manifest.json module '$id'")
+            if (-not (Get-Prop $f 'sha256')) { Fail $EXIT_PACKAGE (L "manifest.json 的 $id / $p 缺 sha256。" "manifest.json $id / $p is missing sha256.") }
             $srcRel = [string](Get-Prop $f 'source')
-            if (-not $srcRel) { Fail $EXIT_PACKAGE "manifest.json 的 $id / $p 缺 source。" }
+            if (-not $srcRel) { Fail $EXIT_PACKAGE (L "manifest.json 的 $id / $p 缺 source。" "manifest.json $id / $p is missing source.") }
             # source 是 Copy-Item 的來源路徑，跟 path 一樣不准跳出安裝包資料夾
-            Assert-SafeRelBase $srcRel "manifest.json 的 module「$id」的 source"
+            Assert-SafeRelBase $srcRel (L "manifest.json 的 module「$id」的 source" "manifest.json module '$id' source")
             # 同一 path 只能由一個模組擁有；同 exclusiveGroup 的變體不會同時安裝，允許共用 path
             if ($ownerOf.ContainsKey($p)) {
                 $prev = $ownerOf[$p]
                 if (-not $group -or $prev.Group -ne $group) {
-                    Fail $EXIT_PACKAGE "manifest.json 的檔案 $p 同時被 $($prev.Id) 與 $id 擁有（且不同 exclusiveGroup）。"
+                    Fail $EXIT_PACKAGE (L "manifest.json 的檔案 $p 同時被 $($prev.Id) 與 $id 擁有（且不同 exclusiveGroup）。" "manifest.json file $p is owned by both $($prev.Id) and $id (in different exclusiveGroups).")
                 }
             } else {
                 $ownerOf[$p] = @{ Id = $id; Group = $group }
@@ -406,7 +420,7 @@ function Read-Manifest([string]$packageDir) {
     foreach ($mod in $mods) {
         foreach ($req in (ConvertTo-Array (Get-Prop $mod 'requires'))) {
             if (-not $seenId.ContainsKey($req)) {
-                Fail $EXIT_PACKAGE "manifest.json 的 module「$(Get-Prop $mod 'id')」依賴不存在的 $req。"
+                Fail $EXIT_PACKAGE (L "manifest.json 的 module「$(Get-Prop $mod 'id')」依賴不存在的 $req。" "manifest.json module '$(Get-Prop $mod 'id')' requires missing module $req.")
             }
         }
     }
@@ -420,10 +434,28 @@ function Get-Module($manifest, [string]$id) {
     return $null
 }
 
+# 英文模式的模組顯示名：nameEn 優先（state.json 不存 nameEn，可由 $manifest 補），其次是已知 id 的內建英文名，最後退回 name。
+$script:ModuleNamesEn = @{
+    'core'                  = 'Core components'
+    'profiler'              = 'DevProfiler (for mod developers)'
+    'client-fixes-standard' = 'Client fixes - standard (32 GB RAM or more)'
+    'client-fixes-lowmem'   = 'Client fixes - low memory (less than 32 GB RAM)'
+}
+
+function Get-ModuleName($mod, [string]$id, $manifest = $null) {
+    if ($script:Lang -eq 'en') {
+        $en = Get-Prop $mod 'nameEn'
+        if (-not $en) { $en = Get-Prop (Get-Module $manifest $id) 'nameEn' }
+        if ($en) { return $en }
+        if ($script:ModuleNamesEn.ContainsKey($id)) { return $script:ModuleNamesEn[$id] }
+    }
+    return (Get-Prop $mod 'name' $id)
+}
+
 function Get-ModuleLabel($manifest, [string]$id) {
     $m = Get-Module $manifest $id
     if ($m) {
-        $n = Get-Prop $m 'name' $id
+        $n = Get-ModuleName $m $id
         return "$n ($id)"
     }
     return $id
@@ -437,11 +469,11 @@ function Assert-PayloadIntact($manifest, [string]$packageDir, [string[]]$moduleI
             Assert-NoReparsePoint $packageDir $sourceRel
             $src = Get-FullTargetPath $packageDir $sourceRel
             if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
-                Fail $EXIT_PACKAGE "安裝包缺檔：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。"
+                Fail $EXIT_PACKAGE (L "安裝包缺檔：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。" "Package file missing: $(Get-Prop $f 'source') (module $id). Extract the whole zip again.")
             }
             $actual = Get-Sha256 $src
             if ($actual -ne (Get-Prop $f 'sha256').ToLowerInvariant()) {
-                Fail $EXIT_PACKAGE "安裝包檔案損毀：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。"
+                Fail $EXIT_PACKAGE (L "安裝包檔案損毀：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。" "Package file is damaged: $(Get-Prop $f 'source') (module $id). Extract the whole zip again.")
             }
         }
     }
@@ -452,10 +484,10 @@ function Read-State([string]$gameRoot) {
     $path = Get-FullTargetPath $gameRoot $STATE_REL
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try { $s = Read-JsonFile $path } catch {
-        Fail $EXIT_INTERNAL "$STATE_REL 無法解析（$($_.Exception.Message)）——請手動檢查 $path。"
+        Fail $EXIT_INTERNAL (L "$STATE_REL 無法解析（$($_.Exception.Message)）——請手動檢查 $path。" "$STATE_REL cannot be read ($($_.Exception.Message)). Please check $path manually.")
     }
     if ([int](Get-Prop $s 'schemaVersion' 0) -ne 1) {
-        Fail $EXIT_INTERNAL "$STATE_REL 的 schemaVersion 不是 1，這個安裝器不認得，請用對應版本處理。"
+        Fail $EXIT_INTERNAL (L "$STATE_REL 的 schemaVersion 不是 1，這個安裝器不認得，請用對應版本處理。" "$STATE_REL schemaVersion is not 1, which this installer does not understand. Use the matching installer version.")
     }
     return $s
 }
@@ -499,7 +531,7 @@ function Find-LegacyPackages($manifest, [string]$gameRoot, [string]$jarSha) {
         $anyPresent = $false
         foreach ($f in $files) {
             $p = Get-Prop $f 'path'
-            Assert-SafeRelPath $p "manifest.json 的 legacyPackage「$(Get-Prop $lp 'id')」"
+            Assert-SafeRelPath $p (L "manifest.json 的 legacyPackage「$(Get-Prop $lp 'id')」" "manifest.json legacyPackage '$(Get-Prop $lp 'id')'")
             $known[$p] = $true
             $full = Get-FullTargetPath $gameRoot $p
             if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { $allMatch = $false; continue }
@@ -528,38 +560,38 @@ function Get-JournalPath([string]$gameRoot) { return (Get-FullTargetPath $gameRo
 # 路徑仍限 loose class／固定 state；無法辨認的現況保留，不依路徑名稱猜所有權。
 function Assert-JournalSafe([string]$gameRoot, $journal) {
     if ([int](Get-Prop $journal 'schemaVersion' 0) -ne 1) {
-        Fail $EXIT_CONFLICT "$JOURNAL_REL 的 schemaVersion 不是 1，這個安裝器不認得，請手動檢查後再試。"
+        Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的 schemaVersion 不是 1，這個安裝器不認得，請手動檢查後再試。" "$JOURNAL_REL schemaVersion is not 1, which this installer does not understand. Check it manually, then try again.")
     }
     $txId = [string](Get-Prop $journal 'txId' '')
     if ($txId -notmatch '^[0-9a-f]{12}$') {
-        Fail $EXIT_CONFLICT "$JOURNAL_REL 的 txId 格式不合法（必須是 12 位小寫十六進位），拒絕依它動檔案。"
+        Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的 txId 格式不合法（必須是 12 位小寫十六進位），拒絕依它動檔案。" "$JOURNAL_REL has an invalid txId (must be 12 lowercase hex digits); no files will be changed based on it.")
     }
     Assert-NoReparsePoint $gameRoot "$BACKUP_REL/$txId"
     $entries = @(ConvertTo-Array (Get-Prop $journal 'entries'))
     if ($entries.Count -eq 0) {
-        Fail $EXIT_CONFLICT "$JOURNAL_REL 沒有任何 entries，無法判斷該復原什麼，拒絕動檔案。"
+        Fail $EXIT_CONFLICT (L "$JOURNAL_REL 沒有任何 entries，無法判斷該復原什麼，拒絕動檔案。" "$JOURNAL_REL has no entries, so there is no way to tell what to restore; no files will be changed.")
     }
     $committed = Get-Prop $journal 'committed'
     if ($committed -isnot [bool]) {
-        Fail $EXIT_CONFLICT "$JOURNAL_REL 的 committed 必須是布林值，拒絕猜測交易狀態。"
+        Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的 committed 必須是布林值，拒絕猜測交易狀態。" "$JOURNAL_REL committed must be true or false; refusing to guess the transaction state.")
     }
     $entryDirs = @{}
     $seen = @{}
     foreach ($e in $entries) {
         $rel = [string](Get-Prop $e 'path' '')
         # 只准碰自家 .class 與那一個固定的 state.json
-        if ($rel -ne $STATE_REL) { Assert-SafeRelPath $rel "$JOURNAL_REL 的 entries" }
+        if ($rel -ne $STATE_REL) { Assert-SafeRelPath $rel (L "$JOURNAL_REL 的 entries" "$JOURNAL_REL entries") }
         Assert-NoReparsePoint $gameRoot $rel
-        if ($seen.ContainsKey($rel)) { Fail $EXIT_CONFLICT "$JOURNAL_REL 的目標重複：$rel" }
+        if ($seen.ContainsKey($rel)) { Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的目標重複：$rel" "$JOURNAL_REL lists the same target twice: $rel") }
         $seen[$rel] = $true
         foreach ($field in @('backupSha256', 'sha256')) {
             $present = if ($e -is [System.Collections.IDictionary]) { $e.Contains($field) } else { $null -ne $e.PSObject.Properties[$field] }
             if (-not $present) {
-                Fail $EXIT_CONFLICT "$JOURNAL_REL 缺少 $field，無法辨識交易影像：$rel"
+                Fail $EXIT_CONFLICT (L "$JOURNAL_REL 缺少 $field，無法辨識交易影像：$rel" "$JOURNAL_REL is missing $field, so the transaction files cannot be identified: $rel")
             }
             $sha = Get-Prop $e $field
             if ($null -ne $sha -and [string]$sha -cnotmatch '^[0-9a-f]{64}$') {
-                Fail $EXIT_CONFLICT "$JOURNAL_REL 的 $field 不合法：$rel"
+                Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的 $field 不合法：$rel" "$JOURNAL_REL has an invalid $field`: $rel")
             }
         }
         $parent = $rel
@@ -569,22 +601,22 @@ function Assert-JournalSafe([string]$gameRoot, $journal) {
         }
         $backup = Get-Prop $e 'backup'
         if (($null -eq $backup) -ne ($null -eq (Get-Prop $e 'backupSha256'))) {
-            Fail $EXIT_CONFLICT "$JOURNAL_REL 的備份與指紋不一致：$rel"
+            Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的備份與指紋不一致：$rel" "$JOURNAL_REL backup and checksum do not match: $rel")
         }
         if ($null -ne $backup) {
             # 備份一律存成 backup/<txId>/<原路徑>；不一致就是被改過的 journal
             if ([string]$backup -ne $rel) {
-                Fail $EXIT_CONFLICT "$JOURNAL_REL 的備份路徑與目標路徑不符（$backup 對 $rel），拒絕依它動檔案。"
+                Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的備份路徑與目標路徑不符（$backup 對 $rel），拒絕依它動檔案。" "$JOURNAL_REL backup path does not match its target ($backup vs $rel); no files will be changed based on it.")
             }
             Assert-NoReparsePoint $gameRoot "$BACKUP_REL/$txId/$rel"
         }
         if (-not $committed) { $null = Get-EntryImage $gameRoot $e }
     }
     foreach ($d in (ConvertTo-Array (Get-Prop $journal 'createdDirs'))) {
-        Assert-SafeRelBase ([string]$d) "$JOURNAL_REL 的 createdDirs"
+        Assert-SafeRelBase ([string]$d) (L "$JOURNAL_REL 的 createdDirs" "$JOURNAL_REL createdDirs")
         Assert-NoReparsePoint $gameRoot ([string]$d)
         if (-not $entryDirs.ContainsKey([string]$d)) {
-            Fail $EXIT_CONFLICT "$JOURNAL_REL 的 createdDirs 包含與交易檔案無關的目錄 $d，拒絕刪除。"
+            Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的 createdDirs 包含與交易檔案無關的目錄 $d，拒絕刪除。" "$JOURNAL_REL createdDirs lists folder $d, which is unrelated to the transaction files; it will not be deleted.")
         }
     }
 }
@@ -594,13 +626,13 @@ function Get-EntryImage([string]$gameRoot, $entry) {
     Assert-NoReparsePoint $gameRoot $rel
     $target = Get-FullTargetPath $gameRoot $rel
     if (Test-Path -LiteralPath $target -PathType Container) {
-        Fail $EXIT_CONFLICT "復原目標變成目錄，已保留交易與備份：$rel"
+        Fail $EXIT_CONFLICT (L "復原目標變成目錄，已保留交易與備份：$rel" "The file to restore is now a folder; transaction record and backup were kept: $rel")
     }
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return 'absent' }
     $sha = Get-Sha256 $target
     if ($sha -eq (Get-Prop $entry 'backupSha256')) { return 'pre' }
     if ($sha -eq (Get-Prop $entry 'sha256')) { return 'post' }
-    Fail $EXIT_CONFLICT "檔案既非交易前影像也非交易後影像，不會覆寫或刪除：$rel。請保留 journal 與備份，人工確認。"
+    Fail $EXIT_CONFLICT (L "檔案既非交易前影像也非交易後影像，不會覆寫或刪除：$rel。請保留 journal 與備份，人工確認。" "File matches neither the before nor the after version, so it will not be overwritten or deleted: $rel. Keep the journal and backup and check it manually.")
 }
 
 function Restore-Transaction([string]$gameRoot, $journal) {
@@ -617,7 +649,7 @@ function Restore-Transaction([string]$gameRoot, $journal) {
                 $backup = Get-FullTargetPath $backupRoot $rel
                 if (-not (Test-Path -LiteralPath $backup -PathType Leaf) -or
                         (Get-Sha256 $backup) -ne (Get-Prop $entry 'backupSha256')) {
-                    throw "備份檔遺失或指紋不符：$rel"
+                    throw (L "備份檔遺失或指紋不符：$rel" "Backup file is missing or its checksum does not match: $rel")
                 }
             }
         } catch { $problems += $_.Exception.Message }
@@ -633,11 +665,11 @@ function Restore-Transaction([string]$gameRoot, $journal) {
             if (Get-Prop $entry 'backup') {
                 Publish-File -path $target -SourcePath (Get-FullTargetPath $backupRoot $rel) `
                     -ExpectedSha (Get-Prop $entry 'backupSha256')
-                if ((Get-Sha256 $target) -ne (Get-Prop $entry 'backupSha256')) { throw "復原後指紋不符：$rel" }
+                if ((Get-Sha256 $target) -ne (Get-Prop $entry 'backupSha256')) { throw (L "復原後指紋不符：$rel" "Checksum mismatch after restore: $rel") }
             } elseif ($image -eq 'post') {
                 Remove-Item -LiteralPath $target -Force
             }
-        } catch { $problems += "還原 $rel 失敗：$($_.Exception.Message)" }
+        } catch { $problems += (L "還原 $rel 失敗：$($_.Exception.Message)" "Failed to restore $rel`: $($_.Exception.Message)") }
     }
     $dirs = @(ConvertTo-Array (Get-Prop $journal 'createdDirs'))
     for ($i = $dirs.Count - 1; $i -ge 0; $i--) {
@@ -645,13 +677,13 @@ function Restore-Transaction([string]$gameRoot, $journal) {
             $d = Get-FullTargetPath $gameRoot ([string]$dirs[$i])
             if (-not (Test-Path -LiteralPath $d)) { continue }
             if (@(Get-ChildItem -LiteralPath $d -Force).Count -eq 0) { Remove-Item -LiteralPath $d -Force }
-        } catch { $problems += "移除交易新建的目錄失敗：$($_.Exception.Message)" }
+        } catch { $problems += (L "移除交易新建的目錄失敗：$($_.Exception.Message)" "Failed to remove a folder created by the transaction: $($_.Exception.Message)") }
     }
     if ($problems.Count -eq 0) {
         try {
             $journal.committed = $true
             Write-JsonFile (Get-JournalPath $gameRoot) $journal
-        } catch { $problems += "無法發布已復原終態：$($_.Exception.Message)" }
+        } catch { $problems += (L "無法發布已復原終態：$($_.Exception.Message)" "Could not record that the restore finished: $($_.Exception.Message)") }
         if ($problems.Count -eq 0) { $problems += Clear-TransactionArtifacts $gameRoot $journal }
     }
     return @($problems)
@@ -666,7 +698,7 @@ function Clear-TransactionArtifacts([string]$gameRoot, $journal) {
         try {
             Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction Stop
         } catch {
-            $problems += "無法刪除交易備份目錄（$backupRoot）：$($_.Exception.Message)"
+            $problems += (L "無法刪除交易備份目錄（$backupRoot）：$($_.Exception.Message)" "Could not delete the transaction backup folder ($backupRoot): $($_.Exception.Message)")
         }
     }
     if ($problems.Count -gt 0) { return @($problems) }
@@ -678,7 +710,7 @@ function Clear-TransactionArtifacts([string]$gameRoot, $journal) {
         try {
             Remove-Item -LiteralPath $jp -Force -ErrorAction Stop
         } catch {
-            $problems += "無法刪除交易紀錄（$jp）：$($_.Exception.Message)"
+            $problems += (L "無法刪除交易紀錄（$jp）：$($_.Exception.Message)" "Could not delete the transaction record ($jp): $($_.Exception.Message)")
         }
     }
     return @($problems)
@@ -700,31 +732,32 @@ function Resume-PendingTransaction([string]$gameRoot) {
         # 缺少 journal 不能證明備份已無用途；保留未知交易資料，不為清理殘留而冒誤刪風險。
         $orphan = Get-FullTargetPath $gameRoot $BACKUP_REL
         if (Test-Path -LiteralPath $orphan) {
-            Write-Warn2 "發現沒有 journal 的備份，已保留供人工確認：$orphan"
+            Write-Warn2 (L "發現沒有 journal 的備份，已保留供人工確認：$orphan" "Found a backup without a journal; kept for manual review: $orphan")
         }
         return
     }
     try { $journal = Read-JsonFile $jp } catch {
-        Fail $EXIT_ROLLBACKFAILED "偵測到未完成的交易紀錄但無法解析（$jp）。請手動檢查 $gameRoot\$STATE_DIRNAME 後再試。"
+        Fail $EXIT_ROLLBACKFAILED (L "偵測到未完成的交易紀錄但無法解析（$jp）。請手動檢查 $gameRoot\$STATE_DIRNAME 後再試。" "Found an unfinished transaction record that cannot be read ($jp). Check $gameRoot\$STATE_DIRNAME manually, then try again.")
     }
     Assert-JournalSafe $gameRoot $journal
     if ([bool](Get-Prop $journal 'committed' $false)) {
         $problems = Clear-TransactionArtifacts $gameRoot $journal
         if ($problems.Count -gt 0) {
             Write-Bad ($problems -join [Environment]::NewLine)
-            Fail $EXIT_ROLLBACKFAILED "上一次的交易已完成，但清不掉它的暫存檔，請依上述訊息手動處理後再試。"
+            Fail $EXIT_ROLLBACKFAILED (L "上一次的交易已完成，但清不掉它的暫存檔，請依上述訊息手動處理後再試。" "The previous operation finished, but its temporary files could not be removed. Fix the problem above, then try again.")
         }
-        Write-Info '已清除上一次已完成交易的暫存備份。'
+        Write-Info (L '已清除上一次已完成交易的暫存備份。' 'Removed the temporary backup of the previous finished operation.')
         return
     }
-    Write-Warn2 '偵測到上一次未完成的安裝／卸載（可能被中斷或當機），正在復原...'
+    Write-Warn2 (L '偵測到上一次未完成的安裝／卸載（可能被中斷或當機），正在復原...' 'The previous install/uninstall did not finish (it may have been interrupted or crashed). Restoring...')
     $problems = Restore-Transaction $gameRoot $journal
     if ($problems.Count -gt 0) {
-        Write-Bad ('復原失敗：' + [Environment]::NewLine + ($problems -join [Environment]::NewLine))
-        Fail $EXIT_ROLLBACKFAILED ("無法完成上一次交易的復原或清理。尚需的紀錄與備份保留在" +
-            " $gameRoot\$STATE_DIRNAME；依上述訊息排除問題後再執行。")
+        Write-Bad ((L '復原失敗：' 'Restore failed:') + [Environment]::NewLine + ($problems -join [Environment]::NewLine))
+        Fail $EXIT_ROLLBACKFAILED (L ("無法完成上一次交易的復原或清理。尚需的紀錄與備份保留在" +
+            " $gameRoot\$STATE_DIRNAME；依上述訊息排除問題後再執行。") ("Could not finish restoring or cleaning up the previous operation. The records and backups are kept in" +
+            " $gameRoot\$STATE_DIRNAME. Fix the problems above, then run this again."))
     }
-    Write-Good '已復原到上一次動作前的狀態。'
+    Write-Good (L '已復原到上一次動作前的狀態。' 'Restored to the state before the previous operation.')
 }
 
 # 互動流程得先把已安裝模組列出來給使用者選，所以在列清單之前就得先復原，
@@ -798,7 +831,7 @@ function Invoke-PatchTransaction {
         foreach ($rel in $touched) {
             $full = Get-FullTargetPath $GameRoot $rel
             Assert-NoReparsePoint $GameRoot $rel
-            if (Test-Path -LiteralPath $full -PathType Container) { throw "目標變成目錄：$rel" }
+            if (Test-Path -LiteralPath $full -PathType Container) { throw (L "目標變成目錄：$rel" "Target is now a folder: $rel") }
             if (Test-Path -LiteralPath $full -PathType Leaf) {
                 $bak = Join-Path $backupRoot ($rel -replace '/', '\')
                 $bakDir = Split-Path -Parent $bak
@@ -812,7 +845,7 @@ function Invoke-PatchTransaction {
         }
     } catch {
         Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
-        Fail $EXIT_INTERNAL "建立備份失敗，沒有變更任何檔案：$($_.Exception.Message)"
+        Fail $EXIT_INTERNAL (L "建立備份失敗，沒有變更任何檔案：$($_.Exception.Message)" "Could not create a backup; no files were changed: $($_.Exception.Message)")
     }
 
     $journal = [ordered]@{
@@ -851,15 +884,16 @@ function Invoke-PatchTransaction {
         Write-JsonFile $journalPath $journal
     } catch {
         $why = $_.Exception.Message
-        Write-Bad "變更失敗，正在回復到動作前的狀態：$why"
+        Write-Bad (L "變更失敗，正在回復到動作前的狀態：$why" "Changes failed; restoring the previous state: $why")
         $problems = Restore-Transaction $GameRoot $journal
         if ($problems.Count -gt 0) {
             Write-Bad ($problems -join [Environment]::NewLine)
-            Fail $EXIT_ROLLBACKFAILED ("變更失敗，且復原或清理尚未完成。所需紀錄與備份保留在" +
-                " $GameRoot\$STATE_DIRNAME；依上述訊息排除問題後再執行。原因：$why")
+            Fail $EXIT_ROLLBACKFAILED (L ("變更失敗，且復原或清理尚未完成。所需紀錄與備份保留在" +
+                " $GameRoot\$STATE_DIRNAME；依上述訊息排除問題後再執行。原因：$why") ("Changes failed, and restoring or cleanup did not finish. The records and backups are kept in" +
+                " $GameRoot\$STATE_DIRNAME. Fix the problems above, then run this again. Reason: $why"))
         }
-        Write-Good '已回復到動作前的狀態，沒有留下半套安裝。'
-        Fail $EXIT_ROLLEDBACK "安裝／卸載失敗（已完整回復）：$why"
+        Write-Good (L '已回復到動作前的狀態，沒有留下半套安裝。' 'Restored the previous state; nothing was left half-installed.')
+        Fail $EXIT_ROLLEDBACK (L "安裝／卸載失敗（已完整回復）：$why" "Install/uninstall failed (fully restored): $why")
     }
 
     foreach ($c in (Clear-TransactionArtifacts $GameRoot $journal)) { Write-Warn2 $c }
@@ -878,7 +912,7 @@ function Resolve-InstallModules($manifest, [string[]]$installed, [string[]]$requ
     $all = ConvertTo-Array (Get-Prop $manifest 'modules')
     foreach ($r in $requested) {
         if (-not (Get-Module $manifest $r)) {
-            Fail $EXIT_USAGE ("未知的模組 id：$r（可用：" + (($all | ForEach-Object { Get-Prop $_ 'id' }) -join ', ') + '）')
+            Fail $EXIT_USAGE ((L "未知的模組 id：$r（可用：" "Unknown module id: $r (available: ") + (($all | ForEach-Object { Get-Prop $_ 'id' }) -join ', ') + (L '）' ')'))
         }
     }
     $requested = @($requested | ForEach-Object { Get-Prop (Get-Module $manifest $_) 'id' } | Select-Object -Unique)
@@ -901,7 +935,7 @@ function Resolve-InstallModules($manifest, [string[]]$installed, [string[]]$requ
         $inGroup = @($groups[$g])
         $req = @($requested | Where-Object { $inGroup -contains $_ })
         if ($req.Count -gt 1) {
-            Fail $EXIT_USAGE "互斥組「$g」一次只能選一個變體，但收到：$($req -join ', ')"
+            Fail $EXIT_USAGE (L "互斥組「$g」一次只能選一個變體，但收到：$($req -join ', ')" "Only one variant of group '$g' can be chosen at a time, but got: $($req -join ', ')")
         }
         if ($req.Count -eq 1) {
             foreach ($other in $inGroup) {
@@ -937,7 +971,7 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
         foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
             $p = Get-Prop $f 'path'
             if ($final.Contains($p)) {
-                Fail $EXIT_PACKAGE "選定的模組中有兩個都擁有 $p（$($final[$p].ModuleId) 與 $id），無法安裝。"
+                Fail $EXIT_PACKAGE (L "選定的模組中有兩個都擁有 $p（$($final[$p].ModuleId) 與 $id），無法安裝。" "Two chosen modules both own $p ($($final[$p].ModuleId) and $id); cannot install.")
             }
             $final[$p] = @{
                 Sha      = (Get-Prop $f 'sha256').ToLowerInvariant()
@@ -955,7 +989,7 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
         Assert-NoReparsePoint $gameRoot $p
         $full = Get-FullTargetPath $gameRoot $p
         if (Test-Path -LiteralPath $full -PathType Container) {
-            $conflicts += "$p 位置上是一個資料夾，無法安裝。"
+            $conflicts += (L "$p 位置上是一個資料夾，無法安裝。" "$p is a folder, so it cannot be installed.")
             continue
         }
         if (Test-Path -LiteralPath $full -PathType Leaf) {
@@ -966,7 +1000,7 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
             } elseif ($legacy.AdoptedPaths.ContainsKey($p)) {
                 # 已精確辨識的舊版包，允許接管
             } else {
-                $conflicts += "$p 已存在且不是本安裝器管理的檔案（可能是其它 patch 或手動放置）。"
+                $conflicts += (L "$p 已存在且不是本安裝器管理的檔案（可能是其它 patch 或手動放置）。" "$p already exists and is not managed by this installer (it may be from another patch or placed by hand).")
                 continue
             }
         }
@@ -998,7 +1032,7 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
         if ($legacy.AdoptedPaths.ContainsKey($p) -or $owned.ContainsKey($p) -or $final.Contains($p)) { continue }
         $full = Get-FullTargetPath $gameRoot $p
         if (Test-Path -LiteralPath $full -PathType Leaf) {
-            $conflicts += "$p 是舊版 patch 的檔案但整組指紋對不上（版本不明），不敢動它。"
+            $conflicts += (L "$p 是舊版 patch 的檔案但整組指紋對不上（版本不明），不敢動它。" "$p belongs to an old patch version, but the full set does not match any known version; it will not be touched.")
         }
     }
 
@@ -1058,7 +1092,7 @@ function Invoke-Install {
     param($Manifest, [string]$PackageDir, [string]$GameRoot, [string[]]$Requested, [bool]$RequestAll, [bool]$Interactive)
 
     if (-not $RequestAll -and @($Requested).Count -eq 0) {
-        Fail $EXIT_USAGE '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。'
+        Fail $EXIT_USAGE (L '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。' 'No modules to install were given. Use -Modules id[,id...] or -All.')
     }
 
     # 順序本身就是契約：先拿目錄鎖 → 確認遊戲沒在跑 → 復原未完成交易 → 最後才讀 state 規劃。
@@ -1070,14 +1104,14 @@ function Invoke-Install {
 
         $jarPath = Join-Path $GameRoot 'projectzomboid.jar'
         if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
-            Fail $EXIT_GAMEDIR "遊戲目錄裡找不到 projectzomboid.jar：$GameRoot"
+            Fail $EXIT_GAMEDIR (L "遊戲目錄裡找不到 projectzomboid.jar：$GameRoot" "projectzomboid.jar was not found in the game folder: $GameRoot")
         }
         $jarSha = Get-Sha256 $jarPath
         $wantJar = (Get-Prop $Manifest 'jarSha256').ToLowerInvariant()
         if ($jarSha -ne $wantJar) {
-            Fail $EXIT_JAR ("遊戲版本不符——本安裝包只適用 $(Get-Prop $Manifest 'gameVersion' '(未標示)')。" +
-                [Environment]::NewLine + "  期望 jar SHA256：$wantJar" +
-                [Environment]::NewLine + "  實際 jar SHA256：$jarSha")
+            Fail $EXIT_JAR ((L "遊戲版本不符——本安裝包只適用 $(Get-Prop $Manifest 'gameVersion' '(未標示)')。" "Game version mismatch. This package only works with $(Get-Prop $Manifest 'gameVersion' '(not specified)').") +
+                [Environment]::NewLine + (L "  期望 jar SHA256：$wantJar" "  Expected jar SHA256: $wantJar") +
+                [Environment]::NewLine + (L "  實際 jar SHA256：$jarSha" "  Actual jar SHA256:   $jarSha"))
         }
 
         # 復原完才讀，state 與 legacy 都必須是「現在」的磁碟狀態
@@ -1095,12 +1129,12 @@ function Invoke-Install {
 
         if ($RequestAll) { $Requested = Get-AllInstallTargets $Manifest $installed }
         if (@($Requested).Count -eq 0) {
-            Fail $EXIT_USAGE '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。'
+            Fail $EXIT_USAGE (L '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。' 'No modules to install were given. Use -Modules id[,id...] or -All.')
         }
 
         if ($state -and (Get-Prop $state 'jarSha256')) {
             if ((Get-Prop $state 'jarSha256').ToLowerInvariant() -ne $jarSha) {
-                Write-Warn2 '偵測到既有安裝是給不同遊戲版本用的，將整組更新為目前版本。'
+                Write-Warn2 (L '偵測到既有安裝是給不同遊戲版本用的，將整組更新為目前版本。' 'The existing install was made for a different game version; everything will be updated for the current version.')
             }
         }
 
@@ -1110,28 +1144,29 @@ function Invoke-Install {
 
         $plan = Get-InstallPlan $Manifest $PackageDir $GameRoot $targetIds $state $legacy
 
-        Write-Head '安裝計畫'
-        Write-Info "  遊戲目錄：$GameRoot"
-        Write-Info "  安裝包版本：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）"
-        Write-Info ('  最終模組：' + (($targetIds | ForEach-Object { Get-ModuleLabel $Manifest $_ }) -join '、'))
+        $sep = L '、' ', '
+        Write-Head (L '安裝計畫' 'Install plan')
+        Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
+        Write-Info (L "  安裝包版本：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）" "  Package version: $(Get-Prop $Manifest 'packageVersion' '(not specified)') (game $(Get-Prop $Manifest 'gameVersion' '?'))")
+        Write-Info ((L '  最終模組：' '  Modules after install: ') + (($targetIds | ForEach-Object { Get-ModuleLabel $Manifest $_ }) -join $sep))
         if ($resolved.Replaced.Count -gt 0) {
-            Write-Info ('  取代變體：' + (($resolved.Replaced | ForEach-Object { Get-ModuleLabel $Manifest $_ }) -join '、'))
+            Write-Info ((L '  取代變體：' '  Replacing: ') + (($resolved.Replaced | ForEach-Object { Get-ModuleLabel $Manifest $_ }) -join $sep))
         }
         if ($legacy.Packages.Count -gt 0) {
-            Write-Info ('  接管舊版包：' + (($legacy.Packages | ForEach-Object { Get-Prop $_ 'id' }) -join '、'))
+            Write-Info ((L '  接管舊版包：' '  Taking over old package: ') + (($legacy.Packages | ForEach-Object { Get-Prop $_ 'id' }) -join $sep))
         }
-        Write-Info "  寫入 $($plan.Writes.Count) 個檔案、移除 $($plan.Deletes.Count) 個檔案"
-        foreach ($r in $plan.Repairs) { Write-Warn2 "自家檔案 $r 內容與紀錄不符，將重新寫入修復。" }
+        Write-Info (L "  寫入 $($plan.Writes.Count) 個檔案、移除 $($plan.Deletes.Count) 個檔案" "  Writing $($plan.Writes.Count) file(s), removing $($plan.Deletes.Count) file(s)")
+        foreach ($r in $plan.Repairs) { Write-Warn2 (L "自家檔案 $r 內容與紀錄不符，將重新寫入修復。" "Installed file $r does not match the record; it will be rewritten to repair it.") }
 
         if ($plan.Conflicts.Count -gt 0) {
-            Write-Head '偵測到衝突，已中止（沒有任何檔案被更動）'
+            Write-Head (L '偵測到衝突，已中止（沒有任何檔案被更動）' 'Conflict found; stopped (no files were changed)')
             foreach ($c in $plan.Conflicts) { Write-Bad $c }
-            Fail $EXIT_CONFLICT '遊戲目錄裡有非本安裝器管理的 loose class 檔。若那是舊版 Minidoracat patch，請先用舊版的 uninstall.bat 移除；其它來源的檔案請自行確認後移除。'
+            Fail $EXIT_CONFLICT (L '遊戲目錄裡有非本安裝器管理的 loose class 檔。若那是舊版 Minidoracat patch，請先用舊版的 uninstall.bat 移除；其它來源的檔案請自行確認後移除。' 'The game folder has loose class files not managed by this installer. If they are from an old Minidoracat patch, remove them first with that version''s uninstall.bat; files from other sources must be checked and removed by you.')
         }
         if ($plan.Tampered.Count -gt 0) {
-            Write-Head '自家檔案被變造，已中止（沒有任何檔案被更動）'
-            foreach ($t in $plan.Tampered) { Write-Bad "$t 內容與安裝紀錄不符，不敢自動刪除。" }
-            Fail $EXIT_TAMPERED '請手動確認上述檔案後再重試。'
+            Write-Head (L '自家檔案被變造，已中止（沒有任何檔案被更動）' 'Installed files were modified; stopped (no files were changed)')
+            foreach ($t in $plan.Tampered) { Write-Bad (L "$t 內容與安裝紀錄不符，不敢自動刪除。" "$t does not match the install record, so it will not be deleted automatically.") }
+            Fail $EXIT_TAMPERED (L '請手動確認上述檔案後再重試。' 'Check the files above manually, then try again.')
         }
 
         # 「不需要變更」必須連 state.json 都已經是最終內容才算數。只比對 class 檔的話，
@@ -1143,17 +1178,17 @@ function Invoke-Install {
         if (Test-Path -LiteralPath $statePath -PathType Leaf) { $curStateJson = [System.IO.File]::ReadAllText($statePath) }
         if ($plan.Writes.Count -eq 0 -and $plan.Deletes.Count -eq 0 -and
             (ConvertTo-Json -InputObject $newState -Depth 12) -eq $curStateJson) {
-            Write-Good '目前狀態已經是目標狀態，不需要任何變更。'
+            Write-Good (L '目前狀態已經是目標狀態，不需要任何變更。' 'Already up to date; nothing to change.')
             return
         }
 
         if ($Interactive) {
-            $ans = Read-Host '確定要安裝嗎？輸入 Y 按 Enter 開始（輸入 N 取消）'
-            if ($ans -notmatch '^[Yy]') { Write-Info '已取消。'; return }
+            $ans = Read-Host (L '確定要安裝嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Install now? Type Y and press Enter to start (N to cancel)')
+            if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
         }
 
         Invoke-PatchTransaction -GameRoot $GameRoot -Writes $plan.Writes -Deletes $plan.Deletes -NewState $newState
-        Write-Good "完成：已安裝 $($targetIds.Count) 個模組。直接啟動遊戲即可。"
+        Write-Good (L "完成：已安裝 $($targetIds.Count) 個模組。直接啟動遊戲即可。" "Done: $($targetIds.Count) module(s) installed. You can start the game now.")
     } finally {
         Exit-GameRootLock $lock
     }
@@ -1169,7 +1204,7 @@ function Assert-NoLegacyLeftovers($manifest, [string]$gameRoot) {
         $jarSha = ''
         if (Test-Path -LiteralPath $jarPath -PathType Leaf) { $jarSha = Get-Sha256 $jarPath }
         $legacy = Find-LegacyPackages $manifest $gameRoot $jarSha
-        foreach ($lp in $legacy.Packages) { $hits += "舊版包 $(Get-Prop $lp 'id')（整組吻合）" }
+        foreach ($lp in $legacy.Packages) { $hits += (L "舊版包 $(Get-Prop $lp 'id')（整組吻合）" "Old package $(Get-Prop $lp 'id') (full match)") }
         foreach ($p in $legacy.KnownPaths.Keys) {
             if ($legacy.AdoptedPaths.ContainsKey($p)) { continue }
             if (Test-Path -LiteralPath (Get-FullTargetPath $gameRoot $p) -PathType Leaf) { $hits += $p }
@@ -1179,13 +1214,13 @@ function Assert-NoLegacyLeftovers($manifest, [string]$gameRoot) {
     $mdcDir = Join-Path ([System.IO.Path]::GetFullPath($gameRoot)) 'zombie\mdc'
     if (Test-Path -LiteralPath $mdcDir -PathType Container) {
         if (@(Get-ChildItem -LiteralPath $mdcDir -Filter '*.class' -Force -ErrorAction SilentlyContinue).Count -gt 0) {
-            $hits += 'zombie/mdc/ 底下還有 .class（自家 namespace，但沒有安裝紀錄）'
+            $hits += (L 'zombie/mdc/ 底下還有 .class（自家 namespace，但沒有安裝紀錄）' 'zombie/mdc/ still has .class files (our own namespace, but no install record)')
         }
     }
     if ($hits.Count -eq 0) { return }
-    Write-Head '偵測到不是這個安裝器裝上去的 Minidoracat 檔案'
+    Write-Head (L '偵測到不是這個安裝器裝上去的 Minidoracat 檔案' 'Found Minidoracat files that were not installed by this installer')
     foreach ($h in ($hits | Sort-Object -Unique)) { Write-Bad $h }
-    Fail $EXIT_CONFLICT '這些檔案沒有 state.json 可對照（多半是 v3.x 或更早的舊版 patch），本安裝器不會亂刪。請改用當初那個版本附的 uninstall.bat 移除，或自行確認後手動刪除。'
+    Fail $EXIT_CONFLICT (L '這些檔案沒有 state.json 可對照（多半是 v3.x 或更早的舊版 patch），本安裝器不會亂刪。請改用當初那個版本附的 uninstall.bat 移除，或自行確認後手動刪除。' 'These files have no state.json record (usually an old v3.x or earlier patch), so this installer will not delete them. Remove them with the uninstall.bat that came with that version, or check and delete them by hand.')
 }
 
 function Invoke-Uninstall {
@@ -1200,7 +1235,7 @@ function Invoke-Uninstall {
         $state = Read-State $GameRoot
         if (-not $state -or (Get-StateModuleIds $state).Count -eq 0) {
             Assert-NoLegacyLeftovers $Manifest $GameRoot
-            Write-Info '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。'
+            Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
             return
         }
 
@@ -1208,13 +1243,13 @@ function Invoke-Uninstall {
         if ($RemoveAll) {
             $Requested = @($installed)
         } elseif (@($Requested).Count -eq 0) {
-            Fail $EXIT_USAGE '沒有指定要卸載的模組。請用 -Modules id[,id...] 或 -All。'
+            Fail $EXIT_USAGE (L '沒有指定要卸載的模組。請用 -Modules id[,id...] 或 -All。' 'No modules to remove were given. Use -Modules id[,id...] or -All.')
         } else {
             $unknown = @($Requested | Where-Object { $installed -notcontains $_ })
             if ($unknown.Count -eq @($Requested).Count) {
-                Fail $EXIT_USAGE ("指定的模組都沒有安裝：$($unknown -join ', ')（已安裝：$($installed -join ', ')）")
+                Fail $EXIT_USAGE (L "指定的模組都沒有安裝：$($unknown -join ', ')（已安裝：$($installed -join ', ')）" "None of the given modules are installed: $($unknown -join ', ') (installed: $($installed -join ', '))")
             }
-            foreach ($u in $unknown) { Write-Warn2 "模組 $u 未安裝，略過。" }
+            foreach ($u in $unknown) { Write-Warn2 (L "模組 $u 未安裝，略過。" "Module $u is not installed; skipped.") }
         }
 
         $keep = New-Object System.Collections.Generic.List[string]
@@ -1244,7 +1279,7 @@ function Invoke-Uninstall {
             }
         }
         foreach ($r in ($retained | Sort-Object -Unique)) {
-            Write-Warn2 "模組 $r 仍被其它保留的模組需要，因此保留不移除。"
+            Write-Warn2 (L "模組 $r 仍被其它保留的模組需要，因此保留不移除。" "Module $r is still needed by other modules being kept, so it stays installed.")
         }
 
         $keepPaths = @{}
@@ -1266,23 +1301,24 @@ function Invoke-Uninstall {
             $deletes += $p
         }
 
-        Write-Head '卸載計畫'
-        Write-Info "  遊戲目錄：$GameRoot"
+        $sep = L '、' ', '
+        Write-Head (L '卸載計畫' 'Removal plan')
+        Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
         $removing = @($installed | Where-Object { -not $keep.Contains($_) })
-        Write-Info ('  移除模組：' + (($removing | ForEach-Object { "$($_)" }) -join '、'))
-        if ($keep.Count -gt 0) { Write-Info ('  保留模組：' + ($keep -join '、')) }
-        Write-Info "  刪除 $($deletes.Count) 個檔案"
-        foreach ($m in $missing) { Write-Warn2 "$m 已經不在遊戲目錄（可能被手動刪除），略過。" }
+        Write-Info ((L '  移除模組：' '  Removing modules: ') + (($removing | ForEach-Object { "$($_)" }) -join $sep))
+        if ($keep.Count -gt 0) { Write-Info ((L '  保留模組：' '  Keeping modules: ') + ($keep -join $sep)) }
+        Write-Info (L "  刪除 $($deletes.Count) 個檔案" "  Deleting $($deletes.Count) file(s)")
+        foreach ($m in $missing) { Write-Warn2 (L "$m 已經不在遊戲目錄（可能被手動刪除），略過。" "$m is no longer in the game folder (maybe deleted by hand); skipped.") }
 
         if ($tampered.Count -gt 0) {
-            Write-Head '自家檔案被變造，已中止（沒有任何檔案被更動）'
-            foreach ($t in $tampered) { Write-Bad "$t 內容與安裝紀錄不符，不刪除。" }
-            Fail $EXIT_TAMPERED '請確認上述檔案是否為你自行替換的版本；確認可刪除後再手動移除，或重新安裝一次讓紀錄同步。'
+            Write-Head (L '自家檔案被變造，已中止（沒有任何檔案被更動）' 'Installed files were modified; stopped (no files were changed)')
+            foreach ($t in $tampered) { Write-Bad (L "$t 內容與安裝紀錄不符，不刪除。" "$t does not match the install record; not deleted.") }
+            Fail $EXIT_TAMPERED (L '請確認上述檔案是否為你自行替換的版本；確認可刪除後再手動移除，或重新安裝一次讓紀錄同步。' 'Check whether the files above are versions you replaced yourself. Delete them by hand once you are sure, or install again to bring the record back in sync.')
         }
 
         if ($Interactive) {
-            $ans = Read-Host '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）'
-            if ($ans -notmatch '^[Yy]') { Write-Info '已取消。'; return }
+            $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
+            if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
         }
 
         $newState = $null
@@ -1295,9 +1331,9 @@ function Invoke-Uninstall {
         }
         Invoke-PatchTransaction -GameRoot $GameRoot -Writes @() -Deletes $deletes -NewState $newState
         if ($keep.Count -gt 0) {
-            Write-Good "完成：已移除 $($removing.Count) 個模組，保留 $($keep.Count) 個。"
+            Write-Good (L "完成：已移除 $($removing.Count) 個模組，保留 $($keep.Count) 個。" "Done: removed $($removing.Count) module(s), kept $($keep.Count).")
         } else {
-            Write-Good '完成：已移除所有 Minidoracat 模組，遊戲回到原版狀態。'
+            Write-Good (L '完成：已移除所有 Minidoracat 模組，遊戲回到原版狀態。' 'Done: all Minidoracat modules removed; the game is back to vanilla.')
         }
     } finally {
         Exit-GameRootLock $lock
@@ -1308,29 +1344,29 @@ function Invoke-Uninstall {
 function Invoke-Status {
     param($Manifest, [string]$GameRoot)
 
-    Write-Head 'Minidoracat client patch 狀態'
-    Write-Info "  遊戲目錄：$GameRoot"
+    Write-Head (L 'Minidoracat client patch 狀態' 'Minidoracat client patch status')
+    Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
     if (Test-PendingTransaction $GameRoot) {
         # status 是唯讀的：只報告，不復原（復原要動檔案，得先確認遊戲已關閉）
-        Write-Warn2 '偵測到未完成的安裝／卸載交易。status 不會修改任何檔案；請關閉遊戲後執行安裝或卸載，屆時會自動先復原。'
+        Write-Warn2 (L '偵測到未完成的安裝／卸載交易。status 不會修改任何檔案；請關閉遊戲後執行安裝或卸載，屆時會自動先復原。' 'An unfinished install/uninstall was detected. Status does not change any files; close the game and run install or uninstall, which will restore it automatically first.')
     }
 
     $jarPath = Join-Path $GameRoot 'projectzomboid.jar'
     $jarSha = $null
     if (Test-Path -LiteralPath $jarPath -PathType Leaf) {
         $jarSha = Get-Sha256 $jarPath
-        Write-Info "  遊戲 jar SHA256：$jarSha"
+        Write-Info (L "  遊戲 jar SHA256：$jarSha" "  Game jar SHA256: $jarSha")
     } else {
-        Write-Warn2 '找不到 projectzomboid.jar。'
+        Write-Warn2 (L '找不到 projectzomboid.jar。' 'projectzomboid.jar not found.')
     }
 
     $state = Read-State $GameRoot
     if (-not $state -or (Get-StateModuleIds $state).Count -eq 0) {
-        Write-Info '  安裝狀態：未安裝任何模組'
+        Write-Info (L '  安裝狀態：未安裝任何模組' '  Install status: no modules installed')
     } else {
-        Write-Info "  安裝包版本：$(Get-Prop $state 'packageVersion' '(未標示)')"
+        Write-Info (L "  安裝包版本：$(Get-Prop $state 'packageVersion' '(未標示)')" "  Package version: $(Get-Prop $state 'packageVersion' '(not specified)')")
         if ($jarSha -and (Get-Prop $state 'jarSha256') -and (Get-Prop $state 'jarSha256').ToLowerInvariant() -ne $jarSha) {
-            Write-Warn2 '既有安裝對應的遊戲版本與目前的 jar 不同（遊戲可能更新過），請重新安裝。'
+            Write-Warn2 (L '既有安裝對應的遊戲版本與目前的 jar 不同（遊戲可能更新過），請重新安裝。' 'The existing install was made for a different game version (the game may have updated). Please install again.')
         }
         foreach ($m in (ConvertTo-Array (Get-Prop $state 'modules'))) {
             $bad = 0; $gone = 0; $total = 0
@@ -1340,33 +1376,33 @@ function Invoke-Status {
                 if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { $gone++; continue }
                 if ((Get-Sha256 $full) -ne (Get-Prop $f 'sha256').ToLowerInvariant()) { $bad++ }
             }
-            $mark = if ($gone -eq 0 -and $bad -eq 0) { '正常' } else { "異常（缺 $gone、變造 $bad）" }
+            $mark = if ($gone -eq 0 -and $bad -eq 0) { L '正常' 'OK' } else { L "異常（缺 $gone、變造 $bad）" "PROBLEM ($gone missing, $bad modified)" }
             $ver = Get-Prop $m 'version' ''
-            Write-Info "    [已安裝] $(Get-Prop $m 'name' (Get-Prop $m 'id')) ($(Get-Prop $m 'id')) $ver — $total 個檔案，$mark"
+            Write-Info (L "    [已安裝] $(Get-Prop $m 'name' (Get-Prop $m 'id')) ($(Get-Prop $m 'id')) $ver — $total 個檔案，$mark" "    [Installed] $(Get-ModuleName $m (Get-Prop $m 'id') $Manifest) ($(Get-Prop $m 'id')) $ver - $total file(s), $mark")
         }
     }
 
     if ($Manifest) {
         $installed = @(Get-StateModuleIds $state)
-        Write-Info "  安裝包可提供：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）"
+        Write-Info (L "  安裝包可提供：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）" "  This package offers: $(Get-Prop $Manifest 'packageVersion' '(not specified)') (game $(Get-Prop $Manifest 'gameVersion' '?'))")
         foreach ($m in (ConvertTo-Array (Get-Prop $Manifest 'modules'))) {
             $id = Get-Prop $m 'id'
-            $tag = if ($installed -contains $id) { '已安裝' } else { '可安裝' }
+            $tag = if ($installed -contains $id) { L '已安裝' 'Installed' } else { L '可安裝' 'Available' }
             $grp = Get-Prop $m 'exclusiveGroup'
-            $grpTxt = if ($grp) { "（互斥組 $grp）" } else { '' }
-            Write-Info "    [$tag] $(Get-Prop $m 'name' $id) ($id) $(Get-Prop $m 'version' '')$grpTxt"
+            $grpTxt = if ($grp) { L "（互斥組 $grp）" " (group $grp, pick one)" } else { '' }
+            Write-Info "    [$tag] $(Get-ModuleName $m $id) ($id) $(Get-Prop $m 'version' '')$grpTxt"
         }
         if ($jarSha) {
             if ($jarSha -ne (Get-Prop $Manifest 'jarSha256' '').ToLowerInvariant()) {
-                Write-Warn2 '目前遊戲版本與這個安裝包不符，無法安裝（請取得對應版本的安裝包）。'
+                Write-Warn2 (L '目前遊戲版本與這個安裝包不符，無法安裝（請取得對應版本的安裝包）。' 'The current game version does not match this package, so it cannot be installed (get the package for your game version).')
             }
             $legacy = Find-LegacyPackages $Manifest $GameRoot $jarSha
             foreach ($lp in $legacy.Packages) {
-                Write-Info "  偵測到舊版包（可自動接管）：$(Get-Prop $lp 'id') -> $((ConvertTo-Array (Get-Prop $lp 'modules')) -join '、')"
+                Write-Info (L "  偵測到舊版包（可自動接管）：$(Get-Prop $lp 'id') -> $((ConvertTo-Array (Get-Prop $lp 'modules')) -join '、')" "  Old package found (can be taken over automatically): $(Get-Prop $lp 'id') -> $((ConvertTo-Array (Get-Prop $lp 'modules')) -join ', ')")
             }
         }
     } else {
-        Write-Info '  （這次執行沒有找到 manifest.json，只顯示已安裝狀態；安裝請從解壓後的安裝包資料夾執行。）'
+        Write-Info (L '  （這次執行沒有找到 manifest.json，只顯示已安裝狀態；安裝請從解壓後的安裝包資料夾執行。）' '  (No manifest.json found this time, so only the installed state is shown. To install, run this from the extracted package folder.)')
     }
 }
 
@@ -1376,7 +1412,7 @@ function Read-Choice([string]$prompt, [string[]]$valid, [string]$default = '') {
         $ans = (Read-Host $prompt).Trim()
         if ($ans -eq '' -and $default) { return $default }
         if ($valid -contains $ans) { return $ans }
-        Write-Bad "請輸入：$($valid -join ' / ')"
+        Write-Bad (L "請輸入：$($valid -join ' / ')" "Please enter: $($valid -join ' / ')")
     }
 }
 
@@ -1385,13 +1421,13 @@ function Select-InstallModules($Manifest) {
     $hasProfiler = $ids -contains 'profiler'
     $variants = @($ids | Where-Object { $_ -like 'client-fixes-*' })
 
-    Write-Head '要安裝什麼？'
+    Write-Head (L '要安裝什麼？' 'What do you want to install?')
     $opts = @('0')
-    if ($variants.Count -gt 0) { Write-Info '  [1] 修復隱形、自建房間看不到東西（一般玩家選這個）'; $opts += '1' }
-    if ($hasProfiler) { Write-Info '  [2] 開發者工具 DevProfiler（一般玩家不用裝）'; $opts += '2' }
-    if ($hasProfiler -and $variants.Count -gt 0) { Write-Info '  [3] 兩個都裝（開發者用）'; $opts += '3' }
-    Write-Info '  [0] 返回'
-    $c = Read-Choice '請輸入數字後按 Enter' $opts
+    if ($variants.Count -gt 0) { Write-Info (L '  [1] 修復隱形、自建房間看不到東西（一般玩家選這個）' '  [1] Client fixes: invisible entities, objects vanishing in player-built rooms (choose this)'); $opts += '1' }
+    if ($hasProfiler) { Write-Info (L '  [2] 開發者工具 DevProfiler（一般玩家不用裝）' '  [2] DevProfiler developer tool (not needed for players)'); $opts += '2' }
+    if ($hasProfiler -and $variants.Count -gt 0) { Write-Info (L '  [3] 兩個都裝（開發者用）' '  [3] Both (developers)'); $opts += '3' }
+    Write-Info (L '  [0] 返回' '  [0] Back')
+    $c = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') $opts
     if ($c -eq '0') { return @() }
 
     $picked = @()
@@ -1399,38 +1435,38 @@ function Select-InstallModules($Manifest) {
     if ($c -eq '1' -or $c -eq '3') {
         $ramGb = 0
         try { $ramGb = [int][Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) } catch { }
-        Write-Head '要用哪個版本？'
+        Write-Head (L '要用哪個版本？' 'Which version?')
         $vopts = @()
         $recommend = ''
         $i = 0
         foreach ($v in $variants) {
             $i++
-            $text = if ($v -eq 'client-fixes-standard') { '標準版（電腦記憶體 32GB 以上）' } elseif ($v -eq 'client-fixes-lowmem') { '省記憶體版（電腦記憶體 32GB 以下）' } else { Get-ModuleLabel $Manifest $v }
+            $text = if ($v -eq 'client-fixes-standard') { L '標準版（電腦記憶體 32GB 以上）' 'Standard (32 GB RAM or more)' } elseif ($v -eq 'client-fixes-lowmem') { L '省記憶體版（電腦記憶體 32GB 以下）' 'Low-memory (less than 32 GB RAM)' } else { Get-ModuleLabel $Manifest $v }
             Write-Info "  [$i] $text"
             $vopts += "$i"
             if (($ramGb -ge 32 -and $v -eq 'client-fixes-standard') -or ($ramGb -gt 0 -and $ramGb -lt 32 -and $v -eq 'client-fixes-lowmem')) { $recommend = "$i" }
         }
         if ($recommend) {
-            Write-Info "  你的電腦記憶體約 $ramGb GB，建議選 [$recommend]，直接按 Enter 就會選它。"
+            Write-Info (L "  你的電腦記憶體約 $ramGb GB，建議選 [$recommend]，直接按 Enter 就會選它。" "  Your PC has about $ramGb GB RAM; option [$recommend] is recommended - just press Enter.")
         } else {
-            Write-Info '  不知道記憶體多大就選省記憶體版。'
+            Write-Info (L '  不知道記憶體多大就選省記憶體版。' '  If unsure about your RAM, choose low-memory.')
         }
-        $vc = Read-Choice '請輸入數字後按 Enter' $vopts $recommend
+        $vc = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') $vopts $recommend
         $picked += $variants[[int]$vc - 1]
     }
     return $picked
 }
 
 function Select-UninstallModules([string[]]$installed) {
-    Write-Head '要移除哪些修補？'
-    Write-Info '  遊戲要更新前，輸入 A 按 Enter 全部移除即可。'
-    $names = @{ 'core' = '核心元件'; 'client-fixes-standard' = '客戶端修復（標準版）'; 'client-fixes-lowmem' = '客戶端修復（省記憶體版）'; 'profiler' = '開發者工具 DevProfiler' }
+    Write-Head (L '要移除哪些修補？' 'Which patches do you want to remove?')
+    Write-Info (L '  遊戲要更新前，輸入 A 按 Enter 全部移除即可。' '  Before a game update, just type A and press Enter to remove everything.')
+    $names = @{ 'core' = (L '核心元件' 'Core components'); 'client-fixes-standard' = (L '客戶端修復（標準版）' 'Client fixes (standard)'); 'client-fixes-lowmem' = (L '客戶端修復（省記憶體版）' 'Client fixes (low-memory)'); 'profiler' = (L '開發者工具 DevProfiler' 'DevProfiler developer tool') }
     $i = 0
     foreach ($id in $installed) { $i++; $label = if ($names.ContainsKey($id)) { $names[$id] } else { $id }; Write-Info "  [$i] $label" }
-    Write-Info '  [A] 全部移除（遊戲更新前選這個）'
-    Write-Info '  [0] 返回'
+    Write-Info (L '  [A] 全部移除（遊戲更新前選這個）' '  [A] Remove everything (do this before a game update)')
+    Write-Info (L '  [0] 返回' '  [0] Back')
     while ($true) {
-        $ans = (Read-Host '請輸入 A 或編號後按 Enter').Trim()
+        $ans = (Read-Host (L '請輸入 A 或編號後按 Enter' 'Type A or a number and press Enter')).Trim()
         if ($ans -eq '0') { return @() }
         if ($ans -match '^[Aa]$') { return @($installed) }
         $picked = @()
@@ -1441,30 +1477,36 @@ function Select-UninstallModules([string[]]$installed) {
             $picked += $installed[[int]$t - 1]
         }
         if ($ok -and $picked.Count -gt 0) { return @($picked | Sort-Object -Unique) }
-        Write-Bad '輸入格式不對，請重新輸入。'
+        Write-Bad (L '輸入格式不對，請重新輸入。' 'Invalid input, please try again.')
     }
 }
 
 function Invoke-Menu {
     param($Manifest, [string]$PackageDir, [string]$GameRoot)
     while ($true) {
-        Write-Head 'Minidoracat Project Zomboid 客戶端模組管理'
-        Write-Info "  遊戲目錄：$GameRoot"
+        Write-Head (L 'Minidoracat Project Zomboid 客戶端模組管理' 'Minidoracat Project Zomboid client patch manager')
+        Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
         if (Test-PendingTransaction $GameRoot) {
             # 光是開選單不會動任何檔案；復原一律等到真的要安裝／卸載時才做
-            Write-Warn2 '偵測到未完成的安裝／卸載交易，執行安裝或卸載時會先自動復原（請先關閉遊戲）。'
+            Write-Warn2 (L '偵測到未完成的安裝／卸載交易，執行安裝或卸載時會先自動復原（請先關閉遊戲）。' 'An unfinished install/uninstall was detected; it will be restored automatically the next time you install or remove (close the game first).')
         }
-        Write-Info '  [1] 安裝或更新修補'
-        Write-Info '  [2] 移除部分修補'
-        Write-Info '  [3] 全部移除（遊戲要更新前選這個）'
-        Write-Info '  [4] 查看目前安裝狀態'
-        Write-Info '  [0] 離開'
-        $c = Read-Choice '請輸入數字後按 Enter' @('0', '1', '2', '3', '4')
+        Write-Info (L '  [1] 安裝或更新修補' '  [1] Install or update patches')
+        Write-Info (L '  [2] 移除部分修補' '  [2] Remove some patches')
+        Write-Info (L '  [3] 全部移除（遊戲要更新前選這個）' '  [3] Remove everything (do this before a game update)')
+        Write-Info (L '  [4] 查看目前安裝狀態' '  [4] Show installation status')
+        Write-Info (L '  [L] English' '  [L] 中文')
+        Write-Info (L '  [0] 離開' '  [0] Exit')
+        $c = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') @('0', '1', '2', '3', '4', 'L')
+        if ($c -eq 'L') {
+            # 切換語言後直接重畫選單，不需要「按 Enter 回到主選單」
+            $script:Lang = if ($script:Lang -eq 'en') { 'zh' } else { 'en' }
+            continue
+        }
         try {
             switch ($c) {
                 '1' {
                     if (-not $Manifest) {
-                        Write-Bad '找不到 manifest.json——安裝必須從解壓後的安裝包資料夾執行 Install-Patches.bat。'
+                        Write-Bad (L '找不到 manifest.json——安裝必須從解壓後的安裝包資料夾執行 Install-Patches.bat。' 'manifest.json not found. To install, run Install-Patches.bat from the extracted package folder.')
                         break
                     }
                     $picked = Select-InstallModules $Manifest
@@ -1490,11 +1532,11 @@ function Invoke-Menu {
         } catch {
             # 選單模式下單一動作失敗不該直接關掉視窗，讓使用者能看訊息並改選
             Write-Bad $_.Exception.Message
-            Write-Info "（代碼 $(if ($script:FailCode) { $script:FailCode } else { $EXIT_INTERNAL })）"
+            Write-Info (L "（代碼 $(if ($script:FailCode) { $script:FailCode } else { $EXIT_INTERNAL })）" "(code $(if ($script:FailCode) { $script:FailCode } else { $EXIT_INTERNAL }))")
             $script:FailCode = $null
         }
         Write-Info ''
-        Read-Host '按 Enter 回到主選單' | Out-Null
+        Read-Host (L '按 Enter 回到主選單' 'Press Enter to return to the main menu') | Out-Null
     }
 }
 
@@ -1512,14 +1554,14 @@ function Main {
     }
 
     if ($Action -eq 'menu' -and $NonInteractive) {
-        Fail $EXIT_USAGE '-NonInteractive 必須搭配 -Action status|install|uninstall。'
+        Fail $EXIT_USAGE (L '-NonInteractive 必須搭配 -Action status|install|uninstall。' '-NonInteractive requires -Action status|install|uninstall.')
     }
 
     $packageDir = Resolve-PackageDir $PackageDir $scriptDir
     $manifest = $null
     if ($packageDir) { $manifest = Read-Manifest $packageDir }
     if ($Action -eq 'install' -and -not $manifest) {
-        Fail $EXIT_PACKAGE '找不到 manifest.json。請在解壓後的安裝包資料夾內執行，或用 -PackageDir 指定。'
+        Fail $EXIT_PACKAGE (L '找不到 manifest.json。請在解壓後的安裝包資料夾內執行，或用 -PackageDir 指定。' 'manifest.json not found. Run this from the extracted package folder, or pass -PackageDir.')
     }
 
     $gameRoot = Resolve-GameDir $GameDir $scriptDir $interactive
@@ -1532,7 +1574,7 @@ function Main {
             $req = $requested
             if (-not $All -and $req.Count -eq 0 -and $interactive) {
                 $req = Select-InstallModules $manifest
-                if ($req.Count -eq 0) { Write-Info '已取消。'; return }
+                if ($req.Count -eq 0) { Write-Info (L '已取消。' 'Cancelled.'); return }
             }
             Invoke-Install -Manifest $manifest -PackageDir $packageDir -GameRoot $gameRoot -Requested @($req) -RequestAll ([bool]$All) -Interactive $interactive
         }
@@ -1548,7 +1590,7 @@ function Main {
                     return
                 }
                 $req = Select-UninstallModules $ids
-                if ($req.Count -eq 0) { Write-Info '已取消。'; return }
+                if ($req.Count -eq 0) { Write-Info (L '已取消。' 'Cancelled.'); return }
             }
             Invoke-Uninstall -Manifest $manifest -GameRoot $gameRoot -Requested @($req) -RemoveAll ([bool]$All) -Interactive $interactive
         }
@@ -1566,6 +1608,6 @@ try {
     if ($code -eq $EXIT_INTERNAL) {
         Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
     }
-    Write-Host "結束代碼：$code" -ForegroundColor DarkGray
+    Write-Host (L "結束代碼：$code" "Exit code: $code") -ForegroundColor DarkGray
     exit $code
 }

@@ -147,13 +147,13 @@ public final class ChunkLoadGuardTest {
     private static void diagnosticsPinpointTheSquare() throws Exception {
         ChunkLoadGuard.resetForTest();
         Fake obj = fake();
-        obj.square = square(7130, 6077, 0);
+        obj.square = square(4100, 4200, 0);
         obj.sprite = sprite("blends_natural_01_53");
         obj.toThrow = new IllegalArgumentException("Entity is already registered <test>");
         ChunkLoadGuard.addToWorld(obj);
         String site = ChunkLoadGuard.firstSiteForTest();
         require(site != null, "必須記下案發位置");
-        require(site.contains("7130,6077,0"), "診斷必須含方格座標，實得：" + site);
+        require(site.contains("4100,4200,0"), "診斷必須含方格座標，實得：" + site);
         require(site.contains("blends_natural_01_53"), "診斷必須含 sprite 名，實得：" + site);
         // 決定性欄位：addedToEngine 把「單純重複 add」與「真的不變量破壞」分開，
         // 兩者的後續調查方向完全不同。沒有它，凌晨三點拿到座標也還是只能猜。
@@ -177,7 +177,7 @@ public final class ChunkLoadGuardTest {
         Probe probe = new Probe();
         withProbe(probe, () -> {
             Fake obj = fake();
-            obj.square = square(7130, 6077, 0);
+            obj.square = square(4100, 4200, 0);
             obj.sprite = sprite("blends_natural_01_53");
             obj.toThrow = new IllegalArgumentException("Entity is already registered <test>");
             ChunkLoadGuard.addToWorld(obj);
@@ -185,7 +185,7 @@ public final class ChunkLoadGuardTest {
         require(probe.lines.size() == 1, "應恰好輸出一行，實得 " + probe.lines.size());
         String line = probe.lines.get(0);
         require(line.contains("[MinidoracatJavaPatch][ChunkLoadGuard]"), "缺前綴：" + line);
-        require(line.contains("7130,6077,0"), "真實 log 必須含方格座標：" + line);
+        require(line.contains("4100,4200,0"), "真實 log 必須含方格座標：" + line);
         require(line.contains("blends_natural_01_53"), "真實 log 必須含 sprite 名：" + line);
     }
 
@@ -287,7 +287,7 @@ public final class ChunkLoadGuardTest {
         ChunkLoadGuard.resetForTest();
         for (int i = 0; i < 50; i++) {
             Fake obj = fake();
-            obj.square = square(7130, 6077, 0);      // 永遠同一格
+            obj.square = square(4100, 4200, 0);      // 永遠同一格
             obj.sprite = sprite("blends_natural_01_53");
             obj.toThrow = new IllegalArgumentException("Entity is already registered <test>");
             ChunkLoadGuard.addToWorld(obj);

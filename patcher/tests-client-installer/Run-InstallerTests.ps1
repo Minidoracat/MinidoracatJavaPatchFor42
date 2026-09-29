@@ -109,12 +109,15 @@ function Test-ModuleSet([string[]]$expected) {
 }
 
 # ---------------------------------------------------------------- 執行安裝器
-function Invoke-Installer([string[]]$Arguments) {
-    $full = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Installer) + $Arguments
+# 預設 -Lang zh：中文斷言不受 Windows 顯示語言影響；英文案例明確傳 'en'。
+function Invoke-Installer([string[]]$Arguments, [string]$Lang = 'zh') {
+    # 參數驗證失敗會寫 stderr；Windows PowerShell 在 Stop 下會把 2>&1 的 stderr 當終止錯誤
+    $ErrorActionPreference = 'Continue'
+    $full = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Installer) + $Arguments + @('-Lang', $Lang)
     $out = (& powershell.exe @full 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $script:LastOut = $out
-    Write-Host "  > Manage-Patches.ps1 $($Arguments -join ' ')  => exit $code" -ForegroundColor DarkGray
+    Write-Host "  > Manage-Patches.ps1 $($Arguments -join ' ') -Lang $Lang  => exit $code" -ForegroundColor DarkGray
     return @{ Code = $code; Out = $out }
 }
 function Invoke-Install([string[]]$mods, [string]$pkgDir) {
@@ -923,6 +926,46 @@ try {
     Check ($r.Code -eq 0) '不依賴 manifest 或尚未提交的 state'
     Check (-not (Test-GameFile $P_CORE_RT) -and -not (Test-GameFile $P_CORE_PI)) '只有本交易的完整後影像被移除'
     Check (-not (Test-GameFile '.mdc-patches/journal.json')) '交易已安全清除'
+
+    # ------------------------------------------------------------ 48-51：英文介面
+    # 遊戲目錄名本身含中文，檢查 CJK 前先把路徑拿掉
+    $cjk = '[\p{IsCJKUnifiedIdeographs}\u3000-\u303f\uff00-\uffef]'
+
+    Start-Case '48. -Lang en：乾淨目錄查狀態輸出英文'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'status', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'en'
+    Check ($r.Code -eq 0) '結束代碼 0'
+    Check ($r.Out -match 'no modules installed') '報告未安裝（英文）'
+    Check ($r.Out -match 'Available') '列出可安裝模組（英文）'
+    Check ($r.Out.Replace($GameDir, '') -notmatch $cjk) 'status 輸出沒有中日韓字元'
+
+    Start-Case '49. -Lang en：安裝結果與中文路徑相同'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 0) '中文對照安裝成功'
+    $zhState = [System.IO.File]::ReadAllText((GameFile '.mdc-patches/state.json'))
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-Modules', 'profiler') 'en'
+    Check ($r.Code -eq 0) '結束代碼 0'
+    Check (Test-ModuleSet @('core', 'profiler')) '安裝 core + profiler'
+    Check ((Test-GameFileIs $P_CORE_RT $C_CORE_RT_V1) -and (Test-GameFileIs $P_PROF_MAIN $C_PROF_MAIN)) '檔案內容正確'
+    Check ([System.IO.File]::ReadAllText((GameFile '.mdc-patches/state.json')) -eq $zhState) 'state.json 與中文安裝完全相同'
+    Check ($r.Out -match 'Done: 2 module\(s\) installed') '英文成功訊息'
+    Check ($r.Out.Replace($GameDir, '') -notmatch $cjk) 'install 輸出沒有中日韓字元'
+
+    Start-Case '50. -Lang en：參數錯誤給英文訊息與代碼 2'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'en'
+    Check ($r.Code -eq 2) 'install 未指定模組 => 2'
+    Check ($r.Out -match 'No modules to install were given') '英文錯誤訊息'
+    Check ($r.Out -match 'Exit code: 2') '英文結束代碼行'
+
+    Start-Case '51. -Lang 只接受 auto/zh/en'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'status', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'xx'
+    Check ($r.Code -ne 0) '非法語言代碼 => 非 0'
+    Check ($r.Out -match 'ParameterArgumentValidationError') '由參數驗證擋下'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何東西'
 }
 finally {
     Write-Host ''

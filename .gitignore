@@ -6,6 +6,7 @@ output/
 *.class
 .omc/
 .omx/
+.omc-workspace
 .claude/
 AGENTS.md
 CLAUDE.md
@@ -17,3 +18,5 @@ native-observer/out/
 private/
 .agents/
 __pycache__/
+# scripts/tis_forum_html.py 的輸出，隨時可重新產生
+docs/report/forum-html/
