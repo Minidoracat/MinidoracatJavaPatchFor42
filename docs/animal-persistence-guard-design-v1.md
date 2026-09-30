@@ -6,8 +6,7 @@
 >
 > 編號說明：W15 已被主迴圈凍結看門狗（patches.md 2ac）使用，本案取 **W16（卸載接手守衛）／W17（hutch 載入守衛）**。
 >
-> **實作正典**：`docs/patches.md` 2ad／2ae。下文原始設計經 42.20.3 javap 重驗後，
-> O1b/O2/O4 掛點有實質修正；本檔已同步最終決策，但若再衝突一律以 patches.md＋程式碼為準。
+> **實作正典**：`docs/patches.md` 2ad／2ae。下文原始設計經 42.20.3 javap 重驗後，O1b/O2/O4 掛點有實質修正；本檔已同步最終決策，但若再衝突一律以 patches.md＋程式碼為準。
 
 ## 0. 一句話
 
@@ -69,8 +68,7 @@ B42 世界動物（放養／出籠層）在 server chunk unload 的接手鏈上*
 | O4/O4b | Main getObjectList／Worker save cell | redirect | world-save 分母＋save null |
 | 來源帳 | APM.virtualize／AnimalZones.spawn／Worker.move | redirect | virtualized/zoneAdds/movedAdds；與 unload 組完整 sourceGap |
 
-Heartbeat（每 256 unload-end 或 world save-start）：
-`completed/aborted/unpaired/skipped/scanSeen/handedOff/droppedAtClear/s2Missed/
+Heartbeat（每 256 unload-end 或 world save-start）：`completed/aborted/unpaired/skipped/scanSeen/handedOff/droppedAtClear/s2Missed/
 clearShortfall/queueFailures/attempts/virtualized/zoneAdds/movedAdds/sourceGap/cellNullAdd/
 chunkNullAdd/duplicateRemoved/cellNullSave/lastSaveReal/scanAvgUs/scanMaxUs/anomalies/mode`
 
@@ -97,9 +95,7 @@ kill switch：`0` off／`2` observe（預設）／`1` 階段二保留值（本�
 
 - 掛點：`IsoHutch.load` 唯一雙參 `addAnimalInside(IsoAnimal,false)`；SmokeCheck 精確鎖
   `ALOAD0 → ALOAD7 → ICONST0 → call → POP`，TIS 開始消費回傳或改 sendEvent 即建置紅。
-- helper 先委派原方法；false 時 duplicate precedence 不救，零 Rand 兩階段選槽：先找 animal/dead-body 都空的 clean slot，再用 vanilla `map.get(key)==null` 判準 fallback
-  （含 key→null）。enforce 補 map/backlink/preferred/hutchPosition/itemID/tryRemove 六步；
-  observe 只記不救；真滿 CRITICAL、有聲但不創造第 21 容量。
+- helper 先委派原方法；false 時 duplicate precedence 不救，零 Rand 兩階段選槽：先找 animal/dead-body 都空的 clean slot，再用 vanilla `map.get(key)==null` 判準 fallback（含 key→null）。enforce 補 map/backlink/preferred/hutchPosition/itemID/tryRemove 六步；observe 只記不救；真滿 CRITICAL、有聲但不創造第 21 容量。
 - kill switch：`-Dmdc.hutchLoadGuard=0` off／`1` enforce（預設）／`2` observe。
 - client worldVersion≥212 直接 skip 動物 blob且 loose class 只部署 server，無 desync 面。
 
@@ -119,23 +115,19 @@ kill switch：`0` off／`2` observe（預設）／`1` 階段二保留值（本�
 
 ## 5. SmokeCheck（已落地）
 
-- vanilla 完整順序、逐方法恰 N、三層 jar-wide source census＋分佈、S4 零 addAnimal、
-  IsoChunk 唯一 RETURN、W17 `ALOAD0/ALOAD7/ICONST0/call/POP` 與原成功路徑 105 真指令。
+- vanilla 完整順序、逐方法恰 N、三層 jar-wide source census＋分佈、S4 零 addAnimal、IsoChunk 唯一 RETURN、W17 `ALOAD0/ALOAD7/ICONST0/call/POP` 與原成功路徑 105 真指令。
 - 手術後 redirect 真指令數不變；HeadCall/TailCall 各 +2；原呼叫歸零、class-wide 差額吻合。
 - helper 各委派恰 1；O3 零 NEW/DebugLog；W17 全 class 零 Rand、forceInto 六步各恰 1。
 
 ## 6. 測試（獨立 JVM，MODE=static final）
 
-- W16 observe／mode1 observe-alias／off：正常、S2 正差、queue failure、unpaired、aborted、
-  sourceGap=0、S1/S1b/S3/save 正負 passthrough、O3 過濾、off 純委派。
-- W17 enforce/observe/off：ZeroRandom 確定性 false、clean/dead-body/null-value 選槽、
-  duplicate、20 隻全存活、第21隻 CRITICAL、六步狀態。
+- W16 observe／mode1 observe-alias／off：正常、S2 正差、queue failure、unpaired、aborted、sourceGap=0、S1/S1b/S3/save 正負 passthrough、O3 過濾、off 純委派。
+- W17 enforce/observe/off：ZeroRandom 確定性 false、clean/dead-body/null-value 選槽、duplicate、20 隻全存活、第21隻 CRITICAL、六步狀態。
 - 變異保證：拿掉 force-put map put 或 O3 instanceof，對應測試立即紅。
 
 ## 7. 部署與驗收
 
-1. W16-observe＋W17 同一次 build 出貨；`dist/manifest.txt` 共 **70 class**（40 patched＋
-   30 runtime helper），install.sh 三閘照常。
+1. W16-observe＋W17 同一次 build 出貨；`dist/manifest.txt` 共 **70 class**（40 patched＋30 runtime helper），install.sh 三閘照常。
 2. W16 部署後跑滿 24–48h：帶回 heartbeat
    `completed/aborted/unpaired/scanSeen/handedOff/s2Missed/queueFailures/sourceGap/
    cellNullAdd/chunkNullAdd/duplicateRemoved/cellNullSave`，與每日 apop 基線對帳後才選 enforce。

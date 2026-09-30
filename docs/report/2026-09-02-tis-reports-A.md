@@ -10,14 +10,12 @@
 ### 中文摘要
 
 報「容器互相巢狀成環 → `ItemContainer.getCharacter()` 無限自遞迴 → 主迴圈 SOE → 全服假死
-13 分鐘」。優先級**高**（一個封包序列即可打死 dedicated server，且無自癒）。建議附件：
-21:31:10 那份 1024 層 SOE 堆疊全文、以及守衛切斷時印出的環閉合點 log（含 containerId /
+13 分鐘」。優先級**高**（一個封包序列即可打死 dedicated server，且無自癒）。建議附件：21:31:10 那份 1024 層 SOE 堆疊全文、以及守衛切斷時印出的環閉合點 log（含 containerId /
 itemId / fullType）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, freeze, inventory
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, freeze, inventory
 
 ### Title
 
@@ -168,8 +166,7 @@ entitySet 殘留（reset/pool 路徑繞過 `removeEntityInternal`）。優先級
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, freeze, chunk
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, freeze, chunk
 
 ### Title
 
@@ -386,8 +383,7 @@ request.
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, corruption, chunk
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, corruption, chunk
 
 ### Title
 
@@ -554,8 +550,7 @@ was never corrupt. Logs / bytecode diffs available on request.
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, freeze, animals
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, freeze, animals
 
 ### Title
 
@@ -709,8 +704,7 @@ priority instead of the server. Logs / bytecode diffs available on request.
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, freeze, window
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, freeze, window
 
 ### Title
 
@@ -858,8 +852,7 @@ object plus one log line. Logs / bytecode diffs available on request.
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, corruption, save
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, corruption, save
 
 ### Title
 

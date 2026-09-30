@@ -10,8 +10,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
-每一項修補都針對一個具體的原版缺陷或實測熱點，並附完整根因分析：
-[docs/patches.md](docs/patches.md)（繁體中文原文，最詳細）與 [docs/patches.en.md](docs/patches.en.md)（英文版）。
+每一項修補都針對一個具體的原版缺陷或實測熱點，並附完整根因分析：[docs/patches.md](docs/patches.md)（繁體中文原文，最詳細）與 [docs/patches.en.md](docs/patches.en.md)（英文版）。
 
 > **給 The Indie Stone 開發團隊**
 >
@@ -23,8 +22,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 ## 目錄
 
 - [為什麼做這些](#為什麼做這些)
-- [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・[效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・[帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・
-  [Native](#native-防護linux-dedicated-server)
+- [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・[效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・[帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・[Native](#native-防護linux-dedicated-server)
 - [官方已修](#官方已修)
 - [修補原理](#修補原理)
 - [伺服器：建置與部署](#伺服器建置與部署)
@@ -225,9 +223,7 @@ bash uninstall.sh  # 下次重啟回到原版
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與標準版互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 
-也可以用 `build-client.ps1` 自行建置。安裝器測試：
-`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
-（Project Zomboid 的 JVM 執行中不要跑）。
+也可以用 `build-client.ps1` 自行建置。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
 ## 建議的伺服器設定
 

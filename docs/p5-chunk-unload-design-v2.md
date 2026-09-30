@@ -39,15 +39,12 @@ private static final Object CONTROL = new Object(); // 線性化 gen 換代與 k
 
 ## 2. 各 op 語意（15 呼叫點 → 6 個 helper 方法）
 
-改道簽名一律 receiver 前插：`contains(Ljava/util/ArrayList;Ljava/lang/Object;)Z`、
-`add(...)Z`、`remove(...)Z`、`clear(Ljava/util/ArrayList;)V`、
-`removeAll(Ljava/util/ArrayList;Ljava/util/Collection;)Z`。killed 或 State==null → 原方法直呼。
+改道簽名一律 receiver 前插：`contains(Ljava/util/ArrayList;Ljava/lang/Object;)Z`、`add(...)Z`、`remove(...)Z`、`clear(Ljava/util/ArrayList;)V`、`removeAll(Ljava/util/ArrayList;Ljava/util/Collection;)Z`。killed 或 State==null → 原方法直呼。
 
 **contains**：State lock 內：size 對帳（不符→rebuild＋divergence++）→ 每 4096 op 抽驗
 `set.contains(o)==list.contains(o)`（不符→rebuild＋divergence++，以 rebuild 後 list 掃描為準）→ 回 `set.contains(o)`。
 
-**add**：`boolean r = list.add(o); set.add(o); expectedSize = list.size(); return r;`
-（ArrayList.add 恆 true；重複元素：list 收多份、set 一份，符合不變量。）
+**add**：`boolean r = list.add(o); set.add(o); expectedSize = list.size(); return r;`（ArrayList.add 恆 true；重複元素：list 收多份、set 一份，符合不變量。）
 
 **remove（codex 雷 1＋2 的修正核心）**：
 ```java
@@ -76,8 +73,7 @@ synchronized (state) {
    `c.contains` 副作用 parity 全由原生承擔）。`c.isEmpty()` → return false（原生等價）。
 2. R monitor 下做**固定大小 identity snapshot**：`int n = c.size(); Object[] snap = ...get(i)`
    —— 不用 iterator（不引入 vanilla 沒有的 CME 面）、不用動態 `i < c.size()`。
-3. P monitor 下單趟壓實 survivors（`list.set(w++, e)`），然後**從尾端逐一 `list.remove(i)`**
-   （`for (int i = n-1; i >= w; i--) list.remove(i)`）—— 每次 O(1)，**每刪一個 `modCount++`，精確還原 JDK `batchRemove` 的 `modCount += removedCount`**。
+3. P monitor 下單趟壓實 survivors（`list.set(w++, e)`），然後**從尾端逐一 `list.remove(i)`**（`for (int i = n-1; i >= w; i--) list.remove(i)`）—— 每次 O(1)，**每刪一個 `modCount++`，精確還原 JDK `batchRemove` 的 `modCount += removedCount`**。
 4. 結構變更全部成功後才 rebuild/commit P 的 sidecar；任何例外 → `expectedSize = -1`（毒化，下次強制 rebuild）再重拋 —— 不會半提交（codex removeAll 表的「例外中途提交」修正）。
 5. 鎖序固定 **P→R**，全 helper 無任何 R→P 路徑（codex 雷 4e）。
 
@@ -89,8 +85,7 @@ ACTIVE/REBUILD --divergenceTotal ≥ 8 或 domain violation--> KILLED（terminal
 KILLED：gen=null、helper 全數直通 vanilla；換代不復活
 ```
 
-- rebuild 用**暫存 set**，成功才 commit＋`expectedSize = list.size()`（雷「rebuild 半失敗」：
-  live shrink 拋 IOOBE → catch → 保留舊 set、divergence++、本次 op 走 vanilla，不無限 retry）。
+- rebuild 用**暫存 set**，成功才 commit＋`expectedSize = list.size()`（雷「rebuild 半失敗」：live shrink 拋 IOOBE → catch → 保留舊 set、divergence++、本次 op 走 vanilla，不無限 retry）。
 - `expectedSize == -1` 的首次 rebuild 不計 divergence；其後所有 mismatch 都計。
 - rebuild 本身**也計入** divergenceTotal（雷「rebuild storm 永不 kill」：持續旁路變異會累積到 kill，而不是每次默默 O(N) 重建）。
 - **先 kill 再 log**：kill 動作在 CONTROL 內完成（`killed=true; gen=null;`），log 移出所有
@@ -103,19 +98,16 @@ KILLED：gen=null、helper 全數直通 vanilla；換代不復活
 **結構（全序語境鎖，比照 popman 模式）**：三個 patched class 六個方法，每站鎖
 `GETFIELD 目標欄位（或 getter invokevirtual）→ aload → INVOKESTATIC helper` 的指令鏈與
 descriptor 精確匹配（`remove(Ljava/lang/Object;)Z` 不得誤中 `remove(I)`）；殘留
-`invokevirtual java/util/ArrayList.{contains,add,remove,removeAll,clear}` 於六方法內全部歸零；
-helper 六方法簽名逐一斷言。
+`invokevirtual java/util/ArrayList.{contains,add,remove,removeAll,clear}` 於六方法內全部歸零；helper 六方法簽名逐一斷言。
 
-**differential（隨機序列對照 vanilla）**：helper 鏡射操作 vs 純 ArrayList，序列含：重複元素、
-null、null 重複、R 空、R⊄P、removeAll 全重複、interleaved add/remove —— 斷言清單內容、順序、回傳值全等；ArrayList 匿名子類傳入 removeAll → 斷言走 vanilla fallback（gate 生效）。
+**differential（隨機序列對照 vanilla）**：helper 鏡射操作 vs 純 ArrayList，序列含：重複元素、null、null 重複、R 空、R⊄P、removeAll 全重複、interleaved add/remove —— 斷言清單內容、順序、回傳值全等；ArrayList 匿名子類傳入 removeAll → 斷言走 vanilla fallback（gate 生效）。
 
 **自癒與 kill**：旁路直改 list → 下一 op rebuild；等大小換血 → audit 在 ≤4096 op 內抓到；連續漂移 → divergenceTotal 達 8 → killed → 斷言 helper 直通且 gen 為 null、換代後仍 killed；kill 前後 log 順序（結構斷言 log 呼叫在 monitorexit 之後）。
 
 **全 jar 斷言**：IsoObject 全部後代（實測 57 類）zero equals/hashCode 覆寫——hierarchy walk
 斷言，任何未來 build 有子類新增覆寫即建置失敗（Claude 修 3）。
 
-**部署原子性**：IsoCell＋IsoObject＋IsoDeadBody＋helper 同 manifest（既有 pipeline 自動保證，
-manifest 完整性守門已在 build.ps1）。
+**部署原子性**：IsoCell＋IsoObject＋IsoDeadBody＋helper 同 manifest（既有 pipeline 自動保證，manifest 完整性守門已在 build.ps1）。
 
 ## 5. 明確接受的殘餘風險（兩審聯集）
 

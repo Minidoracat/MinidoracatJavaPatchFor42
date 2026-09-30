@@ -31,8 +31,7 @@ PSR 的 `coverage REMOVE` 已從 107.7/h 降到 10.9/h（9.9×），主迴圈的
 理由是本專案付過代價的通則（見 `docs/patches.md` 2n、AGENTS.md「修復 5」段）：**受精蛋清除豁免**那把刀本身完全有效（正式服 log：keptLoads 數千、anomalies 全零），但 `IsoGridSquare.load` 的判定區塊**沒有** `GameClient.client` 守衛，而 `SandboxOptions`
 由 server 在握手時完整同步給 client——於是 client 端用一模一樣的條件自行把蛋濾掉，玩家看不到也撿不起來。**server-only patch 必然產生視覺／互動 desync，最後只能退役。**
 
-動物 LOS 直接餵行為與動畫，是最容易踩同一顆雷的位置。若無守衛，設計案**一開始**就要決定：
-(a) 連 client 一起改（需 `build-client.ps1` 分流，且遊戲更新即失效）、或
+動物 LOS 直接餵行為與動畫，是最容易踩同一顆雷的位置。若無守衛，設計案**一開始**就要決定：(a) 連 client 一起改（需 `build-client.ps1` 分流，且遊戲更新即失效）、或
 (b) 從設定層解決、或
 (c) 放棄。**不要做完才發現。**
 
@@ -44,8 +43,7 @@ PSR 的 `coverage REMOVE` 已從 107.7/h 降到 10.9/h（9.9×），主迴圈的
 
 ## 手術可用形狀（本專案鐵則）
 
-只做堆疊形狀與指令長度不變的手術：`redirect`／`constChange`／`headGuard`／`headCall`／
-`fieldGetSwap`／`countClamp`。**禁 early-return**（JDK25 實測 RETURN 後接原碼＋原 frames → VerifyError）。逐方法 `expectedHits` 守門，且「數量對不代表改對地方」——常數手術必須用 `javap` 驗語境。詳見 AGENTS.md「手術鐵則」與 `docs/patches.md`。
+只做堆疊形狀與指令長度不變的手術：`redirect`／`constChange`／`headGuard`／`headCall`／`fieldGetSwap`／`countClamp`。**禁 early-return**（JDK25 實測 RETURN 後接原碼＋原 frames → VerifyError）。逐方法 `expectedHits` 守門，且「數量對不代表改對地方」——常數手術必須用 `javap` 驗語境。詳見 AGENTS.md「手術鐵則」與 `docs/patches.md`。
 
 ## 紀律提醒（本輪血換的）
 

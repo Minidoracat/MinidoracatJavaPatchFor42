@@ -12,8 +12,7 @@
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, timed-action, stuck
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, timed-action, stuck
 
 ### Title
 
@@ -126,8 +125,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, animals, hutch
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, animals, hutch
 
 ### Title
 
@@ -205,8 +203,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, animals, exception
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, animals, exception
 
 ### Title
 
@@ -300,8 +297,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, clothing, sync
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, clothing, sync
 
 ### Title
 
@@ -387,8 +383,7 @@ W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` �
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, vehicles, save-data
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, vehicles, save-data
 
 ### Title
 
@@ -486,8 +481,7 @@ W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` �
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, animals, network
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, animals, network
 
 ### Title
 
@@ -574,8 +568,7 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, log, console
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, log, console
 
 ### Title
 

@@ -196,5 +196,4 @@ this way.
 
 ---
 
-Server: ＜伺服器名稱 placeholder＞
-Contact: ＜聯絡方式 placeholder＞
+Server: ＜伺服器名稱 placeholder＞Contact: ＜聯絡方式 placeholder＞

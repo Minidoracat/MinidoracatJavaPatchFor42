@@ -1,7 +1,6 @@
 # TIS 回報草稿 C（client／native／設計面）— 2026-09-02
 
-> 由 Main 撰寫：C1 client 貼圖管線洩漏（既有 `docs/tis-bug-report.md` 的 42.20.4 論壇格式版）、
-> C2 PathFind native 堆損毀（既有 `docs/report/2026-08-31-pathfind-vehiclerect-pool-poisoning-tis.md`
+> 由 Main 撰寫：C1 client 貼圖管線洩漏（既有 `docs/tis-bug-report.md` 的 42.20.4 論壇格式版）、C2 PathFind native 堆損毀（既有 `docs/report/2026-08-31-pathfind-vehiclerect-pool-poisoning-tis.md`
 > 的論壇格式包裝）、C3 全存檔同步凍結（設計面 feedback，非 bug）。
 
 ## C1. Client 貼圖管線 DirectBuffer 洩漏 → 實體隱形
@@ -16,8 +15,7 @@
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, client, textures, invisible
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, client, textures, invisible
 
 ### Title
 [42.20.4] [MP client] Native DirectBuffer leak in the texture pipeline silently starves texture loading — zombies/players/vehicles render as shadow + nametag only until the game is restarted
@@ -80,8 +78,7 @@ We validated 1–3 as an experimental client-side patch on affected players of o
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, crash, pathfinding
+**Bug Reports** — <https://theindiestone.com/forums/forum/85-bug-reports/>（發新主題：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, crash, pathfinding
 
 ### Title
 [42.20.4] [MP dedicated] Native SIGSEGV in PolygonalMap2::createVehicleClusters() — VehicleRect object pool hands out a corrupted slot (0x30) that entered the pool through VisibilityGraph::release() one round earlier
@@ -104,15 +101,13 @@ Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs
 ## C3. 全存檔（QueuedSaveAll）在主執行緒同步凍結 5–7 秒（設計面 feedback）
 
 ### 中文摘要
-- 報什麼：不是 bug，是設計成本——`ServerMap.SaveAll()` 主執行緒 `sleep(10)` 輪詢 4 條 worker 序列化所有 loaded cells，
-  80 人時每次 5–7 秒全服凍結（我方看門狗 4 天 16 次快照全同族）；`checkClientPause` 有送 Pause 封包所以不踢線，但玩家體感每小時一次 rubber-band。
+- 報什麼：不是 bug，是設計成本——`ServerMap.SaveAll()` 主執行緒 `sleep(10)` 輪詢 4 條 worker 序列化所有 loaded cells，80 人時每次 5–7 秒全服凍結（我方看門狗 4 天 16 次快照全同族）；`checkClientPause` 有送 Pause 封包所以不踢線，但玩家體感每小時一次 rubber-band。
 - 優先級：低（feedback）；可與 C1/C2 分開、獨立發文或放在 PZ Suggestions。
 - 板別：PZ Suggestions／General Discussion（不是 Bug Reports）。
 
 ### 建議板塊
 
-**PZ Suggestions** — https://theindiestone.com/forums/forum/20-pz-suggestions/（發新主題：https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
-multiplayer, dedicated server, performance, save
+**PZ Suggestions** — <https://theindiestone.com/forums/forum/20-pz-suggestions/>（發新主題：<https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add>）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：multiplayer, dedicated server, performance, save
 
 ### Title
 [42.20.4] [MP dedicated] Suggestion: full world save (QueuedSaveAll) blocks the main loop for 5–7 s on a busy server — consider an incremental / off-thread cell save

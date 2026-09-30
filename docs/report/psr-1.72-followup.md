@@ -261,8 +261,7 @@ TOXIC WINDOW (separate: 8/16 06:12 -> 8/17 06:12, because our filter lands at 01
 - **本報告只有兩個時間窗**：(1) 上述凍結窗，供第 1–3 項與 Measured impact；(2) 第 4 項的 toxic
   對照窗 `8/16 06:12 → 8/17 06:12`——因為我方在 01:28 部署了該訊息的 server 端抑噪，凍結窗內它中途就消失、無法計數。兩處都在使用點標明。
 - 1.72 範圍：檔名 ≥ `2026-08-16_2004` 的 8 個 `DebugLog-server.txt`，凍結窗內共 **163 筆**
-  `coverage REMOVE`（**158 筆帶 `tryN/3`** ＋ **5 筆 `demontage`**；**33 筆帶 `legacy`**；全部帶 `bank=`）。
-  1.71 對照組 `18-12` session 獨立統計，**198 筆、0 筆帶 tag**（確認 tag 是 1.72 才加的）。
+  `coverage REMOVE`（**158 筆帶 `tryN/3`** ＋ **5 筆 `demontage`**；**33 筆帶 `legacy`**；全部帶 `bank=`）。1.71 對照組 `18-12` session 獨立統計，**198 筆、0 筆帶 tag**（確認 tag 是 1.72 才加的）。
 - campaign 結構：`try1` 出現 **109** 次＝campaign 數（每次 activation 重置額度）、`try2` 28、`try3` 21。平均 **1.45 sweep/campaign**（上限 3）⇒ 全滿上界 `109×3=327` ＝ **×2.07**；`try1` 即 `complete=true`
   者 **72/109 ＝ 66%**。
 - 時長用 log 行內的 `DD-MM-YY HH:MM:SS` 完整解析（含日期），並**印出每個 session 的實際首末時間戳供驗算**：8 個 session 循序、間隔 1.1–1.3 分鐘（重啟），凍結窗內累計 uptime **15.01h**、平均 **10.9/h**、per-session **3.7–23.1/h**。
@@ -270,10 +269,7 @@ TOXIC WINDOW (separate: 8/16 06:12 -> 8/17 06:12, because our filter lands at 01
 - rect 尺寸由 `rect(x1,y1..x2,y2 zA..zB)` 直接算 `(x2-x1+1)×(y2-y1+1)×(zB-zA+1)`。
 - 誠實邊界：`too busy` 只剩 1 次，且該次前 10 幀無 **logged REMOVE**——但這只是「該條 log 線上沒有時間關聯」，**不等於排除 PSR**：ADD／reapply sweep 不印 log（見第 21 次修正），所以無法從缺席推論無關。故本報告**沒有**把 too busy 當成 PSR 的證據，也沒有把它當成 PSR 無罪的證據。
 - `psrReapplyOtherCoverage` 只呼叫 `psrSweepRect(oRect, false)`，log 只在 `remove` 為真時印 → log 裡每一筆 REMOVE 都是真的移除 sweep。已讀遠端原始碼 525-556 行確認。
-- 腳本：**`temp/psr-frozen.sh`（凍結快照，報告數字的唯一權威來源）**；輔助：`psr-frames2.sh`
-  （frame 分組與原始順序）、`psr-ev8.sh`（Δt 分佈）、`psr-ev9.sh`（Δframe）、`psr-verify.sh`
-  （原始行核對）、`psr-spans.sh`（session 起訖與重疊檢查）、`toxic-dedup.sh`（第 4 項的去重量測）。
-  `psr-recount2.sh` 與 `campaign-cap.sh` 是凍結前的版本，已被 `psr-frozen.sh` 取代。
+- 腳本：**`temp/psr-frozen.sh`（凍結快照，報告數字的唯一權威來源）**；輔助：`psr-frames2.sh`（frame 分組與原始順序）、`psr-ev8.sh`（Δt 分佈）、`psr-ev9.sh`（Δframe）、`psr-verify.sh`（原始行核對）、`psr-spans.sh`（session 起訖與重疊檢查）、`toxic-dedup.sh`（第 4 項的去重量測）。`psr-recount2.sh` 與 `campaign-cap.sh` 是凍結前的版本，已被 `psr-frozen.sh` 取代。
 
 ### 我方狀態
 

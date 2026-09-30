@@ -14,9 +14,7 @@
 - 內文開頭五行欄位：`Version / Mode / Server settings / Mods / Save`，再 `Reproduction steps`（競態類寫 Trigger conditions）。
 - Guide 要求「Mods must be disabled」：草稿的 Mods 欄位一律誠實寫 ~80 mods＋「根因在 vanilla Java、附 class/method 引用」——這是你 getFileWriter 那篇的做法，QA 接受了 bytecode 級證據。
 - 每篇一個主題；建議**分批發**（每天 3–4 篇，先發資料損失與假死），避免同日 15 篇被當洗版。
-- **玩家人數（2026-08-26 20:00 → 09-02 03:10，connections.txt 逐事件重建）**：7 天平均在線 ≈30、每日峰值 68–95
-  （最高 95，9/1 晚）、晚峰 19–24 時小時峰值平均 60、7 天 465 個不同 Steam 帳號、254 slots。
-  16 份草稿的 `Server settings` 欄位已統一用這組數字（人數是負載語境，不是個資；競態／同步類 bug 的觸發率與它直接相關）。
+- **玩家人數（2026-08-26 20:00 → 09-02 03:10，connections.txt 逐事件重建）**：7 天平均在線 ≈30、每日峰值 68–95（最高 95，9/1 晚）、晚峰 19–24 時小時峰值平均 60、7 天 465 個不同 Steam 帳號、254 slots。16 份草稿的 `Server settings` 欄位已統一用這組數字（人數是負載語境，不是個資；競態／同步類 bug 的觸發率與它直接相關）。
 
 ### 板塊對照（2026-09-02 查論壇實際結構）
 
@@ -42,9 +40,7 @@
   - pcap 統計（B-R6）：只貼 decoder 彙總表，不附 pcap 本體（含 IP）。
   - 貼圖遙測／console (12)/(17)（C1）：是玩家自己的 client console，含其 Steam 名與本機路徑——貼前把 `Users\<name>` 與暱稱塗掉，或只貼遙測行。
 - 附件：console 摘錄用 spoiler／code block；hs_err、core、telemetry 用「available on request」。
-- **貼法（A-R1 實貼驗證通過）**：草稿是 80 字硬換行的純文字，直接貼會壞（整篇 code block／每行一段／
-  html 原始碼 code block 三種都試過）。`python scripts/tis_forum_html.py` 產出 `docs/report/forum-html/<篇>.html`
-  （段落合併、小標粗體、log／程式碼片段各自 code block、清單／表格保留）→ **用瀏覽器（Chrome/Edge）雙擊開啟**
+- **貼法（A-R1 實貼驗證通過）**：草稿是 80 字硬換行的純文字，直接貼會壞（整篇 code block／每行一段／html 原始碼 code block 三種都試過）。`python scripts/tis_forum_html.py` 產出 `docs/report/forum-html/<篇>.html`（段落合併、小標粗體、log／程式碼片段各自 code block、清單／表格保留）→ **用瀏覽器（Chrome/Edge）雙擊開啟**
   → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。貼完可用 `curl` 抓 topic 頁對帳：粗體小標數、`<pre>` 數、清單數與本地 .html 相同，且全文 diff 無句子破損。
 - **編輯器已知會咬壞的東西（6 篇實貼對帳，2026-09-02）**：行內 `<code>` 在 4/6 篇被整段搬到段尾（A-R2／A-R3／A-R4／A-R6，句子破損如「uses a JVM-wide shared as scratch space」）、同段兩個 `==`
   會被當 highlight 語法吃掉。轉換器已改成**不產生行內 code／em、` == ` 改寫成 ` is `**，只留粗體與
@@ -101,7 +97,7 @@
 |---|---|---|---|---|
 | C1 | `ImageData.dispose()` 不釋放 `frames` → DirectBuffer 地板超過 `waitFileTask` 50 MB 硬門檻 → 貼圖載入永久停擺 → 實體只剩影子＋名牌 — **已發 2026-09-02** https://theindiestone.com/forums/topic/100919-42204-mp-client-native-directbuffer-leak-in-the-texture-pipeline-silently-starves-texture-loading-zombiesplayersvehicles-render-as-shadow-nametag-only-until-the-game-is-restarted/ | P0 | 仍在：`ImageData`／`TextureID`／`TextureIDAssetManager`／`WorldStreamer` 四 class 42.20.2→42.20.4 逐位元組相同（pz-42.20.4-update-analysis §2）。修後地板 1096 MB→0、隱形零復發。 | 修前/修後 console (12)/(17)、遙測表 |
 
-### V. Native crash → **Bug Reports**：https://theindiestone.com/forums/forum/85-bug-reports/?do=add（Steam 指南說 crash 走 Support，但本文是根因分析，仍發 Bug Reports 並首行註明 crash）
+### V. Native crash → **Bug Reports**：<https://theindiestone.com/forums/forum/85-bug-reports/?do=add>（Steam 指南說 crash 走 Support，但本文是根因分析，仍發 Bug Reports 並首行註明 crash）
 
 | # | 標題 | P | 42.20.4 現況與依據 | 附件 |
 |---|---|---|---|---|
@@ -113,7 +109,7 @@
 |---|---|---|---|
 | B-R7 | `IsoObject.syncIsoObject` 的 `ERROR: IsoThumpable not found on square` println（每次建造必印，4 天 11,567 行）＋`SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件必刷 `Invalid SpriteConfig object!` — **已發 2026-09-02** https://theindiestone.com/forums/topic/100917-42204-mp-two-vanilla-console-spam-sources-on-a-dedicated-server-isoobjectsyncisoobject-not-found-on-square-~120-lineshour-and-spriteconfig-invalid-spriteconfig-object-for-base-game-objects/ | P3 | 仍在：`IsoObject :866-873`（`System.out.println`，繞過 debug channel）；`SpriteConfig :51-72`。 |
 
-### VII. 設計面建議 → **PZ Suggestions**：https://theindiestone.com/forums/forum/20-pz-suggestions/（發文 https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）
+### VII. 設計面建議 → **PZ Suggestions**：<https://theindiestone.com/forums/forum/20-pz-suggestions/>（發文 <https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add>）
 
 | # | 標題 | P | 依據 |
 |---|---|---|---|

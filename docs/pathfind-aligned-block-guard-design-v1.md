@@ -4,10 +4,7 @@
 
 - 事故與證據：`internal-analysis/reports/ops/2026-08-31-B42-pathfind-vehiclerect-pool-poisoning.md`
 - 目標 library：官方 `libPZPathFind64.so`（42.20.4，sha256 `0777dda6…21c4`；**42.21.0，sha256 `e4c7d5c7…07d2`，本工具相關部分同構**，見 §11）——**不修改、不散布**
-- 交付狀態：**2026-09-06 19:38 已安裝正式服（使用者授權），生效待下次重啟**。當日觸發背景：同族 native crash 一天 4 次（03:13／03:40／06:44 `malloc(): invalid size (unsorted)` abort；
-  19:04 SIGSEGV `__libc_free` on `PathfindNativeThread` in `findPath`——首次直接死在尋路執行緒），加 8/31、9/3 共 6 次；AutoDrive MOD 上線前（7/30、8/23、8/24）同簽名已存在，排除為根因。安裝紀錄：artifact sha `5dd7ceef…4de5`（WSL gcc 13.3／glibc 2.39 建置，85/85 合成測試；正式服 `.so` 28/28 前提 PASS）、launcher 備份 `start-server.sh.pre-pfguard-20260906T113847Z`
-  （sha `9bfcb6a6…5957` → 新 `a5190841…3aaf`）、全鏈 dry-run 以 pzserver 身分 gate PASS。**與 §6-2 第 4 點的一處刻意偏離**：wrapper 在 manifest mismatch／檔案缺失時**不再 exit 78 拒啟**，改為印 `STARTUP DISARMED` 橫幅後以 vanilla（僅 libjsig 絕對路徑）啟動——正式服無人工視窗（cron 更新＋monitor `*/10`），拒啟會把「未驗的新 `.so`」升級成「全服停機到有人看到」；
-  fail-closed 的語意是「絕不 preload 未驗 observer」，不是「不讓遊戲跑」。`PFG_DRY_RUN=1`
+- 交付狀態：**2026-09-06 19:38 已安裝正式服（使用者授權），生效待下次重啟**。當日觸發背景：同族 native crash 一天 4 次（03:13／03:40／06:44 `malloc(): invalid size (unsorted)` abort；19:04 SIGSEGV `__libc_free` on `PathfindNativeThread` in `findPath`——首次直接死在尋路執行緒），加 8/31、9/3 共 6 次；AutoDrive MOD 上線前（7/30、8/23、8/24）同簽名已存在，排除為根因。安裝紀錄：artifact sha `5dd7ceef…4de5`（WSL gcc 13.3／glibc 2.39 建置，85/85 合成測試；正式服 `.so` 28/28 前提 PASS）、launcher 備份 `start-server.sh.pre-pfguard-20260906T113847Z`（sha `9bfcb6a6…5957` → 新 `a5190841…3aaf`）、全鏈 dry-run 以 pzserver 身分 gate PASS。**與 §6-2 第 4 點的一處刻意偏離**：wrapper 在 manifest mismatch／檔案缺失時**不再 exit 78 拒啟**，改為印 `STARTUP DISARMED` 橫幅後以 vanilla（僅 libjsig 絕對路徑）啟動——正式服無人工視窗（cron 更新＋monitor `*/10`），拒啟會把「未驗的新 `.so`」升級成「全服停機到有人看到」；fail-closed 的語意是「絕不 preload 未驗 observer」，不是「不讓遊戲跑」。`PFG_DRY_RUN=1`
   下 mismatch 仍 exit 78 供人工檢查。順帶效果：**libjsig 首次真正生效**（原 launcher 用裸檔名＋不存在的 `jre64/lib/amd64` 路徑，`/proc/pid/maps` 實測從未載入）。
 
 ## 1. 為什麼「觀測」是唯一正確的下一步
@@ -51,8 +48,7 @@ mmap →  │ guard PROT_NONE│  data pages  PROT_RW │ guard PROT_NONE│
 
 - **user pointer 對齊在 data 區起點**：本次事故的損壞正好在 `user-8`（glibc size word）。在這個佈局下，`user-8` 落在前置 guard page ⇒ **寫入當場 SIGSEGV，RIP 就是寫入者**。
 - 後置 guard page 抓「越過 data 頁尾」的溢出；**page 內的 slack 用 canary 覆蓋**，在 free／realloc 時驗證，抓小幅溢出（代價是延後到下一次 allocator 事件才發現）。
-- **free 改為 quarantine**：`mprotect(PROT_NONE)`，位址進入有界環（預設 4096 個）後才 `munmap`。
-  ⇒ **use-after-free 的讀或寫都當場 fault**。本次事故的受害者正是一個「已被池回收的過期
+- **free 改為 quarantine**：`mprotect(PROT_NONE)`，位址進入有界環（預設 4096 個）後才 `munmap`。⇒ **use-after-free 的讀或寫都當場 fault**。本次事故的受害者正是一個「已被池回收的過期
   cluster 的 array」，UAF 是第一順位待驗機制，這條直接覆蓋它。
 
 ### 3-2. 不安裝自己的 signal handler（刻意）
@@ -75,8 +71,7 @@ data-race 的理由）。`MDC_PFGUARD_CALLERS` 可覆寫白名單；`MDC_PFGUARD
 記憶體必須把 **live + quarantine** 一起算：預設各上限 4096，約 8192 mappings、通常約
 24,576 VMAs（prefix/data/suffix）。2026-08-31 正式服 `vm.max_map_count=1,048,576`、baseline
 VMAs=683，VMA 餘裕充足。48 MiB（小 block）／288 MiB（64 KiB）只是**quarantine admission
-baseline 範例，不是 byte 上界**：owned block 可在納管後繼續成長，alignment padding 也增加 VA。權威值是線上的 `pages_mapped`/maps 計數。入 quarantine 前的 `MADV_DONTNEED` 釋回 data pages；
-`madvise_failures>0` 才會讓已觸頁 RSS 留住。`MDC_PFGUARD_ALL=1` 必須先量測再上。
+baseline 範例，不是 byte 上界**：owned block 可在納管後繼續成長，alignment padding 也增加 VA。權威值是線上的 `pages_mapped`/maps 計數。入 quarantine 前的 `MADV_DONTNEED` 釋回 data pages；`madvise_failures>0` 才會讓已觸頁 RSS 留住。`MDC_PFGUARD_ALL=1` 必須先量測再上。
 
 
 ### 3-4. 帳本留在 core 裡（不做 I/O）
@@ -92,15 +87,13 @@ baseline 範例，不是 byte 上界**：owned block 可在納管後繼續成長
   python3 native-observer/scripts/pfguard_ring.py --core <core> --shim <libmdcpfguard.so> [--limit N]
   python3 native-observer/scripts/pfguard_ring.py --pid  <pid>  --shim <libmdcpfguard.so>
   ```
-  解法與本次分析 pool globals 相同：ELF 符號 offset ＋ mapping base（core 走 `NT_FILE`）。
-  reader 對 live pid 每個 slot 讀 seq→payload→seq，兩次皆符合 expected generation 才接受；**兩條路徑都在 `run-tests.sh` 內有覆蓋**（18,000 events wrap 的 live `--pid`、以及用 `gcore` 產生的真 ELF core）。
+  解法與本次分析 pool globals 相同：ELF 符號 offset ＋ mapping base（core 走 `NT_FILE`）。reader 對 live pid 每個 slot 讀 seq→payload→seq，兩次皆符合 expected generation 才接受；**兩條路徑都在 `run-tests.sh` 內有覆蓋**（18,000 events wrap 的 live `--pid`、以及用 `gcore` 產生的真 ELF core）。
 
 > **為什麼要特意放進 `.bss`**：`0x31` 不含 bit 2（file-backed private），所以 `.data` 是否落 core
 > 取決於 kernel 的「dump segments that have been written to」規則（VMA 有 `anon_vma` 且 bit 0 開就整段 dump）。**該規則在本次正式服 core 上實測成立**（`libPZPathFind64.so` 的 `.data`
 > 位址可讀），但沒有理由把帳本壓在一條 kernel 內部規則上；移到 `.bss` 同時讓出貨的 `.so` 從 1.1 MB 縮到 52 KB（1 MiB 的 ring 不再進檔案）。
 
-每筆記錄：`seq / 單調 ns / user ptr / mapping base / caller RA / 前一個 ptr / size / old size / tid / op`。
-⇒ 拿到 writer 的 RIP 之後，可以立刻回答「這個受害 block 是誰配置的、多久之前、當時多大」。
+每筆記錄：`seq / 單調 ns / user ptr / mapping base / caller RA / 前一個 ptr / size / old size / tid / op`。⇒ 拿到 writer 的 RIP 之後，可以立刻回答「這個受害 block 是誰配置的、多久之前、當時多大」。
 ### 3-5. 實作對應（檔案）
 
 | 檔案 | 內容 |
@@ -139,9 +132,7 @@ baseline 範例，不是 byte 上界**：owned block 可在納管後繼續成長
 | ledger reader ×3 | 18,000 events 真 wrap 的 stopped live pid + ELF core 均鎖 `head=18000`／無 uncommitted；另有 active writer 與 `/proc/$pid/mem` reader 真並行測試 |
 
 **overhead（實測）**：allowlisted 的 `alloc(32) → realloc(64) → free` 完整生命週期
-**14.2 µs**，delegated 同樣流程 **45 ns**。每次受保護配置 ≈ **7.1 µs**
-（一個 cycle 有兩次配置），成本幾乎全是 syscall（`mmap`＋`mprotect`＋quarantine `mprotect`
-＋環滿時 `munmap`）與首次觸頁。`churn` 的單向生命週期（alloc＋free）為 **9.1 µs**。
+**14.2 µs**，delegated 同樣流程 **45 ns**。每次受保護配置 ≈ **7.1 µs**（一個 cycle 有兩次配置），成本幾乎全是 syscall（`mmap`＋`mprotect`＋quarantine `mprotect`＋環滿時 `munmap`）與首次觸頁。`churn` 的單向生命週期（alloc＋free）為 **9.1 µs**。
 
 > **兩個必須講清楚的限度**：
 > 1. 這個數字是 **WSL2** 量的，WSL2 的 syscall 比裸機貴；正式服應更低，但**我沒有在正式服量過**。
@@ -149,15 +140,12 @@ baseline 範例，不是 byte 上界**：owned block 可在納管後繼續成長
 >    18 µs／cycle，改成窗口後 14–15 µs ⇒ **主成本是 syscall，不是 canary**，再優化 canary 沒有意義。
 
 **換算到正式服**（`推測`，用實測單價乘上未知的配置率）：若一輪
-`createVehicleClusters` 期間有 G 次受保護配置、每秒 10 輪，額外成本 ≈ `G × 7.1 µs × 10`。
-G=200 → 14 ms/s（1.4% wall clock）；G=2000 → 140 ms/s（**不可接受**）。**所以第一個 canary window 的首要任務是讀 `guard_alloc` 的成長率**，而不是等 crash。
+`createVehicleClusters` 期間有 G 次受保護配置、每秒 10 輪，額外成本 ≈ `G × 7.1 µs × 10`。G=200 → 14 ms/s（1.4% wall clock）；G=2000 → 140 ms/s（**不可接受**）。**所以第一個 canary window 的首要任務是讀 `guard_alloc` 的成長率**，而不是等 crash。
 
 ### 一次 review 抓到的 BLOCKING（已修，記錄下來避免重蹈）
 
-初版用**開址 hash table＋tombstone**。因為每個受保護 block 都是**新的 mmap 位址**，
-tombstone 只增不減：累積約 65k 次**歷史**配置後表內再無 `state==0`，於是每一次
-**miss**（PathFind 那 136+94 個呼叫點的多數都是 miss）都會在 `g_lock` 內掃完整張 4 MB 表。
-`MDC_PFGUARD_MAXBLOCKS` 看的是 live 數量，救不了歷史計數；而且是**硬懸崖**，正式服上會表現為「跑了幾分鐘到幾小時後 pathfind 執行緒突然變慢」，且當時沒有任何 counter 能指認。**改法**：換成鏈式 hash（bucket 陣列＋node free list），**evicted quarantine node** 才回收，零 tombstone；正常穩態 high-water = quarantine cap + live，而非歷史 allocation count。新增 `nodes_used` counter 與
+初版用**開址 hash table＋tombstone**。因為每個受保護 block 都是**新的 mmap 位址**，tombstone 只增不減：累積約 65k 次**歷史**配置後表內再無 `state==0`，於是每一次
+**miss**（PathFind 那 136+94 個呼叫點的多數都是 miss）都會在 `g_lock` 內掃完整張 4 MB 表。`MDC_PFGUARD_MAXBLOCKS` 看的是 live 數量，救不了歷史計數；而且是**硬懸崖**，正式服上會表現為「跑了幾分鐘到幾小時後 pathfind 執行緒突然變慢」，且當時沒有任何 counter 能指認。**改法**：換成鏈式 hash（bucket 陣列＋node free list），**evicted quarantine node** 才回收，零 tombstone；正常穩態 high-water = quarantine cap + live，而非歷史 allocation count。新增 `nodes_used` counter 與
 `churn` 壓力測試把這件事釘住。
 
 > 好消息（`實測`，來自本次 core）：這條工作**不在主迴圈執行緒上**——crash thread 不是主執行緒（core 的 thread 2）。因此上面的成本落在
@@ -204,16 +192,14 @@ sha256sum native-observer/out/libmdcpfguard.so native-observer/scripts/pfguard_r
 ### 6-2. 安裝（授權後；**先安裝，不在玩家在線時自行重啟**）
 
 1. 正式服唯讀前置：官方 PathFind SHA 必須仍為
-   `0777dda6db77ddd3059f27f94e0d56fae827b21436b5feb4d719e96878fd21c4`；記錄 `start-server.sh` SHA、`vm.max_map_count`、當前 `/proc/$pid/maps` 行數。
-   2026-08-31 實機：`vm.max_map_count=1,048,576`、current VMAs=683；預設 `MAXBLOCKS=4096` 即使每 block 約 3 VMA，也有數十倍餘裕。
+   `0777dda6db77ddd3059f27f94e0d56fae827b21436b5feb4d719e96878fd21c4`；記錄 `start-server.sh` SHA、`vm.max_map_count`、當前 `/proc/$pid/maps` 行數。2026-08-31 實機：`vm.max_map_count=1,048,576`、current VMAs=683；預設 `MAXBLOCKS=4096` 即使每 block 約 3 VMA，也有數十倍餘裕。
 2. 使用 `/home/pzserver/scripts/pfguard`，不是 `/home/pzserver/observer`：`scripts/` 已被
    `fix-permissions.sh` prune，root ownership 不會五分鐘後被改回 pzserver。目錄
    `root:pzserver 0750`；`.so`/manifest `root:pzserver 0640`；wrapper/reader `root:pzserver 0750`。
 3. 每個檔案先傳入**同一目錄**的隨機 stage 名；以 `install` 設定 stage 的最終 owner/mode，核對 stage SHA，再用 `mv -Tf stage final` 做同檔案系統 atomic rename；最後再核 final SHA。**不得**把 `install source final` 稱為 atomic，也不得直接 truncate 既有 final inode。
 4. 產生 root-owned `manifest.sha256`，內容必含正式服：
    - `/home/pzserver/serverfiles/linux64/libPZPathFind64.so` 的 pinned 官方 SHA；
-   - `/home/pzserver/scripts/pfguard/libmdcpfguard.so` 的本次 artifact SHA。
-   `deploy/run-with-pfguard.sh` 在**每次啟動**先 `sha256sum --check`；任一 mismatch → `STARTUP DISARMED`
+   - `/home/pzserver/scripts/pfguard/libmdcpfguard.so` 的本次 artifact SHA。`deploy/run-with-pfguard.sh` 在**每次啟動**先 `sha256sum --check`；任一 mismatch → `STARTUP DISARMED`
    以 vanilla 啟動（2026-09-06 起；原設計 exit 78 已放棄，見文首），因此自動 Steam 更新保留 launcher 時不會把 observer 掛到未驗的新 `.so`，也不會讓遊戲起不來。
 5. `cp -a start-server.sh start-server.sh.pre-pfguard-<UTC stamp>` 留 rollback 副本；再用同目錄
    stage＋`mv -Tf` 原子替換 launcher。唯一執行行由：
@@ -243,8 +229,7 @@ python3 /home/pzserver/scripts/pfguard/pfguard_ring.py \
 3. 記錄 `guard_alloc` 成長率、worker CPU/latency、VMA 數；單執行緒 benchmark 不是 80 人保證。
 4. `guard_live`、`pages_mapped`、`quarantined` 一起看；`nodes_used` 正常停在
    quarantine high-water + live（預設約 4097），不可隨歷史 alloc 線性成長。
-5. `ownership_conflicts`、`canary_violations`、`quarantine_failures`、`mmap_failures`、
-   `madvise_failures` 必須為 0。`skip_capacity` 可表示 soft admission cap；**不得同時誤增 `skip_table_full`**。
+5. `ownership_conflicts`、`canary_violations`、`quarantine_failures`、`mmap_failures`、`madvise_failures` 必須為 0。`skip_capacity` 可表示 soft admission cap；**不得同時誤增 `skip_table_full`**。
 
 ### 6-4. 回退
 
@@ -262,16 +247,14 @@ python3 /home/pzserver/scripts/pfguard/pfguard_ring.py \
 ## 8. 若第一輪沒抓到（預備路線，尚未實作）
 
 1. 放寬白名單 → `MDC_PFGUARD_ALL=1` 並量測記憶體與 tick 成本。
-2. 若仍安靜 ⇒ 受害族不在 aligned-block 這一族。改對 `ObjectPool<T>` 的物件本體下手：
-   `VehicleRect::alloc/release` 各只有 1 個 PLT 呼叫點，可用同樣手法接管（`operator new(0x28)` 的物件改成 guarded 映射），成本仍有界。
+2. 若仍安靜 ⇒ 受害族不在 aligned-block 這一族。改對 `ObjectPool<T>` 的物件本體下手：`VehicleRect::alloc/release` 各只有 1 個 PLT 呼叫點，可用同樣手法接管（`operator new(0x28)` 的物件改成 guarded 映射），成本仍有界。
 3. 若 popman／MCD 才是 writer：那族的 native 邊界在 `libPZPopMan64.so`（帶完整 DWARF），要換的是 `mcd`/`popman` 的容器配置點，屬另案設計。
 
 ## 9. 第一輪結果與第二輪（2026-09-07）
 
 ### 9-1. 05:41 crash：observer 在場但沒抓到，原因已定案
 
-`hs_err_pid567642`：`PolygonalMap2::createVehicleClusters()+0x89`、`movups %xmm0,(%rbx)`、
-`RBX=0x30`、`si_addr=0x30`——與 8/31 **逐位元組同一簽名**（`VehicleRect::alloc()` 從被污染的池交出 `0x30`）。hs_err 自身在印 summary 時二次 SIGSEGV、native stack 逾時（heap 已壞），只剩
+`hs_err_pid567642`：`PolygonalMap2::createVehicleClusters()+0x89`、`movups %xmm0,(%rbx)`、`RBX=0x30`、`si_addr=0x30`——與 8/31 **逐位元組同一簽名**（`VehicleRect::alloc()` 從被污染的池交出 `0x30`）。hs_err 自身在印 summary 時二次 SIGSEGV、native stack 逾時（heap 已壞），只剩
 11 KB；core 6.5 GB 已歸檔 NAS。
 
 core 重驗（`native-observer/analysis/core-{recheck,neigh,hlpool}-20260907.py`（位址綁定該 core），全用 `pfguard_ring.py` 的 stdlib core reader）：
@@ -293,28 +276,20 @@ core 重驗（`native-observer/analysis/core-{recheck,neigh,hlpool}-20260907.py`
    `0x60` chunk（**較像 `Node`**，不是有 vptr 的 `SearchNode`）、9/7 指向 `HLSearchNode`（vptr 證實）。**推論（非定案）**：payload 來自 A\* 物件；writer 的 RIP 仍未知——「型別混淆」與「懸空指標寫入重切過的
    chunk」都相容，也不能排除同一 16 bytes 來自兩條不同指令。已排除：(a) `HLSuccessor {node, double cost}`
    的正常寫入（objdump：`mov %rbp,(%rbx); movsd %xmm0,0x8(%rbx)`，0x30 當 double 不合法）；(b) 兩個
-   `dtNodeQueue`（`VGAStar`、`HLGlobals::astar`，cap 7500，`AStar::init` 重用同一 heap 陣列故長壽）的尾端溢出——兩份 core 的後鄰 chunk size word 完整、無 node 指標殘留；(c) 9/7 core 全 core 掃描：
-   write base 唯一參照是 tcache bin head、兩個 A\* 池的 parent 欄位無人指向它（歷史／已消失的參照無法排除）。
+   `dtNodeQueue`（`VGAStar`、`HLGlobals::astar`，cap 7500，`AStar::init` 重用同一 heap 陣列故長壽）的尾端溢出——兩份 core 的後鄰 chunk size word 完整、無 node 指標殘留；(c) 9/7 core 全 core 掃描：write base 唯一參照是 tcache bin head、兩個 A\* 池的 parent 欄位無人指向它（歷史／已消失的參照無法排除）。
 2. **victim 族在現行 cap 下無法覆蓋（實測）**：`VehicleCluster::merge` 把被併入的 cluster 從
    `PolygonalMap2` 清單 `memmove` 掉、`count=0`，**從不 `release`**（全 `.so` 唯一 release 點在
-   `VisibilityGraph::release`）——cluster 物件與其 rect array 每秒約 38–41 個一去不回（8/31 core：
-   58 分鐘 131,959；9/7 core：4h04m 602,901；pool free 分別 427／183）。live 白名單 block 因此線性成長，4096 cap 開機約 100 秒飽和，之後新的 cluster array 零覆蓋（core 內 183 個 free-pool cluster
+   `VisibilityGraph::release`）——cluster 物件與其 rect array 每秒約 38–41 個一去不回（8/31 core：58 分鐘 131,959；9/7 core：4h04m 602,901；pool free 分別 427／183）。live 白名單 block 因此線性成長，4096 cap 開機約 100 秒飽和，之後新的 cluster array 零覆蓋（core 內 183 個 free-pool cluster
    的 array 0/183 page-aligned——該次樣本，非全部歷史）。可回報 TIS 的獨立 bug；「每 6 小時 ~85 MB」是物件數換算，未含 array 尺寸分佈。
-3. HL 兩個 pool（`HLSuccessor` 26,496／`HLSearchNode` 7,500）在**崩潰時**全數在 free pool、零垃圾——只能說「崩潰當下 HL 池乾淨」，不能說「HL 池從未被毒化」；已觀察到的毒化只在 rect pool
-   （經 `VisibilityGraph::release` 洗入）。
+3. HL 兩個 pool（`HLSuccessor` 26,496／`HLSearchNode` 7,500）在**崩潰時**全數在 free pool、零垃圾——只能說「崩潰當下 HL 池乾淨」，不能說「HL 池從未被毒化」；已觀察到的毒化只在 rect pool（經 `VisibilityGraph::release` 洗入）。
 
 ### 9-2. 第二輪組態（2026-09-07 06:19 已裝、12:00 重啟生效；review 後判定為「有界診斷」而非主線）
 
 wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；只接受
 `MDC_PFGUARD_*=[A-Za-z0-9_,]*` 行、絕不 source；缺檔／被改／行不合法一律 `STARTUP DISARMED`）：
 
-- `MDC_PFGUARD_CALLERS`＝16 個 A\* 層的 `reallocate_aligned` caller（`HLAStar::findPath`／
-  `addChunkLevelAndAdjacentToList`×2／`setLowestCostSuccessor`／`getSuccessors`／`addSuccessor`×3、
-  `HLChunkLevel::init{Stairs,Regions,SlopedSurfaces}`、`SearchNode::getSuccessors`、
-  `VGAStar::getSearchNode`×3、`PolygonalMap2::findPathHighLevelThenLowLevel`）；全部 CALL 形狀、皆在 dynsym（`verify-preconditions.sh` 現在直接讀 `pfguard.env` 逐一驗；78 checks）。**刻意拿掉** `createVehicleCluster`／`merge`（洩漏族，會在 27 分鐘內把 65536 cap 打滿）。已知盲區：`AStar::shortestPath`（`+0x31620`，自身也 `reallocate_aligned`）不在 16 名內；
-  `dtNodeQueue` 走 `dtAlloc`→`malloc`，`ALL=1` 也不涵蓋。
-- `MDC_PFGUARD_MAXBLOCKS=65536`、`MDC_PFGUARD_QUARANTINE=16384`：正常 `nodes_used` 約 81,920＋
-  realloc 暫時 slot，遠低於 262,144；**RSS 沒有上界**（§3-3：owned block 可繼續成長，「≈256 MB」只是小 block 情境估計），以線上 `pages_mapped`／RSS／VMA 為準。
+- `MDC_PFGUARD_CALLERS`＝16 個 A\* 層的 `reallocate_aligned` caller（`HLAStar::findPath`／`addChunkLevelAndAdjacentToList`×2／`setLowestCostSuccessor`／`getSuccessors`／`addSuccessor`×3、`HLChunkLevel::init{Stairs,Regions,SlopedSurfaces}`、`SearchNode::getSuccessors`、`VGAStar::getSearchNode`×3、`PolygonalMap2::findPathHighLevelThenLowLevel`）；全部 CALL 形狀、皆在 dynsym（`verify-preconditions.sh` 現在直接讀 `pfguard.env` 逐一驗；78 checks）。**刻意拿掉** `createVehicleCluster`／`merge`（洩漏族，會在 27 分鐘內把 65536 cap 打滿）。已知盲區：`AStar::shortestPath`（`+0x31620`，自身也 `reallocate_aligned`）不在 16 名內；`dtNodeQueue` 走 `dtAlloc`→`malloc`，`ALL=1` 也不涵蓋。
+- `MDC_PFGUARD_MAXBLOCKS=65536`、`MDC_PFGUARD_QUARANTINE=16384`：正常 `nodes_used` 約 81,920＋realloc 暫時 slot，遠低於 262,144；**RSS 沒有上界**（§3-3：owned block 可繼續成長，「≈256 MB」只是小 block 情境估計），以線上 `pages_mapped`／RSS／VMA 為準。
 - 命中假說（只測其一）：writer 透過**過期的 A\* array 指標**寫入（realloc 搬走後仍寫舊 block）→ 舊
   block 在 quarantine（PROT_NONE）→ 寫入指令當場 SIGSEGV。**抓不到**：壞指標來自 pool 物件（`HLSearchNode`／`SearchNode`／rb-tree node）、或寫入目的地不是 A\* array。
 - 驗收：重啟後 banner `callers=16 maxblocks=65536 quarantine=16384`、`allowlist_matched` 位元逐漸點亮、`skip_capacity` 增長率、`pages_mapped`／RSS／VMA、`PathfindNativeThread` CPU 對照第一輪 42%。
@@ -330,41 +305,27 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 - **Grok 的關鍵反駁（採納）**：guard page 只在「寫入目的地本身是 guarded block」時發作；兩份 core 的目的地都是 **cluster rect array 的 `user-8` 與 `user+0`**——若受害 array 是 guarded block，`user-8`
   正是前置 PROT_NONE 頁，writer 會**當場**被抓（設計 §3-1 的本案）。round-1 沒抓到不是形狀免疫，是洩漏把 cap 打滿讓長壽 cluster array 零覆蓋；round-2 改瞄 A\* array 是「用同一把尺量比較不可能是目的地的東西」。⇒ **最有價值的儀器是把 victim 族守住**，前提是洩漏被止住（否則任何 cap 都會飽和）。
 - **Codex 的補充**：round-2 只測「過期 A\* array」一種假說；HLSuccessor 正常路徑排除；dtNodeQueue
-  現存陣列尾端完整只排除「目前 backing array 的持續尾端污染」，不是歷史釋放 block 的形式排除；
-  core 腳本的 BASE／pool 偏移雖與 decompile 對得上，仍應核 NT_FILE 與 deque 游標（`start_cur-8`
+  現存陣列尾端完整只排除「目前 backing array 的持續尾端污染」，不是歷史釋放 block 的形式排除；core 腳本的 BASE／pool 偏移雖與 decompile 對得上，仍應核 NT_FILE 與 deque 游標（`start_cur-8`
   只適用未跨 deque 區塊的 pop）。
 
 ### 9-4. 第三輪（2026-09-07 授權後實作；shim layout **v5**）
 
-1. **止血洩漏（唯一的行為變更）**：shim 以 LD_PRELOAD 同名定義接管 `VehicleCluster::merge`
-   （全 `.so` 唯一 PLT 呼叫點＝`createVehicleCluster`，GLOBAL/DEFAULT dynsym）與
+1. **止血洩漏（唯一的行為變更）**：shim 以 LD_PRELOAD 同名定義接管 `VehicleCluster::merge`（全 `.so` 唯一 PLT 呼叫點＝`createVehicleCluster`，GLOBAL/DEFAULT dynsym）與
    `VehicleCluster::alloc`（2 個 PLT 呼叫點，同一函式）；真實定義以 `RTLD_NOLOAD` handle 的
    `dlsym` 取得（連同 `VehicleCluster::release`），三者任一缺失＝`real_symbol_missing`
    → 首次呼叫 fail-fast，不自製替身。流程：呼叫真 merge → 若 `src!=NULL && src!=dst &&
-   src->count(+0x0c)==0` → 位址寫入 shim 私有集合（open addressing、backward-shift 刪除、
-   4096 槽、佔半即拒）→ 成功插入才呼叫真 `release(src)`（回池；array／cap 保留、`init` 只清
+   src->count(+0x0c)==0` → 位址寫入 shim 私有集合（open addressing、backward-shift 刪除、4096 槽、佔半即拒）→ 成功插入才呼叫真 `release(src)`（回池；array／cap 保留、`init` 只清
    count＝池既有語意）；`alloc` 回傳的位址從集合移除。**集合的用途只有一個**：stale
    backpointer（我們在追的那種損毀）可能讓同一 cluster 被 merge 兩次——第二次插入失敗就不
-   release，杜絕「池把同一物件租給兩個人」這個新失效模式。每條跳過路徑都有計數：
-   `merge_skipped_state`／`merge_double_release_blocked`／`merge_set_full`；`merge_calls`／
-   `merge_released`／`cluster_alloc_calls` 對帳。旋鈕 `MDC_PFGUARD_MERGE_RELEASE=0`（pfguard.env，下次重啟生效）整段關閉＝回到 vanilla 洩漏。安全依據（42.20.4 反編譯逐行複核）：merge 前
+   release，杜絕「池把同一物件租給兩個人」這個新失效模式。每條跳過路徑都有計數：`merge_skipped_state`／`merge_double_release_blocked`／`merge_set_full`；`merge_calls`／`merge_released`／`cluster_alloc_calls` 對帳。旋鈕 `MDC_PFGUARD_MERGE_RELEASE=0`（pfguard.env，下次重啟生效）整段關閉＝回到 vanilla 洩漏。安全依據（42.20.4 反編譯逐行複核）：merge 前
    `createVehicleCluster` 已把 src `memmove` 出 cluster 清單、merge 內把 src 每個 rect 的
    backpointer 改指 dst、結尾無條件 `src->count=0`、merge 後 caller 不再觸碰 src；graphs 在所有
    cluster 建完後才建立 ⇒ src 無其他持有者。
-2. **重瞄 victim 族**：`pfguard.env` allowlist＝`createVehicleCluster`＋`VehicleCluster::merge`
-   （rect array 的兩個成長點；洩漏止血後有界）＋原 16 個 A\* caller（有界診斷），共 18，
-   `PFG_MAX_CALLERS` 16→32；**排除 `createVehicleClusters`**（每輪暫時 list）。cap 維持 65536、
-   quarantine 16384。
-3. **驗證**：`run-tests.sh` 115/115（新增 merge-release／merge-double／merge-off／merge-reuse／
-   merge-self／merge-churn 20k 步含影子模型對帳／merge-set-full 2100：集合滿只跳過、alloc 排空後恢復；threads 壓力改走真 merge 路徑），fake `.so` 以 42.20.4 語意實作 alloc／release／merge
-   （含 merge 內經 `reallocate_aligned@plt` 成長＝merge 仍是 allowlist caller）；
-   `verify-preconditions.sh` 91/91 對正式 `.so`（新增：三符號 GLOBAL/DEFAULT、merge/release/alloc
+2. **重瞄 victim 族**：`pfguard.env` allowlist＝`createVehicleCluster`＋`VehicleCluster::merge`（rect array 的兩個成長點；洩漏止血後有界）＋原 16 個 A\* caller（有界診斷），共 18，`PFG_MAX_CALLERS` 16→32；**排除 `createVehicleClusters`**（每輪暫時 list）。cap 維持 65536、quarantine 16384。
+3. **驗證**：`run-tests.sh` 115/115（新增 merge-release／merge-double／merge-off／merge-reuse／merge-self／merge-churn 20k 步含影子模型對帳／merge-set-full 2100：集合滿只跳過、alloc 排空後恢復；threads 壓力改走真 merge 路徑），fake `.so` 以 42.20.4 語意實作 alloc／release／merge（含 merge 內經 `reallocate_aligned@plt` 成長＝merge 仍是 allowlist caller）；`verify-preconditions.sh` 91/91 對正式 `.so`（新增：三符號 GLOBAL/DEFAULT、merge/release/alloc
    PLT 邊 1/1/2 且 direct 0、merge 只由 createVehicleCluster 呼叫、release 只由
    `VisibilityGraph::release` 呼叫、merge 結尾 `movl $0x0,0xc(%reg)`、merge 內 realloc 恰 1）。
-4. **驗收（下次排程重啟後）**：橫幅 `v5 … callers=18 merge_release=1`；`pfguard_ring.py --pid`：
-   `merge_released≈merge_calls`、`merge_double_release_blocked=0`、`merge_set_full=0`、
-   `guard_live` 有界（不再釘在 cap）、`skip_capacity` 不再成長、`allowlist_matched` 含 bit 0/1、
-   anomalies 0；cluster 池 `total_alloc` 斜率塌陷。`merge_double_release_blocked>0` 本身就是「stale backpointer 存在」的直接證據，要連同 ring 一起保存。
+4. **驗收（下次排程重啟後）**：橫幅 `v5 … callers=18 merge_release=1`；`pfguard_ring.py --pid`：`merge_released≈merge_calls`、`merge_double_release_blocked=0`、`merge_set_full=0`、`guard_live` 有界（不再釘在 cap）、`skip_capacity` 不再成長、`allowlist_matched` 含 bit 0/1、anomalies 0；cluster 池 `total_alloc` 斜率塌陷。`merge_double_release_blocked>0` 本身就是「stale backpointer 存在」的直接證據，要連同 ring 一起保存。
 5. **不做**：`VehicleRect::alloc/release` 的值驗證（heap 已壞，只是把崩潰點推後、抹掉證據，設計 §4）；行程內重建 native world（共用 arena 已污染）；Java 側限速 vehicle task（不改變 writer，dirty bit
    已合併重建）；`UseNativeCode=false`（dedicated 無效）。
 6. **平行**：向 TIS 回報兩個獨立缺陷（merge 洩漏＝有行號的確定 bug；rect pool 零驗證＋兩次同簽名
@@ -375,18 +336,12 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 `libmdcsteamfix.so` 是獨立的 **LD_AUDIT 冷載入修補**，不併入 pfguard、不改官方 `.so`
 磁碟內容、不攔 `memcpy`、不吞 SIGSEGV。已定位的缺陷：部分 ACK 只縮短傳送片段長度，卻漏推進起始序號；重傳時 `seq - snd_una` 變成錯誤的 32-bit 無號偏移，造成非法讀取。真函式庫測試涵蓋當場 recovery、稍後 duplicate ACK、連續部分 ACK、完整 ACK 與停用對照；檢查對端實際會收到的序號及 payload，不以「沒有崩潰」代替資料正確。
 
-- **同源**：Steam SHA256 `1a99f39637a505ce2dbfec697dafa118c2d1b8df7dea1412557e2d5ad0a2c7d4`，
-  build ID `04049c668c23a4d6503d811c8a0c703f6855653a`（隨 42.21.0 dedicated server 發佈；原 pin `d8fbc292…1591`／`df982870…` 已退役，見 §11）。wrapper 要求 `steamfix.manifest.sha256`
+- **同源**：Steam SHA256 `1a99f39637a505ce2dbfec697dafa118c2d1b8df7dea1412557e2d5ad0a2c7d4`，build ID `04049c668c23a4d6503d811c8a0c703f6855653a`（隨 42.21.0 dedicated server 發佈；原 pin `d8fbc292…1591`／`df982870…` 已退役，見 §11）。wrapper 要求 `steamfix.manifest.sha256`
   精確包含 Steam／修補庫兩個實際路徑各一次，再核 SHA；載入時另驗 ELF 幾何、build ID、目標與重傳指令。不同版本不猜座標，印 `DISARMED` 並保留 vanilla。
-- **冷載入**：`la_objopen` 在 relocation／constructor 前執行；只改 base namespace。
-  8-byte 單入口區塊改成 direct jump，trampoline 保留原指令並補 `seq += nFree`，再跳回。每次載入保留 4 KiB 到程序結束；不在 `la_objclose` 提早挖掉仍可能被跳入的 trampoline。
-  Steam 更新時必重驗整檔同源、指令語境、重定位不覆蓋目標，以及覆蓋區間的唯一入邊。
-- **回退**：`steamfix.mode` 設 `0`／`off`，下次啟動不載入修補；`1` 才啟用，未知值停用。停用時有效 `MDC_STEAMFIX=0`，即使 inherited audit 使用別名也不能偷渡啟用。
-  Steam gate 與 PathFind gate 相互獨立；`DISARMED` 代表仍跑有原缺陷的 vanilla，**不是修好**。
-- **啟動武裝**：`deploy/core-launch.py` 須裝在不可由遊戲帳號替換的 root-owned 路徑，由範圍限定的 sudoers 執行。先設定並讀回 `coredump_filter=0x31`，再提高 core limit；隨後完整降 uid／gid／補充群組，才執行既有 wrapper。保留附帶 JRE 的 PATH；
-  caller 的 `LD_*`／`PYTHON*` 不穿越 root 邊界。低於 12 GiB 空間時明示 `CORE DISARMED`
-  並以 core=0 啟動；非預期武裝／降權失敗則拒啟，不能靜默重新打開取證空窗。
-  HotSpot 的 `DumpPrivateMappingsInCore`／`DumpSharedMappingsInCore` 預設可再加上檔案映射位元 `0x0c`，故執行中的 `0x3d` 也正常；驗收需保留 `0x31` 並確認 anonymous-shared
+- **冷載入**：`la_objopen` 在 relocation／constructor 前執行；只改 base namespace。8-byte 單入口區塊改成 direct jump，trampoline 保留原指令並補 `seq += nFree`，再跳回。每次載入保留 4 KiB 到程序結束；不在 `la_objclose` 提早挖掉仍可能被跳入的 trampoline。Steam 更新時必重驗整檔同源、指令語境、重定位不覆蓋目標，以及覆蓋區間的唯一入邊。
+- **回退**：`steamfix.mode` 設 `0`／`off`，下次啟動不載入修補；`1` 才啟用，未知值停用。停用時有效 `MDC_STEAMFIX=0`，即使 inherited audit 使用別名也不能偷渡啟用。Steam gate 與 PathFind gate 相互獨立；`DISARMED` 代表仍跑有原缺陷的 vanilla，**不是修好**。
+- **啟動武裝**：`deploy/core-launch.py` 須裝在不可由遊戲帳號替換的 root-owned 路徑，由範圍限定的 sudoers 執行。先設定並讀回 `coredump_filter=0x31`，再提高 core limit；隨後完整降 uid／gid／補充群組，才執行既有 wrapper。保留附帶 JRE 的 PATH；caller 的 `LD_*`／`PYTHON*` 不穿越 root 邊界。低於 12 GiB 空間時明示 `CORE DISARMED`
+  並以 core=0 啟動；非預期武裝／降權失敗則拒啟，不能靜默重新打開取證空窗。HotSpot 的 `DumpPrivateMappingsInCore`／`DumpSharedMappingsInCore` 預設可再加上檔案映射位元 `0x0c`，故執行中的 `0x3d` 也正常；驗收需保留 `0x31` 並確認 anonymous-shared
   位元 `0x02` 未開，不能只把完整數字釘死為 `0x31`。
 - **大型 core**：reader 支援 `PN_XNUM` 與 NT_FILE 的頁單位；缺 NT_FILE 時可傳
   `--hs-err hs_err_pid<PID>.log`。PID 從 log **內容**與 core notes 核對，不信檔名。畸形／截斷 note 不可假裝成「缺映射」；shim 可讀的 build ID 不符即拒讀。身分頁未保存時明示警告，帳本 magic/layout 驗證不等於已證明二進位同源。
@@ -398,17 +353,11 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 
 遊戲更新後正式服 wrapper 依設計把兩者都 `DISARMED`（PathFind 與 Steam 的 SHA 都變了），以 vanilla 啟動。本機以 42.21.0 dedicated server 的原檔重驗：
 
-- **PathFind（`e4c7d5c7…07d2`）**：`verify-preconditions.sh` 91/91 PASS，每條數值與 42.20.4 相同。逐函式正規化反組譯比對（去位址、rip 位移與函式內偏移）：`VehicleCluster::merge/alloc/release`、
-  `createVehicleCluster(s)`、`VisibilityGraph::release`、`trySplit`、A\* 的 allowlist caller、
-  `reallocate_aligned`／`deallocate_aligned` **逐指令相同**；42.21 的變動集中在 `Square` 旗標 32→64 bit
-  與 `findPath` 半徑常數／`smoothPath(Path&,int)`，不碰本工具的配置與 cluster 族。⇒ merge 洩漏原樣存在，
-  §9-4 的安全論證原樣成立；shim 與 `pfguard.env` 不改，只把 `manifest.sha256` 的 PathFind 行換成新 SHA。
-- **Steam（`1a99f396…c7d4`）**：缺陷原樣存在。部分 ACK 分支 8 bytes（`sub %r15d,%eax; mov %eax,0x14(%r12)`）與其後 13 bytes、重傳 offset 計算 36 bytes 皆逐位元組相同且全檔唯一，只是整段平移 `+0x186570`：
-  SITE `0x240c838`、重傳 `0x240b6f1`（間距仍 `0x1147`）、RX 段 `vaddr 0xd9d850／size 0x1d43c6f／offset 0xd9c850`；覆蓋區間唯一入邊為 `0x240c51c ja`、無重定位落入。`steamfix.c` 只換這些常數與 build note；真函式庫測試（`test_steamfix.py`）16/16：vanilla 在 partial／deferred／repeated 三情境 SIGSEGV、修補後對端收到正確序號與 payload；以舊常數的 `steamfix.c` 對新檔則 DISARMED 且 partial 仍崩潰（負對照）。
-  test harness 的 PseudoTCP 入口改為 `0x240c330`。
+- **PathFind（`e4c7d5c7…07d2`）**：`verify-preconditions.sh` 91/91 PASS，每條數值與 42.20.4 相同。逐函式正規化反組譯比對（去位址、rip 位移與函式內偏移）：`VehicleCluster::merge/alloc/release`、`createVehicleCluster(s)`、`VisibilityGraph::release`、`trySplit`、A\* 的 allowlist caller、`reallocate_aligned`／`deallocate_aligned` **逐指令相同**；42.21 的變動集中在 `Square` 旗標 32→64 bit
+  與 `findPath` 半徑常數／`smoothPath(Path&,int)`，不碰本工具的配置與 cluster 族。⇒ merge 洩漏原樣存在，§9-4 的安全論證原樣成立；shim 與 `pfguard.env` 不改，只把 `manifest.sha256` 的 PathFind 行換成新 SHA。
+- **Steam（`1a99f396…c7d4`）**：缺陷原樣存在。部分 ACK 分支 8 bytes（`sub %r15d,%eax; mov %eax,0x14(%r12)`）與其後 13 bytes、重傳 offset 計算 36 bytes 皆逐位元組相同且全檔唯一，只是整段平移 `+0x186570`：SITE `0x240c838`、重傳 `0x240b6f1`（間距仍 `0x1147`）、RX 段 `vaddr 0xd9d850／size 0x1d43c6f／offset 0xd9c850`；覆蓋區間唯一入邊為 `0x240c51c ja`、無重定位落入。`steamfix.c` 只換這些常數與 build note；真函式庫測試（`test_steamfix.py`）16/16：vanilla 在 partial／deferred／repeated 三情境 SIGSEGV、修補後對端收到正確序號與 payload；以舊常數的 `steamfix.c` 對新檔則 DISARMED 且 partial 仍崩潰（負對照）。test harness 的 PseudoTCP 入口改為 `0x240c330`。
 - **Java loose-class 啟動閘**（同日新增於 `run-with-pfguard.sh` 最前段）：若 `java/patch-manifest.txt`
   存在，每次啟動重跑 `deploy/install.sh` 的閘 1（payload SHA）與閘 2（jar 原版 class SHA）；任一不符就把
   `java/zombie` 與 manifest 以 rename 搬到 `/home/pzserver/patch-disabled-<UTC>-autogate/`（目的地已存在則加
   `.1`、`.2`…；先搬 class 樹再搬 manifest），印 `[mdc-javagate] STARTUP DISARMED` 後照常以原版啟動。只有 class 樹搬不走時才拒啟（exit 78），因為那代表舊 patch 會掛在新 jar 上。全數相符印
-  `[mdc-javagate] OK: <n> loose classes verified …; jar sha256 <前 8 碼>`；無 manifest 但有 loose class 只警告。
-  `run-tests.sh` 含 12 條對應行為測試。
+  `[mdc-javagate] OK: <n> loose classes verified …; jar sha256 <前 8 碼>`；無 manifest 但有 loose class 只警告。`run-tests.sh` 含 12 條對應行為測試。

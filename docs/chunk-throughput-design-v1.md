@@ -17,22 +17,18 @@
 
 **已否證**（避免重蹈）：地板物品堆撐肥 chunk（他卡的那格物品密度全服最低）、client 效能（全程 60fps 零停頓）、連線型態（同一條 SDR relay 載入時間 10.8s～101.1s 都有）、頻寬（峰值僅約 1Mbps）、server 主迴圈健康度（綠，且此路徑根本不在主迴圈計量內）。
 
-**副線**（不修，僅記錄）：client 從不填 `ChunkRequest.crc`（javap 實證：`WorldStreamer` 對該欄位**零 putfield**），使 server 兩條「你已經有這塊」捷徑（`PlayerDownloadServer:320-323`、
-`:349-350`）永久失效——已有的 chunk 也整包重壓重送。屬 vanilla bug，值得單獨報 TIS。
+**副線**（不修，僅記錄）：client 從不填 `ChunkRequest.crc`（javap 實證：`WorldStreamer` 對該欄位**零 putfield**），使 server 兩條「你已經有這塊」捷徑（`PlayerDownloadServer:320-323`、`:349-350`）永久失效——已有的 chunk 也整包重壓重送。屬 vanilla bug，值得單獨報 TIS。
 
 ## 2. W4-1：server 端供給併包
 
 **目標**：填滿 vanilla 自己設計好的批次容量，不新增任何 chunk、不改處理順序。
 
-**掛點**：`PlayerDownloadServer.removeOlderDuplicateRequests()V` 頭部 headCall
-（receiver-only，helper `zombie.mdc.ChunkRequestPacker`）。
+**掛點**：`PlayerDownloadServer.removeOlderDuplicateRequests()V` 頭部 headCall（receiver-only，helper `zombie.mdc.ChunkRequestPacker`）。
 
 > **為何不是 `update()V`**（審查抓到的 blocking，必讀）：`update()` 對 `ccrWaiting` 的所有存取都包在 `if (workerThread.ready)` 內，那是 vanilla 與 **WorkerThread** 互斥的唯一機制——
-> worker 的 `sendArray` 會對 `ccrWaiting` 加入 `ccrForRetries` 並持續 `chunks.add()`。
-> headCall 插在 offset 0 會落在該閘**之外**，與 worker 同時改同一個 plain ArrayList；最壞情況是同一個 `Chunk` 實例同時掛在兩個 ccr、被雙重 `releaseChunk` 進 **static** 的
+> worker 的 `sendArray` 會對 `ccrWaiting` 加入 `ccrForRetries` 並持續 `chunks.add()`。headCall 插在 offset 0 會落在該閘**之外**，與 worker 同時改同一個 plain ArrayList；最壞情況是同一個 `Chunk` 實例同時掛在兩個 ccr、被雙重 `releaseChunk` 進 **static** 的
 > `freeChunks` 池＝**跨玩家汙染**。`removeOlderDuplicateRequests()` 全 class 僅被 `update()`
-> 呼叫一次（javap 實證）且就在 ready 閘內、vanilla 去重之前——正是需要的位置。
-> SmokeCheck 以「dedupe 頭部全序 ＋ update() 內零 packer 呼叫」把這件事鎖進建置期。
+> 呼叫一次（javap 實證）且就在 ready 閘內、vanilla 去重之前——正是需要的位置。SmokeCheck 以「dedupe 頭部全序 ＋ update() 內零 packer 呼叫」把這件事鎖進建置期。
 
 **演算法**：把後續 ccr 的 chunk 搬進隊首 ccr，直到隊首達批次上限。
 
@@ -59,13 +55,11 @@
 
 ## 3. W4-2：client 端請求逾時 8s → 15s
 
-**手術**：`WorldStreamer.resendTimedOutRequests()V` 的 `8000L` → `15000L`
-（方法內常數替換；全 class 僅此一處，javap 實證）。
+**手術**：`WorldStreamer.resendTimedOutRequests()V` 的 `8000L` → `15000L`（方法內常數替換；全 class 僅此一處，javap 實證）。
 
 **理由**：`RequestZipList` 與 `SentChunkPacket` 皆 `reliability=2`（RELIABLE，RakNet 保證送達），故此逾時幾乎不是在救「真的遺失」，而是在懲罰「server 慢」——它把已經在路上的資料整包丟掉再重問，正是 livelock 的動力來源。放寬到 15s 讓遲到的資料被接受即可斷鏈；上界仍有限（server 真的不回時 15s 後照樣重試）。
 
-**首發 15s 而非 30s**（審查 I3）：先配合 W4-1 上線觀察 `[ChunkStream] pending` 曲線，確認供給側修好後逾時很少觸發，再決定是否需要放寬。殘留風險寫入發版說明：
-(a) server 真的丟棄請求時復原時間 8s→15s；(b) v2.2 client 若連到未打 patch 的 server，會多持有約 1.9× 的 `ChunkRequest`＋`bb` 狀態才放棄。
+**首發 15s 而非 30s**（審查 I3）：先配合 W4-1 上線觀察 `[ChunkStream] pending` 曲線，確認供給側修好後逾時很少觸發，再決定是否需要放寬。殘留風險寫入發版說明：(a) server 真的丟棄請求時復原時間 8s→15s；(b) v2.2 client 若連到未打 patch 的 server，會多持有約 1.9× 的 `ChunkRequest`＋`bb` 狀態才放棄。
 
 ## 4. 上線與回退
 
