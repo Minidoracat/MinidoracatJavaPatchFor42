@@ -6,15 +6,13 @@
 > - `2026-09-02-tis-reports-C.md`：client 貼圖洩漏、native crash、設計面建議 3 份（C1…C3）
 >
 > 現況核對基準：正式服 jar `80e405a4`（42.20.4，2026-08-26 至今最新 public；unstable 分支已於
-> 2026-07-29 移除）。每份 Root cause 都引用 42.20.4 反編譯快照行號或 javap offset；
-> 另有 SmokeCheck 的 vanilla 前提斷言（釘「缺陷存在的結構事實」）在 42.20.4 jar 上全綠。
+> 2026-07-29 移除）。每份 Root cause 都引用 42.20.4 反編譯快照行號或 javap offset；另有 SmokeCheck 的 vanilla 前提斷言（釘「缺陷存在的結構事實」）在 42.20.4 jar 上全綠。
 
 ## 0. 論壇格式（依 TIS 官方 Bug Report Guide 與你先前被 QA 採納的貼文）
 
 - 板別：`Bug Reports`（forum/85）；標題 `[42.20.4] [MP] <concise symptom>`（你 42.17 那篇用 `[42.17 MP]`，兩者皆可）。
 - 內文開頭五行欄位：`Version / Mode / Server settings / Mods / Save`，再 `Reproduction steps`（競態類寫 Trigger conditions）。
-- Guide 要求「Mods must be disabled」：草稿的 Mods 欄位一律誠實寫 ~80 mods＋「根因在 vanilla Java、附 class/method 引用」——
-  這是你 getFileWriter 那篇的做法，QA 接受了 bytecode 級證據。
+- Guide 要求「Mods must be disabled」：草稿的 Mods 欄位一律誠實寫 ~80 mods＋「根因在 vanilla Java、附 class/method 引用」——這是你 getFileWriter 那篇的做法，QA 接受了 bytecode 級證據。
 - 每篇一個主題；建議**分批發**（每天 3–4 篇，先發資料損失與假死），避免同日 15 篇被當洗版。
 - **玩家人數（2026-08-26 20:00 → 09-02 03:10，connections.txt 逐事件重建）**：7 天平均在線 ≈30、每日峰值 68–95
   （最高 95，9/1 晚）、晚峰 19–24 時小時峰值平均 60、7 天 465 個不同 Steam 帳號、254 slots。
@@ -47,11 +45,8 @@
 - **貼法（A-R1 實貼驗證通過）**：草稿是 80 字硬換行的純文字，直接貼會壞（整篇 code block／每行一段／
   html 原始碼 code block 三種都試過）。`python scripts/tis_forum_html.py` 產出 `docs/report/forum-html/<篇>.html`
   （段落合併、小標粗體、log／程式碼片段各自 code block、清單／表格保留）→ **用瀏覽器（Chrome/Edge）雙擊開啟**
-  → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。
-  不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。
-  貼完可用 `curl` 抓 topic 頁對帳：粗體小標數、`<pre>` 數、清單數與本地 .html 相同，且全文 diff 無句子破損。
-- **編輯器已知會咬壞的東西（6 篇實貼對帳，2026-09-02）**：行內 `<code>` 在 4/6 篇被整段搬到段尾
-  （A-R2／A-R3／A-R4／A-R6，句子破損如「uses a JVM-wide shared as scratch space」）、同段兩個 `==`
+  → 在排好版的網頁上從 `Version:` 拖選到最後 → Ctrl+C → 論壇編輯器 **Ctrl+V** → 標題另外複製到 Title 欄。不要用編輯器開 .html 再複製（會貼到原始碼），不要 Ctrl+Shift+V（純文字失去全部格式）。貼完可用 `curl` 抓 topic 頁對帳：粗體小標數、`<pre>` 數、清單數與本地 .html 相同，且全文 diff 無句子破損。
+- **編輯器已知會咬壞的東西（6 篇實貼對帳，2026-09-02）**：行內 `<code>` 在 4/6 篇被整段搬到段尾（A-R2／A-R3／A-R4／A-R6，句子破損如「uses a JVM-wide shared as scratch space」）、同段兩個 `==`
   會被當 highlight 語法吃掉。轉換器已改成**不產生行內 code／em、` == ` 改寫成 ` is `**，只留粗體與
   `<pre>`（6/6 存活）。上述 4 篇已用重生的 .html 重貼修正。
 - **Tags 只能從既有 tag 下拉選，不能自訂**：版本不打 tag（標題已有 `[42.20.4]`，板上其他回報也不打）；`dedicated` 選
@@ -138,9 +133,7 @@
 
 ## 4. 發文節奏（避免被當洗版）
 
-論壇沒有明文的每日發文上限，但 16 篇同一人同日連發，版主第一眼會當 spam、QA 也沒辦法逐篇開 ticket。
-這批每篇都是獨立缺陷＋反編譯證據，**分散節奏**＋**明說是系列**就不會被誤判——你 42.17 那篇 QA（Artem_VB）
-已經回過，他們認得這個 ID。
+論壇沒有明文的每日發文上限，但 16 篇同一人同日連發，版主第一眼會當 spam、QA 也沒辦法逐篇開 ticket。這批每篇都是獨立缺陷＋反編譯證據，**分散節奏**＋**明說是系列**就不會被誤判——你 42.17 那篇 QA（Artem_VB）已經回過，他們認得這個 ID。
 
 **節奏：每天最多 2 篇、同日兩篇間隔數小時、P0 先發，約 9 天發完。**
 
@@ -170,8 +163,6 @@ Note: this is the first of a series of independent dedicated-server findings fro
 Related reports from the same server: <URL of previous topic(s)>
 ```
 
-**Tags**：每篇草稿「建議板塊」段下方有一行純文字（如 `42.20.4, multiplayer, dedicated, freeze, inventory`），
-整串貼進 Tags 欄即可（逗號分隔會被拆成多個 tag；若這個版本的輸入框不拆，就一個一個打、每個按 Enter）。
-多字 tag 一律用連字號（`data-loss`、`timed-action`、`log-spam`），不要選下拉裡別人留的雜項。
+**Tags**：每篇草稿「建議板塊」段下方有一行純文字（如 `42.20.4, multiplayer, dedicated, freeze, inventory`），整串貼進 Tags 欄即可（逗號分隔會被拆成多個 tag；若這個版本的輸入框不拆，就一個一個打、每個按 Enter）。多字 tag 一律用連字號（`data-loss`、`timed-action`、`log-spam`），不要選下拉裡別人留的雜項。
 
 每篇貼出後把論壇 URL 回填到本表 §2（方便日後 follow-up、changelog 對照與「Related」串連）。

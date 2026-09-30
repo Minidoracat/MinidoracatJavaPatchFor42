@@ -1,10 +1,7 @@
 # TIS 官方回報草稿 — A 組：伺服器假死／資料損失（六份）
 
 > 目標板：The Indie Stone 官方論壇 Bug Reports（B42）。每份 `### Body` 的 fenced block
-> 可直接複製貼上。所有根因均對 **42.20.4** 反編譯快照
-> （`pz_jar_sha256 = 80e405a4bfc42f6072e75b3735f458a6514143da011d3226007ded305a442f44`，
-> 與正式服現場 jar 相同）逐行核對，行號即該快照行號。
-> 撰於 2026-09-02。
+> 可直接複製貼上。所有根因均對 **42.20.4** 反編譯快照（`pz_jar_sha256 = 80e405a4bfc42f6072e75b3735f458a6514143da011d3226007ded305a442f44`，與正式服現場 jar 相同）逐行核對，行號即該快照行號。撰於 2026-09-02。
 
 ---
 
@@ -19,8 +16,7 @@ itemId / fullType）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, freeze, inventory
 
 ### Title
@@ -168,14 +164,11 @@ available on request.
 報兩層問題：(1) `GameServer.main` 的 catch 在迴圈頂端而 `ServerCell.Load2` 的出隊在
 `RecalcAll2()` **之後**，導致同一個地圖格每 0.1 秒重撞，凍結 114 分鐘；(2) 我方捕手 6 天
 21 次全部是 `addedToEngine=false` 但 entitySet 仍持有該實例 —— 指向 vanilla 有 stale
-entitySet 殘留（reset/pool 路徑繞過 `removeEntityInternal`）。優先級**最高**（唯一一個會
-造成 114 分鐘全服靜止且看門狗救不了的形態）。建議附件：兩次事故的完整 stack、21 筆捕手
-明細（座標／sprite／class／addedToEngine／identity／jobType）。
+entitySet 殘留（reset/pool 路徑繞過 `removeEntityInternal`）。優先級**最高**（唯一一個會造成 114 分鐘全服靜止且看門狗救不了的形態）。建議附件：兩次事故的完整 stack、21 筆捕手明細（座標／sprite／class／addedToEngine／identity／jobType）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, freeze, chunk
 
 ### Title
@@ -389,15 +382,11 @@ request.
 ### 中文摘要
 
 報「`IsoGameCharacter.setForwardDirectionFromIsoDirection()` 用 JVM 全域共用的
-`private static final Vector2 tempVector2_2` 當暫存，chunk loader 執行緒與主迴圈同時進入
-即讀到 (0,0) → `normalize()` 長度 0 → 例外 → 整塊 chunk 被 Blam 抹除」。優先級**最高**
-（真實玩家建造永久消失，且存檔本身是好的）。建議附件：Player-A 雞舍案的 `blam/` 前後檔
-（46,142 / 8,549 bytes）與該次 chunk 載入 stack。
+`private static final Vector2 tempVector2_2` 當暫存，chunk loader 執行緒與主迴圈同時進入即讀到 (0,0) → `normalize()` 長度 0 → 例外 → 整塊 chunk 被 Blam 抹除」。優先級**最高**（真實玩家建造永久消失，且存檔本身是好的）。建議附件：Player-A 雞舍案的 `blam/` 前後檔（46,142 / 8,549 bytes）與該次 chunk 載入 stack。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, corruption, chunk
 
 ### Title
@@ -561,13 +550,11 @@ was never corrupt. Logs / bytecode diffs available on request.
 
 報「`BaseAnimalSoundManager` 的 comparator 對 NaN 距離回 0 違反遞移性 → TimSort 拋 IAE →
 `characters.clear()` 在 sort 之後被跳過 → 清單永不清空 → 之後每幀重炸 → `updateManagers()`
-永久跳過 → 全服卡讀條、時間停止」。優先級**高**（frame 照推進，看門狗不救，只能重啟）。
-建議附件：19:25–21:47 的 IAE 計數曲線與 `IngameState.updateInternal` stack。
+永久跳過 → 全服卡讀條、時間停止」。優先級**高**（frame 照推進，看門狗不救，只能重啟）。建議附件：19:25–21:47 的 IAE 計數曲線與 `IngameState.updateInternal` stack。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, freeze, animals
 
 ### Title
@@ -718,15 +705,11 @@ priority instead of the server. Logs / bytecode diffs available on request.
 ### 中文摘要
 
 報「一個玩家的砸窗封包即可讓整個 server tick 進入無限迴圈」。`removeGlassAttachments`
-假設 `RemoveTileObject` 一定會讓清單縮短並無條件 `n--`，但 42.20 的安全移除路徑
-（`IsoObjectUtils.safelyRemoveTileObjectFromSquare`）有兩條「什麼都沒移除」的返回路徑。
-優先級**高**（單一封包即可觸發，需 SIGKILL 才能恢復）。修法只有一行。建議附件：兩份
-間隔 4 秒的 thread dump。
+假設 `RemoveTileObject` 一定會讓清單縮短並無條件 `n--`，但 42.20 的安全移除路徑（`IsoObjectUtils.safelyRemoveTileObjectFromSquare`）有兩條「什麼都沒移除」的返回路徑。優先級**高**（單一封包即可觸發，需 SIGKILL 才能恢復）。修法只有一行。建議附件：兩份間隔 4 秒的 thread dump。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, freeze, window
 
 ### Title
@@ -869,18 +852,13 @@ object plus one log line. Logs / bytecode diffs available on request.
 
 ### 中文摘要
 
-原 42.20.2 草稿（`docs/report/2026-08-15-chunk-save-crc-race.md`）更新為 42.20.4 版並精簡
-到論壇可讀長度。`ServerChunkLoader$SaveChunkThread.addLoadedJob` 與
+原 42.20.2 草稿（`docs/report/2026-08-15-chunk-save-crc-race.md`）更新為 42.20.4 版並精簡到論壇可讀長度。`ServerChunkLoader$SaveChunkThread.addLoadedJob` 與
 `SaveLoadedTask.save` 在 42.20.3／42.20.4 逐指令相同（見
-`docs/report/pz-42.20.3-update-analysis.md`、`pz-42.20.4-update-analysis.md`）。
-優先級**最高**（唯一一個已定罪、有 A/B 驗證、且會持續吃掉玩家基地的資料損失機制）。
-建議附件：A 組（crc=0）與 B 組（垃圾值）各一份 `blam/*.bin` ＋ `_error.txt`、
-攔截器 BLOCKED log 節錄。
+`docs/report/pz-42.20.3-update-analysis.md`、`pz-42.20.4-update-analysis.md`）。優先級**最高**（唯一一個已定罪、有 A/B 驗證、且會持續吃掉玩家基地的資料損失機制）。建議附件：A 組（crc=0）與 B 組（垃圾值）各一份 `blam/*.bin` ＋ `_error.txt`、攔截器 BLOCKED log 節錄。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, corruption, save
 
 ### Title

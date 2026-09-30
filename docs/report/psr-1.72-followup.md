@@ -217,11 +217,7 @@ TOXIC WINDOW (separate: 8/16 06:12 -> 8/17 06:12, because our filter lands at 01
 
 **座標處理**：bank 用 A–F／`X,Y+n` 代號、rect 只給尺寸與 square 數、log 樣本用 `rect(R)`。保留的具體數字是 `touched` / `unreadable` / `skippedGen` 與 frame 編號（論證需要，不含位置資訊）。第 4 項只說「13–15 distinct building coordinates」不給座標。無洩漏風險。
 
-**附錄的匿名處理**：`temp/psr-appendix.sh` 產生的是**去座標版本**——session 匿名為 S1–S8（僅時序）、
-不含任何 bank／rect／building 座標、不含 log 檔名。刻意**不**直接貼 `psr-frozen.sh` 的原始輸出，
-因為那會攤開真實 rect 與 bank 明細，違反上面這條座標策略。附錄保留的是每個數字的**算式與欄位定義**
-（例如 `163 / 15.01`、`109 x 3 = 327 → 327/158 = x2.07`），作者可拿去對自己的 log 重算而不需信任我的轉述。
-預設不貼；只在對方質疑某個數字時貼該區塊。
+**附錄的匿名處理**：`temp/psr-appendix.sh` 產生的是**去座標版本**——session 匿名為 S1–S8（僅時序）、不含任何 bank／rect／building 座標、不含 log 檔名。刻意**不**直接貼 `psr-frozen.sh` 的原始輸出，因為那會攤開真實 rect 與 bank 明細，違反上面這條座標策略。附錄保留的是每個數字的**算式與欄位定義**（例如 `163 / 15.01`、`109 x 3 = 327 → 327/158 = x2.07`），作者可拿去對自己的 log 重算而不需信任我的轉述。預設不貼；只在對方質疑某個數字時貼該區塊。
 
 ## 中文備忘（不貼）
 
@@ -261,21 +257,15 @@ TOXIC WINDOW (separate: 8/16 06:12 -> 8/17 06:12, because our filter lands at 01
 
 ### 本次數據來源與方法
 
-- **凍結快照：`2026-08-17 11:12:54`（含）以前的 log 行。** 由 `temp/psr-frozen.sh` 一次算出報告
-  用到的每個 sweep／campaign 數字，凍結點寫在腳本開頭，**重跑必得相同結果**（伺服器仍在運行，
-  沒有凍結點的話每次重算都會漂移——本輪就因此出現過 162／164 兩個版本）。
+- **凍結快照：`2026-08-17 11:12:54`（含）以前的 log 行。** 由 `temp/psr-frozen.sh` 一次算出報告用到的每個 sweep／campaign 數字，凍結點寫在腳本開頭，**重跑必得相同結果**（伺服器仍在運行，沒有凍結點的話每次重算都會漂移——本輪就因此出現過 162／164 兩個版本）。
 - **本報告只有兩個時間窗**：(1) 上述凍結窗，供第 1–3 項與 Measured impact；(2) 第 4 項的 toxic
-  對照窗 `8/16 06:12 → 8/17 06:12`——因為我方在 01:28 部署了該訊息的 server 端抑噪，凍結窗內
-  它中途就消失、無法計數。兩處都在使用點標明。
+  對照窗 `8/16 06:12 → 8/17 06:12`——因為我方在 01:28 部署了該訊息的 server 端抑噪，凍結窗內它中途就消失、無法計數。兩處都在使用點標明。
 - 1.72 範圍：檔名 ≥ `2026-08-16_2004` 的 8 個 `DebugLog-server.txt`，凍結窗內共 **163 筆**
   `coverage REMOVE`（**158 筆帶 `tryN/3`** ＋ **5 筆 `demontage`**；**33 筆帶 `legacy`**；全部帶 `bank=`）。
   1.71 對照組 `18-12` session 獨立統計，**198 筆、0 筆帶 tag**（確認 tag 是 1.72 才加的）。
-- campaign 結構：`try1` 出現 **109** 次＝campaign 數（每次 activation 重置額度）、`try2` 28、`try3` 21。
-  平均 **1.45 sweep/campaign**（上限 3）⇒ 全滿上界 `109×3=327` ＝ **×2.07**；`try1` 即 `complete=true`
+- campaign 結構：`try1` 出現 **109** 次＝campaign 數（每次 activation 重置額度）、`try2` 28、`try3` 21。平均 **1.45 sweep/campaign**（上限 3）⇒ 全滿上界 `109×3=327` ＝ **×2.07**；`try1` 即 `complete=true`
   者 **72/109 ＝ 66%**。
-- 時長用 log 行內的 `DD-MM-YY HH:MM:SS` 完整解析（含日期），並**印出每個 session 的實際首末時間戳
-  供驗算**：8 個 session 循序、間隔 1.1–1.3 分鐘（重啟），凍結窗內累計 uptime **15.01h**、
-  平均 **10.9/h**、per-session **3.7–23.1/h**。
+- 時長用 log 行內的 `DD-MM-YY HH:MM:SS` 完整解析（含日期），並**印出每個 session 的實際首末時間戳供驗算**：8 個 session 循序、間隔 1.1–1.3 分鐘（重啟），凍結窗內累計 uptime **15.01h**、平均 **10.9/h**、per-session **3.7–23.1/h**。
 - 配對：逐檔跑 awk、每檔狀態重置，同 bank 連續 `try N → try N+1`，用 `f:` frame 編號判定同 tick。19 個 same-frame（16 later ＋ 3 early，分佈於 17 個 frame，`f:4654` 一個 frame 內含 3 個配對）。跨 frame 的 29 個依 Δf 三分：35 幀×3（同 campaign 重試）／217 幀起×26（pass 間隔）。注意 `f:12824` 的 `try1 → try1 legacy` **不符配對條件**（非遞增），故不在 19 之內，另案當 legacy 雙路徑證據。
 - rect 尺寸由 `rect(x1,y1..x2,y2 zA..zB)` 直接算 `(x2-x1+1)×(y2-y1+1)×(zB-zA+1)`。
 - 誠實邊界：`too busy` 只剩 1 次，且該次前 10 幀無 **logged REMOVE**——但這只是「該條 log 線上沒有時間關聯」，**不等於排除 PSR**：ADD／reapply sweep 不印 log（見第 21 次修正），所以無法從缺席推論無關。故本報告**沒有**把 too busy 當成 PSR 的證據，也沒有把它當成 PSR 無罪的證據。

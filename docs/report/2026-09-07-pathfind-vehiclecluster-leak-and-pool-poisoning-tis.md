@@ -1,7 +1,6 @@
 # TIS 官方回報草稿 — `libPZPathFind64.so`：`VehicleCluster::merge` 洩漏（R1）／`VehicleRect` 池被 heap 覆寫毒化 → 伺服器 native crash 家族（R2）
 
-**狀態**：**草稿（2026-09-07，未送）**。兩篇獨立：R1 是行為確定、可一行修的洩漏；R2 是「writer 未定案」的 heap corruption 家族，只提供實測證據鏈與兩份同簽名 core 的比對，不宣稱根因。
-回報前核對（2026-09-07）`docs/report/` 全部既有草稿：`VehicleCluster`／`VehicleRect`／`createVehicleClusters`／`PolygonalMap2` 零命中，與 A／B／C／D 組不重疊。
+**狀態**：**草稿（2026-09-07，未送）**。兩篇獨立：R1 是行為確定、可一行修的洩漏；R2 是「writer 未定案」的 heap corruption 家族，只提供實測證據鏈與兩份同簽名 core 的比對，不宣稱根因。回報前核對（2026-09-07）`docs/report/` 全部既有草稿：`VehicleCluster`／`VehicleRect`／`createVehicleClusters`／`PolygonalMap2` 零命中，與 A／B／C／D 組不重疊。
 
 證據來源：正式服（Linux x86_64 dedicated，42.20.4）hs_err ×2＋完整 core ×2（8/31、9/7）＋LinuxGSM console；對 exact `libPZPathFind64.so`（sha256 `0777dda6db77ddd3059f27f94e0d56fae827b21436b5feb4d719e96878fd21c4`）的 `objdump`／`readelf`；core 解析用 `native-observer/analysis/*.py`（stdlib ELF core reader）。**對外只引用函式名、`.so` offset 與觀測值，不貼反編譯原文。**
 

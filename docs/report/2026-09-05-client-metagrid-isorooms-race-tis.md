@@ -1,8 +1,6 @@
 # TIS 官方回報草稿 — client 端 `IsoMetaCell.isoRooms` 跨執行緒競態 → 玩家被踢回主選單
 
-**狀態**：**已回報 2026-09-05** → https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/ 。本檔與 `forum-html/D-R1.html` 為公開去識別化版本，不宣稱與歷史貼文逐字一致。
-回報前核對（2026-09-05）`docs/report/` 全部既有草稿與 `patches.md`：`WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs`／`IsoMetaGrid.getRoomByID`／`isoRooms` 零命中；唯一沾邊的 `lambda$updateSquares$0` 是 PSR toxic 案，不同方法不同問題。
-與 A 組 R3（`tempVector2_2`）、R6（CRC32）同家族：main loop 與 World Streamer 對同一個非執行緒安全物件無鎖存取。這次是 **client** 端。
+**狀態**：**已回報 2026-09-05** → https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/ 。本檔與 `forum-html/D-R1.html` 為公開去識別化版本，不宣稱與歷史貼文逐字一致。回報前核對（2026-09-05）`docs/report/` 全部既有草稿與 `patches.md`：`WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs`／`IsoMetaGrid.getRoomByID`／`isoRooms` 零命中；唯一沾邊的 `lambda$updateSquares$0` 是 PSR toxic 案，不同方法不同問題。與 A 組 R3（`tempVector2_2`）、R6（CRC32）同家族：main loop 與 World Streamer 對同一個非執行緒安全物件無鎖存取。這次是 **client** 端。
 
 ## R1. client 端 `IsoMetaCell.isoRooms` 跨執行緒競態 → 玩家被踢回主選單
 

@@ -1,8 +1,6 @@
 # TIS 官方論壇回報草稿 — Batch B（MP 玩法／動物／網路／minor）
 
-> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。每份 `### Body` 為可直接複製貼上的完整內文。
-> 所有 Root cause 均以 42.20.4 反編譯（`pz-decompiled-reference/snapshots/42.20.4-20260826`）或 42.20.4 jar 的 `javap` 重新核對過，行號為 42.20.4 行號。
-> 撰於 2026-09-02。發文前逐份確認附件已備妥、不含玩家名／IP／實際座標。
+> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。每份 `### Body` 為可直接複製貼上的完整內文。所有 Root cause 均以 42.20.4 反編譯（`pz-decompiled-reference/snapshots/42.20.4-20260826`）或 42.20.4 jar 的 `javap` 重新核對過，行號為 42.20.4 行號。撰於 2026-09-02。發文前逐份確認附件已備妥、不含玩家名／IP／實際座標。
 
 ---
 
@@ -10,14 +8,11 @@
 
 ### 中文摘要
 
-報 W10 兩個疊乘的 vanilla 缺陷：`loadInventoryItem` 靜默回 null → Lua ctor 例外穿過 `protectedCall` → `processServer` 從未執行；加上 `processServer` 對中間物件 `act` 設 state 卻送出 `this`。結果是 client 四道自癒全失效、動作永久卡在 100% 且整條動作佇列堵死。
-優先級：**最高**（玩家可見、需重開遊戲、社群長期回報）。
-附件：8/23 session 的三筆 Lua ctor 例外全 stack、8/27–9/2 我方 hotfix 的 60 筆 reject 分類表、`NetTimedActionPacket.processServer` 與 `ItemTransactionPacket.processServer` 的 javap 對照。
+報 W10 兩個疊乘的 vanilla 缺陷：`loadInventoryItem` 靜默回 null → Lua ctor 例外穿過 `protectedCall` → `processServer` 從未執行；加上 `processServer` 對中間物件 `act` 設 state 卻送出 `this`。結果是 client 四道自癒全失效、動作永久卡在 100% 且整條動作佇列堵死。優先級：**最高**（玩家可見、需重開遊戲、社群長期回報）。附件：8/23 session 的三筆 Lua ctor 例外全 stack、8/27–9/2 我方 hotfix 的 60 筆 reject 分類表、`NetTimedActionPacket.processServer` 與 `ItemTransactionPacket.processServer` 的 javap 對照。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, timed-action, stuck
 
 ### Title
@@ -127,14 +122,11 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 中文摘要
 
-報 W17：`IsoHutch.load` 對 `addAnimalInside(animal,false)` 的 boolean 回傳直接丟棄；false 時該動物已 new/load 完並 `removeFromSquare`，卻不進 hutch map、不進世界、無 log，直接被 GC。純靜態定罪（不宣稱等於正式服的放養動物流失，那是另一個持久化域）。
-優先級：**高**（靜默資料損失、修法只有幾行）。
-附件：42.20.4 `IsoHutch.load` / `addAnimalInside` 反編譯節錄、零 `Rand` 測試 harness 的重現說明（「有空槽但 vanilla 101 次全撞」）。
+報 W17：`IsoHutch.load` 對 `addAnimalInside(animal,false)` 的 boolean 回傳直接丟棄；false 時該動物已 new/load 完並 `removeFromSquare`，卻不進 hutch map、不進世界、無 log，直接被 GC。純靜態定罪（不宣稱等於正式服的放養動物流失，那是另一個持久化域）。優先級：**高**（靜默資料損失、修法只有幾行）。附件：42.20.4 `IsoHutch.load` / `addAnimalInside` 反編譯節錄、零 `Rand` 測試 harness 的重現說明（「有空槽但 vanilla 101 次全撞」）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, animals, hutch
 
 ### Title
@@ -209,14 +201,11 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 中文摘要
 
-報 W22：`IsoObject.getClosestSpriteGridObject` 在 sprite-grid 清單為空時回 null，`IsoGameCharacter.faceThisObject` 無條件解參考 → 動物狀態機每 tick 炸、卡 idle 不轉 eat/walk。9/1–9/2 兩天 3386 次（≈70/h），是我方 log 最大單一例外源。
-優先級：**高**（一行修法、有行為後果、噪音第一名）。
-附件：`StateMachine.stateExecute` 例外樣本（含 caller 分佈 2366/1020）、42.20.4 `faceThisObject` javap（offset 200→206 無 ifnull）。
+報 W22：`IsoObject.getClosestSpriteGridObject` 在 sprite-grid 清單為空時回 null，`IsoGameCharacter.faceThisObject` 無條件解參考 → 動物狀態機每 tick 炸、卡 idle 不轉 eat/walk。9/1–9/2 兩天 3386 次（≈70/h），是我方 log 最大單一例外源。優先級：**高**（一行修法、有行為後果、噪音第一名）。附件：`StateMachine.stateExecute` 例外樣本（含 caller 分佈 2366/1020）、42.20.4 `faceThisObject` javap（offset 200→206 無 ifnull）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, animals, exception
 
 ### Title
@@ -307,14 +296,11 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 中文摘要
 
-報 W20 三點：(b) `ItemDescription` ctor 對 baseTexture/textureChoice 有 `getVisual()==null` 守衛、唯 tint 漏 → 一件 null-visual 穿戴物讓該玩家的衣物廣播 per-connection 全滅；(c) `SyncVisualsPacket.parse` 純 positional、count 不符整包丟；(a) `ContainerID` 雙參 set 對 x/y/z 有 raw `square` 守衛、對 `getObjects()` 沒有。8 天 480+ 筆 (b) 全同一玩家，(c) 同人 `wire-local=+1`。
-優先級：**中高**（(b) 修法一行，影響單一玩家全服可見度）。
-附件：nullVisual 歸因統計（單一玩家 480+）、(c) mismatch 的 signed diff 分佈、`ContainerID` 探針的 `o class` 分佈（全為 IsoPlayer）。
+報 W20 三點：(b) `ItemDescription` ctor 對 baseTexture/textureChoice 有 `getVisual()==null` 守衛、唯 tint 漏 → 一件 null-visual 穿戴物讓該玩家的衣物廣播 per-connection 全滅；(c) `SyncVisualsPacket.parse` 純 positional、count 不符整包丟；(a) `ContainerID` 雙參 set 對 x/y/z 有 raw `square` 守衛、對 `getObjects()` 沒有。8 天 480+ 筆 (b) 全同一玩家，(c) 同人 `wire-local=+1`。優先級：**中高**（(b) 修法一行，影響單一玩家全服可見度）。附件：nullVisual 歸因統計（單一玩家 480+）、(c) mismatch 的 signed diff 分佈、`ContainerID` 探針的 `o class` 分佈（全為 IsoPlayer）。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, clothing, sync
 
 ### Title
@@ -397,14 +383,11 @@ We validated (b) and the (b)/(c) link with an experimental server-side hotfix (A
 
 ### 中文摘要
 
-W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` 的 wx/wy 取自 `vehicle.chunk`、x/y 取自 physics，兩來源無 invariant；`resetForStore` 把 pooled chunk 的 wx/wy 清成 0,0 卻不清車輛的反向參照；載入只查 `WHERE wx=? AND wy=?`。42.20.4 逐行核對後 `VehicleBuffer.set` 未變。
-優先級：**高**（永久資料不可達、修法四行、涵蓋所有 persistence 路徑）。
-附件：三筆實案 SQLite 前後列、8/27–9/2 hotfix 的 182 筆修正分佈（|Δ|=1 ×176、|Δ|=2 ×6）、8/28 兩輛 NaN 車紀錄。
+W12 既有草稿（42.20.3）更新到 42.20.4 並精簡：`VehicleBuffer.set` 的 wx/wy 取自 `vehicle.chunk`、x/y 取自 physics，兩來源無 invariant；`resetForStore` 把 pooled chunk 的 wx/wy 清成 0,0 卻不清車輛的反向參照；載入只查 `WHERE wx=? AND wy=?`。42.20.4 逐行核對後 `VehicleBuffer.set` 未變。優先級：**高**（永久資料不可達、修法四行、涵蓋所有 persistence 路徑）。附件：三筆實案 SQLite 前後列、8/27–9/2 hotfix 的 182 筆修正分佈（|Δ|=1 ×176、|Δ|=2 ×6）、8/28 兩輛 NaN 車紀錄。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, vehicles, save-data
 
 ### Title
@@ -499,14 +482,11 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 中文摘要
 
-W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` 在 42.20.4 `AnimalSynchronizationManager.java:122`、`setRequested` 在 57-60 仍無 relevancy／無冷卻、150 上限在 107）並精簡到論壇長度。含 pcap 量測與 W13 上線後的殘留量測（598 份 full、96.2% 在環帶、98.5% 來自單一載具連線）。
-優先級：**中**（無 crash，但吃掉近四成上傳；requested 路徑另有放大面）。
-附件：pcap decoder 統計摘要（去識別化）、W13 前後對照、`range` 值以便重算環帶。
+W13＋W14 合併，既有草稿更新到 42.20.4（`(getRelevantRange()-2)*10` 在 42.20.4 `AnimalSynchronizationManager.java:122`、`setRequested` 在 57-60 仍無 relevancy／無冷卻、150 上限在 107）並精簡到論壇長度。含 pcap 量測與 W13 上線後的殘留量測（598 份 full、96.2% 在環帶、98.5% 來自單一載具連線）。優先級：**中**（無 crash，但吃掉近四成上傳；requested 路徑另有放大面）。附件：pcap decoder 統計摘要（去識別化）、W13 前後對照、`range` 值以便重算環帶。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, animals, network
 
 ### Title
@@ -590,14 +570,11 @@ We validated the diagnosis with an experimental server-side hotfix (ASM bytecode
 
 ### 中文摘要
 
-兩項純噪音（無玩法影響），合成一份短報告：(i) `IsoObject.syncIsoObject` 在 `getObjectIndex()==-1` 時用 `System.out.println` 印 `ERROR:`，B42 建造流程每次必觸發，四天 11,567 行；(ii) `SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件每次載入必刷 `Invalid SpriteConfig object!`，42.20.3 實測 26h 23,517 行。
-優先級：**低**（minor，但會淹沒真錯誤）。
-附件：兩段 log 樣本與計數指令、19 個 vanilla 物件名單。
+兩項純噪音（無玩法影響），合成一份短報告：(i) `IsoObject.syncIsoObject` 在 `getObjectIndex()==-1` 時用 `System.out.println` 印 `ERROR:`，B42 建造流程每次必觸發，四天 11,567 行；(ii) `SpriteConfig.initObjectInfo` 對 19 個 vanilla 物件每次載入必刷 `Invalid SpriteConfig object!`，42.20.3 實測 26h 23,517 行。優先級：**低**（minor，但會淹沒真錯誤）。附件：兩段 log 樣本與計數指令、19 個 vanilla 物件名單。
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, log, console
 
 ### Title

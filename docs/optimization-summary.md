@@ -1,18 +1,13 @@
 # 全 Patch 優化原理與效果總結
 
-> 最後更新：2026-08-17（第 8 把抑噪刀＋食材重量記憶化上線並驗證、PSR v1.72 以凍結快照對照定案、
-> 記憶化實測後決定不啟用 `on`、ChunkPacker 觀察點結案）。本文是**面向營運的總覽**——
-> 每項只講三件事：浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
-> [patches.md](patches.md)，各波設計定稿見 `docs/*-design-*.md` 與 [specs/](specs/)。
-> 現況（以 `PatchConfig.all()` 實數為準）：**29 個 patched class、37 個 patched method、
+> 最後更新：2026-08-17（第 8 把抑噪刀＋食材重量記憶化上線並驗證、PSR v1.72 以凍結快照對照定案、記憶化實測後決定不啟用 `on`、ChunkPacker 觀察點結案）。本文是**面向營運的總覽**——每項只講三件事：浪費/問題在哪、怎麼修、實測效果。逐項 javap 證據與安全論證見
+> [patches.md](patches.md)，各波設計定稿見 `docs/*-design-*.md` 與 [specs/](specs/)。現況（以 `PatchConfig.all()` 實數為準）：**29 個 patched class、37 個 patched method、
 > 64 個命中點、17 個 runtime helper class 檔**（16 個手寫＋建置期生成的 `zombie.mdc.PatchInfo`）。
 > 42.20.2 里程碑：官方收編 P5／popman 隔離／512→256 三組（見第四節），我方對應退役。
 > 2026-08-08：受精蛋清除豁免退役（patch 有效但 client 端無對應改道，見 patches.md 2n）。
 > 2026-08-13～14 的四起事故（容器環假死、地圖格載入活鎖 114 分鐘、雞舍 chunk 被抹除、
 > CRC-blam 家族 43 筆資料損失）催生 W5–W9 五刀，全部是 vanilla 缺陷而非本專案所致。
-> **42.20.3（2026-08-17）**：TIS 重構 chunk 供給管線（pending 機制＋ChunkNotReady、重試刪除）
-> ——29 刀逐指令重驗**全數存續**、僅 SmokeCheck retriesCount 斷言退場；client v2.2 包全面失效。
-> 完整存續判定與官方變更分析見 [report/pz-42.20.3-update-analysis.md](report/pz-42.20.3-update-analysis.md)。
+> **42.20.3（2026-08-17）**：TIS 重構 chunk 供給管線（pending 機制＋ChunkNotReady、重試刪除）——29 刀逐指令重驗**全數存續**、僅 SmokeCheck retriesCount 斷言退場；client v2.2 包全面失效。完整存續判定與官方變更分析見 [report/pz-42.20.3-update-analysis.md](report/pz-42.20.3-update-analysis.md)。
 
 ## 全 Patch 清單（42.21.0 對版；本表只列到 W9／W3 波次，W10 之後各刀見 docs/patches.md）
 
@@ -37,10 +32,7 @@
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |
 | 觀測 | JoinMetrics | `CreatePlayerPacket`＋`GameServer`＋`ConnectPacket`＋`ConnectCoopPacket` | 4+2+1+1 | MinidoracatJoinMetrics | join/rejoin 各階段耗時歸因（實測 5.8–11.1s 停頓的證據源） |
 
-合計：**29 個 patched class、37 個 patched method、64 個命中點、17 個 runtime helper class 檔**
-（16 個手寫＋建置期生成的 `zombie.mdc.PatchInfo`；部署的 `.class` 檔另含 `$State` 等內嵌類別）。
-數字以 `patcher/src/PatchConfig.java` 的 `all()` 逐項 `expectedHits` 為準——文件與程式碼衝突以程式碼為準。
-另有 **client 端獨立包**（貼圖管線門檻＋洩漏根治，發佈於 `output\`，玩家自選安裝，不在 server manifest）。
+合計：**29 個 patched class、37 個 patched method、64 個命中點、17 個 runtime helper class 檔**（16 個手寫＋建置期生成的 `zombie.mdc.PatchInfo`；部署的 `.class` 檔另含 `$State` 等內嵌類別）。數字以 `patcher/src/PatchConfig.java` 的 `all()` 逐項 `expectedHits` 為準——文件與程式碼衝突以程式碼為準。另有 **client 端獨立包**（貼圖管線門檻＋洩漏根治，發佈於 `output\`，玩家自選安裝，不在 server manifest）。
 
 ### 退役／停用／否決（歷史記錄，詳見第四節）
 
@@ -59,8 +51,7 @@
 
 ## 核心哲學
 
-三波效能 patch 共用同一句話：**找出「算了也白算」的工作，證明它白算，然後不算。**
-證明方式分三型：
+三波效能 patch 共用同一句話：**找出「算了也白算」的工作，證明它白算，然後不算**。證明方式分三型：
 
 | 型 | 代表 | 一句話 |
 |---|---|---|
@@ -69,8 +60,7 @@
 | 陳舊度換算力 | ownership 選舉、清單 sidecar | 答案幾百 ms 內不會變的計算，不必每 tick 重算——且延遲上界必須落在 vanilla 自己的容忍包絡內 |
 
 安全底線（每一刀都遵守）：只用三種堆疊形狀不變的手術（呼叫改道／常數替換／頭部
-null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋語境雙守門，PZ 更新
-漂移＝建置失敗而非默默錯位。
+null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋語境雙守門，PZ 更新漂移＝建置失敗而非默默錯位。
 
 ---
 
@@ -78,17 +68,14 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 
 ### W1-1 殭屍→車輛視線預篩（`IsoZombie.isVehicleBetween`，2026-08-02）
 
-- **浪費**：每隻殭屍檢查視線是否被車擋住時，對整個 cell 的**每台車**做完整 OBB 相交
-  （每台 2 次矩陣求逆＋6 次向量池借還）。低谷 dump 佔比 ~23%，第一代榜首。
-- **修法**：改道到「線段到車輛保守包圍球」平方距離預篩——球外幾何上不可能相交直接
-  回 null；球內或任何異常委派原版精確判定。per-vehicle 動態半徑（L1 上界），零 false-negative。
+- **浪費**：每隻殭屍檢查視線是否被車擋住時，對整個 cell 的**每台車**做完整 OBB 相交（每台 2 次矩陣求逆＋6 次向量池借還）。低谷 dump 佔比 ~23%，第一代榜首。
+- **修法**：改道到「線段到車輛保守包圍球」平方距離預篩——球外幾何上不可能相交直接回 null；球內或任何異常委派原版精確判定。per-vehicle 動態半徑（L1 上界），零 false-negative。
 - **實測**：**拒絕率 99.87%**（rejected 8.9 億 vs delegated 128 萬），車輛碰撞主題從後續
   dump **完全消失**；低谷頻率 12+/日 → 1-2/日（與 W1-2 合併效果）。
 
 ### W1-2 `VehicleManager` 連線槽 512→256——**42.20.2 官方收編退役**（官方刪除雙 512 陣列改 per-connection HashMap，比砍半更徹底）
 
-- **浪費**：serverUpdate 每 tick 無條件掃 512 個連線槽 × 全部車輛，但 RakNet 連線陣列
-  只有 256、connection ID 解碼恆 <256——上半 512 槽純空轉。
+- **浪費**：serverUpdate 每 tick 無條件掃 512 個連線槽 × 全部車輛，但 RakNet 連線陣列只有 256、connection ID 解碼恆 <256——上半 512 槽純空轉。
 - **修法**：建構子常數 512→256，掃描直接砍半。
 - **實測**：該迴圈行號從 dump 消失（原 5/5 命中）。
 
@@ -98,8 +85,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
   掃描——**P 實測 1.0～1.5 萬個元素**，幾乎全 miss 全掃；每 tick 的 removeAll 是
   O(P×R)。第二代榜首（dump 佔比 23-27%）。
 - **修法**：identity membership sidecar（HashSet 鏡像三清單成員資格），miss 查詢
-  O(P)→O(1)、removeAll O(P×R)→O(P+R)。清單本身仍是順序權威；抽驗發現失同步
-  即自動整組回歸 vanilla（kill switch）。
+  O(P)→O(1)、removeAll O(P×R)→O(P+R)。清單本身仍是順序權威；抽驗發現失同步即自動整組回歸 vanilla（kill switch）。
 - **實測**：chunk 卸載掃描主題 27% → **0**；上線至今 `rebuilds=0 divergence=0
   killed=false` 全綠；尖峰低谷 FPS 2-3 → 4-6、sampler 觸發 9 次/晚（頂格）→ 3 次。
 
@@ -109,19 +95,14 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
   owner 穩定的殭屍**每 tick 全額重選舉**（O(連線×玩家) 距離掃描）。Z≈2500、C≈80
   時每 tick ~20 萬次距離計算，而答案 99% 與上一 tick 相同。
 - **修法**：已擁有且存活的殭屍每 3 個 pass 才重選一次（id 錯峰、負載平滑）；無主/
-  剛死/特殊選項即刻放行。延遲上界 300ms，遠在 vanilla 換手後 2000ms 冷卻包絡內。
-  （此刀歷經三輪打回：wall-clock 版被三稜鏡審查抓到與退化 tick 週期共振、單欄位
+  剛死/特殊選項即刻放行。延遲上界 300ms，遠在 vanilla 換手後 2000ms 冷卻包絡內。（此刀歷經三輪打回：wall-clock 版被三稜鏡審查抓到與退化 tick 週期共振、單欄位
   tick 版被 code review 抓到長 pass 步進鎖死，定稿為雙欄位偵測＋質數週期。）
-- **實測**：首日白天 skip 27%（無主殭屍多，尖峰 owned 比例升高後上揚）、anomalies=0。
-  預估尖峰省 tick 預算 3–10%。
+- **實測**：首日白天 skip 27%（無主殭屍多，尖峰 owned 比例升高後上揚）、anomalies=0。預估尖峰省 tick 預算 3–10%。
 
 ### W3-3 動物 spotted 距離預篩（2026-08-05）
 
-- **浪費**：每隻動物每 tick 掃同層**所有**移動物件（殭屍數千）呼叫完整 spotted()，
-  但 spotted() 所有持久效果都要求距離 ≤10 格——對地平線外殭屍的呼叫全是白繳。
-- **修法**：距離 > max(12, 該動物視距+2) 只重放無條件前綴（兩行簿記，逐句同構）、
-  跳過其餘。動物數量一隻不動（營運約束）。三重 42.21 漂移防護（全 jar 子類走訪＋
-  前綴指紋＋51 值有序常數包絡）。
+- **浪費**：每隻動物每 tick 掃同層**所有**移動物件（殭屍數千）呼叫完整 spotted()，但 spotted() 所有持久效果都要求距離 ≤10 格——對地平線外殭屍的呼叫全是白繳。
+- **修法**：距離 > max(12, 該動物視距+2) 只重放無條件前綴（兩行簿記，逐句同構）、跳過其餘。動物數量一隻不動（營運約束）。三重 42.21 漂移防護（全 jar 子類走訪＋前綴指紋＋51 值有序常數包絡）。
 - **實測**：首日 4h45m **攔截 37.6 億次、攔截率 99.94%**、anomalies=0、threshold
   動態跟隨（見過 12.0 與 21.0）。預估省 tick 預算 5–15%。
 
@@ -130,17 +111,14 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **浪費**：每車每 tick 掃車身 AABB 10-18 格算「玩家可見性」，結果只餵給
   `setTargetAlpha`（渲染透明度）——而 server 端該方法是 vanilla 自己
   `if(!GameServer.server)` 擋掉的**空操作**。每秒 5-25 萬次格子查找算完即丟。
-- **修法**：server 端直接短路回傳；SmokeCheck 以 targetAlpha guard 指紋把「官方
-  丟棄結果」的前提鎖進建置期。
+- **修法**：server 端直接短路回傳；SmokeCheck 以 targetAlpha guard 指紋把「官方丟棄結果」的前提鎖進建置期。
 - **實測**：首日 8500 萬次短路、`replicated=0`（判定零失誤）。估省 1–3%，與車數線性。
 - **附註**：同波的 W3-2（ECS 查找快取）被 microbenchmark 實測否決（vanilla 0.93 vs
   memo 1.19 ns/call，淨劣化）而撤刀——審查證明「無風險」，只有量測證明「有收益」。
 
 ### 基礎-1 popman 共享 buffer 執行緒競爭修復（v3 隔離）——**42.20.2 官方收編退役**（官方 readByteBuffer 專用讀 buffer，與 v3 指令級同構）
 
-- **問題**：`ZombiePopulationManager.byteBuffer` 由背景寫側與主執行緒讀側共用、讀側
-  無鎖（vanilla 遺漏）→ position 併發亂跳 → BufferUnderflow ＋隨機欄位混讀——
-  **實體消失事件的三大根因之一**。
+- **問題**：`ZombiePopulationManager.byteBuffer` 由背景寫側與主執行緒讀側共用、讀側無鎖（vanilla 遺漏）→ position 併發亂跳 → BufferUnderflow ＋隨機欄位混讀——**實體消失事件的三大根因之一**。
 - **修法**：updateMain 全部 10 處 buffer 讀取換成專用隔離 buffer（讀寫分離、零鎖），
   count-clamp 降為保險絲。
 - **效果**：上線後 BufferUnderflow 歸零。
@@ -150,9 +128,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **浪費**：批次卸載時逐 entity 對全域陣列做 identity 線性搜尋。
 - **修法**：4 個 callsite 改道 primitive sidecar index，O(N)→O(1)；碰撞/外部
   mutation/ordered 路徑全走原版 fallback。
-- **效果**：benchmark 每 entity 439ns→63ns（8192 尺度；2026-08-06 壓實回退後由 42ns 回升，
-  換得墓碑有界——初版停用 Trove auto-compaction 曾致墓碑飽和、主迴圈 15-25s 停頓，見 patches.md 2g）；
-  線上 anomalies=0。
+- **效果**：benchmark 每 entity 439ns→63ns（8192 尺度；2026-08-06 壓實回退後由 42ns 回升，換得墓碑有界——初版停用 Trove auto-compaction 曾致墓碑飽和、主迴圈 15-25s 停頓，見 patches.md 2g）；線上 anomalies=0。
 
 ## 二、修復類
 
@@ -167,8 +143,7 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 
 ### W4–W9：2026-08-13～14 事故修復六刀（全部是 vanilla 缺陷，非本專案所致）
 
-這六刀的共同性質與前三波效能刀不同：**不是省工，是止血**。每一刀都有正式服實案、
-都附「非本專案所致」的 javap／指令級實證，且都留旋鈕可不重新部署即降級回 vanilla。
+這六刀的共同性質與前三波效能刀不同：**不是省工，是止血**。每一刀都有正式服實案、都附「非本專案所致」的 javap／指令級實證，且都留旋鈕可不重新部署即降級回 vanilla。
 
 | 項 | 問題 | 修法 | 效果/狀態 |
 |---|---|---|---|
@@ -185,19 +160,12 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 - **null 頭部守衛 2 項**（`hit/Zombie`、`hit/Fall`）：惡意/損壞封包導致的 NPE 崩潰，
   guard-before-super 擋下。負對照實測：原版必拋 NPE、修補版安靜返回。
 - **遞迴／活鎖／資損守衛 5 項**（W5 `ItemContainer`、W6 `IsoChunk.doLoadGridsquare`、
-  W7 `IsoGameCharacter`、W8 `IsoChunk.Save`＋`SaveLoadedTask.save`、W9 存檔管線）：
-  全部帶計數器＋不需重新部署的旋鈕，明細與已知降級見第二節「W4–W9」小節。
+  W7 `IsoGameCharacter`、W8 `IsoChunk.Save`＋`SaveLoadedTask.save`、W9 存檔管線）：全部帶計數器＋不需重新部署的旋鈕，明細與已知降級見第二節「W4–W9」小節。
 - **抑噪 7 項**（SkinningBoneHierarchy／SpriteConfig／ItemPickInfo／
-  PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding；AnimationSet 已於 42.21.0 退役）：只攔
-  已知噪音樣式，未知警告與**反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的
-  訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的 toxic 抑噪是
-  最大單一噪音源：`Send Toxic Building at [ … ]` 抑噪前佔 console **45.5%**（15.41 小時／8 session
-  實測 164,176／360,669 行，逐 session 35.5%–80.8%），
-  來源是 PSR 的 `PBSystem.suppressToxic` 掛 `Events.EveryOneMinute`（Day Length=1h → 每 2.5
-  真實秒）逐 powerbank 無條件 `setToxic`，而 `IsoBuilding.setToxic` 的 putfield 沒有變更比對。
-  **只攔 log、不動封包**——封包本身是 client 端 toxic 狀態的來源，攔它會把玩家鎖在毒氣室。
-- **觀測 2 項**（LoginMetrics／JoinMetrics）：登入三個同步 DB 寫入與 join 四段重活
-  的 elapsedNs 量測，不改任何順序與例外邊界。成果：把「join 造成主迴圈停頓
+  PacketsCache／INetworkPacket／NetworkZombieManager／GameServer.sendToxicBuilding；AnimationSet 已於 42.21.0 退役）：只攔已知噪音樣式，未知警告與**反作弊警告照常輸出**。價值：console log 從噪音海變成可鑑識的訊號源——後續所有低谷/凍結/實體消失的診斷都建立在這之上。2026-08-16 新增的 toxic 抑噪是最大單一噪音源：`Send Toxic Building at [ … ]` 抑噪前佔 console **45.5%**（15.41 小時／8 session
+  實測 164,176／360,669 行，逐 session 35.5%–80.8%），來源是 PSR 的 `PBSystem.suppressToxic` 掛 `Events.EveryOneMinute`（Day Length=1h → 每 2.5
+  真實秒）逐 powerbank 無條件 `setToxic`，而 `IsoBuilding.setToxic` 的 putfield 沒有變更比對。**只攔 log、不動封包**——封包本身是 client 端 toxic 狀態的來源，攔它會把玩家鎖在毒氣室。
+- **觀測 2 項**（LoginMetrics／JoinMetrics）：登入三個同步 DB 寫入與 join 四段重活的 elapsedNs 量測，不改任何順序與例外邊界。成果：把「join 造成主迴圈停頓
   5.8/6.6/11.1 秒」從猜測變成實測數字，驅動了 PingLimit 決策。
 
 ## 四、42.20 已移除／停用項（誠實記錄）
@@ -236,7 +204,5 @@ null 守衛）；每個 helper 帶 vanilla fallback＋計數器；命中數＋�
 | 8/16（巡檢實測＋第 8 把抑噪刀） | 約 **63 人在線**、主迴圈 **9.36–10.10 fps**、**所有 patch 計數器 anomalies=0**。PSR 作者已在 **v1.72** 修掉我方回報的回歸（刪除 `psrSweepRect` 內的 per-square `RecalcAllWithNeighbours`，並在註解引用我方數據）：`coverage REMOVE` **1103 行/2.5h → 20 行/46min**（`complete=true` 從 11/1067 變成 5/8）、`Server is too busy` **12 次 → 0 次**。同日巡檢另抓到最大單一噪音源——`Send Toxic Building at [ … ]`（當時單一時間窗估 34.4%／9512 行；**8/17 以 15.41 小時 8 session 重算為 45.5%／164,176 行**）→ 新增 `GameServer.sendToxicBuilding` 抑噪（第 8 項，只攔 log 不動封包）。`ChargeFreq=2` 尚未回復為 1；PSR 殘留項待回報（8/17 重寫為四項） |
 | 8/17（部署生效＋PSR 1.72 對照＋記憶化定案） | 兩刀於 **01:28** 重啟生效（`PatchInfo built=00:16` → 部署後第一次排程重啟；`01-28`／`04-04`／`04-53` 三 session 的 toxic 皆為 0）：`Send Toxic Building` 10,654 行/h → **0**，其餘 Multiplayer 訊息照常；48 個 loose class 在位、SHA 對帳 bad=0。PSR v1.72 **凍結快照 `2026-08-17 11:12:54`／15.01 小時／8 session** 對照：REMOVE **107.7/h → 10.9/h**（平均 **9.9×**，per-session 4.7×–29×）、fps **9.93–10.02 平坦 3.5h**、`too busy` 12 次 → **1 次**（該次前 10 幀無 logged REMOVE；但 ADD／reapply sweep 不印 log，故**不能據此排除 PSR**，只能說該條 log 線上無時間關聯）。殘留四項寫成 `docs/report/psr-1.72-followup.md`。ChunkPacker `overrunTicks` 觀察點結案（`overrunTicks/calls` 恆定 0.14–0.15%＝預算閘正常累計）。**食材重量記憶化實測定案不啟用 `on`**：observe 樣本窗 4 session／9.68h，命中率 99.997% 但呼叫速率僅 271–732/s、單次 2.1µs ⇒ 上限 0.06–0.18% 主迴圈（≈0.006–0.018 fps），不足以承擔 RNG 序列位移＋首次執行共用實例的風險 |
 
-誠實邊界：主迴圈是單執行緒，Amdahl 定律決定了沒有銀彈——每一波都是「低谷變淺、
-變稀」而非平均 FPS 飆升；80+ 人的瀰漫負載（LOS thread 飽和、join chunk 同步、
-SaveAll 凍結）仍有結構性成分是三形狀手術範圍外的，已逐項記錄於各設計文件的
-「無法以現行手法處理」清單。
+誠實邊界：主迴圈是單執行緒，Amdahl 定律決定了沒有銀彈——每一波都是「低谷變淺、變稀」而非平均 FPS 飆升；80+ 人的瀰漫負載（LOS thread 飽和、join chunk 同步、
+SaveAll 凍結）仍有結構性成分是三形狀手術範圍外的，已逐項記錄於各設計文件的「無法以現行手法處理」清單。

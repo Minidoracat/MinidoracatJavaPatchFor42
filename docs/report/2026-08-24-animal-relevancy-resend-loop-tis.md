@@ -1,18 +1,14 @@
 # Animal relevancy radius exceeds the client loaded range, causing a full-snapshot resend loop
 
-> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。英文本文可直接複製。
-> 數據來源：正式服（38–39 連線、77 mods）2026-08-24 雙向 pcap 解碼 ＋ 42.20.3 `javap` 核實。
-> 撰於 2026-08-24。發文前補上文末 placeholder。
+> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。英文本文可直接複製。數據來源：正式服（38–39 連線、77 mods）2026-08-24 雙向 pcap 解碼 ＋ 42.20.3 `javap` 核實。撰於 2026-08-24。發文前補上文末 placeholder。
 >
-> **規則**：不貼反編譯 Java 源碼；class／method 名稱、bytecode offset、行為描述可以。
-> 不寫玩家名／IP／實際座標。
+> **規則**：不貼反編譯 Java 源碼；class／method 名稱、bytecode offset、行為描述可以。不寫玩家名／IP／實際座標。
 >
 > 姊妹篇（同樣動物相關但機制完全獨立）：
 > - `docs/tis-bug-report-animal-sort-livelock.md`（W11）＝ comparator 契約違反造成全服活鎖。
 > - 本篇（W13）＝ 沒有 crash、沒有活鎖，純粹是頻寬浪費 ＋ 永不成功的重試迴圈。
 >
-> **審稿注意**：本文已刻意避免三種過度宣稱——不寫「exactly 1.25×」（奇數 grid width 下
-> 是整數除法）、不寫「ring 內每份 snapshot 都必然被丟棄」（我們沒有逐請求的 client
+> **審稿注意**：本文已刻意避免三種過度宣稱——不寫「exactly 1.25×」（奇數 grid width 下是整數除法）、不寫「ring 內每份 snapshot 都必然被丟棄」（我們沒有逐請求的 client
 > chunk 載入狀態）、不寫「修法零可見損失」（chunk 對齊與載具前移都會留下誤差）。
 
 ---

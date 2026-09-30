@@ -1,12 +1,8 @@
 # TIS 官方回報草稿 — 動物聲音排序比較器違反契約 → 全服主迴圈活鎖
 
-> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。英文本文可直接複製。
-> 數據來源：正式服（60+ 人、77 mods）2026-08-23 事故 log ＋ 42.20.3 `javap` 核實。
-> 撰於 2026-08-23。發文前補上文末 placeholder。
+> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。英文本文可直接複製。數據來源：正式服（60+ 人、77 mods）2026-08-23 事故 log ＋ 42.20.3 `javap` 核實。撰於 2026-08-23。發文前補上文末 placeholder。
 >
-> **規則**：不貼反編譯 Java 源碼；class／method 名稱、bytecode offset、行為描述可以。
-> 本報告與 timed-action 報告（tis-bug-report-timed-action-stuck.md）互補：那份是
-> 「單一玩家永久卡讀條」，這份是「全服同時卡死」——症狀相似、機制完全不同。
+> **規則**：不貼反編譯 Java 源碼；class／method 名稱、bytecode offset、行為描述可以。本報告與 timed-action 報告（tis-bug-report-timed-action-stuck.md）互補：那份是「單一玩家永久卡讀條」，這份是「全服同時卡死」——症狀相似、機制完全不同。
 
 ---
 

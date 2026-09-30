@@ -5,8 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、
-  主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 57 個 patched class、147 個命中點、58 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 57 個 patched class、147 個命中點、58 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形、42.21.0「自建房間」繪製 bug），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -15,6 +14,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 [docs/patches.md](docs/patches.md)（繁體中文原文，最詳細）與 [docs/patches.en.md](docs/patches.en.md)（英文版）。
 
 > **給 The Indie Stone 開發團隊**
+>
 > 以下每一項都是在正式服上用 thread dump、JFR、心跳計數器與封包擷取定位出來的，每個修正都逐指令對照過官方
 > `projectzomboid.jar`。其中幾項已在 42.20.2–42.21.0 由官方修掉（見[官方已修](#官方已修)），謝謝。表格的
 > **TIS** 欄標出哪些已在論壇回報、哪些還沒回報。任何一項都可以提供 log、封包統計或測試版本：請在這裡開
@@ -23,9 +23,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 ## 目錄
 
 - [為什麼做這些](#為什麼做這些)
-- [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・
-  [效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・
-  [帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・
+- [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・[效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・[帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・
   [Native](#native-防護linux-dedicated-server)
 - [官方已修](#官方已修)
 - [修補原理](#修補原理)
@@ -39,8 +37,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ## 為什麼做這些
 
-我們的伺服器每日尖峰 68–95 人同時在線（254 個名額）。dedicated server 的主迴圈是單執行緒、上限 10 FPS，每一毫秒
-都很重要。每一項修補都起源於一次正式服事故或一個 profiler 熱點。部分成效：
+我們的伺服器每日尖峰 68–95 人同時在線（254 個名額）。dedicated server 的主迴圈是單執行緒、上限 10 FPS，每一毫秒都很重要。每一項修補都起源於一次正式服事故或一個 profiler 熱點。部分成效：
 
 | 項目 | 修補前 | 修補後 |
 |---|---|---|
@@ -58,8 +55,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ## 修補目錄
 
-狀態欄以 42.21.0 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的
-論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。
+狀態欄以 42.21.0 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。
 
 ### 穩定性：凍結、活鎖與崩潰
 
@@ -139,8 +135,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ### 觀測
 
-不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、
-動物死亡帳本（[2bb](docs/patches.md#2bb)）與聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）。它們在 console
+不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）與聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）。它們在 console
 寫限流的心跳行，上面多數問題都是靠它們找到的。
 
 ### 客戶端修補（發布包）
@@ -184,16 +179,13 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 dedicated server 的 classpath 把 `java/.` 排在 `java/projectzomboid.jar` 前面，同路徑的 loose `.class` 會覆蓋 jar
 裡的類別。patcher 用 ASM 直接讀 jar 裡的原版類別並就地修改，不反編譯、也不重新編譯原始碼。
 
-- **只做堆疊形狀不變的手術**：改道到堆疊效果與指令長度相同的 static helper、方法內常數替換、線性的頭部／尾部
-  呼叫。Stack map frame 原樣保留（`ClassWriter(0)`）；helper 是對遊戲 jar 正常編譯的 Java 類別。
+- **只做堆疊形狀不變的手術**：改道到堆疊效果與指令長度相同的 static helper、方法內常數替換、線性的頭部／尾部呼叫。Stack map frame 原樣保留（`ClassWriter(0)`）；helper 是對遊戲 jar 正常編譯的 Java 類別。
 - **逐方法命中數**：每個手術點都宣告必須命中幾條指令。遊戲更新後手術點移動或改變，建置直接失敗，而不是改錯地方。
-- **原版前提檢查**：`SmokeCheck` 釘住每項修正所依賴的結構事實（例如「這個呼叫沒有檢查 null」）。官方修好 bug 時
-  對應的檢查會轉紅，提醒我們退役該修補。
+- **原版前提檢查**：`SmokeCheck` 釘住每項修正所依賴的結構事實（例如「這個呼叫沒有檢查 null」）。官方修好 bug 時對應的檢查會轉紅，提醒我們退役該修補。
 - **驗證**：`LoadCheck` 以 `-Xverify:all` 載入每個類別，`BytecodeVerify` 跑 ASM 的資料流驗證，行為測試在裸 JVM
   中直接跑遊戲的真實類別。
 - **開關**：每項伺服器修補都讀一個 `-Dmdc.*` 屬性（`0`／`off` 回原版；很多項另有只量測、不改行為的 `observe` 模式）。
-- **失敗即停的安裝**：payload SHA、jar 同源與不明 loose class 巡檢三道閘都要通過。開服時印出版本橫幅
-  （`server patch <commit> … jar=<sha>`）。
+- **失敗即停的安裝**：payload SHA、jar 同源與不明 loose class 巡檢三道閘都要通過。開服時印出版本橫幅（`server patch <commit> … jar=<sha>`）。
 
 ## 伺服器：建置與部署
 
@@ -212,8 +204,7 @@ bash uninstall.sh  # 下次重啟回到原版
 ```
 
 **每次遊戲更新前都要先執行 `uninstall.sh`。** loose class 不在 Steam depot 裡，更新只會換掉 jar，舊的 patched class
-仍會留著。對新 jar 重新建置，並用 `javap` 確認每個手術點的語境（命中數對不代表意思沒變），再重新安裝。建置檢查與
-部署後驗證清單見 [docs/patches.md §3](docs/patches.md#3)。
+仍會留著。對新 jar 重新建置，並用 `javap` 確認每個手術點的語境（命中數對不代表意思沒變），再重新安裝。建置檢查與部署後驗證清單見 [docs/patches.md §3](docs/patches.md#3)。
 
 ## 客戶端修補：安裝
 
@@ -225,10 +216,7 @@ bash uninstall.sh  # 下次重啟回到原版
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
 3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版），再輸入 `Y` 確認。
 
-安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只
-接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能
-復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新
-下載同一個 zip）。
+安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。
 
 | 模組 | 用途 |
 |---|---|
@@ -253,10 +241,8 @@ bash uninstall.sh  # 下次重啟回到原版
 
 ## 選用工具
 
-- **主迴圈健康檢查**（`scripts/pz-health-watch.py`，Linux／LinuxGSM）：透過本機 RCON 的 `players` 確認主迴圈確實
-  回應，連續三次失敗才重啟。測試：`python3 scripts/test_pz_health_watch.py`。
-- **Native 快照**（`scripts/native_snapshot.py`）：每次遊戲更新後對伺服器的 native 函式庫做雜湊與符號差異比對；
-  官方會單獨更新這些函式庫，jar 不變不代表它們沒變。
+- **主迴圈健康檢查**（`scripts/pz-health-watch.py`，Linux／LinuxGSM）：透過本機 RCON 的 `players` 確認主迴圈確實回應，連續三次失敗才重啟。測試：`python3 scripts/test_pz_health_watch.py`。
+- **Native 快照**（`scripts/native_snapshot.py`）：每次遊戲更新後對伺服器的 native 函式庫做雜湊與符號差異比對；官方會單獨更新這些函式庫，jar 不變不代表它們沒變。
 
 ## 專案結構
 
@@ -304,6 +290,5 @@ MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服�
 - repo 本身不含任何遊戲檔案。**客戶端發布包含有 `projectzomboid.jar` 中少數類別的修改版**，由本 repo 的 patcher
   從指定版本的官方原版 jar 產生；只能搭配合法持有的同一版本遊戲使用，安裝器也會拒絕其他版本。若 The Indie
   Stone 要求停止散布，我們會照辦。
-- **修改遊戲檔案風險自負。** 伺服器用 `bash uninstall.sh`、客戶端用 `Uninstall-Patches.bat` 移除修補；安裝前請先
-  備份伺服器。
+- **修改遊戲檔案風險自負。** 伺服器用 `bash uninstall.sh`、客戶端用 `Uninstall-Patches.bat` 移除修補；安裝前請先備份伺服器。
 - **每次 Project Zomboid 更新後都必須重新建置與驗證**，切勿把舊修補套到新版遊戲上。

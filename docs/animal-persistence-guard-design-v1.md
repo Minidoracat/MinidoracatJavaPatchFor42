@@ -97,8 +97,7 @@ kill switch：`0` off／`2` observe（預設）／`1` 階段二保留值（本�
 
 - 掛點：`IsoHutch.load` 唯一雙參 `addAnimalInside(IsoAnimal,false)`；SmokeCheck 精確鎖
   `ALOAD0 → ALOAD7 → ICONST0 → call → POP`，TIS 開始消費回傳或改 sendEvent 即建置紅。
-- helper 先委派原方法；false 時 duplicate precedence 不救，零 Rand 兩階段選槽：
-  先找 animal/dead-body 都空的 clean slot，再用 vanilla `map.get(key)==null` 判準 fallback
+- helper 先委派原方法；false 時 duplicate precedence 不救，零 Rand 兩階段選槽：先找 animal/dead-body 都空的 clean slot，再用 vanilla `map.get(key)==null` 判準 fallback
   （含 key→null）。enforce 補 map/backlink/preferred/hutchPosition/itemID/tryRemove 六步；
   observe 只記不救；真滿 CRITICAL、有聲但不創造第 21 容量。
 - kill switch：`-Dmdc.hutchLoadGuard=0` off／`1` enforce（預設）／`2` observe。
@@ -140,10 +139,8 @@ kill switch：`0` off／`2` observe（預設）／`1` 階段二保留值（本�
 2. W16 部署後跑滿 24–48h：帶回 heartbeat
    `completed/aborted/unpaired/scanSeen/handedOff/s2Missed/queueFailures/sourceGap/
    cellNullAdd/chunkNullAdd/duplicateRemoved/cellNullSave`，與每日 apop 基線對帳後才選 enforce。
-3. W17 驗收：接近滿舍載入出現 force log；CRITICAL 只允許真滿。長期 hen/turkeyhen 日流失
-   應歸零或收斂到可解釋的屠宰／死亡。
-4. 正典已同步 `patches.md` 2ad/2ae 與 AGENTS.md；部署後再整理 TIS 官方回報
-   （unload 丟棄＋hutch load 回傳）及實測數據。
+3. W17 驗收：接近滿舍載入出現 force log；CRITICAL 只允許真滿。長期 hen/turkeyhen 日流失應歸零或收斂到可解釋的屠宰／死亡。
+4. 正典已同步 `patches.md` 2ad/2ae 與 AGENTS.md；部署後再整理 TIS 官方回報（unload 丟棄＋hutch load 回傳）及實測數據。
 
 ## 8. 明確不做（語意邊界）
 

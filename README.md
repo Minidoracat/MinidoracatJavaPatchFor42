@@ -17,6 +17,7 @@ Every patch targets a specific vanilla defect or a measured hot spot and has a w
 (Traditional Chinese, the original and most detailed version).
 
 > **For The Indie Stone developers**
+>
 > Everything below was diagnosed on a production server with thread dumps, JFR, heartbeat counters and
 > packet captures, and every fix was checked instruction by instruction against the shipped
 > `projectzomboid.jar`. Several of these issues were fixed in 42.20.2–42.21.0 (see

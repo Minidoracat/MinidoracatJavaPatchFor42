@@ -1,10 +1,8 @@
 # TIS 回報草稿：IsoCell.addToProcessItems 每次登記都線性掃描（未送出）
 
 - 狀態：草稿，尚未回報。本服緩解為 W45（docs/patches.md 2bh），本機建置通過、尚未部署。
-- 與 `2026-09-26-processitems-null-tis.md` 是同一份清單，該篇 Suggested fix 2 就是本篇修法。兩篇都未送出：
-  可以分開送（一篇講正確性、一篇講效能），也可以把本篇的量測併進該篇。
-- 數據來源：9/27 正式服 W40 心跳（19:05、19:45 兩個 session）與低 FPS thread dump；microbenchmark 在本機 JDK 25 跑。
-  堆疊已拿掉本服兩個直通 wrapper frame（`BulkItemRegistration`、`ChunkLoadGuard`），兩者在這條路徑都原樣轉呼叫原版。
+- 與 `2026-09-26-processitems-null-tis.md` 是同一份清單，該篇 Suggested fix 2 就是本篇修法。兩篇都未送出：可以分開送（一篇講正確性、一篇講效能），也可以把本篇的量測併進該篇。
+- 數據來源：9/27 正式服 W40 心跳（19:05、19:45 兩個 session）與低 FPS thread dump；microbenchmark 在本機 JDK 25 跑。堆疊已拿掉本服兩個直通 wrapper frame（`BulkItemRegistration`、`ChunkLoadGuard`），兩者在這條路徑都原樣轉呼叫原版。
 
 ```text
 [42.20.4][Dedicated Server] IsoCell.addToProcessItems does a linear ArrayList.contains on every registration; with rotten-food removal enabled it costs ~6% of the server main thread

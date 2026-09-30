@@ -1,13 +1,9 @@
 # TIS 官方回報草稿 — MP timed action 永久卡讀條（吃／閱讀／製作／搬移家具）
 
-> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42），或提交給官方支援信箱。
-> 下方英文本文可直接複製貼上。附件建議附上玩家 client console.txt（顯示 client 側全程健康、
-> frame 持續推進、無任何 exception）＋ server console.txt 節錄（`Lua(Vanilla).new(...)` 例外）。
-> 數據來源：42.20.3 反編譯與 `javap` 核實 ＋ 正式服（60+ 人、77 mods）實測。
-> 撰於 2026-08-23。發文前請把文末 placeholder（伺服器名／聯絡方式）補上。
+> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42），或提交給官方支援信箱。下方英文本文可直接複製貼上。附件建議附上玩家 client console.txt（顯示 client 側全程健康、
+> frame 持續推進、無任何 exception）＋ server console.txt 節錄（`Lua(Vanilla).new(...)` 例外）。數據來源：42.20.3 反編譯與 `javap` 核實 ＋ 正式服（60+ 人、77 mods）實測。撰於 2026-08-23。發文前請把文末 placeholder（伺服器名／聯絡方式）補上。
 >
-> **注意**：本檔遵守專案規則——只引用 class／method／field 名稱、Lua 行號與 bytecode 位置事實，
-> 不貼任何反編譯的 Java 原始碼。`media/lua/` 是遊戲隨附的明文檔案，可原文引用。
+> **注意**：本檔遵守專案規則——只引用 class／method／field 名稱、Lua 行號與 bytecode 位置事實，不貼任何反編譯的 Java 原始碼。`media/lua/` 是遊戲隨附的明文檔案，可原文引用。
 
 ---
 

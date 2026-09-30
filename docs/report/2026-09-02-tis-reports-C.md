@@ -16,8 +16,7 @@
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, client, textures, invisible
 
 ### Title
@@ -81,8 +80,7 @@ We validated 1–3 as an experimental client-side patch on affected players of o
 
 ### 建議板塊
 
-**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/（發新主題：https://theindiestone.com/forums/forum/85-bug-reports/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, crash, pathfinding
 
 ### Title
@@ -113,8 +111,7 @@ Crash: yes (SIGSEGV in native code, 7 occurrences 2026-08-22 … 2026-08-31). hs
 
 ### 建議板塊
 
-**PZ Suggestions** — https://theindiestone.com/forums/forum/20-pz-suggestions/（發新主題：https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）
-建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
+**PZ Suggestions** — https://theindiestone.com/forums/forum/20-pz-suggestions/（發新主題：https://theindiestone.com/forums/forum/20-pz-suggestions/?do=add）建議 tags（論壇只能從既有 tag 下拉選、不能自訂；以下每個都已確認存在，逐一在搜尋框打字後點選）：
 multiplayer, dedicated server, performance, save
 
 ### Title

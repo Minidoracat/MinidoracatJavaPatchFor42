@@ -1,12 +1,7 @@
 # TIS 官方回報草稿 — 42.20.3 兩個 server 端小 bug（NPE＋格式字串）
 
-> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。兩個 bug 獨立、都很小，
-> 可以合成一篇發（下方就是合篇格式）或拆兩篇。與 texture 洩漏主報告
-> （tis-bug-report.md）分開發——混在一起會稀釋處理效率。
-> 數據來源：正式服 42.20.3（30–40 人、100+ mods）上線後首個 11 小時 session 的
-> server console/DebugLog 實測；stack trace 全為 vanilla frame（無任何 mod class 在
-> 堆疊上——觸發資料可能來自 mod 物品，但 null-safety 與格式字串是 vanilla 程式碼）。
-> 撰於 2026-08-18。發文前補上文末 placeholder。
+> 用途：貼到 The Indie Stone 官方論壇 Bug Reports 板（B42）。兩個 bug 獨立、都很小，可以合成一篇發（下方就是合篇格式）或拆兩篇。與 texture 洩漏主報告（tis-bug-report.md）分開發——混在一起會稀釋處理效率。數據來源：正式服 42.20.3（30–40 人、100+ mods）上線後首個 11 小時 session 的
+> server console/DebugLog 實測；stack trace 全為 vanilla frame（無任何 mod class 在堆疊上——觸發資料可能來自 mod 物品，但 null-safety 與格式字串是 vanilla 程式碼）。撰於 2026-08-18。發文前補上文末 placeholder。
 
 ---
 
