@@ -6,6 +6,7 @@ import java.util.Collection;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
@@ -2881,6 +2882,7 @@ public final class SmokeCheck {
                 headCallSlotsOk(pOnDeath, "zombie/mdc/AnimalDeathLedger", "onDeath",
                         "(Lzombie/characters/animals/IsoAnimal;)V", 0)
                 && realInsnCount(pOnDeath) == realInsnCount(vOnDeath) + 2);
+        failed += checkAnimalCatchUpAndHookSave(jar, distJava);
         // W40：存在理由＝原版 ProcessItems 對 processItems.get(n) 不做 null 檢查（TIS 補檢查時會紅＝撤刀）。
         String isoCellCls = "zombie/iso/IsoCell";
         String piGuard = "zombie/mdc/ProcessItemsGuard";
@@ -3768,6 +3770,232 @@ public final class SmokeCheck {
             i++;
         }
         return i == want.length;
+    }
+
+    /**
+     * W49 離線補算根治＋W50 掛鉤屠體存檔（docs/patches.md 2bm／2bn）。存在理由各自釘在原版 jar 上（TIS 修好時紅＝重估），
+     * 手術以「原版文字置換後與 dist 逐字相同」鎖同形改道。
+     */
+    static int checkAnimalCatchUpAndHookSave(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String animal = "zombie/characters/animals/IsoAnimal";
+        String data = "zombie/characters/animals/datas/AnimalData";
+        String probe = "zombie/mdc/AnimalAwayProbe";
+        String saveHelper = "zombie/characters/animals/MdcAnimalSave";
+        String cellHelper = "zombie/characters/animals/MdcAnimalCellSave";
+        String cell = "zombie/characters/animals/AnimalCell";
+        String chunk = "zombie/characters/animals/AnimalChunk";
+        String virtual = "zombie/characters/animals/VirtualAnimal";
+        String worker = "zombie/characters/animals/AnimalManagerWorker";
+        String hutch = "zombie/iso/objects/IsoHutch";
+        String buffer = "java/nio/ByteBuffer";
+
+        // A1：原版 fromWorker 在 getZone() 為 null（connectedDZone 不存檔）時補 0。
+        String fromWorker = methodText(methodFromJar(jar, "zombie/characters/animals/AnimalManagerMain", "fromWorker",
+                "(Ljava/util/ArrayList;)V"));
+        int zoneAt = fromWorker.indexOf("INVOKEVIRTUAL " + animal + ".getZone ()Lzombie/iso/areas/DesignationZone;");
+        int nonNullAt = fromWorker.indexOf("IFNONNULL", zoneAt);
+        int zeroAt = fromWorker.indexOf("ICONST_0", nonNullAt);
+        int lastSeenAt = fromWorker.indexOf("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen", zeroAt);
+        failed += check("W49 vanilla fromWorker：getZone() 為 null 時補 0，否則以 hourLastSeen 推算",
+                zoneAt >= 0 && nonNullAt > zoneAt && zeroAt > nonNullAt && lastSeenAt > zeroAt);
+
+        // A3：原版存檔的時鐘欄位寫存檔當下，不讀動物時鐘。
+        MethodNode vSave = methodFromJar(jar, animal, "save", "(Ljava/nio/ByteBuffer;ZZ)V");
+        MethodNode pSave = method(distJava, animal, "save", "(Ljava/nio/ByteBuffer;ZZ)V");
+        failed += check("W49 vanilla IsoAnimal.save 時鐘欄位寫存檔當下（getTimeInMillis 恰 1、不讀 timeSinceLastUpdate）",
+                countExactCalls(vSave, Opcodes.INVOKEVIRTUAL, "zombie/util/PZCalendar", "getTimeInMillis", "()J") == 1
+                && countFieldTouches(vSave, animal, "timeSinceLastUpdate") == 0);
+        failed += check("W49 IsoAnimal.save 唯一 getTimeInMillis 同形改道 clockToWrite，其餘指令與 frames 保留",
+                methodText(vSave).replace("INVOKEVIRTUAL zombie/util/PZCalendar.getTimeInMillis ()J",
+                        "INVOKESTATIC " + saveHelper + ".clockToWrite (Lzombie/util/PZCalendar;)J")
+                        .equals(methodText(pSave)));
+
+        // A4：原版補算一次性把 hoursSurvived 設成 新age×24、只在日曆午夜 growUp；載入中的成長公式是 helper 的複本。
+        MethodNode vAway = methodFromJar(jar, animal, "updateStatsAway", "(I)V");
+        MethodNode pAway = method(distJava, animal, "updateStatsAway", "(I)V");
+        AbstractInsnNode setHours = firstCall(vAway, Opcodes.INVOKEVIRTUAL, animal, "setHoursSurvived", "(D)V");
+        AbstractInsnNode i2d = prevRealOrNull(setHours);
+        AbstractInsnNode imul = prevRealOrNull(i2d);
+        AbstractInsnNode by24 = prevRealOrNull(imul);
+        AbstractInsnNode growUp = firstCall(vAway, Opcodes.INVOKEVIRTUAL, data, "growUp", "(Z)V");
+        AbstractInsnNode midnight = prevRealOrNull(prevRealOrNull(prevRealOrNull(prevRealOrNull(growUp))));
+        failed += check("W49 vanilla updateStatsAway：一次性 setHoursSurvived(新age×24)、growUp 在 realHour==0 分支內、四個呼叫各恰 1",
+                i2d != null && i2d.getOpcode() == Opcodes.I2D && imul != null && imul.getOpcode() == Opcodes.IMUL
+                && by24 instanceof IntInsnNode bi && bi.operand == 24
+                && midnight != null && midnight.getOpcode() == Opcodes.IFNE
+                && countExactCalls(vAway, Opcodes.INVOKEVIRTUAL, animal, "setHoursSurvived", "(D)V") == 1
+                && countExactCalls(vAway, Opcodes.INVOKEVIRTUAL, data, "setAge", "(I)V") == 1
+                && countExactCalls(vAway, Opcodes.INVOKEVIRTUAL, data, "hourGrow", "(Z)V") == 1
+                && countExactCalls(vAway, Opcodes.INVOKEVIRTUAL, data, "growUp", "(Z)V") == 1);
+        String awayHead = "    ALOAD 0\n    ILOAD 1\n    INVOKESTATIC " + probe + ".entryHours (L" + animal + ";I)I\n"
+                + "    ISTORE 1\n";
+        String pAwayText = methodText(pAway);
+        failed += check("W49 updateStatsAway 頭部 this＋hours→entryHours→istore 1（直接呼叫也受上限約束），"
+                        + "四處同形改道累積語意 helper，其餘指令與 frames 保留",
+                pAwayText.startsWith(awayHead)
+                && realInsnCount(pAway) == realInsnCount(vAway) + 4
+                && methodText(vAway)
+                        .replace("INVOKEVIRTUAL " + animal + ".setHoursSurvived (D)V",
+                                "INVOKESTATIC " + probe + ".accrualSetHoursSurvived (L" + animal + ";D)V")
+                        .replace("INVOKEVIRTUAL " + data + ".setAge (I)V",
+                                "INVOKESTATIC " + probe + ".accrualSetAge (L" + data + ";I)V")
+                        .replace("INVOKEVIRTUAL " + data + ".hourGrow (Z)V",
+                                "INVOKESTATIC " + probe + ".accrualHourGrow (L" + data + ";Z)V")
+                        .replace("INVOKEVIRTUAL " + data + ".growUp (Z)V",
+                                "INVOKESTATIC " + probe + ".accrualGrowUp (L" + data + ";Z)V")
+                        .equals(pAwayText.substring(Math.min(awayHead.length(), pAwayText.length()))));
+        failed += check("W49 vanilla AnimalData.update 載入中成長：age < daysSurvived 時 age＝daysSurvived＋(mod−1)、"
+                        + "hoursSurvived＝age×24（accrualHourGrow 照抄這段）",
+                containsRun(callNames(methodFromJar(jar, data, "update", "()V")),
+                        data + ".getAge", data + ".getDaysSurvived", data + ".getAgeGrowModifier",
+                        data + ".getDaysSurvived", "java/lang/Float.valueOf", "java/lang/Float.intValue",
+                        data + ".setAge", data + ".getAge", animal + ".setHoursSurvived"));
+
+        // 雞舍內每小時推進 hoursSurvived 但不刷新動物時鐘。
+        MethodNode vInside = methodFromJar(jar, hutch, "updateAnimalInside", "(L" + animal + ";Z)V");
+        MethodNode pInside = method(distJava, hutch, "updateAnimalInside", "(L" + animal + ";Z)V");
+        failed += check("W49 vanilla 雞舍內 setHoursSurvived 恰 2、不碰動物時鐘",
+                countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, animal, "setHoursSurvived", "(D)V") == 2
+                && countFieldTouches(vInside, animal, "timeSinceLastUpdate") == 0
+                && countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, animal, "updateLastTimeSinceUpdate", "()V") == 0);
+        failed += check("W49 雞舍兩處 setHoursSurvived 同形改道 hutchHoursSurvived，其餘指令與 frames 保留",
+                methodText(vInside).replace("INVOKEVIRTUAL " + animal + ".setHoursSurvived (D)V",
+                        "INVOKESTATIC " + probe + ".hutchHoursSurvived (L" + animal + ";D)V").equals(methodText(pInside)));
+
+        // W50 存在理由：原版只在 hook 參照有效時寫 onHook=1＋座標；尾端恰為 petTimer／wild／onlineID；
+        // load 讀到 onHook 後接著讀三個 int 到 attachBackToHook。
+        List<String> saveCalls = callNames(vSave);
+        int n = saveCalls.size();
+        failed += check("W50 vanilla IsoAnimal.save 以 hook 參照決定 onHook，尾端恰為 putFloat(petTimer)→put(wild)→putShort(onlineID)",
+                countFieldTouches(vSave, animal, "hook") >= 1
+                && countExactCalls(vSave, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoButcherHook", "getSquare",
+                        "()Lzombie/iso/IsoGridSquare;") >= 1
+                && n >= 5 && saveCalls.subList(n - 5, n).equals(List.of(buffer + ".putFloat", animal + ".isWild",
+                        buffer + ".put", animal + ".getOnlineID", buffer + ".putShort"))
+                && countExactFields(vSave, Opcodes.GETFIELD, animal, "petTimer", "F") == 1
+                && lastReal(vSave).getOpcode() == Opcodes.RETURN);
+        MethodNode vLoad = methodFromJar(jar, animal, "load", "(Ljava/nio/ByteBuffer;IZ)V");
+        List<String> loadEvents = events(vLoad);
+        failed += check("W50 vanilla IsoAnimal.load：setOnHook 後 onHook 為真即讀三個 int 到 attachBackToHookX／Y／Z",
+                containsRun(loadEvents, "C:" + animal + ".setOnHook", "C:" + animal + ".isOnHook",
+                        "C:" + buffer + ".getInt", "F:" + animal + ".attachBackToHookX",
+                        "C:" + buffer + ".getInt", "F:" + animal + ".attachBackToHookY",
+                        "C:" + buffer + ".getInt", "F:" + animal + ".attachBackToHookZ"));
+
+        // W50 手術：apop 只經 VirtualAnimal.save 寫動物，其唯一 IsoAnimal.save 改道。
+        MethodNode vVirtual = methodFromJar(jar, virtual, "save", "(Ljava/nio/ByteBuffer;)V");
+        MethodNode pVirtual = method(distJava, virtual, "save", "(Ljava/nio/ByteBuffer;)V");
+        MethodNode vChunk1 = methodFromJar(jar, chunk, "save", "(Ljava/nio/ByteBuffer;)V");
+        MethodNode vChunk2 = methodFromJar(jar, chunk, "save", "(Ljava/nio/ByteBuffer;Ljava/util/ArrayList;)V");
+        failed += check("W50 apop 只經 VirtualAnimal.save 寫動物（全 jar 呼叫者恰為 AnimalChunk 的 3 處、AnimalChunk 零 IsoAnimal.save）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, virtual, "save", "(Ljava/nio/ByteBuffer;)V") == 3
+                && countExactCalls(vChunk1, Opcodes.INVOKEVIRTUAL, virtual, "save", "(Ljava/nio/ByteBuffer;)V") == 1
+                && countExactCalls(vChunk2, Opcodes.INVOKEVIRTUAL, virtual, "save", "(Ljava/nio/ByteBuffer;)V") == 2
+                && countCalls(vChunk1, animal, "save") + countCalls(vChunk2, animal, "save") == 0);
+        failed += check("W50 VirtualAnimal.save 唯一 IsoAnimal.save 同形改道 MdcAnimalSave.save，其餘指令與 frames 保留",
+                countExactCalls(vVirtual, Opcodes.INVOKEVIRTUAL, animal, "save", "(Ljava/nio/ByteBuffer;Z)V") == 1
+                && methodText(vVirtual).replace("INVOKEVIRTUAL " + animal + ".save (Ljava/nio/ByteBuffer;Z)V",
+                        "INVOKESTATIC " + saveHelper + ".save (L" + animal + ";Ljava/nio/ByteBuffer;Z)V")
+                        .equals(methodText(pVirtual)));
+        MethodNode vReattach = methodFromJar(jar, animal, "reattachBackToHook", "()V");
+        MethodNode pReattach = method(distJava, animal, "reattachBackToHook", "()V");
+        failed += check("W50 vanilla reattachBackToHook 掛回成功才清座標（afterReattach 以座標非零判斷未掛回）",
+                countExactCalls(vReattach, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoButcherHook", "reattachAnimal",
+                        "(L" + animal + ";)V") == 1
+                && countExactFields(vReattach, Opcodes.PUTFIELD, animal, "attachBackToHookX", "I") == 1
+                && countExactFields(vReattach, Opcodes.PUTFIELD, animal, "attachBackToHookY", "I") == 1
+                && countExactFields(vReattach, Opcodes.PUTFIELD, animal, "attachBackToHookZ", "I") == 1
+                && firstFieldIndex(vReattach, Opcodes.PUTFIELD, animal, "attachBackToHookX", "I")
+                        > firstCallIndex(vReattach, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoButcherHook", "reattachAnimal",
+                                "(L" + animal + ";)V"));
+        failed += check("W50 reattachBackToHook 每個 RETURN（5）前 afterReattach、真指令恰 +10",
+                countOpcode(vReattach, Opcodes.RETURN) == 5
+                && tailCallOk(pReattach, saveHelper, "afterReattach", "(L" + animal + ";)V")
+                && realInsnCount(pReattach) == realInsnCount(vReattach) + 10);
+
+        // W37 重試不重複寫出：原版 saveRealAnimals 只追加快照，AnimalCell.save(ByteBuffer) 寫完全部 chunk 後才清。
+        MethodNode vReal = methodFromJar(jar, worker, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        MethodNode pReal = method(distJava, worker, "saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        MethodNode vCellBuf = methodFromJar(jar, cell, "save", "(Ljava/nio/ByteBuffer;)V");
+        failed += check("W50 存在理由：saveRealAnimals 只追加（零 clear）、AnimalCell.save 的清空在最後一次 chunk 寫出之後",
+                countExactCalls(vReal, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "clear", "()V") == 0
+                && countExactCalls(vReal, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z") >= 1
+                && lastFieldIndex(vCellBuf, Opcodes.PUTFIELD, cell, "saveRealAnimalHack", "Ljava/util/ArrayList;")
+                        > lastCallIndex(vCellBuf, Opcodes.INVOKEVIRTUAL, chunk, "save",
+                                "(Ljava/nio/ByteBuffer;Ljava/util/ArrayList;)V"));
+        failed += check("W50 saveRealAnimals 頭部 aload_0→clearStaleRealSnapshots、真指令恰 +2",
+                headCallSlotsOk(pReal, cellHelper, "clearStaleRealSnapshots", "(L" + worker + ";)V", 0)
+                && realInsnCount(pReal) == realInsnCount(vReal) + 2);
+        return failed;
+    }
+
+    /** 方法內依序的呼叫（owner.name）。 */
+    static List<String> callNames(MethodNode m) {
+        List<String> out = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi) {
+                out.add(mi.owner + "." + mi.name);
+            }
+        }
+        return out;
+    }
+
+    /** 方法內依序的呼叫（C:owner.name）與欄位寫入（F:owner.name）。 */
+    static List<String> events(MethodNode m) {
+        List<String> out = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi) {
+                out.add("C:" + mi.owner + "." + mi.name);
+            } else if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD) {
+                out.add("F:" + fi.owner + "." + fi.name);
+            }
+        }
+        return out;
+    }
+
+    /** list 內是否有一段連續元素恰為 run。 */
+    static boolean containsRun(List<String> list, String... run) {
+        return java.util.Collections.indexOfSubList(list, List.of(run)) >= 0;
+    }
+
+    static AbstractInsnNode firstCall(MethodNode m, int opcode, String owner, String name, String desc) {
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.getOpcode() == opcode
+                    && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)) {
+                return in;
+            }
+        }
+        return null;
+    }
+
+    /** 前一條真指令；輸入為 null 或已到開頭時回 null（順序斷言自然失敗，不會拋例外）。 */
+    static AbstractInsnNode prevRealOrNull(AbstractInsnNode in) {
+        return in == null ? null : prevReal(in);
+    }
+
+    static AbstractInsnNode lastReal(MethodNode m) {
+        AbstractInsnNode p = m.instructions.getLast();
+        while (p != null && p.getOpcode() < 0) {
+            p = p.getPrevious();
+        }
+        return p;
+    }
+
+    /** 真指令序中最後一個符合的欄位存取位置（1 起算）；不存在＝MIN_VALUE。 */
+    static int lastFieldIndex(MethodNode method, int opcode, String owner, String name, String desc) {
+        int index = 0;
+        int last = Integer.MIN_VALUE;
+        for (AbstractInsnNode in : method.instructions) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            index++;
+            if (isField(in, opcode, owner, name, desc)) {
+                last = index;
+            }
+        }
+        return last;
     }
 
     /** W3-3 去虛擬化前提：BaseAnimalBehavior 全後代（全 jar walk）零 spotted 覆寫——改道後 static dispatch 等價。 */

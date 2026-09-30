@@ -2663,6 +2663,135 @@ low-memory variants; module version `v3.1`.
 
 **Exit**: when an official build fixes it the SmokeCheck precondition turns red; remove the patch from `PatchConfig.client()` and delete helper and test.
 
+<a id="2bm"></a>
+## 2bm. Animal offline catch-up, fixed at the root (W49, server, default on)
+
+**Symptom (player report, 2026-09-30)**: a pregnant cow's pregnancy barely advanced, and the whole farm grew slowly. NAS snapshots show the same herd
+progressing at only 50–60% of game time: cow pregnancy 47% before W42 and 58% after, age 23% / 45%. The shortfall predates W42. Full evaluation and
+evidence (Chinese): [animal-catchup-hook-save-design-v0.md](animal-catchup-hook-save-design-v0.md).
+
+**Root cause** (four vanilla defects, confirmed against the production bytecode):
+- Restart erasure: `IsoAnimal.save` writes the save time into the clock field instead of the animal's `timeSinceLastUpdate`, and
+  `DesignationZone.streamed` starts as true and is not saved, so the first check after boot overwrites `hourLastSeen` with the boot time. Offline time
+  between the player leaving and the next restart is never caught up.
+- First entry catches up 0 hours: `fromWorker` derives hours from `getZone()`, and `connectedDZone` is not saved; every animal entering the world for the
+  first time after boot, and every free-range animal outside a pen, catches up 0 hours. When a pen is only partly streamed, it catches up only to
+  `hourLastSeen`.
+- Remainder reset: `updateStatsAway` adds `floor(hours/24) × mod` to age in one step and sets `hoursSurvived` to `age × 24`, dropping up to 23
+  accumulated hours on every call.
+- Two `growUp` triggers: catch-up grows at calendar midnight, loaded animals every 24 accumulated hours, so simply keeping the remainder would double count.
+
+**Patch** (W32's `AnimalAwayProbe` plus a new helper, `MdcAnimalSave`):
+- Own-clock catch-up: the chunk path (`fromWorker`) catches up the animal's own offline hours and ignores the zone. The own clock is written by vanilla
+  `unloaded()` on unload, refreshed every hour while loaded or in a hutch (W42's `liveHourGrow`, and this patch's hutch redirect), and advanced hour by hour
+  by the catch-up loop, so no period is counted twice. The zone path (`doMeta`) keeps W42's `min(zone, own)`, which gives 0 for animals that stayed loaded.
+  Wild animals and animals without a clock (newborns) keep vanilla hours.
+- Unloaded animals save their own clock: the only `IsoAnimal.save` in `VirtualAnimal.save` is redirected to `MdcAnimalSave.save`, which records the animal
+  being written in a `try/finally`; the only `getTimeInMillis` in `IsoAnimal.save` is redirected to `clockToWrite`, which returns the animal's clock only
+  inside that context, only when the animal is not in `currentCell.getObjectList()`, and only for a valid clock. The context is consumed by the first clock
+  write. `saveRealAnimals` collects in-world animals by exactly that objectList membership, on the same thread and right before serialization in
+  `AnimalPopulationManager.save()`, so in-world animals (including ones just released from a hutch and not yet placed) still save the current time.
+  Network packets, inventory items and hutches do not go through this context.
+- Long-absence cap: one absence catches up at most `-Dmdc.animalCatchUpLimit` (default 168) game hours. Above that the clock is first moved to
+  "now − limit" and the earlier part is dropped; the loop ends exactly at now, so later entry points see 0. Direct callers that bypass the three Java
+  redirects are capped too: `entryHours` is inserted at the head of `updateStatsAway` (`aload_0; iload_1; invokestatic; istore_1`, linear, the slot
+  stays an int). The livestock trailer's Lua `Vehicles.Update.TrailerAnimalFood` (offline hours derived from the vehicle part's last update) and admin
+  commands keep their own hour source and only get the cap and the accounting (W32 counters, W39 ledger); a trailer animal may have had its clock
+  refreshed by `liveHourGrow` just before, so the own clock cannot be used there. The cap holds for catch-ups that complete normally: vanilla adds age
+  before its hourly loop, so if the loop throws halfway, a later catch-up of the rest adds age again. That is existing vanilla behaviour; the patch only
+  counts it (`delegateFailures`). Animals without a clock (newborns, migration groups) keep vanilla hours with the cap applied, which is not the same
+  guarantee as a reliable single absence.
+- Accrued hours: the `setHoursSurvived`, `setAge`, `hourGrow` and `growUp` calls in `updateStatsAway` are 1:1 redirected. The one-step age and
+  `hoursSurvived` reset is skipped; every hour accrues with the loaded formula from `AnimalData.update` (`hoursSurvived + 1`; after 24 accrued hours age
+  becomes `daysSurvived + (mod − 1)` and `growUp(true)` runs); the midnight `growUp` is skipped. A 0-hour catch-up (`doMeta` on an animal that stayed
+  loaded) changes nothing.
+- Hooked carcasses are not caught up: only `fromMeta` is cleared. Vanilla catches carcasses up like live animals, changing their size and weight.
+- Hutch clock: the two `setHoursSurvived` calls in `IsoHutch.updateAnimalInside` are redirected so the clock is refreshed every hour inside a hutch; a
+  released animal is not caught up again by `doMeta` for time it already lived in the hutch.
+
+**Gameplay**: animals now really grow while their owners are away; pregnancies can come to term and animals can starve if troughs run out. That is how
+vanilla offline catch-up is designed; restarts had been hiding it on our server. 168 game hours is about 7 real hours on our server.
+
+**Kill switches**: `-Dmdc.animalOwnClock=0` (own-clock catch-up and saving; also off when W42 is off), `-Dmdc.animalCatchUpLimit=N` (≤0 = no cap),
+`-Dmdc.animalCatchUpAccrual=0`, `-Dmdc.animalCarcassGuard=0`; the hutch refresh follows `-Dmdc.animalCatchUpCap`.
+
+**First restart after deployment**: existing apop files still hold the vanilla save time, so the first round catches up only from that point; an animal
+carries its own clock once it has been unloaded and saved again.
+
+**Observability**: the W32 beat adds `hutchRefresh ownCatchUps ownGainHours limited limitedHours directCalls directHours directLimited
+directLimitedHours carcassSkips accrualGrowths delegateFailures maxRunMs maxRunCalls ownClock limit accrual carcassGuard`. `ownGainHours` is how many
+more hours the own clock caught up than W42 would have; `direct*` counts direct callers (trailers, admins), with counts and hours but no timing;
+`maxRunMs` is the longest accumulated time of adjacent catch-ups through the Java redirects (under 50 ms from the end of one to the start of the next,
+usually one frame's batch), an approximation rather than an exact frame boundary. The observe path hands a single-use ticket to the animal it is
+catching up, so a mod callback that directly catches up another animal during that call is still capped. The `[AnimalSave]` beat counts
+`ownClock saveNow` (records saved with the animal's clock vs the current time).
+
+**Expected result and acceptance**: for the afternoon of 2026-09-30 (208.8 game hours, two unloaded stretches totalling 147 hours, under the cap) the
+pregnancy should advance about 8.7 days instead of the measured +4. In production: NAS snapshots of the `<cell-K>` farm approach 100% progression (minus
+absences above the cap), `maxRunMs` shows no main-loop stall from the larger catch-ups, and W39's post-catch-up deaths do not rise abnormally.
+
+**Guards**: SmokeCheck pins four vanilla preconditions (`fromWorker` catches up 0 when `getZone()` is null, `IsoAnimal.save` writes the save time into the
+clock field, `updateStatsAway` resets `hoursSurvived` to `age × 24` in one step and calls `growUp` only in the midnight branch, the hutch never refreshes
+the clock) plus the loaded growth formula in `AnimalData.update` that the helper copies. The `entryHours` insertion at the head of `updateStatsAway` is
+locked in order with exactly +4 real instructions, and the rest must match the vanilla text with only the four redirect sets replaced. The patcher gains
+one primitive, `HeadIntFilter` (an int-parameter filter at the head of an instance method). `AnimalAwayProbeTest` runs five configurations (shipped,
+observation off, W42 off, own clock off, carcass guard off; it also checks the adjacent-run accumulation and the delegate failure count),
+`AnimalCatchUpAccrualTest` calls the patched `updateStatsAway` directly (accrual on and off, including a trailer-style direct call of 200 hours capped at
+168), and `MdcAnimalSaveTest` covers every clock decision.
+
+<a id="2bn"></a>
+## 2bn. Hooked carcasses keep their hook state in saves, and W37 retries no longer duplicate animals (W50, server, default on)
+
+**Symptom (2026-09-30)**: an unknown live pig appeared on a farm. It was a boar carcass from a butcher hook: the noon save still had it on the hook, an
+afternoon save turned it into a live animal, and after a restart it walked around. A scan of all 2,973 apop files found 3 animals with carcass modData,
+all already alive again, and not a single carcass still correctly on a hook.
+
+**Root cause**: `IsoAnimal.save` writes onHook=1 plus the hook coordinates only when `isOnHook() && hook != null && hook.getSquare() != null`. The `hook`
+reference is not saved; a carcass loaded from disk gets it back only in `reattachBackToHook()` during its first `update()` in the world. If its cell is
+saved before that (another animal in the cell unloads, or the carcass is still virtual in the worker), onHook=0 is written and the carcass loads as a live
+animal. The hook itself was intact: its record is bit-identical in all three saves.
+
+**Patch**:
+- The only `IsoAnimal.save` in `VirtualAnimal.save` is redirected to `MdcAnimalSave.save` (shared with W49). After vanilla writes the record, if the
+  animal is still on a hook, has no valid hook reference and carries the `attachBackToHook` coordinates restored at load, the record's tail
+  `[0][petTimer][wild][onlineID]` is rewritten in the buffer to `[1][x][y][z][petTimer][wild][onlineID]`, the same format vanilla writes for a hooked
+  carcass. Only apop saves are affected; network packets stay vanilla (the snapshot after reattaching already carries 1).
+- Every check (flag, the three tail fields matching the carcass's current values, remaining capacity) runs before anything is modified. On any mismatch
+  it throws `IOException`, W37 keeps the previous file and retries later; a record known to be wrong is never committed. `SliceY.SliceBuffer` is a fixed
+  10 MiB and the affected cell is 124 KB, so running out of room is theoretical.
+- Depends on W37: with W37 off, vanilla opens (truncates) the file before serializing, so a thrown exception would leave a truncated file; the patch turns
+  itself off in that case.
+- Without coordinates (both axes 0, the same test vanilla `reattachBackToHook` uses) it saves as vanilla and counts `noCoords`. That cannot happen in
+  the normal flow: `load` restores the coordinates whenever it reads 1, and only a successful reattach clears them. Coordinates with only one axis at 0
+  are valid and are kept.
+- A hook that really is gone (hook square loaded, no `IsoButcherHook` on it): `afterReattach`, before every RETURN of `reattachBackToHook`, only observes
+  and logs one `hook missing` line per carcass. Vanilla would save such a carcass as a live animal; the patch keeps it hanging, and whether to turn it into
+  a corpse waits for data.
+- W37 retries no longer write in-world animals twice: `saveRealAnimals` wraps in-world animals in a temporary list that vanilla clears only after the whole
+  cell has been written. After a failure the list stays, the next round appends the same animals again, and each is written twice (a latent W37 issue
+  since 2026-09-26). The head of `AnimalManagerWorker.saveRealAnimals` now clears lists left from the previous round (necessarily stale: this round
+  collects them again); nothing is cleared at the moment of failure, so a retry before the next round still includes the in-world animals. W37 also marks
+  `dataChanged` on `IOException` now.
+
+**Kill switch**: `-Dmdc.animalHookSave=0`; the W37 retry fix follows `-Dmdc.animalCellSave`.
+
+**Observability**: the `[AnimalSave]` beat counts `kept noCoords ioFail hookMissing`; the first time a carcass is kept, one `kept hook state` line is
+logged. W37 logs `cleared stale real-animal snapshots` when it clears a leftover list.
+
+**Verification**:
+- Replay of the real incident file: the carcass record in the noon snapshot, rewritten to the onHook=0 that vanilla saved, comes out of the tail rewrite
+  bit-identical to the original file (120,985 bytes).
+- `MdcAnimalSaveTest`, four configurations: capacity and field boundaries of the tail rewrite, non-zero start and two consecutive records; no change for a
+  valid hook reference, a non-carcass or missing coordinates; `IOException` handed to W37; vanilla behaviour with the patch or W37 off.
+- `MdcAnimalCellSaveTest`: `IOException` keeps the previous file; fail once → clear leftovers → collect again → every animal written once; without
+  clearing, written twice (the vanilla behaviour, as a control).
+- SmokeCheck: vanilla decides onHook from the hook reference and ends the record with `putFloat(petTimer)` → `put(wild)` → `putShort(onlineID)`;
+  `load` reads three coordinates after onHook; apop writes animals only through `VirtualAnimal.save`; `reattachBackToHook` clears the coordinates only
+  after a successful reattach; `saveRealAnimals` only appends.
+- In production: the daily scan of apop `deathTime` finds no newly revived carcasses; `kept > 0` means a save vanilla would have gotten wrong was caught.
+
+**The 3 carcasses already revived**: left as they are; players can slaughter them like any other animal.
+
 ---
 
 <a id="3"></a>

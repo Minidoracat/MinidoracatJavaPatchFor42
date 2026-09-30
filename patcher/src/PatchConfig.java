@@ -1044,6 +1044,54 @@ public final class PatchConfig {
                 "(Lzombie/characters/animals/IsoAnimal;)V");
         onDeath.expectedHits = 1;
 
+        // W49：動物離線補算根治（docs/patches.md 2bm）。chunk 路徑以動物自身時鐘補算＋長離線上限、
+        // 掛鉤屠體不補算（皆在 AnimalAwayProbe）；以下幾處手術：
+        // (1) updateStatsAway 內四個呼叫改道成累積小時語意：原版一次性 setHoursSurvived(新 age×24)／
+        //     setAge 略過，逐小時 hourGrow 時照載入中邏輯累積、滿 24 小時才 growUp，午夜的 growUp 略過。
+        //     頭部另以 entryHours 過濾時數：不經三個 Java 改道的直接呼叫（牲畜拖車的 Lua
+        //     Vehicles.Update.TrailerAnimalFood、管理員指令）同樣受長離線上限約束並記帳。
+        // (2) IsoAnimal.save 內唯一 getTimeInMillis（時鐘欄位）改道：apop 寫出已卸載動物時寫自身時鐘。
+        // (3) IsoHutch.updateAnimalInside 兩個 setHoursSurvived 改道：雞舍內每小時一併刷新時鐘。
+        String accrualDataCls = "zombie/characters/animals/datas/AnimalData";
+        Patcher.MethodOps statsAway = animal.method("updateStatsAway", "(I)V");
+        statsAway.headIntFilter = new Patcher.HeadIntFilter(1, awayProbe, "entryHours",
+                "(Lzombie/characters/animals/IsoAnimal;I)I");
+        statsAway.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "setHoursSurvived", "(D)V", awayProbe, "accrualSetHoursSurvived"));
+        statsAway.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                accrualDataCls, "setAge", "(I)V", awayProbe, "accrualSetAge"));
+        statsAway.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                accrualDataCls, "hourGrow", "(Z)V", awayProbe, "accrualHourGrow"));
+        statsAway.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                accrualDataCls, "growUp", "(Z)V", awayProbe, "accrualGrowUp"));
+        statsAway.expectedHits = 4 + 1;   // 四個改道＋頭部時數過濾
+        String animalSave = "zombie/characters/animals/MdcAnimalSave";
+        Patcher.MethodOps animalSaveOps = animal.method("save", "(Ljava/nio/ByteBuffer;ZZ)V");
+        animalSaveOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/util/PZCalendar", "getTimeInMillis", "()J", animalSave, "clockToWrite"));
+        animalSaveOps.expectedHits = 1;
+        Patcher.MethodOps hutchInside = hutch.method("updateAnimalInside", "(Lzombie/characters/animals/IsoAnimal;Z)V");
+        hutchInside.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "setHoursSurvived", "(D)V", awayProbe, "hutchHoursSurvived"));
+        hutchInside.expectedHits = 2;   // 每小時 +1、成長時重設
+
+        // W50：掛鉤屠體存檔保住掛鉤狀態（docs/patches.md 2bn）。VirtualAnimal.save 內唯一 IsoAnimal.save
+        // 改道 MdcAnimalSave.save（也是 W49 自身時鐘的上下文）；reattachBackToHook 每個 RETURN 前觀測
+        // 鉤子確實不存在的屠體；saveRealAnimals 頭部清掉失敗留下的世界中動物快照（W37 重試不重複寫出）。
+        Patcher.ClassPatch virtualAnimal = new Patcher.ClassPatch("zombie/characters/animals/VirtualAnimal");
+        Patcher.MethodOps virtualSave = virtualAnimal.method("save", "(Ljava/nio/ByteBuffer;)V");
+        virtualSave.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "save", "(Ljava/nio/ByteBuffer;Z)V", animalSave, "save"));
+        virtualSave.expectedHits = 1;
+        patches.add(virtualAnimal);
+        Patcher.MethodOps reattach = animal.method("reattachBackToHook", "()V");
+        reattach.tailCall = new Patcher.TailCall(animalSave, "afterReattach", "(Lzombie/characters/animals/IsoAnimal;)V");
+        reattach.expectedHits = 5;   // RETURN 數（javap）
+        Patcher.MethodOps realSnapshots = animalWorker.method("saveRealAnimals", "(Ljava/util/ArrayList;)V");
+        realSnapshots.headCall = new Patcher.HeadCall(cellSave, "clearStaleRealSnapshots",
+                "(Lzombie/characters/animals/AnimalManagerWorker;)V");
+        realSnapshots.expectedHits = 1;
+
         // W40／W41：IsoCell.ProcessItems null 容錯＋跨執行緒寫入觀測與補登記（docs/patches.md 2bc／2bd）。
         // processItems 混進 null 時原版每次 ProcessItems 都 NPE、清單不再縮減，chunk 載入的線性 contains
         // 凍結 5–16 秒。ProcessItems 頭部 beginPass（補登記 W41 佇列、開始計時）、唯一 RETURN 前 endPass。

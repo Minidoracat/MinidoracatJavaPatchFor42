@@ -126,6 +126,14 @@ public final class Patcher {
     }
 
     /**
+     * instance 方法頭部的 int 參數過濾（W49 首用）：visitCode 後插
+     * {@code aload_0; iload <slot>; invokestatic helper(L<owner>;I)I; istore <slot>}——以 helper 回傳值取代該參數。
+     * 純線性、無新 branch target；slot 型別仍是 int，原 frames 照舊有效；堆疊峰值 2。只支援 instance 方法
+     * （slot 0＝this）且 slot 必須是 int 參數（頭部尚無任何 store）。
+     */
+    record HeadIntFilter(int slot, String helperOwner, String helperName, String helperDesc) {}
+
+    /**
      * void instance 方法尾部線性呼叫：每個 RETURN 前插
      * {@code aload_0; invokestatic helperOwner.helperName helperDesc}。與 HeadCall 同形，
      * 純線性、無新 branch/frame（RETURN 前的 frame 狀態不變，插入的兩條指令不引入 branch
@@ -140,6 +148,7 @@ public final class Patcher {
         final List<ConstChange> consts = new ArrayList<>();
         HeadGuard headGuard = null;
         HeadCall headCall = null;
+        HeadIntFilter headIntFilter = null;
         TailCall tailCall = null;
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
@@ -218,12 +227,20 @@ public final class Patcher {
                         hc.helperDesc(), false);
                 ops.actualHits++;
             }
+            HeadIntFilter hf = ops.headIntFilter;
+            if (hf != null) {
+                super.visitVarInsn(Opcodes.ALOAD, 0);
+                super.visitVarInsn(Opcodes.ILOAD, hf.slot());
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, hf.helperOwner(), hf.helperName(), hf.helperDesc(), false);
+                super.visitVarInsn(Opcodes.ISTORE, hf.slot());
+                ops.actualHits++;
+            }
         }
 
         @Override
         public void visitMaxs(int maxStack, int maxLocals) {
-            // 頭部插入峰值＝載入的 slot 數（單 slot 版=1）；VehicleChunkIndexRepair 的
-            // buffer＋vehicle＋float＋int 峰值為 4
+            // 頭部插入峰值＝載入的 slot 數（單 slot 版=1）；HeadIntFilter 的 this＋int 峰值為 2；
+            // VehicleChunkIndexRepair 的 buffer＋vehicle＋float＋int 峰值為 4
             int minimum;
             if (ops.vehicleChunkIndexRepair != null) {
                 minimum = 4;
@@ -233,7 +250,7 @@ public final class Patcher {
             } else {
                 minimum = ops.headGuard != null || ops.tailCall != null ? 1 : 0;
             }
-            super.visitMaxs(Math.max(maxStack, minimum), maxLocals);
+            super.visitMaxs(Math.max(maxStack, ops.headIntFilter != null ? Math.max(minimum, 2) : minimum), maxLocals);
         }
         @Override
         public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {

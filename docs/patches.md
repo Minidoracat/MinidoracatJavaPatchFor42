@@ -3353,6 +3353,65 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 **退場**：官方版本修掉後 SmokeCheck 的 vanilla 前提會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper
 與測試。
 
+<a id="2bm"></a>
+## 2bm. 動物離線補算根治（W49，server，預設 on）
+
+**症狀（2026-09-30 玩家回報）**：懷孕中的乳牛天數幾乎不動，同一座農場的動物成長也很慢。NAS 快照實測，同一群動物的推進率長期只有五到六成：牛的懷孕推進率在 W42 上線前 47%、上線後 58%，成長（age）23%／45%——不足在 W42 之前就存在。完整評估與證據見 [animal-catchup-hook-save-design-v0.md](animal-catchup-hook-save-design-v0.md)。
+
+**根因**（原版四個缺陷，正式服 bytecode 確認）：
+- 重啟抹除：`IsoAnimal.save` 的時鐘欄位寫存檔當下，不是動物的 `timeSinceLastUpdate`；`DesignationZone.streamed` 預設 true 且不存檔，開機後把 `hourLastSeen` 覆寫成開機時刻。「玩家離開到下次重啟」這段離線時間，重啟後沒有任何路徑會補。
+- 首次進世界補 0：`fromWorker` 以 `getZone()` 推算時數，`connectedDZone` 不存檔；本次開機首次進世界的動物、不在畜牧區的放養動物一律補 0。畜牧區只部分串流時，也只補到 `hourLastSeen`。
+- 餘數歸零：`updateStatsAway` 一次性把 age 加上 `floor(時數/24)×mod`，再把 `hoursSurvived` 設成 `age×24`，每呼叫一次就丟掉最多 23 小時的累積。
+- 兩種 `growUp` 語意混用：補算按日曆午夜、載入中按累積滿 24 小時，所以不能單純保留餘數。
+
+**手術**（W32 的 `AnimalAwayProbe`＋新 helper `MdcAnimalSave`）：
+- 自身時鐘補算：chunk 路徑（`fromWorker`）改以動物自身離線時數補算，不看 zone。自身時鐘在卸載時由原版 `unloaded()` 寫入，載入中與雞舍內每小時刷新（W42 的 `liveHourGrow`、本刀的雞舍改道），補算時原版迴圈逐小時推進，同一段時間不會算兩次。zone 路徑（`doMeta`）維持 W42 的 `min(zone, 自身)`，一直載入中的動物補 0。野生動物與無時鐘紀錄（新生）沿用原版。
+- 已卸載動物寫出自身時鐘：`VirtualAnimal.save` 內唯一的 `IsoAnimal.save` 改道 `MdcAnimalSave.save`，以 `try/finally` 記下正在寫出的動物；`IsoAnimal.save` 內唯一的 `getTimeInMillis` 改道 `clockToWrite`，只在這個上下文中、動物不在 `currentCell.getObjectList()`、時鐘有效時寫動物時鐘，上下文在第一次時鐘寫入即消耗。`saveRealAnimals` 收集世界中動物的條件就是 objectList 成員，兩者在 `AnimalPopulationManager.save()` 同一執行緒依序執行，所以世界中的動物（包括剛從雞舍放出、還沒定位的）照原版寫存檔當下。網路封包、背包、雞舍的 `IsoAnimal.save` 不經這個上下文。
+- 長離線上限：一次離線最多補 `-Dmdc.animalCatchUpLimit`（預設 168）遊戲小時。超過時先把時鐘設為「現在 − 上限」再補，較早的部分丟棄；迴圈跑完時鐘恰為現在，後續入口看到 0。不經三個 Java 改道的直接呼叫同樣受上限約束：`updateStatsAway` 頭部插入 `entryHours`（`aload_0; iload_1; invokestatic; istore_1`，線性、slot 型別不變），牲畜拖車的 Lua `Vehicles.Update.TrailerAnimalFood`（以車輛零件上次更新推算的離線時數）與管理員指令保留原本的時數來源，只套上限並記帳（W32 計數、W39 帳本）。拖車動物在那之前可能剛被 `liveHourGrow` 刷新時鐘，所以不能改用自身時鐘取較小值。上限保證只涵蓋正常跑完的補算：原版在逐小時迴圈之前就一次把 age 入帳，委派中途拋例外時，之後再補會多算 age，這是原版既有的語意，本刀只計數（`delegateFailures`）。無時鐘紀錄（新生、遷徙群）沿用原版時數、只受上限約束，不在「可信的單段離線」保證之內。
+- 累積小時語意：`updateStatsAway` 內 `setHoursSurvived`、`setAge`、`hourGrow`、`growUp` 四個呼叫 1:1 改道。一次性的 age 與 `hoursSurvived` 重設略過，每小時照 `AnimalData.update`（載入中）的公式累積：`hoursSurvived + 1`，累積滿 24 小時就把 age 設成 `daysSurvived + (mod − 1)` 並 `growUp(true)`；午夜的 `growUp` 略過。補 0 小時（`doMeta` 對一直載入中的動物）時完全不動。
+- 掛鉤屠體不補算：只清 `fromMeta` 後返回。原版會把屠體當活體補算，改變尺寸與體重。
+- 雞舍時鐘：`IsoHutch.updateAnimalInside` 的兩個 `setHoursSurvived` 改道，雞舍內每小時一併刷新動物時鐘，放出後不會被 `doMeta` 當成離線再補一次。
+
+**遊戲體驗**：離線期間的動物開始真的成長，懷孕可能到期，食槽不足時可能餓死（原版的離線補算本來就是這樣設計，本服過去因重啟抹除而沒有體驗到）。上限 168 遊戲小時約為本服 7 個真實小時。
+
+**kill switch**：`-Dmdc.animalOwnClock=0`（關自身時鐘補算與寫出；W42 關閉時一併停用）、`-Dmdc.animalCatchUpLimit=N`（≤0＝不設上限）、`-Dmdc.animalCatchUpAccrual=0`、`-Dmdc.animalCarcassGuard=0`；雞舍刷新跟隨 `-Dmdc.animalCatchUpCap`。
+
+**部署後的第一次重啟**：舊 apop 的時鐘仍是原版寫的存檔當下，第一輪只能補到存檔時刻；動物卸載後再存檔一次，才開始帶自身時鐘。
+
+**觀測**：W32 beat 新增 `hutchRefresh ownCatchUps ownGainHours limited limitedHours directCalls directHours directLimited directLimitedHours carcassSkips accrualGrowths delegateFailures maxRunMs maxRunCalls ownClock limit accrual carcassGuard`。`ownGainHours` 是自身時鐘比 W42 多補的時數；`direct*` 是不經 Java 改道的直接呼叫（拖車、管理員），只有次數與時數、沒有耗時；`maxRunMs` 是經 Java 改道的相鄰補算（前一筆結束到下一筆開始小於 50 ms，通常是同一幀的整批）的最長累計耗時，是近似值而不是精確的幀邊界。observe 委派時發一次性票證給正在補算的那隻動物，委派中若有 MOD 回呼對別的動物直接呼叫，照樣受上限約束。`[AnimalSave]` beat 的 `ownClock saveNow` 是寫出動物時鐘與存檔當下的筆數。
+
+**預期與驗收**：09-30 下午那段（208.8 遊戲小時，兩段卸載合計 147 小時，未超過上限），修後懷孕應推進約 8.7 天，原版實測 +4。線上驗收看 NAS 備份的 `<cell-K>` 推進率接近 100%（扣除超過上限的離線）、`maxRunMs` 沒有因補算量增加而凍結主迴圈、W39 的補算後死亡沒有異常上升。
+
+**守門**：SmokeCheck 釘存在理由四條（`fromWorker` 在 `getZone()` 為 null 時補 0、`IsoAnimal.save` 時鐘欄位寫存檔當下、`updateStatsAway` 一次性 `setHoursSurvived(age×24)` 且 `growUp` 在午夜分支、雞舍內不刷新時鐘），加上 `AnimalData.update` 載入中的成長公式（helper 照抄這段）；`updateStatsAway` 頭部的 `entryHours` 插入全序鎖定、真指令恰 +4，其餘與四組改道以「原版文字置換後與 dist 逐字相同」鎖同形。Patcher 新增詞彙 `HeadIntFilter`（instance 方法頭部的 int 參數過濾）。`AnimalAwayProbeTest` 五組態（出貨、觀測關、W42 關、自身時鐘關、屠體守衛關；另驗相鄰補算累計與委派例外計數）、`AnimalCatchUpAccrualTest` 直接呼叫手術後的 `updateStatsAway`（累積語意開與關；含拖車式直接呼叫 200 小時被截成 168）、`MdcAnimalSaveTest` 驗時鐘寫出的各種判定。
+
+<a id="2bn"></a>
+## 2bn. 掛鉤屠體存檔保住掛鉤狀態＋W37 重試不重複寫出（W50，server，預設 on）
+
+**症狀（2026-09-30）**：農場出現一隻不明活豬，其實是掛在屠宰鉤上的公豬屠體。中午的存檔裡牠還掛在鉤上，下午的存檔變成活體，重開後在附近走動。全服 2,973 個 apop 檔掃描：帶屠體 modData 的動物 3 隻，全部已是活體，沒有任何正確掛著的屠體。
+
+**根因**：`IsoAnimal.save` 只在 `isOnHook() && hook != null && hook.getSquare() != null` 時寫 onHook=1＋鉤子座標；`hook` 參照不存檔，從磁碟載入的屠體要等進世界後第一次 `update()` 的 `reattachBackToHook()` 才補回。這之前所屬 cell 被存檔（同 cell 其他動物卸載，或屠體還在 worker 的虛擬狀態），就寫成 onHook=0，下次載入變成活體。鉤子本身沒有被拆：三份存檔中的鉤子紀錄逐位元相同。
+
+**手術**：
+- `VirtualAnimal.save` 內唯一的 `IsoAnimal.save` 改道 `MdcAnimalSave.save`（與 W49 共用）。原版寫完後，若屠體仍掛鉤、參照無效、且帶著載入時還原的 `attachBackToHook` 座標，就在 buffer 內把該筆尾端 `[0][petTimer][wild][onlineID]` 改成 `[1][x][y][z][petTimer][wild][onlineID]`，與原版正常掛鉤時的格式相同。只作用在 apop；網路封包照原版，屠體掛回後的快照本來就帶 1。
+- 所有檢查（旗標、尾端三個欄位與屠體現值相符、剩餘容量）都在改寫之前；不符時拋 `IOException`，由 W37 保留舊檔並標回重試，絕不提交已知錯誤的 onHook=0。`SliceY.SliceBuffer` 固定 10 MiB，本案 cell 是 124 KB，容量不足只是理論路徑。
+- 依賴 W37：W37 關閉時原版先開檔（截斷）才序列化，拋例外會留下截斷的檔案，所以本刀一併停用。
+- 座標缺席（兩軸同時為 0，與原版 `reattachBackToHook` 的判斷相同）時照原版寫出並計 `noCoords`。正常流程不會發生：`load` 讀到 1 時一定還原座標，只有掛回成功才清座標。只有一軸為 0 的座標仍是有效座標，照常保住。
+- 鉤子確實不存在（鉤子格已載入、格上沒有 `IsoButcherHook`）：`reattachBackToHook` 每個 RETURN 前的 `afterReattach` 只觀測，每隻屠體記一行 `hook missing`。原版此時會把屠體存成活體；本刀讓牠繼續掛著，要不要轉成屍體等觀測數據再定。
+- W37 重試不重複寫出：`saveRealAnimals` 把世界中的動物包成暫存清單，原版只在整份寫完才清。失敗後清單留著，下一輪又把同一批加進去，同一隻會被寫兩次（W37 自 9/26 起的隱患）。`AnimalManagerWorker.saveRealAnimals` 頭部先清掉上一輪殘留的清單（此時必然是失敗或未寫出的舊快照，本輪會重新收集）；失敗當下不清，下一輪之前的重試仍帶著世界中的動物。W37 的 `IOException` 也改為標回 `dataChanged`。
+
+**kill switch**：`-Dmdc.animalHookSave=0`；W37 的重試修正跟隨 `-Dmdc.animalCellSave`。
+
+**觀測**：`[AnimalSave]` beat 的 `kept noCoords ioFail hookMissing`；每隻屠體第一次被保住時記一行 `kept hook state`。W37 清掉殘留快照時記 `cleared stale real-animal snapshots`。
+
+**驗證**：
+- 真實事故檔重播：把 12:00 快照中那隻屠體的掛鉤紀錄改成原版錯存的 onHook=0，交給尾端改寫後與原檔逐位元相同（120,985 bytes）。
+- `MdcAnimalSaveTest` 四組態：尾端改寫的容量與欄位邊界、非零起點與連續兩筆；參照有效、非屠體、無座標時不動；`IOException` 交給 W37；本刀關閉與 W37 關閉時照原版。
+- `MdcAnimalCellSaveTest`：`IOException` 保留舊檔；失敗一次 → 清殘留 → 重新收集 → 每隻只寫一次；不清時寫兩次（原版行為對照）。
+- SmokeCheck：原版存檔以 hook 參照決定 onHook、尾端恰為 `putFloat(petTimer)`→`put(wild)`→`putShort(onlineID)`；`load` 讀到 onHook 後接著讀三個座標；apop 只經 `VirtualAnimal.save` 寫動物；`reattachBackToHook` 掛回成功才清座標；`saveRealAnimals` 只追加。
+- 線上驗收：每日全服 apop `deathTime` 掃描不再出現新的活化屠體；`kept` 大於 0 代表原版會寫錯的情況確實被攔下。
+
+**已活化的 3 隻**：不動存檔，玩家可以照一般動物宰殺。
+
 ---
 
 <a id="3"></a>

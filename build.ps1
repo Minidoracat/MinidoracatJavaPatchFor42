@@ -99,6 +99,7 @@ $helperEntries = @(
     'zombie/mdc/BabyBreedGuard.class',
     'zombie/mdc/AnimalSpawnGuard.class',
     'zombie/characters/animals/MdcAnimalCellSave.class',
+    'zombie/characters/animals/MdcAnimalSave.class',
     'zombie/mdc/AnimalMetaSnapshot.class',
     'zombie/mdc/AnimalDeathLedger.class',
     'zombie/mdc/ProcessItemsGuard.class',
@@ -367,13 +368,22 @@ Assert-Ok "MdcUsingPlayerIndexTest（enforce）"
 java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest off
 Assert-Ok "MdcUsingPlayerIndexTest（off kill switch）"
 
-Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）行為驗證＋kill switch（獨立 JVM）..."
+Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）＋離線補算根治（W49）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
-Assert-Ok "AnimalAwayProbeTest（出貨組態：觀測＋W42 上限）"
+Assert-Ok "AnimalAwayProbeTest（出貨組態：觀測＋W42 上限＋W49 自身時鐘與屠體守衛）"
 java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest off
 Assert-Ok "AnimalAwayProbeTest（animalAwayProbe=0 kill switch）"
 java "-Dmdc.animalCatchUpCap=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest nocap
-Assert-Ok "AnimalAwayProbeTest（animalCatchUpCap=0，W42 回 vanilla 時數）"
+Assert-Ok "AnimalAwayProbeTest（animalCatchUpCap=0，W42 回 vanilla 時數、W49 自身時鐘一併停用）"
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest noown
+Assert-Ok "AnimalAwayProbeTest（animalOwnClock=0，只關 W49 自身時鐘）"
+java "-Dmdc.animalCarcassGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest nocarcass
+Assert-Ok "AnimalAwayProbeTest（animalCarcassGuard=0，屠體照原版補算）"
+# W49 累積小時語意：走 dist 內手術後的 IsoAnimal.updateStatsAway（四個改道）。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpAccrualTest on
+Assert-Ok "AnimalCatchUpAccrualTest（on，出貨組態）"
+java "-Dmdc.animalCatchUpAccrual=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpAccrualTest off
+Assert-Ok "AnimalCatchUpAccrualTest（animalCatchUpAccrual=0，原版一次性 age＋午夜 growUp）"
 
 Write-Host "[9r3/10] 分娩品種守衛（W33）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest
@@ -391,6 +401,15 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters
 Assert-Ok "MdcAnimalCellSaveTest（on，出貨組態）"
 java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest off
 Assert-Ok "MdcAnimalCellSaveTest（animalCellSave=0，原版截斷重現）"
+# W49-A3 自身時鐘寫出＋W50 掛鉤屠體存檔（W50 依賴 W37，animalCellSave=0 時一併停用）。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest on
+Assert-Ok "MdcAnimalSaveTest（on，出貨組態）"
+java "-Dmdc.animalHookSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest nohook
+Assert-Ok "MdcAnimalSaveTest（animalHookSave=0 kill switch）"
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest noown
+Assert-Ok "MdcAnimalSaveTest（animalOwnClock=0，時鐘照原版寫存檔當下）"
+java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest nocellsave
+Assert-Ok "MdcAnimalSaveTest（animalCellSave=0，W50 隨 W37 停用）"
 
 Write-Host "[9r5/10] 畜牧區補算快照（W38）＋動物死亡帳本（W39）行為驗證＋kill switch（獨立 JVM）..."
 # W38 off 組態以原版迴圈形狀重現重複補算／漏算；on 每隻恰一次。
