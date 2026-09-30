@@ -187,8 +187,10 @@ If you have never seen these problems, you do not need this package.
 
 INSTALL
 1. Close the game.
-2. Extract the whole zip into a folder (do not drag single files out of it).
-3. Double-click Install-Patches.bat.
+2. Extract the whole zip into any folder, such as your Desktop or Downloads; it does
+   not need to be in the game folder. Keep all the files together.
+3. Double-click Install-Patches.bat. It finds the game folder through Steam by itself,
+   even on another drive, and asks you to paste the path only if it cannot.
 4. Type 1 and press Enter (install or update patches).
 5. Type 1 and press Enter (client fixes).
 6. When asked for the version, just press Enter: the recommended one is picked
@@ -200,7 +202,8 @@ the main menu to switch, or start it with: Install-Patches.bat -Lang en
 
 BEFORE A GAME UPDATE
 1. Close the game.
-2. Double-click Uninstall-Patches.bat, type A and Enter (remove everything), then Y and Enter.
+2. Double-click Uninstall-Patches.bat in this folder (deleted it? download the same zip
+   again), type A and Enter (remove everything), then Y and Enter.
 3. Let Steam update the game.
 4. Wait for a package that matches the new game version, then install again.
 Updating without removing the patches first can stop you from joining servers
@@ -251,8 +254,10 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
 【怎麼安裝】
 1. 關閉遊戲。
-2. 把整個壓縮檔解壓縮到一個資料夾（不要只拉出其中一個檔案）。
-3. 雙擊 Install-Patches.bat。
+2. 把整個壓縮檔解壓縮到任何資料夾都可以（例如桌面或下載），不用放進遊戲目錄；
+   檔案要放在一起，不要只拉出其中一個。
+3. 雙擊 Install-Patches.bat。程式會自己透過 Steam 找到遊戲目錄，遊戲裝在別的硬碟也找得到；
+   找不到時才會請你貼上路徑。
 4. 輸入 1 按 Enter（安裝或更新修補）。
 5. 輸入 1 按 Enter（修復隱形、自建房間看不到東西）。
 6. 選版本時直接按 Enter，程式會依你的電腦自動選好。
@@ -262,7 +267,8 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
 【遊戲要更新時】
 1. 關閉遊戲。
-2. 雙擊 Uninstall-Patches.bat，輸入 A 按 Enter（全部移除），再輸入 Y 按 Enter 確認。
+2. 雙擊這個資料夾裡的 Uninstall-Patches.bat（資料夾刪掉了就重新下載同一個 zip），
+   輸入 A 按 Enter（全部移除），再輸入 Y 按 Enter 確認。
 3. 讓 Steam 更新遊戲。
 4. 等新版修補包發布後，再照上面的步驟裝回去。
 沒先移除就更新，可能會進不了伺服器，或一連線就出錯。

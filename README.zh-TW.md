@@ -220,13 +220,15 @@ bash uninstall.sh  # 下次重啟回到原版
 給玩家使用。從 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，並與
 `SHA256SUMS.txt` 比對（`Get-FileHash .\MinidoracatClientPatches-*.zip`）。
 
-1. 關閉遊戲，把整個 zip 解壓縮到一個資料夾。
+1. 關閉遊戲，把整個 zip 解壓縮到任何資料夾（桌面、下載都可以，不必放進遊戲目錄）。安裝程式會自己透過 Steam
+   找到遊戲目錄，遊戲裝在別的硬碟也找得到；找不到時才會請你貼上路徑（也可以用 `-GameDir "<路徑>"` 指定）。
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
 3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版），再輸入 `Y` 確認。
 
 安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只
 接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能
-復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）。**
+復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新
+下載同一個 zip）。
 
 | 模組 | 用途 |
 |---|---|

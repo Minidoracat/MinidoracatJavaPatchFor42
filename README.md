@@ -235,7 +235,9 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) and check it against `SHA256SUMS.txt`
 (`Get-FileHash .\MinidoracatClientPatches-*.zip`).
 
-1. Close the game and extract the whole zip into a folder.
+1. Close the game and extract the whole zip into any folder: your Desktop or Downloads is fine, it does not need
+   to be in the game folder. The installer finds the game through Steam by itself, even on another drive, and
+   asks you to paste the path only if it cannot (`-GameDir "<path>"` also works).
 2. Run `Install-Patches.bat`, choose `1` (install or update), then `1` (client fixes).
 3. Press Enter to accept the recommended variant (standard for 32 GB RAM or more, low-memory otherwise), then
    `Y` to confirm.
@@ -243,7 +245,8 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
 The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
 or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for: it
 checks the SHA-256 of `projectzomboid.jar` and of every file it writes, never touches files it does not own,
-and rolls back an interrupted install. **Run `Uninstall-Patches.bat` (choose `A`) before every game update.**
+and rolls back an interrupted install. **Run `Uninstall-Patches.bat` (choose `A`) before every game update**, so
+keep the extracted folder (or download the same zip again when you need it).
 
 | Module | Purpose |
 |---|---|
