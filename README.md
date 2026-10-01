@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 58 patched classes, 162 patch sites and 59 helper classes on 42.21.0.
+  actions and log noise. 59 patched classes, 163 patch sites and 59 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles, the 42.21.0
   "player-built room" rendering bug). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -152,7 +152,8 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 
 Observe-only probes that change no behavior: the main-loop watchdog ([2ac](docs/patches.en.md#2ac)), the
 animal offline catch-up probe ([2au](docs/patches.en.md#2au)), the animal death ledger
-([2bb](docs/patches.en.md#2bb)) and the slow sound-packet probe ([2at](docs/patches.en.md#2at)).
+([2bb](docs/patches.en.md#2bb)), the animal ID miss log ([2bo](docs/patches.en.md#2bo)) and the slow
+sound-packet probe ([2at](docs/patches.en.md#2at)).
 They write rate-limited heartbeat lines to the console and are how most of the issues above were found.
 
 ### Client patches (release package)

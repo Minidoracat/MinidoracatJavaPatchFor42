@@ -209,14 +209,16 @@ Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不�
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
 
-Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸（三組態，獨立 JVM）..."
-# 出貨、Lua 保險絲關閉、參數守衛關閉；每組皆自驗旗標。缺 component 的封包走 42.21 原版 processServer 驗 Reject bytes。
+Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸＋W51 動物 ID 紀錄（四組態，獨立 JVM）..."
+# 出貨、Lua 保險絲關閉、參數守衛關閉、動物 ID 紀錄關閉；每組皆自驗旗標。缺 component 的封包走 42.21 原版 processServer 驗 Reject bytes。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest
 Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
 java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest guard-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionGuard=0 kill switch）"
 java "-Dmdc.netTimedActionArgs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest args-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionArgs=0 kill switch，W10-D 直通）"
+java "-Dmdc.animalIdMiss=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest animal-off
+Assert-Ok "NetTimedActionGuardTest（animalIdMiss=0 kill switch，W51 不記）"
 
 Write-Host "[9h/10] 動物排序活鎖捕手（W11）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest

@@ -16,6 +16,7 @@ import zombie.debug.DebugType;
 import zombie.debug.LogSeverity;
 import zombie.network.IConnection;
 import zombie.network.PZNetKahluaTableImpl;
+import zombie.network.fields.character.AnimalID;
 
 /**
  * W10 卡讀條根治（server-only 改道，client 不需安裝任何東西）。
@@ -48,7 +49,12 @@ import zombie.network.PZNetKahluaTableImpl;
  * {@code RuntimeException}。診斷 log 各自獨立包在自己的方法裡：log 失敗只累計 {@code anomalies}，
  * 絕不能讓 parse 中斷（那正是本刀要修的症狀）。不碰 {@code !isConsistent} 分支。
  *
- * <p><b>kill switch</b>：{@code -Dmdc.netTimedActionGuard=0}（B）、{@code -Dmdc.netTimedActionArgs=0}（D）。
+ * <p><b>kill switch</b>：{@code -Dmdc.netTimedActionGuard=0}（B）、{@code -Dmdc.netTimedActionArgs=0}（D）、
+ * {@code -Dmdc.animalIdMiss=0}（W51）。
+ *
+ * <p><b>W51 動物 ID 解析失敗紀錄</b>（{@link #parseAnimalId}，純觀測）：共用 table decoder 的 type 17（IsoAnimal）
+ * 查不到 client 指定的 online ID 時，原版把 null 交給呼叫端（Lua 動作拿到 nil 動物），不留任何紀錄。
+ * 本刀只在 null 時記一行；解析結果與例外照原版。
  */
 public final class NetTimedActionGuard {
 
@@ -56,6 +62,8 @@ public final class NetTimedActionGuard {
     private static final boolean CALL_GUARD = !"0".equals(System.getProperty("mdc.netTimedActionGuard"));
     /** D 刀：參數反序列化失敗的有聲化。 */
     private static final boolean ARGS_GUARD = !"0".equals(System.getProperty("mdc.netTimedActionArgs"));
+    /** W51：伺服器查不到 client 指定的動物時記一行。 */
+    private static final boolean ANIMAL_ID_LOG = !"0".equals(System.getProperty("mdc.animalIdMiss"));
 
     /** beginParse 次數；heartbeat 的節拍。 */
     private static final AtomicLong parses = new AtomicLong();
@@ -69,6 +77,8 @@ public final class NetTimedActionGuard {
     private static final AtomicLong suppressed = new AtomicLong();
     /** helper 自身的診斷失敗數；恆應為 0。 */
     private static final AtomicLong anomalies = new AtomicLong();
+    /** W51：type 17 解析查不到動物的次數。 */
+    private static final AtomicLong animalIdMisses = new AtomicLong();
 
     /** 本次 parse 的封包（{@link #beginParse} 設定）；D 刀只在有 parse 上下文時生效。 */
     private static final ThreadLocal<NetTimedAction> PARSE_OWNER = new ThreadLocal<>();
@@ -81,6 +91,7 @@ public final class NetTimedActionGuard {
     /** heartbeat 週期（以 parse 計數為節拍）。 */
     private static final long HEARTBEAT_EVERY = 2048L;
     private static final String TAG = "[MinidoracatJavaPatch][NetTimedAction] ";
+    private static final String ANIMAL_TAG = "[MinidoracatJavaPatch][AnimalIdMiss] ";
 
     // 封包處理是伺服器主執行緒單線；時間窗欄位容忍罕見交錯（只影響 log 節流）。
     private static long windowStartNs;
@@ -151,6 +162,44 @@ public final class NetTimedActionGuard {
             reportLuaFailure(args, e, n);
             return LuaReturn.createReturn(new Object[]{ Boolean.FALSE, "mdc: rejected timed action (" + e + ")" });
         }
+    }
+
+    /**
+     * W51：{@code PZNetKahluaTableImpl.load(ByteBufferReader, IConnection, byte)} type 17 唯一
+     * {@code AnimalID.parse} 的 1:1 改道。原呼叫在 try 之外：解析結果與例外都照原版，查不到動物時才記一行。
+     * {@code type}／{@code name} 只在呼叫端確定是 {@code NetTimedAction.parse} 時才取 {@link #PARSE_OWNER}
+     * ——其他 parse 中途離開時它會殘留，不能拿來歸因別的封包。
+     */
+    public static void parseAnimalId(AnimalID id, ByteBufferReader b, IConnection connection) {
+        id.parse(b, connection);
+        if (!ANIMAL_ID_LOG || id.getAnimal() != null) {
+            return;
+        }
+        long n = animalIdMisses.incrementAndGet();
+        if (!allowLine()) {
+            return;
+        }
+        try {
+            String src = decoderCaller();
+            NetTimedAction packet = "zombie.core.NetTimedAction.parse".equals(src) ? PARSE_OWNER.get() : null;
+            DebugLog.log(ANIMAL_TAG + "id=" + id.getID() + " src=" + src
+                    + (packet == null ? "" : " type=" + MdcTimedActionProbe.safeName(packet.type)
+                            + " name=" + MdcTimedActionProbe.safeName(packet.name))
+                    + " connectionPlayers=" + (connection instanceof UdpConnection udp
+                        ? MdcTimedActionProbe.connectionPlayers(udp) : "?")
+                    + " n=" + n);
+        } catch (RuntimeException | LinkageError ignored) {
+            anomalies.incrementAndGet();
+        }
+    }
+
+    /** 第一個不在 table decoder 與本 helper 內的 frame＝誰在解這張 table；只在要寫 log 時才走 stack。 */
+    private static String decoderCaller() {
+        return StackWalker.getInstance().walk(frames -> frames
+                .map(f -> f.getClassName() + "." + f.getMethodName())
+                .filter(n -> !n.startsWith("zombie.network.PZNetKahluaTableImpl.")
+                        && !n.startsWith("zombie.mdc.NetTimedActionGuard."))
+                .findFirst().orElse("?"));
     }
 
     private static void reportArgsFailure(PZNetKahluaTableImpl args, ByteBufferReader reader,
@@ -258,7 +307,9 @@ public final class NetTimedActionGuard {
                     + " caught=" + caught.get()
                     + " argsFailed=" + argsFailed.get() + " argsRejected=" + argsRejected.get()
                     + " suppressed=" + suppressed.get() + " anomalies=" + anomalies.get()
-                    + " guard=" + (CALL_GUARD ? 1 : 0) + " args=" + (ARGS_GUARD ? 1 : 0));
+                    + " animalIdMisses=" + animalIdMisses.get()
+                    + " guard=" + (CALL_GUARD ? 1 : 0) + " args=" + (ARGS_GUARD ? 1 : 0)
+                    + " animalIdLog=" + (ANIMAL_ID_LOG ? 1 : 0));
         } catch (RuntimeException | LinkageError ignored) {
             anomalies.incrementAndGet();
         }
@@ -280,6 +331,10 @@ public final class NetTimedActionGuard {
 
     static long anomaliesForTest() {
         return anomalies.get();
+    }
+
+    static long animalIdMissesForTest() {
+        return animalIdMisses.get();
     }
 
     /** 本次 parse 是否留有未消費的參數解析失敗。 */

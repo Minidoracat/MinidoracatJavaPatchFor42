@@ -1,5 +1,6 @@
 package zombie.mdc;
 
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -7,6 +8,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.function.Consumer;
 
 import se.krka.kahlua.converter.KahluaConverterManager;
 import se.krka.kahlua.integration.LuaCaller;
@@ -15,25 +18,30 @@ import se.krka.kahlua.j2se.KahluaTableImpl;
 import se.krka.kahlua.vm.KahluaTable;
 import se.krka.kahlua.vm.KahluaThread;
 import zombie.Lua.LuaManager;
+import zombie.characters.animals.IsoAnimal;
 import zombie.core.Transaction;
 import zombie.core.network.ByteBufferReader;
 import zombie.core.network.ByteBufferWriter;
 import zombie.core.raknet.UdpConnection;
+import zombie.debug.DebugLog;
+import zombie.debug.DebugType;
+import zombie.debug.LogSeverity;
 import zombie.entity.ComponentType;
 import zombie.network.GameServer;
 import zombie.network.IConnection;
 import zombie.network.PZNetKahluaTableImpl;
 import zombie.network.PacketTypes;
 import zombie.network.packets.NetTimedActionPacket;
+import zombie.popman.animal.AnimalInstanceManager;
 
 /**
  * W10 卡讀條根治的行為驗證：用真實的線路位元組驅動<b>已手術的</b>
  * {@code NetTimedAction.parse}（classpath 上 {@code dist\java} 先於遊戲 jar），
  * 重現正式服的 sbyt 36 缺席 component，確認整包不再中斷而是被明確拒絕。
  *
- * <p>argv：無參數＝兩刀啟用；{@code guard-off}／{@code args-off} 各對應一個 kill switch。
+ * <p>argv：無參數＝全部啟用；{@code guard-off}／{@code args-off}／{@code animal-off} 各對應一個 kill switch。
  * 測試反射自驗 helper 的實際旗標與 argv 相符——property 名稱打錯時炸在測試裡，
- * 不會默默把 enabled 版跑三遍假綠。
+ * 不會默默把 enabled 版跑四遍假綠。
  *
  * <p>以可控 LuaCaller 觀察是否誤執行建構子；parse 與回覆（42.21 原版 {@code processServer} 的
  * initial Reject 分支）都使用遊戲真類別，只以擷取連線替代 RakNet 送出端。
@@ -47,6 +55,11 @@ public final class NetTimedActionGuardTest {
     private static final byte SBYT_STRING = 1;
     private static final byte SBYT_INTEGER = 0;
     private static final byte SBYT_CRAFTBENCH = 36;
+    /** client 的 {@code PZNetKahluaTableImpl.save} 對 IsoAnimal 值寫 type 17 ＋ online ID（short）。 */
+    private static final byte SBYT_ANIMAL = 17;
+    private static final short KNOWN_ANIMAL = 4242;
+    private static final short MISSING_ANIMAL = 4243;
+    private static final String ANIMAL_TAG = "[MinidoracatJavaPatch][AnimalIdMiss] ";
 
     /** Lua 建構子替身的回傳值（parse 成功時會被塞進 packet.action）。 */
     private static final KahluaTable MADE = table();
@@ -59,11 +72,14 @@ public final class NetTimedActionGuardTest {
         String mode = args.length > 0 ? args[0] : "both";
         boolean wantGuard = !"guard-off".equals(mode);
         boolean wantArgs = !"args-off".equals(mode);
+        boolean wantAnimal = !"animal-off".equals(mode);
 
         boolean guard = flag("CALL_GUARD");
         boolean argsGuard = flag("ARGS_GUARD");
-        expect("自驗：argv=" + mode + " 與 helper 實際旗標相符（guard=" + guard + " args=" + argsGuard + "）",
-                guard == wantGuard && argsGuard == wantArgs);
+        boolean animalLog = flag("ANIMAL_ID_LOG");
+        expect("自驗：argv=" + mode + " 與 helper 實際旗標相符（guard=" + guard + " args=" + argsGuard
+                + " animalIdLog=" + animalLog + "）",
+                guard == wantGuard && argsGuard == wantArgs && animalLog == wantAnimal);
 
         GameServer.server = true;
         LuaManager.env = table();
@@ -78,6 +94,7 @@ public final class NetTimedActionGuardTest {
         testCauseBinding(argsGuard);
         testProtectedCall(guard);
         testLoadArgsUnit(argsGuard);
+        testAnimalIdMiss(animalLog);
 
         expect("零 anomalies（診斷路徑自身沒有失敗）", NetTimedActionGuard.anomaliesForTest() == 0);
 
@@ -86,13 +103,13 @@ public final class NetTimedActionGuardTest {
             System.exit(1);
         }
         System.out.println("net-timed-action OK  mode=" + mode
-                + "：共用 decoder 未改道／缺 component 的封包由原版送出 Reject／下一包乾淨／原因綁單一 parse／"
-                + "Error 穿透（各 kill switch 走對應分支）全數通過");
+                + "：共用 decoder 的 component 路徑未改道／缺 component 的封包由原版送出 Reject／下一包乾淨／"
+                + "原因綁單一 parse／Error 穿透／W51 動物 ID 紀錄（各 kill switch 走對應分支）全數通過");
     }
 
     /**
-     * D2 退役的負對照：共用 table decoder 必須維持原版。同一段位元組在
-     * {@code NetTimedAction.parse} 之外（任何其他封包共用這個 decoder）照樣從
+     * D2 退役的負對照：共用 table decoder 的 component 路徑必須維持原版（W51 只改 type 17 的動物）。
+     * 同一段位元組在 {@code NetTimedAction.parse} 之外（任何其他封包共用這個 decoder）照樣從
      * {@code PZNetKahluaTableImpl} 自己拋 NPE，且半成品條目留在表上——helper 一個字節都沒碰它。
      */
     private static void testVanillaDecoderUntouched() {
@@ -103,7 +120,7 @@ public final class NetTimedActionGuardTest {
         } catch (NullPointerException e) {
             npe = e;
         }
-        expect("原版共用 table parser 未被改道：sbyt 36 缺 entity 仍由 PZNetKahluaTableImpl 自己 NPE，"
+        expect("原版共用 table parser 的 component 路徑未被改道：sbyt 36 缺 entity 仍由 PZNetKahluaTableImpl 自己 NPE，"
                 + "半成品條目照原版留著",
                 npe != null && raw.size() == 1
                 && "zombie.network.PZNetKahluaTableImpl".equals(npe.getStackTrace()[0].getClassName()));
@@ -337,10 +354,63 @@ public final class NetTimedActionGuardTest {
         endParse();
     }
 
+    /**
+     * W51：type 17 查不到動物時記一行，解析結果照原版（nil 照位置交給建構子）。歸因只信真的
+     * {@code NetTimedAction.parse} 呼叫端；其他 parse 中途離開時殘留的上下文不得冒充別的 decoder 呼叫端。
+     */
+    private static void testAnimalIdMiss(boolean animalLog) throws Exception {
+        ByteArrayOutputStream log = captureLog();
+        IsoAnimal animal = alloc(IsoAnimal.class);
+        AnimalInstanceManager.getInstance().getAnimals().put(KNOWN_ANIMAL, animal);
+        long misses0 = NetTimedActionGuard.animalIdMissesForTest();
+
+        PZNetKahluaTableImpl known = newArgsTable();
+        known.load(argsWire(bb -> putAnimalArgs(bb, KNOWN_ANIMAL)), null);
+        expect("W51：查得到的動物原樣解析（同一個實例），不記、不計數",
+                known.rawget("animal") == animal && animalRows(log).isEmpty()
+                && NetTimedActionGuard.animalIdMissesForTest() == misses0);
+
+        NetTimedActionPacket p = new NetTimedActionPacket();
+        CALLER.calls = 0;
+        p.parse(packetWire(bb -> putAnimalArgs(bb, MISSING_ANIMAL)), null);
+        List<String> rows = animalRows(log);
+        expect("W51：查不到時照原版把 nil 交給建構子（建構子恰呼叫 1 次、action 照常建立）",
+                CALLER.calls == 1 && p.action == MADE);
+        if (!animalLog) {
+            expect("W51 kill switch：animalIdMiss=0 時不記、不計數",
+                    rows.isEmpty() && NetTimedActionGuard.animalIdMissesForTest() == misses0);
+            AnimalInstanceManager.getInstance().getAnimals().remove(KNOWN_ANIMAL);
+            return;
+        }
+        expect("W51：NetTimedAction.parse 內查不到動物記恰 1 行，帶 wire ID、動作 type／name 與計數",
+                rows.size() == 1 && rows.get(0).contains(ANIMAL_TAG + "id=" + MISSING_ANIMAL
+                        + " src=zombie.core.NetTimedAction.parse type=" + ACTION_TYPE
+                        + " name=test connectionPlayers=? n=" + (misses0 + 1)));
+
+        NetTimedActionGuard.beginParse(new NetTimedActionPacket());   // 中途離開的 parse 留下的上下文
+        newArgsTable().load(argsWire(bb -> putAnimalArgs(bb, MISSING_ANIMAL)), null);
+        endParse();
+        rows = animalRows(log);
+        expect("W51：其他 decoder 呼叫端以真的呼叫者歸因，不借用殘留的 NetTimedAction 上下文",
+                rows.size() == 2 && rows.get(1).contains(" src=zombie.mdc.NetTimedActionGuardTest.testAnimalIdMiss ")
+                && !rows.get(1).contains(" type="));
+
+        for (int i = 0; i < 30; i++) {
+            newArgsTable().load(argsWire(bb -> putAnimalArgs(bb, MISSING_ANIMAL)), null);
+        }
+        expect("W51：每筆都計數，但逐筆 log 受時間窗上限（30 筆查不到不會寫 30 行）",
+                NetTimedActionGuard.animalIdMissesForTest() == misses0 + 32 && animalRows(log).size() - 2 <= 20);
+        AnimalInstanceManager.getInstance().getAnimals().remove(KNOWN_ANIMAL);
+    }
+
     // ---- 線路位元組（對照 vanilla 的 Action.parse／NetTimedAction.parse 讀取順序）----
 
     /** {@code Action.parse} 的 header ＋ type／name ＋ actionArgs。 */
     private static ByteBufferReader packetWire(boolean withComponent) {
+        return packetWire(bb -> putArgs(bb, withComponent));
+    }
+
+    private static ByteBufferReader packetWire(Consumer<ByteBuffer> args) {
         ByteBuffer bb = ByteBuffer.allocate(512);
         bb.put((byte) 7);                                                   // Action.id
         bb.put((byte) Transaction.TransactionState.Request.ordinal());      // Action.state
@@ -348,15 +418,19 @@ public final class NetTimedActionGuardTest {
         bb.put((byte) -1);                                                  // PlayerID.playerIndex
         putUTF(bb, ACTION_TYPE);
         putUTF(bb, "test");
-        putArgs(bb, withComponent);
+        args.accept(bb);
         bb.flip();
         return new ByteBufferReader(bb);
     }
 
     /** 只有 {@code PZNetKahluaTableImpl.load} 讀的那一段。 */
     private static ByteBufferReader argsWire(boolean withComponent) {
+        return argsWire(bb -> putArgs(bb, withComponent));
+    }
+
+    private static ByteBufferReader argsWire(Consumer<ByteBuffer> args) {
         ByteBuffer bb = ByteBuffer.allocate(256);
-        putArgs(bb, withComponent);
+        args.accept(bb);
         bb.flip();
         return new ByteBufferReader(bb);
     }
@@ -375,6 +449,14 @@ public final class NetTimedActionGuardTest {
             bb.putLong(MISSING_NET_ID);
             bb.putShort(ComponentType.CraftBench.GetID());
         }
+    }
+
+    private static void putAnimalArgs(ByteBuffer bb, short animalId) {
+        bb.putInt(1);
+        bb.put(SBYT_STRING);
+        putUTF(bb, "animal");
+        bb.put(SBYT_ANIMAL);
+        bb.putShort(animalId);
     }
 
     private static void putUTF(ByteBuffer bb, String s) {
@@ -495,6 +577,24 @@ public final class NetTimedActionGuardTest {
     /** Kahlua table 需要一個後備 Map（j2se 實作沒有無參建構子）。 */
     private static KahluaTable table() {
         return new KahluaTableImpl(new LinkedHashMap<>());
+    }
+
+    /** 只用公開 API 擷取 DebugLog（裸 JVM 預設 Off＝安靜 no-op）。 */
+    private static ByteArrayOutputStream captureLog() {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        DebugType.General.setLogSeverity(LogSeverity.All);
+        DebugLog.getInstance().setStdOut(buf);
+        return buf;
+    }
+
+    private static List<String> animalRows(ByteArrayOutputStream log) {
+        List<String> out = new ArrayList<>();
+        for (String line : log.toString(StandardCharsets.UTF_8).split("\\R")) {
+            if (line.contains(ANIMAL_TAG)) {
+                out.add(line);
+            }
+        }
+        return out;
     }
 
     /** 模擬 loadInventoryItem 靜默回 null 的參數形狀（index 2 為 null）。 */

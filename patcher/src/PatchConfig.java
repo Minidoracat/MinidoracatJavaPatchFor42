@@ -637,6 +637,19 @@ public final class PatchConfig {
         ntaParse.expectedHits = 3;   // beginParse＋protectedCall＋actionArgs.load
         patches.add(nta);
 
+        // W51：伺服器查不到 client 指定的動物時記一行（純觀測；docs/patches.md 2bo）。共用 table decoder 的
+        // type 17（IsoAnimal）唯一 AnimalID.parse 1:1 改道，解析結果與例外照原版；其餘方法逐指令不變
+        // （W10-D2 的猜測改道不得回來，SmokeCheck 釘）。kill switch -Dmdc.animalIdMiss=0。
+        Patcher.ClassPatch netTable = new Patcher.ClassPatch("zombie/network/PZNetKahluaTableImpl");
+        Patcher.MethodOps netTableLoad = netTable.method("load",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;");
+        netTableLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/network/fields/character/AnimalID", "parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                ntaGuard, "parseAnimalId"));
+        netTableLoad.expectedHits = 1;
+        patches.add(netTable);
+
         Patcher.ClassPatch ntaPkt = new Patcher.ClassPatch("zombie/network/packets/NetTimedActionPacket");
         Patcher.MethodOps ntaProcess = ntaPkt.method("processServer",
                 "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");

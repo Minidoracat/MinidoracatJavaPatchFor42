@@ -1435,8 +1435,38 @@ public final class SmokeCheck {
         failed += check("W10-D：loadArgs 只攔 RuntimeException，Error 不降級",
                 !gLoadArgs.tryCatchBlocks.isEmpty()
                 && gLoadArgs.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
-        failed += check("W10-D2 退役：共用 table class 不出貨",
-                !Files.exists(distJava.resolve(netTableCls + ".class")));
+        // W51（docs/patches.md 2bo）：共用 table decoder 只為觀測重新出貨。存在理由：原版 type 17 查不到 online ID
+        // 就把 null 交給呼叫端、不留紀錄（TIS 補上紀錄或拒絕時紅＝重估）。手術：唯一 AnimalID.parse 同形改道，
+        // 原呼叫在 helper 的 try 之外；其餘方法逐指令不變——W10-D2 的猜測改道不得回來。
+        String animalIdCls = "zombie/network/fields/character/AnimalID";
+        String typedLoadDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;";
+        String parseAnimalIdDesc = "(L" + animalIdCls + ";" + argsLoadDesc.substring(1);
+        MethodNode vTypedLoad = methodFromJar(jar, netTableCls, "load", typedLoadDesc);
+        AbstractInsnNode vAnimalParse = null;
+        for (AbstractInsnNode in : vTypedLoad.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc)) vAnimalParse = in;
+        }
+        AbstractInsnNode vAfterParse = vAnimalParse == null ? null : nextReal(nextReal(vAnimalParse));
+        failed += check("W51 vanilla：AnimalID.parse 只以 AnimalInstanceManager.get 查 online ID；load(…B) 恰 1 處 parse，之後直接回 getAnimal()",
+                methodText(methodFromJar(jar, animalIdCls, "parse", argsLoadDesc)).contains(
+                        "INVOKEVIRTUAL zombie/popman/animal/AnimalInstanceManager.get (S)Lzombie/characters/animals/IsoAnimal;")
+                && countExactCalls(vTypedLoad, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc) == 1
+                && isCall(vAfterParse, Opcodes.INVOKEVIRTUAL, animalIdCls, "getAnimal", "()Lzombie/characters/animals/IsoAnimal;")
+                && nextReal(vAfterParse).getOpcode() == Opcodes.ARETURN);
+        failed += check("W51 load(…B) 唯一 AnimalID.parse 同形改道 NetTimedActionGuard.parseAnimalId，其餘指令與 frames 保留",
+                methodText(vTypedLoad).replace("INVOKEVIRTUAL " + animalIdCls + ".parse " + argsLoadDesc,
+                        "INVOKESTATIC " + ntaGuardCls + ".parseAnimalId " + parseAnimalIdDesc)
+                        .equals(methodText(method(distJava, netTableCls, "load", typedLoadDesc))));
+        int netTableDiffs = 0;
+        for (MethodNode original : classNodeFromJar(jar, netTableCls).methods) {
+            if ((original.name + original.desc).equals("load" + typedLoadDesc)) continue;
+            if (!methodText(original).equals(methodText(method(distJava, netTableCls, original.name, original.desc)))) netTableDiffs++;
+        }
+        failed += check("W51 PZNetKahluaTableImpl 其餘方法逐指令不變（W10-D2 的 loadComponent 猜測改道不得回來）", netTableDiffs == 0);
+        MethodNode gParseAnimal = method(distJava, ntaGuardCls, "parseAnimalId", parseAnimalIdDesc);
+        failed += check("W51 helper 契約：parseAnimalId 恰委派 1 次原 parse，且不在任何 try 內（解析例外照原版外傳）",
+                countExactCalls(gParseAnimal, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc) == 1
+                && callsInsideTryRange(gParseAnimal, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc) == 0);
 
         // D1 診斷只能回讀已確定由 loadComponent 消費的 long＋short；不是猜 payload 內容。
         String componentLoadDesc = "(Ljava/nio/ByteBuffer;Lzombie/network/IConnection;)Lzombie/entity/Component;";

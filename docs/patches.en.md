@@ -1180,7 +1180,7 @@ Production also logged `NetTimedAction` packets NPE-ing in `PZNetKahluaTableImpl
 | the method's only `actionArgs.load` | `loadArgs` catches `RuntimeException` only within a valid parse context and when enabled, clears the partial arguments, and records the cause; `Error` propagates |
 | existing `protectedCall` redirect | if a parse-failure cause exists, skips the Lua constructor and returns a failure result so vanilla sets `action=null` |
 | W10-A `write` redirect (42.20 only) | with `action=null`, serializes a correct Reject; the cause is scoped to this packet and taken-and-cleared **before** write, so a throwing write leaves no residue |
-| shared `PZNetKahluaTableImpl` | not modified, no loose class shipped; other users such as `StatePacket` stay vanilla |
+| shared `PZNetKahluaTableImpl` | not modified, no loose class shipped; other users such as `StatePacket` stay vanilla (since 2026-10-01 W51 ships it again for observation only: one line when type 17 finds no animal, decoding unchanged; see [2bo](#2bo)) |
 
 `-Dmdc.netTimedActionArgs=0` disables D. (On 42.20, D was also disabled when A was off: a parse exception must not be swallowed without a correct Reject exit.) B's `netTimedActionGuard` switch is independent. D covers only `actionArgs.load` failures; it is not a catch-all around `parse`.
 
@@ -2791,6 +2791,54 @@ logged. W37 logs `cleared stale real-animal snapshots` when it clears a leftover
 - In production: the daily scan of apop `deathTime` finds no newly revived carcasses; `kept > 0` means a save vanilla would have gotten wrong was caught.
 
 **The 3 carcasses already revived**: left as they are; players can slaughter them like any other animal.
+
+<a id="2bo"></a>
+## 2bo. Animal ID miss log (W51, server, observe-only)
+
+**Why**: MP animal timed actions (giving water, leashing, tying to a tree, loading into a trailer, hand-feeding) send the animal's online ID to the
+server. When the server cannot find that ID, vanilla hands nil to the Lua action without logging anything, and the error only surfaces while the
+action runs (for example an `animEvent` exception every 400 ms while giving water). The vanilla log does not show which ID the player sent, so "this
+animal was never registered on the server" cannot be told apart from "the server removed it but the client still has it".
+
+**Patch**: the only `AnimalID.parse` in the type 17 (IsoAnimal) branch of `PZNetKahluaTableImpl.load(ByteBufferReader, IConnection, byte)` is
+redirected 1:1 to `NetTimedActionGuard.parseAnimalId`. The helper calls the original parse outside any try, so the decoded value and any exception
+are exactly vanilla; only when `getAnimal()` is null does it count and log one line:
+
+```text
+[MinidoracatJavaPatch][AnimalIdMiss] id=<online ID> src=<caller> [type=<action> name=<name>] connectionPlayers=<onlineID:account|…> n=<total>
+```
+
+- `src` is the first stack frame outside the table decoder and the helper; the stack is walked only when a line is written. Timed actions show
+  `zombie.core.NetTimedAction.parse`; other packets that share this decoder (`BuildAction`, `StatePacket`) show their own parse.
+- `type`/`name` are added only when `src` is `NetTimedAction.parse`, taken from W10's parse context. That context is left behind when another parse
+  exits early, so it is never used to attribute other packets.
+- `id=-1` never resolves: vanilla does not register -1 (`IsoObjectID.incorrect`). For any other value, this line alone cannot say whether the animal
+  was never registered or was removed.
+- Shares W10's time window (at most 20 lines per 10 seconds); beyond that only `suppressed` grows. The W10 heartbeat (`[NetTimedAction] parses=…`)
+  gains `animalIdMisses animalIdLog`.
+
+**Relation to the W10-D2 removal**: this class stopped shipping on 2026-09-08 when D2 (guessing a replacement object in the shared decoder) was removed.
+W51 ships it again for observation only and changes no decoded value. SmokeCheck pins that `load(…B)` is identical to vanilla except for this one call,
+every other method is instruction-for-instruction unchanged, and the original parse is outside the helper's try. The reason for the patch is pinned
+on the vanilla jar too: `AnimalID.parse` looks the ID up only through `AnimalInstanceManager.get`, and the type 17 branch returns `getAnimal()` right
+after parsing.
+
+**Kill switch**: `-Dmdc.animalIdMiss=0` (the redirect stays and only delegates to the original parse; nothing is logged or counted).
+
+**Deployment**: the manifest gains `zombie/network/PZNetKahluaTableImpl.class` (117 → 118 classes). As usual, uninstall completely with the old
+manifest, then install the new package, in the same window as a controlled restart. After it is live, first confirm the banner fingerprint is the new
+build, then look for `animalIdLog=1` in the W10 heartbeat.
+
+**Reading the log**: match it by time and account against the server-side guards in MinidoracatFixesFor42 (`MDFX_GiveWaterAnimalGuard nilAnimal`,
+`MDFX_AnimalCompleteGuard nilAnimal`). `AnimalIdMiss` is logged when the server builds the action; the Fixes line follows while the action runs or when
+it completes.
+
+**Not done**: a server-side record of ID registration and removal (to tell "never registered" from "removed") waits until there are samples.
+
+**Verification**: `NetTimedActionGuardTest`, four configurations (shipping plus three kill switches), with the real table decoder and the real
+`NetTimedAction.parse`: a known animal decodes to the same instance and logs nothing; a missing one reaches the constructor as nil exactly as in
+vanilla and logs exactly one line with the action type/name; a stale parse context does not label another caller as a timed action; 30 consecutive
+misses are all counted while per-line logging is throttled; the kill switch logs and counts nothing.
 
 ---
 

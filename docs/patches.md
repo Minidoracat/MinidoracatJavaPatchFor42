@@ -1473,7 +1473,7 @@ helper 實際旗標相符——property 名稱打錯會炸在測試裡，不會�
 | 該方法唯一的 `actionArgs.load` | `loadArgs` 只在有效 parse 上下文且 `args && stateFix` 時攔 `RuntimeException`，清空半成品參數並留下失敗原因；`Error` 穿透 |
 | 既有 `protectedCall` 改道 | 有解析失敗原因就不呼叫 Lua 建構子，回失敗結果，讓 vanilla 設 `action=null` |
 | W10-A `write` 改道 | `action=null` 時序列化正確 Reject；原因只供同一 packet 使用，並在 write **之前**取用即清，write 拋錯也不留殘餘 |
-| 共用 `PZNetKahluaTableImpl` | 完全不改、不出貨 loose class；`StatePacket` 等其他使用者維持原版 |
+| 共用 `PZNetKahluaTableImpl` | 完全不改、不出貨 loose class；`StatePacket` 等其他使用者維持原版（2026-10-01 起 W51 為觀測重新出貨：type 17 查不到動物時記一行，解析結果不變，見 [2bo](#2bo)） |
 
 `-Dmdc.netTimedActionArgs=0` 關 D；`-Dmdc.netTimedActionState=0` 關 A 時 D 也直通。沒有正確 Reject 出口就不得吞解析例外。B 刀的 `netTimedActionGuard` 開關仍獨立。這只涵蓋 `actionArgs.load` 的失敗，不是整個 `parse` 的萬用 catch。
 
@@ -3411,6 +3411,34 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 - 線上驗收：每日全服 apop `deathTime` 掃描不再出現新的活化屠體；`kept` 大於 0 代表原版會寫錯的情況確實被攔下。
 
 **已活化的 3 隻**：不動存檔，玩家可以照一般動物宰殺。
+
+<a id="2bo"></a>
+## 2bo. 動物 ID 解析失敗紀錄（W51，server，純觀測）
+
+**為什麼要記**：MP 的動物讀條動作（餵水、牽繩、拴樹、裝拖車、手餵）以動物的 online ID 傳給伺服器。伺服器查不到這個 ID 時，原版把 nil 交給 Lua 動作，不留任何紀錄，錯誤要到動作執行中才爆出來（例如餵水每 400 ms 一次 `animEvent` 例外）。原版 log 看不出玩家送來的是哪個 ID，也就分不出「這隻動物從沒登記到伺服器」和「伺服器已移除、client 還留著」。
+
+**手術**：`PZNetKahluaTableImpl.load(ByteBufferReader, IConnection, byte)` 的 type 17（IsoAnimal）唯一的 `AnimalID.parse` 1:1 改道 `NetTimedActionGuard.parseAnimalId`。helper 在 try 之外呼叫原 parse，解析結果與例外都照原版；`getAnimal()` 為 null 才計數並記一行：
+
+```text
+[MinidoracatJavaPatch][AnimalIdMiss] id=<online ID> src=<呼叫端> [type=<動作> name=<名稱>] connectionPlayers=<onlineID:帳號|…> n=<累計>
+```
+
+- `src` 是 stack 上第一個不在 table decoder 與 helper 內的 frame，只在要寫 log 時才走 stack。讀條動作是 `zombie.core.NetTimedAction.parse`；其他共用這個 decoder 的封包（`BuildAction`、`StatePacket`）是各自的 parse。
+- `type`／`name` 只在 `src` 是 `NetTimedAction.parse` 時才帶，取自 W10 的 parse 上下文。其他 parse 中途離開時這個上下文會殘留，所以不拿它歸因別的封包。
+- `id=-1` 一定查不到：原版不登記 -1（`IsoObjectID.incorrect`）。其他值單看這一行分不出是從沒登記還是已移除。
+- 與 W10 共用時間窗（每 10 秒最多 20 行），超過只累計 `suppressed`。W10 的 heartbeat（`[NetTimedAction] parses=…`）新增 `animalIdMisses animalIdLog`。
+
+**與 W10-D2 撤除的關係**：這個 class 在 2026-09-08 撤除 D2（在共用 decoder 猜替代物件）後就不再出貨。本刀只為觀測重新出貨，不改任何解析結果。SmokeCheck 釘住：`load(…B)` 除了這一處與原版逐字相同、其餘方法逐指令不變、原 parse 不在 helper 的 try 內。存在理由也釘在原版 jar 上：`AnimalID.parse` 只以 `AnimalInstanceManager.get` 查 ID，type 17 解析完直接回 `getAnimal()`。
+
+**kill switch**：`-Dmdc.animalIdMiss=0`（改道仍在，只委派原 parse，不記也不計）。
+
+**部署**：manifest 新增 `zombie/network/PZNetKahluaTableImpl.class`（117 → 118 個 class）。照常用舊 manifest 完整卸載，再安裝新包，與受控重啟放在同一個窗口。上線後先確認橫幅指紋是新版，再看 W10 heartbeat 出現 `animalIdLog=1`。
+
+**判讀**：和 MinidoracatFixesFor42 的伺服器端守衛（`MDFX_GiveWaterAnimalGuard nilAnimal`、`MDFX_AnimalCompleteGuard nilAnimal`）依時間與帳號對照。`AnimalIdMiss` 在伺服器建立動作時記，Fixes 那行在動作執行中或結束時出現。
+
+**未做**：伺服器端的 ID 登記與移除紀錄（用來分辨從沒登記與已移除）等累積樣本再決定。
+
+**驗證**：`NetTimedActionGuardTest` 四組態（出貨與三個 kill switch），用真 table decoder 與真 `NetTimedAction.parse`：查得到的動物原樣解析、不記；查不到時建構子照原版拿到 nil，並記恰 1 行、帶動作 type／name；殘留的 parse 上下文不會讓其他呼叫端被標成讀條動作；連續 30 筆查不到全部計數，逐筆 log 受節流；kill switch 不記也不計。
 
 ---
 
