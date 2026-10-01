@@ -23,6 +23,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - [為什麼做這些](#為什麼做這些)
 - [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・[效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・[帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・[Native](#native-防護linux-dedicated-server)
+- [官方未修的已知問題](#官方未修的已知問題)
 - [官方已修](#官方已修)
 - [修補原理](#修補原理)
 - [伺服器：建置與部署](#伺服器建置與部署)
@@ -153,6 +154,14 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | pfguard（[設計文件](docs/pathfind-aligned-block-guard-design-v1.md)） | `libPZPathFind64.so`：`VehicleRect` 池的槽位被寫壞，在 `PolygonalMap2::createVehicleClusters` SIGSEGV；`VehicleCluster::merge` 從不歸還被合併的 cluster（每秒約洩漏 40 塊）。 | 用 `LD_PRELOAD` 在該配置器家族周圍加 guard page（第一次錯誤寫入就當場 fault），並把被合併的 cluster 還回池。啟動時核對函式庫雜湊，不符即停用。 | 崩潰：[#100921](https://theindiestone.com/forums/topic/100921/)；洩漏：草稿 |
 | steamfix | Valve 的 `steamclient.so` PseudoTCP：部分 ACK 只縮短傳送片段、卻沒推進起始序號，重傳時越界讀取。 | 選用：以 `LD_AUDIT` 在已載入的函式庫中修正那一個區塊（磁碟上的檔案不變），只對確切的 Steam build 生效。 | Valve 函式庫 |
 | 啟動閘（[run-with-pfguard.sh](native-observer/deploy/run-with-pfguard.sh)） | 遊戲自動更新後，殘留的舊 loose class 讓伺服器起不來，或在新 jar 上靜默混跑。 | 每次開服重驗 payload SHA 與 jar 同源；不符就把修補移到一旁、以原版啟動。 | — |
+
+## 官方未修的已知問題
+
+已查出原因、但我們沒有修補的原版問題。回報放在 [docs/report/](docs/report/)，送出前都是草稿。
+
+| 問題 | 原版哪裡出錯 | 玩家可以怎麼做 | TIS |
+|---|---|---|---|
+| 駕駛中的車被留在已卸載的 chunk 上（[回報](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)） | client 卸載 chunk 時，車上有本機玩家的車移不掉，也沒有被移到已載入的 chunk。這台車之後不再回報位置、也不更新聲音（引擎聲「消失」）。等伺服器記的舊位置落到 client 的載入範圍外，一則車輛更新就會把駕駛拉回那個舊位置，車可能因此掉進水裡：下不了車，畫面一直全黑。 | 開車時引擎聲突然消失或車子自己煞停，就沿原路倒退，等引擎聲回來再開。已經卡在水裡就重登幾次（每次重登車都往岸邊移幾格），或請管理員移位。 | 草稿 |
 
 ## 官方已修
 

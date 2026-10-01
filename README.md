@@ -33,6 +33,7 @@ Every patch targets a specific vanilla defect or a measured hot spot and has a w
   [network](#network-bandwidth-and-resend-loops) · [multiplayer correctness](#multiplayer-correctness) ·
   [accounts and abuse](#accounts-and-abuse) · [log noise](#log-noise) · [observability](#observability) ·
   [client](#client-patches-release-package) · [native](#native-guards-linux-dedicated-server)
+- [Open vanilla issues](#open-vanilla-issues)
 - [Fixed upstream](#fixed-upstream)
 - [How the patches work](#how-the-patches-work)
 - [Server: build and deploy](#server-build-and-deploy)
@@ -169,6 +170,15 @@ They write rate-limited heartbeat lines to the console and are how most of the i
 | pfguard ([design, Chinese](docs/pathfind-aligned-block-guard-design-v1.md)) | `libPZPathFind64.so`: SIGSEGV in `PolygonalMap2::createVehicleClusters` from a corrupted `VehicleRect` pool slot; `VehicleCluster::merge` never returns merged clusters (about 40 leaked blocks per second). | `LD_PRELOAD` guard pages around the allocator family (fault at the first bad write) and returns merged clusters to the pool. Checks the exact library hash at startup and disarms on mismatch. | crash: [#100921](https://theindiestone.com/forums/topic/100921/); leak: draft |
 | steamfix | Valve's `steamclient.so` PseudoTCP: a partial ACK shortens the segment but does not advance its start sequence, so a retransmit reads out of bounds. | Opt-in `LD_AUDIT` fix of that single block in the loaded library (the file on disk is not modified), pinned to the exact Steam build. | Valve library |
 | Startup gate ([run-with-pfguard.sh](native-observer/deploy/run-with-pfguard.sh)) | After an automatic game update, stale loose classes stop the server from starting or run silently against the new jar. | Re-checks the payload SHA and jar identity at every start; moves a mismatched patch aside and starts vanilla. | — |
+
+## Open vanilla issues
+
+Vanilla bugs we have diagnosed but not patched. The reports live in [docs/report/](docs/report/) and stay drafts
+until posted.
+
+| Issue | What goes wrong in vanilla | What players can do | TIS |
+|---|---|---|---|
+| Driven vehicle left on an unloaded chunk ([report](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)) | On the client, a vehicle with a local player aboard cannot be removed when its chunk unloads, and nothing moves it to a loaded chunk. It stops sending its position and stops updating its sounds (the engine "goes silent"). Once the server's stale position is outside the client's loaded area, a vehicle update teleports the driver back to it, and the car can end up in water: the driver cannot get out and the screen stays black. | When the engine sound stops or the car brakes by itself, reverse along the road until the sound returns. If the car is already stuck in water, reconnect a few times (each reconnect moved it a few squares toward the shore) or ask an admin. | draft |
 
 ## Fixed upstream
 
