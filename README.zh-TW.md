@@ -162,7 +162,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | 問題 | 原版哪裡出錯 | 玩家可以怎麼做 | TIS |
 |---|---|---|---|
 | 駕駛中的車被留在已卸載的 chunk 上（[回報](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)） | client 卸載 chunk 時，車上有本機玩家的車移不掉，也沒有被移到已載入的 chunk。這台車之後不再回報位置、也不更新聲音（引擎聲「消失」）。等伺服器記的舊位置落到 client 的載入範圍外，一則車輛更新就會把駕駛拉回那個舊位置，車可能因此掉進水裡：下不了車，畫面一直全黑。 | 開車時引擎聲突然消失或車子自己煞停，就沿原路倒退，等引擎聲回來再開。已經卡在水裡就重登幾次（每次重登車都往岸邊移幾格），或請管理員移位。 | 草稿 |
-| 有雞舍的 chunk 卸載時被斷線踢回主選單（[回報](docs/report/2026-10-03-hutch-removefromworld-npe-tis.md)） | 42.21.0：`IsoHutch.removeFromWorld` 對 `animalInside` 的每個值呼叫 `removeFromUpdateLists()`，但 client 自己的動物同步會把 `null` 寫進這個 map（例如母雞進巢箱下蛋時）。client 卸載那個 chunk 時（走開、開車離開或傳送），NPE 一路拋到 `IngameState.updateInternal` 的 catch，client 被斷線送回主選單。已在本機伺服器實機重現。 | 重登就能回到遊戲。我們的 Lua 修復 MOD 會在 client 清掉這些空格（[MinidoracatFixesFor42](https://github.com/Minidoracat/MinidoracatFixesFor42) 的 `MDFX_HutchNullSlotGuard`，尚未發布到 Workshop）。 | 草稿 |
+| 有雞舍的 chunk 卸載時被斷線踢回主選單（[回報](docs/report/2026-10-03-hutch-removefromworld-npe-tis.md)） | 42.21.0：`IsoHutch.removeFromWorld` 對 `animalInside` 的每個值呼叫 `removeFromUpdateLists()`，但 client 自己的動物同步會把 `null` 寫進這個 map（例如母雞進巢箱下蛋時）。client 卸載那個 chunk 時（走開、開車離開或傳送），NPE 一路拋到 `IngameState.updateInternal` 的 catch，client 被斷線送回主選單。已在本機伺服器實機重現。 | 重登就能回到遊戲。我們的 Lua 修復 MOD 會在 client 清掉這些空格（[MinidoracatFixesFor42](https://github.com/Minidoracat/MinidoracatFixesFor42) 的 `MDFX_HutchNullSlotGuard`，Workshop 42.21.0-0.13.0 起）。 | 草稿 |
 
 ## 官方已修
 
