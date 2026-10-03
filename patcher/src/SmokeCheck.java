@@ -3051,6 +3051,66 @@ public final class SmokeCheck {
                 countExactFields(gVcr, Opcodes.PUTFIELD, svsCls, "netPlayerId", "S") == 1
                 && countExactCalls(gVcr, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager", "getVehicleState",
                         "(Lzombie/core/raknet/UdpConnection;Lzombie/vehicles/BaseVehicle;)L" + svsCls + ";") == 0);
+
+        // W52：分割畫面與重生的名稱冒用守衛（docs/patches.md 2bp）。存在理由（TIS 修好即紅＝撤刀）：stage 1 唯一 getUTF
+        // 的名稱存進 slot 4，兩個 setUserName 都直接拿它；parse 不比對連線登入名、不查帳號；receivePlayerConnect 把名稱參數
+        // 設成 player.username；首次進場的 ConnectPacket 傳的是連線登入名（0 號改用登入名的依據）。
+        String ccpCls = "zombie/network/packets/connection/ConnectCoopPacket";
+        String ccgCls = "zombie/network/packets/connection/MdcCoopNameGuard";
+        String bbrCls = "zombie/core/network/ByteBufferReader";
+        String connItf = "zombie/network/IConnection";
+        String swdCls = "zombie/network/ServerWorldDatabase";
+        String ccpDesc = "(L" + bbrCls + ";L" + connItf + ";)V";
+        String utfDesc = "()Ljava/lang/String;";
+        MethodNode vCoopParse = methodFromJar(jar, ccpCls, "parse", ccpDesc);
+        failed += check("W52 原版：parse 唯一 getUTF 存入 slot 4，兩個 setUserName 都直接載入它，slot 4 另外只有 stage 2 寫一次；"
+                        + "不比對連線登入名、不查帳號",
+                coopNameFlowOk(vCoopParse, bbrCls, connItf)
+                && countExactCalls(vCoopParse, Opcodes.INVOKEINTERFACE, connItf, "getUserName", utfDesc) == 0
+                && !methodText(vCoopParse).contains(swdCls));
+        MethodNode vReceiveConnect = methodFromJar(jar, "zombie/network/GameServer", "receivePlayerConnect",
+                "(L" + bbrCls + ";L" + connItf + ";Ljava/lang/String;)V");
+        AbstractInsnNode connectCall = null;
+        for (AbstractInsnNode in : methodFromJar(jar, "zombie/network/packets/connection/ConnectPacket", "parse",
+                ccpDesc).instructions) {
+            if (in instanceof MethodInsnNode mi && mi.name.equals("receivePlayerConnect")) {
+                connectCall = in;
+            }
+        }
+        failed += check("W52 原版：receivePlayerConnect 把名稱參數設成 player.username；首次進場 ConnectPacket 傳連線登入名",
+                putFieldFromLocal(vReceiveConnect, "zombie/characters/IsoPlayer", "username", 2)
+                && connectCall != null && prevReal(connectCall) instanceof MethodInsnNode login
+                && login.owner.equals(connItf) && login.name.equals("getUserName") && login.desc.equals(utfDesc));
+        MethodNode pCoopParse = method(distJava, ccpCls, "parse", ccpDesc);
+        String beginDesc = "(L" + ccpCls + ";L" + connItf + ";)V";
+        String readDesc = "(L" + bbrCls + ";)Ljava/lang/String;";
+        failed += check("W52 手術後：頭部 aload_0／aload_2／begin 全序、唯一 getUTF 改道 readName，其餘指令與 frames 不變",
+                headCallSlotsOk(pCoopParse, ccgCls, "begin", beginDesc, 0, 2)
+                && methodText(pCoopParse).equals("    ALOAD 0\n    ALOAD 2\n    INVOKESTATIC " + ccgCls + ".begin "
+                        + beginDesc + "\n" + methodText(vCoopParse).replace(
+                                "INVOKEVIRTUAL " + bbrCls + ".getUTF " + utfDesc,
+                                "INVOKESTATIC " + ccgCls + ".readName " + readDesc))
+                && classRealInsnCount(classNode(distJava, ccpCls))
+                        == classRealInsnCount(classNodeFromJar(jar, ccpCls)) + 3);
+        ClassNode gCoop = classNode(distJava, ccgCls);
+        MethodNode gReadName = method(distJava, ccgCls, "readName", readDesc);
+        int coopDbCalls = 0;
+        int coopNameWrites = 0;
+        for (MethodNode m : gCoop.methods) {
+            for (AbstractInsnNode in : m.instructions) {
+                if (in instanceof MethodInsnNode mi) {
+                    coopDbCalls += mi.owner.equals(swdCls) ? 1 : 0;
+                    coopNameWrites += mi.name.equals("setUserName") ? 1 : 0;
+                }
+            }
+        }
+        failed += check("W52 helper 契約：readName 恰讀 1 次名稱且不在 try 內；資料庫只查 containsCaseinsensitiveUser；不寫任何名稱",
+                countExactCalls(gReadName, Opcodes.INVOKEVIRTUAL, bbrCls, "getUTF", utfDesc) == 1
+                && callsInsideTryRange(gReadName, Opcodes.INVOKEVIRTUAL, bbrCls, "getUTF", utfDesc) == 0
+                && coopDbCalls == 1
+                && classWideCalls(gCoop, Opcodes.INVOKEVIRTUAL, swdCls, "containsCaseinsensitiveUser",
+                        "(Ljava/lang/String;)Z") == 1
+                && coopNameWrites == 0);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",
@@ -3446,6 +3506,47 @@ public final class SmokeCheck {
         return h[slots.length] instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKESTATIC
                 && mi.owner.equals(owner) && mi.name.equals(name) && mi.desc.equals(desc)
                 && countExactCalls(m, Opcodes.INVOKESTATIC, owner, name, desc) == 1;
+    }
+
+    /**
+     * W52 名稱資料流：唯一 getUTF 緊接 ASTORE 4；兩個 IConnection.setUserName(I,String) 前一條都是 ALOAD 4；
+     * slot 4 只另外被寫一次（stage 2 的 getUserName(I) 結果）——改道 getUTF 就等於決定兩個分支寫入的名稱。
+     */
+    static boolean coopNameFlowOk(MethodNode m, String readerCls, String connItf) {
+        int utf = 0;
+        int writes = 0;
+        int stores = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(readerCls) && mi.name.equals("getUTF")) {
+                utf++;
+                if (!(nextReal(in) instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ASTORE || v.var != 4) {
+                    return false;
+                }
+            } else if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEINTERFACE
+                    && mi.owner.equals(connItf) && mi.name.equals("setUserName") && mi.desc.equals("(ILjava/lang/String;)V")) {
+                writes++;
+                if (!(prevReal(in) instanceof VarInsnNode v) || v.getOpcode() != Opcodes.ALOAD || v.var != 4) {
+                    return false;
+                }
+            } else if (in instanceof VarInsnNode v && v.getOpcode() == Opcodes.ASTORE && v.var == 4) {
+                stores++;
+            }
+        }
+        return utf == 1 && writes == 2 && stores == 2;
+    }
+
+    /** 方法內 PUTFIELD owner.name 恰 1 處，且寫入值直接來自 ALOAD slot。 */
+    static boolean putFieldFromLocal(MethodNode m, String owner, String name, int slot) {
+        int puts = 0;
+        boolean fromSlot = false;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD
+                    && fi.owner.equals(owner) && fi.name.equals(name)) {
+                puts++;
+                fromSlot = prevReal(in) instanceof VarInsnNode v && v.getOpcode() == Opcodes.ALOAD && v.var == slot;
+            }
+        }
+        return puts == 1 && fromSlot;
     }
 
     /**

@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 59 patched classes, 163 patch sites and 59 helper classes on 42.21.0.
+  actions and log noise. 60 patched classes, 165 patch sites and 60 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles, the 42.21.0
   "player-built room" rendering bug). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -139,6 +139,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | Patch | What goes wrong in vanilla | What the patch does | TIS |
 |---|---|---|---|
 | W23 Account limit per Steam ID ([2ak](docs/patches.en.md#2ak)) | `MaxAccountsPerUser` is only checked when a new account is created, so existing accounts are never limited. | Enforces the limit at login, keeping the most recently used accounts. Server policy. | not reported |
+| W52 Split-screen and respawn names ([2bp](docs/patches.en.md#2bp)) | `ConnectCoopPacket` takes the player name from the packet and only rejects an empty or connected name. A split-screen player (vanilla UI) or a respawning player (modified client Lua, any `AllowCoop`) can take an offline player's name and pass name-based safehouse, faction and mod checks; the owner cannot log in meanwhile. | Player 0 always gets the account the connection logged in with; split-screen players 1–3 cannot use an existing account name (rejected before any state changes). | draft |
 | W29 Animal sync validation ([2aq](docs/patches.en.md#2aq)) | A validation gap in client-to-server animal sync packets. The details will be reported to TIS privately rather than published here. | Validates the packet and drops it before any game state changes. | to be reported privately |
 | W19 Vehicle removal ledger ([2ag](docs/patches.en.md#2ag)) | Vehicles can be deleted permanently from several Lua paths without an audit trail. | Logs every permanent removal with caller and ownership (observe only). | not reported |
 

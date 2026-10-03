@@ -2840,6 +2840,87 @@ it completes.
 vanilla and logs exactly one line with the action type/name; a stale parse context does not label another caller as a timed action; 30 consecutive
 misses are all counted while per-line logging is throttled; the kill switch logs and counts nothing.
 
+<a id="2bp"></a>
+## 2bp. Name guard for split-screen joins and respawns (W52, server, default enforce)
+
+**Vanilla defect (42.21.0)**: split-screen joins and respawns of the primary player both go through `ConnectCoopPacket`. Stage 1 of `parse` reads the
+name from the packet and only rejects an empty name or a name that is in any connection's `usernames[]`. It does not compare the name with the account
+that logged in on this connection, and it does not check whether the name belongs to another account. Both branches ("replacing dead player" and "new
+split-screen player") call `connection.setUserName(playerIndex, name)`, and stage 2 (`GameServer.receivePlayerConnect`) sets `player.username` to it.
+Two ways in:
+
+- **Split-screen** (`AllowCoop=true`, the vanilla default): the vanilla CoopUserName panel lets player 2 type any name (`isValidUserName` only checks
+  the format). No modified client is needed.
+- **Respawn of the primary player** (any `AllowCoop`): `parse` reads `allowCoop` only when `playerIndex != 0`; on respawn the client sends
+  `IsoPlayer.username` through `ConnectCoopPacket.setInit`, so a client running modified Lua can call `setUsername` right after respawning.
+
+Impact: checks that identify players by name treat the player as that account (`SafeHouse.playerAllowed` compares `getUsername()`, faction lists, many
+mods), and the real owner cannot log in while the impersonator is connected (`LoginPacket` denies a connected name). The character data (loaded for
+`connection.getUserName()`) and the role (taken from the connection) are not affected. Both ways were reproduced on a local 42.21.0 dedicated server:
+a split-screen player joined under an offline account's name and the server created player 1 with that name; a respawned client renamed itself and
+the server's player 0 took the other name.
+
+**What a normal client sends**: on respawn the client sets player 0's `IsoPlayer.username` to `GameClient.username` (`LuaManager.assignUsername` /
+`setPlayerMouse`), the name it logged in with. Both the client and `LoginPacket.parse` apply `trim()`, so it equals the server's
+`connection.getUserName()`. The first join (`ConnectPacket`) uses `connection.getUserName()` directly. The server's name is written back to the
+client's own `player.username` by `ConnectedPacket` (`bMe` branch), so both sides agree after a correction; the client never runs `parse`
+(`handlingType=1`).
+
+**Patch**: head call at `ConnectCoopPacket.parse` (slots {0, 2} = packet, connection) that binds this packet and the connection's login name; the
+only `ByteBufferReader.getUTF()` in the method (the stage 1 name, javap offset 137) is redirected 1:1 to `readName`. Two patch sites, new ClassPatch.
+The helper `zombie.network.packets.connection.MdcCoopNameGuard` (same package, to read the protected `playerIndex`) reads the name exactly as vanilla
+does and returns the name the rest of vanilla's code will use:
+
+- Player 0: always the account the connection logged in with (`connection.getUserName()`). Both branches use this value, so stage 2's
+  `player.username` is right too. A connection without a login name gets an empty string.
+- Players 1–3: an empty string if the name belongs to any account (`ServerWorldDatabase.containsCaseinsensitiveUser`: the whitelist, case-insensitive,
+  the same table `LoginPacket` uses).
+- An empty string takes vanilla's "No username given" rejection, which returns before `disconnectPlayer`, ID assignment, `setUserName` and the
+  granted reply; the client runs vanilla `OnCoopJoinFailed`. An empty name is rejected as in vanilla and everything else is unchanged; the helper
+  changes no connection state.
+
+**Kill switch**: `-Dmdc.coopNameGuard`: unset / `1` / `enforce` = enforce (default; unknown values enforce too), `2` / `observe` = log only and keep
+vanilla, `0` / `off` = vanilla. Restart required. A RuntimeException in the decision is counted in `anomalies` and vanilla proceeds.
+
+**Log** (at most 20 lines per 10 s; names are truncated, control characters and quotes become `?`):
+
+```text
+[MinidoracatJavaPatch][CoopNameGuard] 首次生效 mode=enforce（-Dmdc.coopNameGuard=observe|off）
+[MinidoracatJavaPatch][CoopNameGuard] renamed player=1/4 login="<login account>" sent="<packet name>" mode=enforce renamed=<n> rejected=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][CoopNameGuard] rejected player=2/4 login="<host account>" sent="<packet name>" reason=account mode=enforce …
+```
+
+Observe mode prints `wouldRename` / `wouldReject`; `reason=noLogin` means player 0 on a connection without a login name. The first-activation line
+(`首次生效`, "first activation") appears with the first stage 1 packet after boot, usually the first respawn.
+
+**Limits**: names that are not accounts remain a shared namespace: another host's split-screen player can reuse a non-account name and get the
+safehouse or faction rights granted to that name (on 2026-10-03 the user chose to block account names only rather than derive names from the host).
+`GoogleAuthKey` calling `connection.setUserName(packet name)` before it verifies and disconnects is out of scope: it changes the login name that
+vanilla also uses to load the character, and it needs a modified Java client that beats the disconnect.
+
+**Verification**:
+- SmokeCheck (reasons for the patch; red when TIS fixes it = retire): in vanilla `parse` the only `getUTF` is stored in slot 4, both `setUserName`
+  calls load slot 4 directly, slot 4 is written only once more (stage 2), and there is no `IConnection.getUserName()` call and no
+  `ServerWorldDatabase`; `receivePlayerConnect` sets `player.username` from its name parameter; the first-join `ConnectPacket` passes
+  `connection.getUserName()`. Shape: head `aload_0 / aload_2 / begin` in order, the method text (frames included) equals vanilla except
+  `getUTF` → `readName`, exactly +3 real instructions class-wide. Helper contract: `readName` reads the name exactly once and not inside a try; the only
+  database call is `containsCaseinsensitiveUser`; it writes no name.
+- `MdcCoopNameGuardTest` (enforce / observe / off, `-Xverify:all`) drives the real patched `parse`, with account names looked up through the real
+  `ServerWorldDatabase` in an in-memory SQLite whitelist. Enforce: player 0 sending another name gets the login name and is still granted; sending the
+  login name changes nothing; a connection without a login name is rejected before any side effect; player 1 using an account name (different case) is
+  rejected before `setUserName`, ID assignment and the granted reply; free names and empty names behave as in vanilla; the binding left by a stage 2
+  packet is not used by the next connection's stage 1. Observe only counts; off reproduces the vanilla impersonation (negative control).
+- In-game E2E (local 42.21.0 dedicated server with dist first on the classpath; two offline accounts created with `adduser` after boot). Enforce
+  run: a normal respawn keeps its name; a client that calls `setUsername` with an offline account's name right after respawning is logged as
+  `[CoopNameGuard] renamed player=1/4 login="test" sent="victim1"`, player 0 is still test and is granted as usual, and the client's own player 0
+  name returns to test; a split-screen player with a free name joins; a split-screen player using the other offline account's name is rejected
+  (server `rejected … reason=account`, client `access denied: No username given` and `OnCoopJoinFailed`). The same scenario with
+  `-Dmdc.coopNameGuard=off` reproduces vanilla: player 0 takes the offline account's name and the split-screen player joins under the other one.
+
+**Deployment**: the manifest gains `zombie/network/packets/connection/ConnectCoopPacket.class` and the helper (118 → 120 classes). As usual, uninstall
+completely with the old manifest, then install the new package, in the same window as a controlled restart. After it is live, first confirm the
+banner fingerprint is the new build; after the first respawn the log shows `[CoopNameGuard] 首次生效 mode=enforce`.
+
 ---
 
 <a id="3"></a>

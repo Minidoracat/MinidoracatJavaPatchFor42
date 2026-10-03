@@ -114,6 +114,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalSoundIndex$CellTable.class',
     'zombie/mdc/AnimalSoundIndex$SoundList.class',
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
+    'zombie/network/packets/connection/MdcCoopNameGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -526,6 +527,16 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "AnimalSoundIndexTest（聲音原地改寫由抽樣比對發現並停用）"
 java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest on
 Assert-Ok "AnimalSoundProbeTest（索引 off 時每 64 次抽樣）"
+
+Write-Host "[9ze/10] 分割畫面／重生名稱守衛（W52）：真 ConnectCoopPacket.parse、真 whitelist 查詢與原版回退..."
+# enforce＝出貨組態（0 號改用登入名、1–3 號帳號名在任何副作用前被拒）；observe 只計數照原版；
+# off＝原版冒名重現（負對照）。測試自驗 argv 與實際 MODE 相符，property 拼錯不得假綠。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest enforce
+Assert-Ok "MdcCoopNameGuardTest（enforce，出貨組態）"
+java -Xverify:all "-Dmdc.coopNameGuard=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest observe
+Assert-Ok "MdcCoopNameGuardTest（observe，只計數照原版）"
+java -Xverify:all "-Dmdc.coopNameGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest off
+Assert-Ok "MdcCoopNameGuardTest（off，原版冒名負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

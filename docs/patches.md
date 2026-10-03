@@ -3440,6 +3440,45 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 
 **驗證**：`NetTimedActionGuardTest` 四組態（出貨與三個 kill switch），用真 table decoder 與真 `NetTimedAction.parse`：查得到的動物原樣解析、不記；查不到時建構子照原版拿到 nil，並記恰 1 行、帶動作 type／name；殘留的 parse 上下文不會讓其他呼叫端被標成讀條動作；連續 30 筆查不到全部計數，逐筆 log 受節流；kill switch 不記也不計。
 
+<a id="2bp"></a>
+## 2bp. 分割畫面與重生的名稱冒用守衛（W52，server，預設 enforce）
+
+**原版缺陷（42.21.0）**：分割畫面加入與主玩家重生都走 `ConnectCoopPacket`。stage 1 的 `parse` 從封包讀名稱，只擋空字串與任何連線 `usernames[]` 裡在線的同名，不比對這條連線登入的帳號，也不查名稱是否屬於別的帳號；「接替死亡玩家」與「新的分割畫面玩家」兩個分支都直接 `connection.setUserName(playerIndex, 名稱)`，stage 2 的 `GameServer.receivePlayerConnect` 再把它設成 `player.username`。兩條路徑：
+
+- **分割畫面**（`AllowCoop=true`，原版預設）：原版 CoopUserName 面板讓第 2 位玩家自由輸入名稱（`isValidUserName` 只檢查格式），不必改客戶端。
+- **主玩家重生**（不看 `AllowCoop`）：`parse` 只在 `playerIndex != 0` 時讀 `allowCoop`；客戶端重生時 `ConnectCoopPacket.setInit` 送 `IsoPlayer.username`，改過 Lua 的客戶端重生後立刻 `setUsername` 就能換名。
+
+後果：以名字認人的檢查把他當成那個帳號（`SafeHouse.playerAllowed` 比對 `getUsername()`、陣營名單、許多 MOD）；冒名者在線時本人登不進來（`LoginPacket` 拒絕已在線的同名）。角色資料（以 `connection.getUserName()` 載入）與權限（取自連線）不受影響。本機 E2E（42.21.0）兩條都重現過：分割畫面以離線帳號名加入，伺服器出現序號 1、名為該帳號的玩家；重生後改名，伺服器的 0 號玩家換成別人的名字。
+
+**正常客戶端送的是什麼**：0 號重生時客戶端把 `IsoPlayer.username` 設成 `GameClient.username`（`LuaManager.assignUsername`／`setPlayerMouse`），也就是登入時送出的名稱；客戶端與 `LoginPacket.parse` 都做 `trim()`，所以與伺服器的 `connection.getUserName()` 相同。首次進場的 `ConnectPacket` 也直接用 `connection.getUserName()`。伺服器的名稱經 `ConnectedPacket` 回寫客戶端自己的 `player.username`（`bMe` 分支），伺服器改名後兩端一致；`parse` 不在客戶端執行（`handlingType=1`）。
+
+**手術**：`ConnectCoopPacket.parse` 頭部 headCall，slots＝{0, 2}（封包、連線），綁定本次封包與連線登入名；方法內唯一的 `ByteBufferReader.getUTF()`（stage 1 名稱，javap offset 137）1:1 改道 `readName`。共 2 個命中點，新 ClassPatch。helper `zombie.network.packets.connection.MdcCoopNameGuard`（同 package 以讀 protected `playerIndex`）照原版讀名稱，回傳原版後續程式要用的名稱：
+
+- 0 號：一律用連線登入的帳號（`connection.getUserName()`）。接替死亡玩家與新玩家兩個分支吃同一個值，stage 2 的 `player.username` 跟著正確。連線沒有登入名時回空字串。
+- 1–3 號：名稱屬於任何帳號（`ServerWorldDatabase.containsCaseinsensitiveUser`，whitelist 不分大小寫，與 `LoginPacket` 同一張表）就回空字串。
+- 回空字串＝走原版「No username given」拒絕：在 `disconnectPlayer`、配 ID、`setUserName`、送 granted 之前結束，客戶端走原版 `OnCoopJoinFailed`。空名稱照原版拒絕，其餘照原版；helper 不改任何連線狀態。
+
+**kill switch**：`-Dmdc.coopNameGuard`，未設定／`1`／`enforce`＝執法（預設；未知值也執法），`2`／`observe`＝只記錄、照原版，`0`／`off`＝原版；需重啟。判定的 RuntimeException 計入 `anomalies` 並照原版放行。
+
+**log**（每 10 秒最多 20 行；名稱截斷，控制字元與引號換成 `?`）：
+
+```text
+[MinidoracatJavaPatch][CoopNameGuard] 首次生效 mode=enforce（-Dmdc.coopNameGuard=observe|off）
+[MinidoracatJavaPatch][CoopNameGuard] renamed player=1/4 login="<登入帳號>" sent="<封包名稱>" mode=enforce renamed=<n> rejected=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][CoopNameGuard] rejected player=2/4 login="<主機帳號>" sent="<封包名稱>" reason=account mode=enforce …
+```
+
+observe 印 `wouldRename`／`wouldReject`；`reason=noLogin` 是 0 號連線沒有登入名。首次生效行在開機後第一個 stage 1 封包出現（通常是第一次重生）。
+
+**限制**：不是帳號的名字仍是共用命名空間：別台主機的分割畫面可以沿用同一個非帳號名字，拿到以那個名字授予的安全屋或陣營權限（使用者 2026-10-03 選擇只擋帳號名，不改成衍生名稱）。`GoogleAuthKey` 先 `connection.setUserName(封包名稱)` 才驗證並斷線的問題不在本刀範圍：它改的是原版載入角色也用的登入名，需要改過 Java 的客戶端並搶在斷線前。
+
+**驗證**：
+- SmokeCheck（存在理由，TIS 修好即紅＝撤刀）：原版 `parse` 唯一 `getUTF` 存入 slot 4、兩個 `setUserName` 都直接載入它、slot 4 另外只有 stage 2 寫一次，且不呼叫 `IConnection.getUserName()`、不碰 `ServerWorldDatabase`；`receivePlayerConnect` 把名稱參數設成 `player.username`；首次進場 `ConnectPacket` 傳 `connection.getUserName()`。手術形狀：頭部 `aload_0／aload_2／begin` 全序，除了 `getUTF`→`readName` 之外方法文字（含 frames）與原版相同，全 class 真指令恰 +3。helper 契約：`readName` 恰讀 1 次名稱且不在 try 內；資料庫只查 `containsCaseinsensitiveUser`；不寫任何名稱。
+- `MdcCoopNameGuardTest`（enforce／observe／off，`-Xverify:all`）：走 dist 手術後的真 `parse`，帳號名以真 `ServerWorldDatabase` 查 in-memory SQLite whitelist。enforce：0 號送別人的名字改用登入名且照常 granted；送登入名不動；連線沒有登入名在任何副作用前拒絕；1 號用帳號名（大小寫不同）在 `setUserName`、配 ID、送 granted 之前拒絕；自由名稱與空名稱照原版；stage 2 留下的綁定不會被下一個連線的 stage 1 拿去用。observe 照原版只計數；off 重現原版冒名（負對照）。
+- 本機實機 E2E（42.21.0 本機 dedicated server，dist 放在 classpath 最前面；開機後以 `adduser` 建兩個離線帳號）：enforce 那輪正常重生名稱不變；重生後立刻 `setUsername` 成離線帳號，伺服器記 `[CoopNameGuard] renamed player=1/4 login="test" sent="victim1"`，0 號仍叫 test 且照常 granted，客戶端自己的 0 號名稱也回到 test；分割畫面用自由名稱照常加入；用離線帳號名的分割畫面玩家被拒（伺服器 `rejected … reason=account`，客戶端 `access denied: No username given`、觸發 `OnCoopJoinFailed`）。同一情境以 `-Dmdc.coopNameGuard=off` 重跑重現原版：0 號變成離線帳號名，分割畫面以離線帳號名加入。
+
+**部署**：manifest 新增 `zombie/network/packets/connection/ConnectCoopPacket.class` 與 helper（118 → 120 個 class）。照常用舊 manifest 完整卸載，再安裝新包，與受控重啟放在同一個窗口。上線後先確認橫幅指紋是新版，第一次有人重生後 log 出現 `[CoopNameGuard] 首次生效 mode=enforce`。
+
 ---
 
 <a id="3"></a>

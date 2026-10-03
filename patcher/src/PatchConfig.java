@@ -1221,6 +1221,23 @@ public final class PatchConfig {
         vcProcess.expectedHits = 1;
         patches.add(vcPacket);
 
+        // W52：分割畫面與重生的名稱冒用守衛（docs/patches.md 2bp）。ConnectCoopPacket.parse stage 1 採用封包名稱
+        // （只擋空字串與在線同名），兩個分支都 setUserName(playerIndex, 名稱)，stage 2 的 receivePlayerConnect 再設成
+        // player.username；0 號不看 AllowCoop。頭部收 (this, connection)，唯一 getUTF（stage 1 名稱）改道：0 號改用
+        // 連線登入名、1–3 號名稱屬於帳號就回空字串走原版「No username given」拒絕。client 不執行 parse（handlingType=1），
+        // 伺服器名稱由 ConnectedPacket 回寫 client 的 player.username，無 desync。-Dmdc.coopNameGuard=observe|off。
+        String coopGuard = "zombie/network/packets/connection/MdcCoopNameGuard";
+        Patcher.ClassPatch coopPacket = new Patcher.ClassPatch("zombie/network/packets/connection/ConnectCoopPacket");
+        Patcher.MethodOps coopParse = coopPacket.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        coopParse.headCall = new Patcher.HeadCall(coopGuard, "begin",
+                "(Lzombie/network/packets/connection/ConnectCoopPacket;Lzombie/network/IConnection;)V",
+                new int[]{0, 2});
+        coopParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/network/ByteBufferReader",
+                "getUTF", "()Ljava/lang/String;", coopGuard, "readName"));
+        coopParse.expectedHits = 2;   // headCall＋getUTF 改道（stage 1 名稱，javap offset 137）
+        patches.add(coopPacket);
+
         return patches;
     }
 

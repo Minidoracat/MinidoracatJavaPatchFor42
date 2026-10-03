@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 59 個 patched class、163 個命中點、59 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 60 個 patched class、165 個命中點、60 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形、42.21.0「自建房間」繪製 bug），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -125,6 +125,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
 | W23 每個 Steam ID 帳號上限（[2ak](docs/patches.md#2ak)） | `MaxAccountsPerUser` 只在建立新帳號時檢查，既有帳號從不受限。 | 在登入時執行上限，保留最近使用的帳號。屬伺服器政策。 | 未回報 |
+| W52 分割畫面與重生名稱（[2bp](docs/patches.md#2bp)） | `ConnectCoopPacket` 採用封包裡的名稱，只擋空字串與在線同名。分割畫面玩家（原版介面）或重生的主玩家（改過的客戶端 Lua，不受 `AllowCoop` 影響）能換成離線玩家的名字，通過以名字認人的安全屋、陣營與 MOD 檢查，期間本人登不進來。 | 0 號一律用連線登入的帳號；1–3 號分割畫面玩家不能用任何已有帳號的名稱（在任何狀態改變前拒絕）。 | 草稿 |
 | W29 動物同步驗證（[2aq](docs/patches.md#2aq)） | client 送往伺服器的動物同步封包有驗證缺口；細節會私下回報 TIS，不在此公開。 | 在任何遊戲狀態改變前驗證並丟棄不合法封包。 | 將私下回報 |
 | W19 車輛永久移除帳本（[2ag](docs/patches.md#2ag)） | 好幾條 Lua 路徑都能永久刪除車輛，卻沒有任何稽核紀錄。 | 每次永久移除都記錄呼叫來源與認領狀態（純觀測）。 | 未回報 |
 
