@@ -3477,7 +3477,9 @@ observe 印 `wouldRename`／`wouldReject`；`reason=noLogin` 是 0 號連線沒�
 - `MdcCoopNameGuardTest`（enforce／observe／off，`-Xverify:all`）：走 dist 手術後的真 `parse`，帳號名以真 `ServerWorldDatabase` 查 in-memory SQLite whitelist。enforce：0 號送別人的名字改用登入名且照常 granted；送登入名不動；連線沒有登入名在任何副作用前拒絕；1 號用帳號名（大小寫不同）在 `setUserName`、配 ID、送 granted 之前拒絕；自由名稱與空名稱照原版；stage 2 留下的綁定不會被下一個連線的 stage 1 拿去用。observe 照原版只計數；off 重現原版冒名（負對照）。
 - 本機實機 E2E（42.21.0 本機 dedicated server，dist 放在 classpath 最前面；開機後以 `adduser` 建兩個離線帳號）：enforce 那輪正常重生名稱不變；重生後立刻 `setUsername` 成離線帳號，伺服器記 `[CoopNameGuard] renamed player=1/4 login="test" sent="victim1"`，0 號仍叫 test 且照常 granted，客戶端自己的 0 號名稱也回到 test；分割畫面用自由名稱照常加入；用離線帳號名的分割畫面玩家被拒（伺服器 `rejected … reason=account`，客戶端 `access denied: No username given`、觸發 `OnCoopJoinFailed`）。同一情境以 `-Dmdc.coopNameGuard=off` 重跑重現原版：0 號變成離線帳號名，分割畫面以離線帳號名加入。
 
-**部署**：manifest 新增 `zombie/network/packets/connection/ConnectCoopPacket.class` 與 helper（118 → 120 個 class）。照常用舊 manifest 完整卸載，再安裝新包，與受控重啟放在同一個窗口。上線後先確認橫幅指紋是新版，第一次有人重生後 log 出現 `[CoopNameGuard] 首次生效 mode=enforce`。
+**部署**：manifest 新增 `zombie/network/packets/connection/ConnectCoopPacket.class` 與 helper（118 → 120 個 class）。2026-10-04 00:4x 以延後生效流程 stage＋arm（沒有手動重啟），06:00 排程重啟時切換：console 有 `[mdc-java-patch] ACTIVATED` 與 `[mdc-javagate] OK: 120`，舊的 118 個 class 封存在 job 的 `state/`。
+
+**上線驗收（2026-10-04 21:34）**：06:06 起四個 session 的橫幅都是 `server patch 13dbc29`，120 個 loose class 逐檔 SHA 與 manifest 相符，沒有 linkage 錯誤，各刀心跳的 `anomalies` 都是 0。主玩家重生 11 次（四個 session 依序 4、0、3、4 次），每個有重生的 session 都在第一次重生時印出 `[CoopNameGuard] 首次生效 mode=enforce`，沒有任何 `renamed`／`rejected`：正常客戶端重生送的都是登入名，守衛不需要介入。正式服 `AllowCoop=false`，分割畫面沒有樣本。
 
 ---
 

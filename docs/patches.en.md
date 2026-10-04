@@ -2917,9 +2917,15 @@ vanilla also uses to load the character, and it needs a modified Java client tha
   (server `rejected … reason=account`, client `access denied: No username given` and `OnCoopJoinFailed`). The same scenario with
   `-Dmdc.coopNameGuard=off` reproduces vanilla: player 0 takes the offline account's name and the split-screen player joins under the other one.
 
-**Deployment**: the manifest gains `zombie/network/packets/connection/ConnectCoopPacket.class` and the helper (118 → 120 classes). As usual, uninstall
-completely with the old manifest, then install the new package, in the same window as a controlled restart. After it is live, first confirm the
-banner fingerprint is the new build; after the first respawn the log shows `[CoopNameGuard] 首次生效 mode=enforce`.
+**Deployment**: the manifest gains `zombie/network/packets/connection/ConnectCoopPacket.class` and the helper (118 → 120 classes). Staged and armed on
+2026-10-04 at 00:4x with the deferred-activation flow (no manual restart); the switch happened at the 06:00 scheduled restart: the console shows
+`[mdc-java-patch] ACTIVATED` and `[mdc-javagate] OK: 120`, and the previous 118 classes are archived in the job's `state/`.
+
+**Production acceptance (2026-10-04 21:34)**: all four sessions since 06:06 print the banner `server patch 13dbc29`; the 120 loose classes match the
+manifest SHA by SHA; there are no linkage errors and no heartbeat reports a non-zero `anomalies`. There were 11 primary-player respawns (4, 0, 3 and 4
+per session); each session with a respawn printed `[CoopNameGuard] 首次生效 mode=enforce` at its first respawn, and there was no `renamed` or `rejected`
+line: normal clients send their login name when respawning, so the guard never had to act. Production runs `AllowCoop=false`, so there is no
+split-screen sample.
 
 ---
 
