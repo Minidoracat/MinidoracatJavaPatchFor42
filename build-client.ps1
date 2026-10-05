@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.3'
+$PACKAGE_VERSION = '0.2.4'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -207,7 +207,8 @@ BEFORE A GAME UPDATE
 3. Let Steam update the game.
 4. Wait for a package that matches the new game version, then install again.
 Updating without removing the patches first can stop you from joining servers
-or cause errors right after connecting.
+or cause errors right after connecting. If you forgot and the game now fails to
+start or errors out, close it, run Uninstall-Patches.bat and type A.
 
 SAFETY
 - The installer only works on the exact game version it was built for: it checks the
@@ -235,8 +236,9 @@ Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
   never removes other authors' tools.
 - Does not change the game jar, the JVM launch JSON or any Java agent.
-- Old v3.0 packages are taken over only when every SHA matches; otherwise remove them with
-  their own uninstaller first.
+- Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
+  matches, even after a game update: installing replaces them, removing deletes them.
+  Anything else must be removed with its own uninstaller first.
 - Never remove patches while the game is running. If an install was interrupted, run the
   installer again before starting the game.
 - Nothing is uploaded. Profiler captures stay in Zomboid/Lua/MinidoracatDevProfiler/captures/.
@@ -271,11 +273,14 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
    輸入 A 按 Enter（全部移除），再輸入 Y 按 Enter 確認。
 3. 讓 Steam 更新遊戲。
 4. 等新版修補包發布後，再照上面的步驟裝回去。
-沒先移除就更新，可能會進不了伺服器，或一連線就出錯。
+沒先移除就更新，可能會進不了伺服器，或一連線就出錯。忘了先移除、遊戲已經開不起來或出錯時，
+關閉遊戲後執行 Uninstall-Patches.bat，輸入 A 全部移除即可。
 
 【以前裝過舊版】
 - 裝過有 Uninstall-Patches.bat 的版本：直接照上面安裝即可，會自動換成新版。
-- 裝過只有 uninstall.bat 的 TexPipeline 舊版：先執行舊包裡的 uninstall.bat，再裝這包。
+- 裝過只有 uninstall.bat 的 TexPipeline v3.0（42.20.3／42.20.4）：一樣直接安裝，會自動換成新版；
+  只想移除就執行這包的 Uninstall-Patches.bat 輸入 A。遊戲已經更新也適用。
+- 更早的版本安裝器認不出來，會拒絕並提示：先執行舊包裡的 uninstall.bat，再裝這包。
 
 【安全驗證】
 - 安裝器只接受對應版本的遊戲：會比對 projectzomboid.jar 與每個檔案的 SHA-256，不符就不寫入。
@@ -297,7 +302,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
 - 不改遊戲 JAR、JVM 啟動 JSON 或其他 Java agent。
 - 不明或變造的 loose class 不會被自動覆蓋或刪除。
-- 舊 v3.0 包必須整組 SHA 完全吻合才會接管；辨識不了時先用舊版 uninstaller。
+- 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - 遊戲更新前先卸載。安裝時的 SHA 閘無法阻止 Steam 日後更新 JAR 卻殘留舊 class。
 - JVM 執行中不得卸載 helper。交易中斷時，先重跑管理器復原，再開遊戲。
 

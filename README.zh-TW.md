@@ -227,7 +227,7 @@ bash uninstall.sh  # 下次重啟回到原版
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
 3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版），再輸入 `Y` 確認。
 
-安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。
+安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。忘了先移除、遊戲更新後開不起來時，關閉遊戲再執行 `Uninstall-Patches.bat`（選 `A`）即可；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得，直接安裝新版或移除都會清乾淨。
 
 | 模組 | 用途 |
 |---|---|

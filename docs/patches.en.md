@@ -400,11 +400,16 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.21.0-0.2.2.zip`) and never touches the server manifest; the
+(currently `MinidoracatClientPatches-42.21.0-0.2.4.zip`) and never touches the server manifest; the
 client classpath `[".", "projectzomboid.jar"]` is unchanged and loose classes override.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
 `client-fixes-standard`/`client-fixes-lowmem`) after jar/payload SHA and ownership checks;
-`Uninstall-Patches.bat` removes per module and refuses unknown or modified classes. Steam file
+`Uninstall-Patches.bat` removes per module and refuses unknown or modified classes. Old TexPipeline
+v3.0 packages (the 42.20.3 and 42.20.4 builds, `deploy-client/legacy-packages.json`) are identified
+by their full set of file fingerprints only, not by the current jar: if one is left behind after a game
+update, installing replaces it and uninstalling removes it as a whole (since 0.2.4; earlier versions
+tied the match to the old jar, so a game update made it unrecognizable and players had to find the old
+`uninstall.bat`). Unrecognized leftovers are still refused. Steam file
 verification does not remove loose classes: uninstall before a game update, **never while the JVM is
 running**. Binaries are for local use by legal game owners only and are not committed or redistributed.
 

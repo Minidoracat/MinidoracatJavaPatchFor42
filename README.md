@@ -262,7 +262,10 @@ The installer follows the Windows display language (Traditional Chinese or Engli
 or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for: it
 checks the SHA-256 of `projectzomboid.jar` and of every file it writes, never touches files it does not own,
 and rolls back an interrupted install. **Run `Uninstall-Patches.bat` (choose `A`) before every game update**, so
-keep the extracted folder (or download the same zip again when you need it).
+keep the extracted folder (or download the same zip again when you need it). If you forgot and the game no
+longer starts after an update, close it and run `Uninstall-Patches.bat` (choose `A`). It also recognizes the old
+TexPipeline v3.0 package (the one that only came with `uninstall.bat`), so installing the new package or removing
+cleans it up.
 
 | Module | Purpose |
 |---|---|

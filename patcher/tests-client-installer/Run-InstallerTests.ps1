@@ -173,7 +173,6 @@ function New-TestPackage {
             $legacy += [ordered]@{
                 id        = $lp.id
                 modules   = @($lp.modules)
-                jarSha256 = $JarSha
                 files     = @($lf)
             }
         }
@@ -599,16 +598,27 @@ try {
     Check (Test-GameFileIs $P_PROF_MAIN $C_PROF_MAIN) 'profiler 有裝上'
 
     # ------------------------------------------------------------ 24
-    Start-Case '24. 沒有 state.json 但有舊版檔：卸載明確拒絕，不回報假成功'
+    Start-Case '24. 沒有 state.json：整組吻合的舊版包可卸載，認不出的殘檔明確拒絕'
     Reset-GameDir
     Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
     Write-TextFile (GameFile $P_FIX_TIDAM) $C_LEGACY_TIDAM_STD
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-Modules', 'profiler')
+    Check ($r.Code -eq 2) '非互動又沒有 -All：舊版包只能整組移除（代碼 2）'
+    Check (Test-GameFileIs $P_LEGACY_GUARD $C_LEGACY_GUARD) '被擋下時舊版檔沒有被刪'
     $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-All')
-    Check ($r.Code -eq 7) '結束代碼 7（拒絕）'
+    Check ($r.Code -eq 0) '整組吻合：結束代碼 0'
+    Check ($r.Out -match 'legacy-client-v3\.0-standard') '卸載計畫列出辨識到的舊版包'
+    Check ($r.Out -notmatch '沒有東西需要卸載') '沒有回報「沒東西要卸載」'
+    Check (-not (Test-GameFile $P_LEGACY_GUARD) -and -not (Test-GameFile $P_FIX_TIDAM)) '舊版包的檔案都已移除'
+    Check (-not (Test-Path -LiteralPath (GameFile 'zombie'))) '清空的目錄一併移除'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有留下狀態目錄'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-All')
+    Check ($r.Code -eq 7) '只吻合一部分：結束代碼 7（拒絕）'
     Check ($r.Out -match 'uninstall') '有指引使用者用舊版 uninstaller'
     Check ($r.Out -notmatch '沒有東西需要卸載') '沒有回報「沒東西要卸載」'
     Check (Test-GameFileIs $P_LEGACY_GUARD $C_LEGACY_GUARD) '舊版檔沒有被刪'
-    Check (Test-GameFileIs $P_FIX_TIDAM $C_LEGACY_TIDAM_STD) '舊版修復檔沒有被刪'
     $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-All')
     Check ($r.Code -eq 7) '沒有 manifest 也一樣拒絕（自家 namespace 還有 class）'
     $r = Invoke-Installer @('-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgV1)

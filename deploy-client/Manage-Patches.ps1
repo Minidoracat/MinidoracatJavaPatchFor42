@@ -14,7 +14,7 @@
       * 僅操作遊戲根內 loose .class 與固定管理資料；jar／exe／存檔／遊戲設定不改。
         SHA 用於辨識損毀或過期內容，不是簽章；同權限者同時偽造 metadata 與檔案不在防護範圍。
         未記錄的外來 class 拒裝；既有模組可重新安裝修復，卸載拒刪內容已變動的檔案。
-        沒有 state.json 但有舊版 patch 殘檔時，卸載會明確拒絕並指回舊版 uninstaller。
+        沒有 state.json 時，整組指紋吻合的舊版包可直接卸載；認不出的殘檔才拒絕並指回舊版 uninstaller。
       * 持鎖期間遊戲 exe 不能啟動（系統顯示檔案使用中）；外部 Java 啟動仍由行程檢查擋下。
 
     不需要 Python／JDK／任何第三方 MOD。
@@ -519,13 +519,13 @@ function New-StateObject([string]$jarSha, [string]$packageVersion, $moduleEntrie
 
 # ---------------------------------------------------------------- 舊版包辨識
 # legacyPackages 必須「整組」精確吻合才算辨識成功：standard 與 lowmem 有 6/8 個檔案指紋相同，
-# 只看單檔會誤判成另一個變體。
-function Find-LegacyPackages($manifest, [string]$gameRoot, [string]$jarSha) {
+# 只看單檔會誤判成另一個變體。辨識只看檔案指紋、不看目前的 jar：最需要清掉舊版包的時候，
+# 正是遊戲已經更新、舊 class 留在新 jar 旁邊的時候。
+function Find-LegacyPackages($manifest, [string]$gameRoot) {
     $identified = @()
     $touchedPaths = @{}
     $known = @{}
     foreach ($lp in (ConvertTo-Array (Get-Prop $manifest 'legacyPackages'))) {
-        $lpJar = Get-Prop $lp 'jarSha256'
         $files = ConvertTo-Array (Get-Prop $lp 'files')
         $allMatch = $files.Count -gt 0
         $anyPresent = $false
@@ -538,7 +538,6 @@ function Find-LegacyPackages($manifest, [string]$gameRoot, [string]$jarSha) {
             $anyPresent = $true
             if ((Get-Sha256 $full) -ne (Get-Prop $f 'sha256').ToLowerInvariant()) { $allMatch = $false }
         }
-        if ($lpJar -and $lpJar.ToLowerInvariant() -ne $jarSha) { $allMatch = $false }
         if ($allMatch) {
             $identified += $lp
             foreach ($f in $files) { $touchedPaths[(Get-Prop $f 'path')] = $true }
@@ -1116,7 +1115,7 @@ function Invoke-Install {
 
         # 復原完才讀，state 與 legacy 都必須是「現在」的磁碟狀態
         $state = Read-State $GameRoot
-        $legacy = Find-LegacyPackages $Manifest $GameRoot $jarSha
+        $legacy = Find-LegacyPackages $Manifest $GameRoot
 
         # 已安裝集合 ＝ state 紀錄 ＋ 整組精確辨識出的舊版包對應的模組。
         # 少了後者，只加裝 profiler 會把舊版的客戶端修復當成「不再需要」而刪掉。
@@ -1196,15 +1195,13 @@ function Invoke-Install {
 
 # ---------------------------------------------------------------- 動作：uninstall
 # 沒有 state.json 不代表目錄是乾淨的：舊版（v3.x 及更早）patch 就是一堆沒有紀錄的 loose class。
-# 這種情況必須明確拒絕並指回舊版 uninstaller，不能回一句「沒東西要卸載」讓使用者以為卸乾淨了。
-function Assert-NoLegacyLeftovers($manifest, [string]$gameRoot) {
+# 整組指紋吻合的舊版包交給呼叫端移除；認不出來的殘檔必須明確拒絕並指回舊版 uninstaller，
+# 不能回一句「沒東西要卸載」讓使用者以為卸乾淨了。
+function Assert-NoUnknownLegacy($manifest, [string]$gameRoot) {
     $hits = @()
+    $legacy = @{ Packages = @(); AdoptedPaths = @{}; KnownPaths = @{} }
     if ($manifest) {
-        $jarPath = Join-Path $gameRoot 'projectzomboid.jar'
-        $jarSha = ''
-        if (Test-Path -LiteralPath $jarPath -PathType Leaf) { $jarSha = Get-Sha256 $jarPath }
-        $legacy = Find-LegacyPackages $manifest $gameRoot $jarSha
-        foreach ($lp in $legacy.Packages) { $hits += (L "舊版包 $(Get-Prop $lp 'id')（整組吻合）" "Old package $(Get-Prop $lp 'id') (full match)") }
+        $legacy = Find-LegacyPackages $manifest $gameRoot
         foreach ($p in $legacy.KnownPaths.Keys) {
             if ($legacy.AdoptedPaths.ContainsKey($p)) { continue }
             if (Test-Path -LiteralPath (Get-FullTargetPath $gameRoot $p) -PathType Leaf) { $hits += $p }
@@ -1213,14 +1210,16 @@ function Assert-NoLegacyLeftovers($manifest, [string]$gameRoot) {
     # 沒有 manifest（例如不是從安裝包資料夾執行）時，至少看自家 namespace
     $mdcDir = Join-Path ([System.IO.Path]::GetFullPath($gameRoot)) 'zombie\mdc'
     if (Test-Path -LiteralPath $mdcDir -PathType Container) {
-        if (@(Get-ChildItem -LiteralPath $mdcDir -Filter '*.class' -Force -ErrorAction SilentlyContinue).Count -gt 0) {
+        $stray = @(Get-ChildItem -LiteralPath $mdcDir -Filter '*.class' -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not $legacy.AdoptedPaths.ContainsKey("zombie/mdc/$($_.Name)") })
+        if ($stray.Count -gt 0) {
             $hits += (L 'zombie/mdc/ 底下還有 .class（自家 namespace，但沒有安裝紀錄）' 'zombie/mdc/ still has .class files (our own namespace, but no install record)')
         }
     }
-    if ($hits.Count -eq 0) { return }
+    if ($hits.Count -eq 0) { return $legacy }
     Write-Head (L '偵測到不是這個安裝器裝上去的 Minidoracat 檔案' 'Found Minidoracat files that were not installed by this installer')
     foreach ($h in ($hits | Sort-Object -Unique)) { Write-Bad $h }
-    Fail $EXIT_CONFLICT (L '這些檔案沒有 state.json 可對照（多半是 v3.x 或更早的舊版 patch），本安裝器不會亂刪。請改用當初那個版本附的 uninstall.bat 移除，或自行確認後手動刪除。' 'These files have no state.json record (usually an old v3.x or earlier patch), so this installer will not delete them. Remove them with the uninstall.bat that came with that version, or check and delete them by hand.')
+    Fail $EXIT_CONFLICT (L '這些檔案沒有 state.json 可對照，也對不上任何已知的舊版包（版本不明或內容被改過），本安裝器不會亂刪。請改用當初那個版本附的 uninstall.bat 移除，或自行確認後手動刪除。' 'These files have no state.json record and do not match any known old package (unknown version or modified content), so this installer will not delete them. Remove them with the uninstall.bat that came with that version, or check and delete them by hand.')
 }
 
 function Invoke-Uninstall {
@@ -1234,8 +1233,27 @@ function Invoke-Uninstall {
 
         $state = Read-State $GameRoot
         if (-not $state -or (Get-StateModuleIds $state).Count -eq 0) {
-            Assert-NoLegacyLeftovers $Manifest $GameRoot
-            Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
+            $legacy = Assert-NoUnknownLegacy $Manifest $GameRoot
+            if ($legacy.Packages.Count -eq 0) {
+                Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
+                return
+            }
+            # 舊版包沒有模組可挑，只能整組移除
+            if (-not $RemoveAll -and -not $Interactive) {
+                Fail $EXIT_USAGE (L '偵測到舊版包，只能整組移除：請用 -All。' 'An old package was found; it can only be removed as a whole. Use -All.')
+            }
+            $deletes = @($legacy.AdoptedPaths.Keys | Sort-Object)
+            foreach ($p in $deletes) { Assert-NoReparsePoint $GameRoot $p }
+            Write-Head (L '卸載計畫' 'Removal plan')
+            Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
+            Write-Info ((L '  移除舊版包：' '  Removing old package: ') + (($legacy.Packages | ForEach-Object { Get-Prop $_ 'id' }) -join (L '、' ', ')))
+            Write-Info (L "  刪除 $($deletes.Count) 個檔案" "  Deleting $($deletes.Count) file(s)")
+            if ($Interactive) {
+                $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
+                if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
+            }
+            Invoke-PatchTransaction -GameRoot $GameRoot -Writes @() -Deletes $deletes -NewState $null
+            Write-Good (L '完成：已移除舊版包，遊戲回到原版狀態。' 'Done: the old package was removed; the game is back to vanilla.')
             return
         }
 
@@ -1396,7 +1414,7 @@ function Invoke-Status {
             if ($jarSha -ne (Get-Prop $Manifest 'jarSha256' '').ToLowerInvariant()) {
                 Write-Warn2 (L '目前遊戲版本與這個安裝包不符，無法安裝（請取得對應版本的安裝包）。' 'The current game version does not match this package, so it cannot be installed (get the package for your game version).')
             }
-            $legacy = Find-LegacyPackages $Manifest $GameRoot $jarSha
+            $legacy = Find-LegacyPackages $Manifest $GameRoot
             foreach ($lp in $legacy.Packages) {
                 Write-Info (L "  偵測到舊版包（可自動接管）：$(Get-Prop $lp 'id') -> $((ConvertTo-Array (Get-Prop $lp 'modules')) -join '、')" "  Old package found (can be taken over automatically): $(Get-Prop $lp 'id') -> $((ConvertTo-Array (Get-Prop $lp 'modules')) -join ', ')")
             }

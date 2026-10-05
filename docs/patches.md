@@ -380,8 +380,8 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.2.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
-`core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版包只有整組指紋吻合才遷移，否則須先使用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
+**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.4.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
+`core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：遊戲已更新而殘留時，安裝會換成新版，卸載會整組移除（0.2.4 起；之前因為綁舊 jar，遊戲一更新就認不出，玩家只能回頭找舊包 `uninstall.bat`）。認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
 **驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
 waitFileTask 恰一個 getBytesAllocated＋恰一個 52428800L,PZ 改寫時建置失敗)、全序鎖(observed→4GB→lcmp→ifle)、sleep(20) 迴圈保留、helper 門檻常數與 bytecode
