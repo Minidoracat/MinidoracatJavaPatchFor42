@@ -3535,6 +3535,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - SmokeCheck（存在理由，TIS 改即紅＝重估）：原版 `sendVehicles` 唯一 `isRelevantTo`、參數是車的 `getX／getY`、後接 `IFEQ`，方法內送 `VehicleFullUpdate`；`processServer` 唯一 `isRelevantTo` 後接 `IFNE`、再來是 `ALOAD 2` 與 `VehicleRemove`，方法內有 `SIPUSH 16384`；`isRelevantTo` 讀 `relevantRange` 兩次、不讀 `chunkGridWidth`。手術後兩個方法除了 `isRelevantTo`→helper 之外方法文字（含 frames）與原版相同、全 class 真指令數不變；兩個 class 的 `isRelevantTo` 都歸零且各只改道到自己的入口。helper 契約：兩個入口共用 `decide`，`decide` 恰呼叫原版 `isRelevantTo` 一次，並各查一次 connectArea、半徑與車內。
 - `VehicleRelevancyGateTest`（observe R=64、on R=64、on R=48、on R=5 夾到 32、off，`-Xverify:all`）：真 `UdpConnection.isRelevantTo` 做原版負對照（環帶與正方形角落原版相關、89 格不相關）；R−1、恰等於 R 一律相關，`Math.nextUp(R)`、R+1、圓外正方形內的對角依模式分流；原版外一律不相關；兩個入口各自計數；車內（含分割畫面 2 號乘客）與 connectArea 照原版；分割畫面任一玩家 R 內即相關；parseMode 別名。另外走 dist 手術後的真 `VehicleRequestPacket.processServer`：真 wire 請求、真 `VehicleRemovePacket` 寫出再解碼，R 內不移除、環帶只有 on 回 `VehicleRemove`、原版外三模式都移除、Full 請求只記旗標、車內照原版。
 - 本機實機 E2E（2026-10-07，正式服 139 個 MOD 的本機複本，在車輛密集區站 20–25 秒，JFR MainThread 每幀）：off 80 fps（每幀 12.5 ms，client 持有 113 輛，`postupdate` 3.11＋`update` 1.25 ms）；on R=48 190 fps（5.2 ms，37 輛，0.81＋0.27 ms）；on R=64 137 fps（7.3 ms，57 輛，1.51＋0.49 ms）。沿同一條路步行，最大幀 off／R=48／R=64 為 119／72／96 ms，超過 50 ms 的幀 7／3／6；`anomalies=0`。
+- 車內照原版的實機驗證（同一套複本，R=48）：在 56 格外圈生 6 台車，步行時 client 載入 0 台（關閉時 4 台，另 2 台關閉時也沒有載入）；坐進車後外圈載入 4 台，與關閉時相同；`passVehicle` 計數隨之增加、`anomalies=0`。另與 W54 一起開：同一處站立 198 fps（5.0 ms，37 輛），步行最大幀 68 ms。
 
 <a id="2br"></a>
 ## 2br. 車輛靜止姿勢跳過（W54，client，預設 on；client 包 0.2.5）

@@ -2989,6 +2989,9 @@ Both call sites use the same R with no hysteresis: if "send" were narrower than 
   off 80 fps (12.5 ms per frame, 113 vehicles on the client, `postupdate` 3.11 + `update` 1.25 ms); on R=48 190 fps (5.2 ms, 37 vehicles, 0.81 + 0.27 ms);
   on R=64 137 fps (7.3 ms, 57 vehicles, 1.51 + 0.49 ms). Walking the same route, the longest frame was 119 / 72 / 96 ms (off / R=48 / R=64) and 7 / 3 / 6
   frames exceeded 50 ms; `anomalies=0`.
+- In-vehicle pass-through, same copy at R=48: six vehicles spawned on a 56-tile ring were not loaded while walking (0 on the client; 4 with the patch off, the other 2
+  were not loaded with the patch off either). After the player sat in a car the client loaded the same 4 ring vehicles as with the patch off; `passVehicle` rose and
+  `anomalies=0`. With W54 also on, the same standing spot ran at 198 fps (5.0 ms, 37 vehicles) and the longest walking frame was 68 ms.
 
 <a id="2br"></a>
 ## 2br. Skip unchanged vehicle part poses (W54, client, default on; client package 0.2.5)
