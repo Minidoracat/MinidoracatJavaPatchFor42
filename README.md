@@ -9,7 +9,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
   actions and log noise. 60 patched classes, 165 patch sites and 60 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles, the 42.21.0
-  "player-built room" rendering bug). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
+  "player-built room" rendering bug, mod vehicles re-animated every frame while parked). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
 
 Every patch targets a specific vanilla defect or a measured hot spot and has a written root-cause analysis:
@@ -164,6 +164,8 @@ They write rate-limited heartbeat lines to the console and are how most of the i
 | Texture pipeline limit and leak fixes ([2j](docs/patches.en.md#2j)) | Texture-loading threads sleep forever once 50 MB of decoded, not-yet-uploaded buffers pile up. Leaks (APNG frames, 64 MB fallback buffers) push that floor over the limit: players, zombies and vehicles render as a shadow and a name tag. | Fixes the leaks; the standard variant also raises the wait limit to 4 GiB. Invisibility stopped recurring. | [#100919](https://theindiestone.com/forums/topic/100919/) |
 | Chunk streaming log ([2o](docs/patches.en.md#2o)) | Black-edge incidents left no evidence on the client. | Logs streaming state and stalls; no behavior change. | — |
 | Player-built room XL tree fix ([2bl](docs/patches.en.md#2bl)) | 42.21.0: `IsoTree.isPlayerInsideARoom` reads `getRoom().getRectsBounds()` whenever `isInARoom()` is true, but `isInARoom()` is also true for enclosed player-built rooms that have no `IsoRoom`. The NPE aborts the frame: furniture, trees and fences vanish. | Treats such rooms as "not inside a room" for the XL tree fade. | [#101887](https://theindiestone.com/forums/topic/101887/) (fixed internally by TIS) |
+| W54 Skip unchanged vehicle part poses ([2br](docs/patches.en.md#2br)) | Every loaded vehicle calls `AnimationPlayer.Update` for every skinned part model every frame, whatever the distance, whether parked or visible; windows and armor share the door's player, so one skeleton is computed 2–3 times per frame. Mod vehicles with moving parts (KI5, rSemiTruck) cost 22–47 µs per vehicle per frame, vanilla vehicles 3–5 µs. | Skips the Update when no track is playing and the pose inputs match the last full computation; the renderer reuses the previous matrices. One in 256 skips is fully recomputed and compared; any difference reverts to vanilla for the session. Bit-identical poses in the synthetic tests. | not reported |
+| W55 `isBoneReparented` fast path ([2bs](docs/patches.en.md#2bs)) | The skeleton update calls `isBoneReparented` once per bone, each time allocating a pooled lambda and scanning a list that is empty for vehicles, zombies and most characters. | Returns false for an empty list, vanilla otherwise; bit-identical results for every character and vehicle. | not reported |
 
 ### Native guards (Linux dedicated server)
 
@@ -270,7 +272,7 @@ cleans it up.
 | Module | Purpose |
 |---|---|
 | `core` | Shared Lua bridge, installation fingerprint check and startup status; installed automatically |
-| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, XL tree room fix (32 GB RAM or more) |
+| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, XL tree room fix, vehicle animation speed-ups (32 GB RAM or more) |
 | `client-fixes-lowmem` | The same fixes with the vanilla 50 MiB texture limit; excludes the standard variant |
 | `profiler` | DevProfiler for mod developers (Java → Lua call timing, CSV/JFR export); its UI is the separate mod `MinidoracatDevProfilerFor42` |
 

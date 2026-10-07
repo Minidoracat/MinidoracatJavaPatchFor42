@@ -105,6 +105,19 @@ public final class LoadCheck {
                     throw new NoSuchMethodException("TreeRoomGuard.isInARoom signature");
                 }
                 System.out.println("tree room guard OK isInARoom(IsoPlayer) 簽名一致");
+                Class<?> animPlayer = Class.forName("zombie.core.skinnedmodel.animation.AnimationPlayer", false, cl);
+                var vehUpdate = Class.forName("zombie.mdc.VehicleAnimGate", false, cl)
+                        .getDeclaredMethod("update", animPlayer, float.class);
+                if (vehUpdate.getReturnType() != void.class || (vehUpdate.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("VehicleAnimGate.update signature");
+                }
+                var reparent = Class.forName("zombie.mdc.BoneReparentFastPath", false, cl)
+                        .getDeclaredMethod("isBoneReparented", animPlayer, int.class);
+                if (reparent.getReturnType() != boolean.class || (reparent.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("BoneReparentFastPath.isBoneReparented signature");
+                }
+                System.out.println("vehicle anim OK VehicleAnimGate.update(AnimationPlayer,float)、"
+                        + "BoneReparentFastPath.isBoneReparented(AnimationPlayer,int) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

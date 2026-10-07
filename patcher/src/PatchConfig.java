@@ -1370,6 +1370,30 @@ public final class PatchConfig {
         inside.expectedHits = 1;
         patches.add(tree);
 
+        // ---- W54 車輛靜止姿勢跳過（docs/patches.md 2br）----
+        // updateAnimationPlayer 是 private、只在 postupdate 被呼叫兩次（車身＋models 迴圈），方法內唯一的
+        // AnimationPlayer.Update(F)V（javap offset 44）只會碰到車輛的 player；1:1 改道 VehicleAnimGate.update。
+        // 所有 track 都沒在播放、姿勢輸入與上一次完整計算相同且已連續算過兩次才跳過；抽樣比對不一致即本次回原版。
+        Patcher.ClassPatch vehicle = new Patcher.ClassPatch("zombie/vehicles/BaseVehicle");
+        Patcher.MethodOps vehicleAnim = vehicle.method("updateAnimationPlayer",
+                "(Lzombie/core/skinnedmodel/animation/AnimationPlayer;Lzombie/vehicles/VehiclePart;)V");
+        vehicleAnim.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/skinnedmodel/animation/AnimationPlayer", "Update", "(F)V",
+                "zombie/mdc/VehicleAnimGate", "update"));
+        vehicleAnim.expectedHits = 1;
+        patches.add(vehicle);
+
+        // ---- W55 isBoneReparented 快速路徑（docs/patches.md 2bs）----
+        // updateMultiTrackBoneTransformsInternal 每根骨頭呼叫一次 isBoneReparented（javap offset 115，全 jar 唯一
+        // 呼叫點），原版每次從池配置 Lambda.predicate；reparentedBoneBindings 為空時直接回 false（與原版同值）。
+        Patcher.ClassPatch animPlayer = new Patcher.ClassPatch("zombie/core/skinnedmodel/animation/AnimationPlayer");
+        Patcher.MethodOps boneLoop = animPlayer.method("updateMultiTrackBoneTransformsInternal", "(F)V");
+        boneLoop.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/core/skinnedmodel/animation/AnimationPlayer", "isBoneReparented", "(I)Z",
+                "zombie/mdc/BoneReparentFastPath", "isBoneReparented"));
+        boneLoop.expectedHits = 1;
+        patches.add(animPlayer);
+
         return patches;
     }
 

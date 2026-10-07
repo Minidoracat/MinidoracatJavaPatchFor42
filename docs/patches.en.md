@@ -400,7 +400,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.21.0-0.2.4.zip`) and never touches the server manifest; the
+(currently `MinidoracatClientPatches-42.21.0-0.2.5.zip`) and never touches the server manifest; the
 client classpath `[".", "projectzomboid.jar"]` is unchanged and loose classes override.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
 `client-fixes-standard`/`client-fixes-lowmem`) after jar/payload SHA and ownership checks;
@@ -2931,6 +2931,116 @@ manifest SHA by SHA; there are no linkage errors and no heartbeat reports a non-
 per session); each session with a respawn printed `[CoopNameGuard] 首次生效 mode=enforce` at its first respawn, and there was no `renamed` or `rejected`
 line: normal clients send their login name when respawning, so the guard never had to act. Production runs `AllowCoop=false`, so there is no
 split-screen sample.
+
+<a id="2br"></a>
+## 2br. Skip unchanged vehicle part poses (W54, client, default on; client package 0.2.5)
+
+**Problem**: mod vehicles such as the KI5 series and rSemiTruck use skinned part models for doors, hoods, windows and armor. Every frame the client runs
+`BaseVehicle.postupdate` for every loaded vehicle, whatever the distance, whether it is parked or visible, and calls `updateAnimationPlayer` for the body and for
+each non-static part model; that method calls `AnimationPlayer.Update` unconditionally and recomputes the whole skeleton. Freshly spawned vehicles cost 22–47 µs
+per frame each (KI5), 32 µs (rSemiTruck cab), against 3–5 µs for vanilla vehicles. A JFR on a copy of the production server (2026-10-07, idle, 113 vehicles):
+`postupdate` 3.76 ms per frame, of which `updateAnimationPlayer` 2.88 ms. A part with a `parent` shares the parent's player (windows and armor under a door), but
+`postupdate` still updates once per part model, so one door player is updated 2–3 times per frame.
+
+**Root cause** (javap, 42.21.0 jar `e1a69eb7`):
+- `BaseVehicle.updateAnimationPlayer(AnimationPlayer, VehiclePart)` is private and only called twice, from `postupdate` (offset 40 body, offset 77 `models`
+  loop). Its only `invokevirtual AnimationPlayer.Update(F)V` (offset 44) comes before all follow-up work: removing finished tracks, setting the window track time
+  from `openDelta`, and `playPartAnim("Opened"/"Closed"/"ClosedToOpen")` when the part has no track. Characters, zombies, animals and the mechanics 3D view
+  (`UI3DScene`) use other call sites.
+- A track that is not playing does not advance (`AnimationTrack.tickCurrentTimeInternal` reads `isPlaying` and zeroes dt). A static door or window pose
+  (`animate = FALSE` Opened/Closed/ClosedToOpen) recomputes to the same matrices every frame: bones with weight 1 are fully determined by the track, bones with
+  weight 0 keep their previous value.
+- The renderer pulls: `getSkinTransforms` rebuilds skin matrices from `modelTransforms` only when `SkinTransformData.dirty` is set; without an Update the previous
+  result is reused.
+- A vanilla quirk: a shared player updated k times advances its playing tracks k times, so KI5 door animations play at k× speed in vanilla (the mods' `rate`
+  values were tuned under that behavior). "Update once per frame" would slow doors down 2–3×; this patch does not do it.
+
+**Patch**: the only `AnimationPlayer.Update(F)V` in `updateAnimationPlayer` → `zombie/mdc/VehicleAnimGate.update(AnimationPlayer, float)` (3 bytes for 3, same
+stack shape, frames unchanged), `expectedHits = 1`, new ClassPatch `zombie/vehicles/BaseVehicle`. In both standard and low-memory variants; module version
+`v3.2`.
+
+**Decision** (the helper keeps one signature per player in a `WeakHashMap<AnimationPlayer, …>`, so entries disappear with the player; a pooled player that is
+reused carries `needFirstFrame` and is always computed first):
+- Signature: model and skinningData (identity), track count, angle and target angle, `doBlending`, and per track: identity, clip identity, `currentTimeValue`,
+  `getBlendWeight()`, `getBlendFieldWeight()`, `getLayerIdx()`, `priority`, `isPlaying`/`reverse`/`looping`/`hasBoneMask()`.
+- Vanilla Update when any track `isPlaying`, `isBoneTransformsNeedFirstFrame()`, `parentPlayer != null`, `updateBones == false`, `isRecording()`, no tracks,
+  or the signature differs from the last full computation. The same signature must be fully computed twice in a row before skipping starts, giving first-frame
+  and partial-weight blending one more step.
+- Only the first calling thread (the main thread) is gated; other threads run vanilla and count `foreignThread`. If reading the signature throws, vanilla runs
+  and `anomalies` counts it.
+
+**Sampled audit**: one in 256 would-be skips is computed anyway and the `modelTransforms` before and after are compared (each of the 16 floats, relative error
+with values below 1 treated as 1). Above 1e-5, the gate turns itself off for the rest of the session, clears its table and logs one line. `verify` mode always
+computes, compares and counts.
+
+**Kill switch**: `-Dmdc.vehAnimSkip=on` (default; unset or unknown) | `verify` (`2`) | `off` (`0`); restart required.
+
+**Log** (console.txt):
+
+```text
+[MinidoracatJavaPatch][VehicleAnimGate] active mode=on sampleEvery=256 tolerance=1.0E-5
+[MinidoracatJavaPatch][VehicleAnimGate] calls=<n> computed=<n> skipped=<n> sampled=<n> mismatches=0 players=<n> foreignThread=0 anomalies=0 disabled=false
+[MinidoracatJavaPatch][VehicleAnimGate] pose mismatch bone=<i> diff=<d> tracks=<n>; vanilla Update for the rest of this session calls=…
+```
+
+The first line (`mode=on`/`verify`/`off`, with the raw flag value when set) appears at the first update of a skinned vehicle, also in off mode, so it confirms
+the switch; the counter line is printed only in on/verify, every 5 minutes (the clock is checked every 4096 calls).
+
+**Not done**:
+- Per-frame deduplication: see the last root-cause point. A version that computes bones only on the last call and only advances time on the others would keep
+  the speed, but once this patch skips parked vehicles it would only help during the second a door is moving.
+- Caching the lookup in `ModelInfo.getAnimationPlayer` (0.71 ms per frame in the same JFR): a part with a parent recurses into the parent's
+  `getAnimationPlayer`, which calls `ModelManager.getLoadedModel(file)` every time, a string-hashed `ScriptManager.getModelScript` lookup
+  (`ScriptBucketCollection.getScript` does `contains(".")` plus module and name lookups); the linear `getModelInfoForPart` scan only compares references and costs
+  far less. Caching `getLoadedModel` cannot be proven identical to vanilla call for call: Lua reloads, script reloads, a cleared `ModelScript.loadedModel` or a
+  model swap through `setModelVisible` change the result, and there is no single invalidation signal. Caching only `getModelInfoForPart` does not pay either:
+  `models` is an `ArrayList` whose `modCount` lives in `java.base` and cannot be read, and a part may own several ModelInfos (vanilla returns the first), so
+  validating the cache is a rescan.
+
+**Checks and verification**:
+- SmokeCheck (both variants): reasons for the patch and design assumptions — `updateAnimationPlayer` is private and called only twice in the class, both from
+  `postupdate`; exactly one `Update(F)V`, before `getModelInfoForPart`; `tickCurrentTimeInternal` reads `isPlaying`; `getSkinTransforms` reads and writes
+  `dirty`. After the patch the method text (frames included) equals vanilla except for that one call; `postupdate` and `playPartAnim` are unchanged. LoadCheck:
+  `VehicleAnimGate.update(AnimationPlayer, float)` is public static void.
+- `VehicleAnimGateBehaviorTest` (bare JVM with real `AnimationPlayer`/`AnimationTrack`/`SkinningData`/`AnimationClip`; `build-client.ps1` runs on, verify and
+  off for each variant): a synthetic KI5-style vehicle (one door player shared by door, window and armor, plus a trunk) runs the same inputs through vanilla (A)
+  and the gate (B); part call order and follow-up work follow the javap of `updateAnimationPlayer` and `playPartAnim`. After every frame `modelTransforms`, skin
+  matrices (bit for bit) and every track time are compared. Scenarios: S1 parked for 300 frames; S2 window rolled then held; S3 door opening (still 3× speed);
+  S4 finished, switched to Opened; S5 player released to the pool and reallocated (same object); S6 new skinningData; S7 `parentPlayer` and no tracks; S8
+  `updateBones=false`; S9 a clip keyframe edited in place (invisible to the signature). In on mode A and B are bit-identical every frame; S9 is caught by the
+  audit within 42 frames, the gate falls back to vanilla and A==B from then on. Verify never skips and audits all 2,537 would-be skips; off sends every call to
+  vanilla (N1). Negative controls: updating once per frame (N2) is caught as a slower door; not computing on the frame the window moves (N3) is caught as a
+  different pose.
+
+**Expected**: parked skinned vehicles cost only the signature check. The main session will measure per-vehicle cost with JFR and diff screenshots on/off
+(opening/closing doors, rolling windows, driving); no gain is claimed before that.
+
+**Residual**: inputs the signature cannot see (a track object whose bone mask is changed in place, edited clip data, debug options) can leave the old pose on
+screen for up to 256 skips until the audit catches it and the gate turns off for the session.
+
+<a id="2bs"></a>
+## 2bs. `isBoneReparented` fast path (W55, client, default on; client package 0.2.5)
+
+**Problem**: `AnimationPlayer.updateMultiTrackBoneTransformsInternal` calls `isBoneReparented(int)` once per bone; vanilla does `Integer.valueOf`,
+`Lambda.predicate` (a pooled allocation) and `PZArrayUtil.contains(reparentedBoneBindings, …)` every time. For vehicles, zombies and most characters the list is
+empty and the answer is always false. In the vehicle JFR it is about 27% of `AnimationPlayer.updateInternal` samples (SemiTruck 100/373, M998 94/341).
+
+**Patch**: the only `invokevirtual AnimationPlayer.isBoneReparented(I)Z` in that method (offset 115, also the only call site in the jar) →
+`zombie/mdc/BoneReparentFastPath.isBoneReparented(AnimationPlayer, int)`, `expectedHits = 1`, new ClassPatch `zombie/core/skinnedmodel/animation/AnimationPlayer`.
+The helper reads the private final `reparentedBoneBindings` through a VarHandle from `MethodHandles.privateLookupIn`; an empty list returns false, otherwise the
+unchanged vanilla `isBoneReparented` is called. Results are bit-identical to vanilla, and every player on the standard animation path benefits (characters,
+zombies, animals, vehicles, the mechanics 3D view). If the field cannot be found, one line is logged and every call goes to vanilla.
+
+**Kill switch**: `-Dmdc.boneReparentFast=off` (or `0`) always calls vanilla; restart required. The first use logs one line to console.txt:
+`[MinidoracatJavaPatch][BoneReparentFastPath] active=true|false` (with the raw flag value when set).
+
+**Checks and verification**:
+- SmokeCheck (both variants): reasons for the patch — vanilla `isBoneReparented` scans `reparentedBoneBindings` with `Lambda.predicate` + `PZArrayUtil.contains`
+  (red if TIS adds its own fast path = reconsider), the field is an `ArrayList`; the only call site in `AnimationPlayer` is this method; after the patch the
+  method text equals vanilla except for that call; `isBoneReparented` itself is unchanged. LoadCheck: the helper is public static boolean.
+- `BoneReparentFastPathBehaviorTest` (on and off per variant): with no re-parenting, with re-parenting, and after a pool round trip, the helper agrees with
+  vanilla for every bone; the SHA-256 digest of `modelTransforms` over 60 frames of real animation (including a re-parented player) must be the same in the on
+  and off runs, compared by `build-client.ps1`. Bare-JVM micro-benchmark (report only): with an empty list vanilla takes about 90–100 ns per call.
 
 ---
 

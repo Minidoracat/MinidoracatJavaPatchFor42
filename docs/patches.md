@@ -380,7 +380,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.4.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
+**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.5.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：遊戲已更新而殘留時，安裝會換成新版，卸載會整組移除（0.2.4 起；之前因為綁舊 jar，遊戲一更新就認不出，玩家只能回頭找舊包 `uninstall.bat`）。認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
 **驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
@@ -3480,6 +3480,63 @@ observe 印 `wouldRename`／`wouldReject`；`reason=noLogin` 是 0 號連線沒�
 **部署**：manifest 新增 `zombie/network/packets/connection/ConnectCoopPacket.class` 與 helper（118 → 120 個 class）。2026-10-04 00:4x 以延後生效流程 stage＋arm（沒有手動重啟），06:00 排程重啟時切換：console 有 `[mdc-java-patch] ACTIVATED` 與 `[mdc-javagate] OK: 120`，舊的 118 個 class 封存在 job 的 `state/`。
 
 **上線驗收（2026-10-04 21:34）**：06:06 起四個 session 的橫幅都是 `server patch 13dbc29`，120 個 loose class 逐檔 SHA 與 manifest 相符，沒有 linkage 錯誤，各刀心跳的 `anomalies` 都是 0。主玩家重生 11 次（四個 session 依序 4、0、3、4 次），每個有重生的 session 都在第一次重生時印出 `[CoopNameGuard] 首次生效 mode=enforce`，沒有任何 `renamed`／`rejected`：正常客戶端重生送的都是登入名，守衛不需要介入。正式服 `AllowCoop=false`，分割畫面沒有樣本。
+
+<a id="2br"></a>
+## 2br. 車輛靜止姿勢跳過（W54，client，預設 on；client 包 0.2.5）
+
+**問題**：KI5 系列與 rSemiTruck 這類模組車的門、引擎蓋、車窗、裝甲是蒙皮（skinned）零件模型。客戶端對每台已載入的車每幀跑 `BaseVehicle.postupdate`，不分遠近、停著或看不看得到，車身與每個非 static 零件模型各呼叫一次 `updateAnimationPlayer`，後者無條件 `AnimationPlayer.Update`，整副骨架重算一次。新生成的車每台每幀：KI5 22–47 µs、rSemiTruck 車頭 32 µs，原版車 3–5 µs。2026-10-07 正式服複本 JFR（閒置、113 輛）：`postupdate` 每幀 3.76 ms，其中 `updateAnimationPlayer` 2.88 ms。零件有 `parent` 時共用 parent 的 player（窗、裝甲掛在門底下），`postupdate` 仍對每個零件模型各 Update 一次，所以同一個門的 player 每幀被算 2–3 次。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `BaseVehicle.updateAnimationPlayer(AnimationPlayer, VehiclePart)` 是 private，只在 `postupdate` 被呼叫兩次（offset 40 車身、offset 77 `models` 迴圈）。方法內唯一的 `invokevirtual AnimationPlayer.Update(F)V`（offset 44）在所有善後之前：移除播完的 track、窗 track 依 `openDelta` 設時間、沒有 track 時 `playPartAnim("Opened"/"Closed"/"ClosedToOpen")`。角色、殭屍、動物、機械介面 3D 車（`UI3DScene`）都走別的呼叫點。
+- 沒在播放的 track 時間不前進（`AnimationTrack.tickCurrentTimeInternal` 讀 `isPlaying`，false 時 dt 設 0）。靜止的門窗姿勢（`animate = FALSE` 的 Opened／Closed／ClosedToOpen）每幀重算出同樣的矩陣：權重 1 的骨頭完全由 track 決定，權重 0 的骨頭保留上一次的值。
+- renderer 是拉資料：`getSkinTransforms` 只在 `SkinTransformData.dirty` 時從 `modelTransforms` 重算蒙皮矩陣，不跑 Update 就沿用上一次的結果。
+- 原版的怪癖：共用 player 被 Update k 次，每次都推進正在播放的 track，所以 KI5 的門開關動畫在原版是 k 倍速（MOD 的 `rate` 是在這個行為下調的）。「同一幀只 Update 一次」會讓門變慢 2–3 倍，本刀不做。
+
+**手術**：`updateAnimationPlayer` 內唯一的 `AnimationPlayer.Update(F)V` 1:1 改道 `zombie/mdc/VehicleAnimGate.update(AnimationPlayer, float)`（3 bytes 換 3 bytes、堆疊形狀不變、frames 原樣），`expectedHits = 1`，新 ClassPatch `zombie/vehicles/BaseVehicle`。標準版與省記憶體版都含這刀，模組版本 `v3.2`。
+
+**判定**（helper 以 `WeakHashMap<AnimationPlayer, 簽章>` 記每個 player，player 被 GC 時自動消失；池回收再用的 player 會帶 `needFirstFrame`，第一次一定照算）：
+- 簽章：model、skinningData（身分）、track 數、角度與目標角度、`doBlending`，以及每條 track 的身分、clip 身分、`currentTimeValue`、`getBlendWeight()`、`getBlendFieldWeight()`、`getLayerIdx()`、`priority`、`isPlaying`／`reverse`／`looping`／`hasBoneMask()`。
+- 照原版算：任一 track `isPlaying`、`isBoneTransformsNeedFirstFrame()`、`parentPlayer != null`、`updateBones == false`、`isRecording()`、沒有 track，或簽章與上一次完整計算不同。同一份簽章要連續完整算過兩次才開始跳過，讓 first-frame 與權重 <1 的混合多走一步。
+- 只在第一個呼叫的執行緒（主執行緒）運作；其他執行緒照原版並計 `foreignThread`。簽章讀取拋例外時照原版並計 `anomalies`。
+
+**抽樣比對**：每 256 次本來會跳過的呼叫抽 1 次照算，比對算前算後的 `modelTransforms`（16 個 float 逐一比，相對誤差，絕對值小於 1 時以 1 計），超過 1e-5 就本次啟動永久回原版、清空簽章表並記一行。verify 模式永遠照算，只比對與計數。
+
+**kill switch**：`-Dmdc.vehAnimSkip=on`（預設；未設定或未知值）｜`verify`（`2`）｜`off`（`0`），需重啟。
+
+**log**（console.txt）：
+
+```text
+[MinidoracatJavaPatch][VehicleAnimGate] active mode=on sampleEvery=256 tolerance=1.0E-5
+[MinidoracatJavaPatch][VehicleAnimGate] calls=<n> computed=<n> skipped=<n> sampled=<n> mismatches=0 players=<n> foreignThread=0 anomalies=0 disabled=false
+[MinidoracatJavaPatch][VehicleAnimGate] pose mismatch bone=<i> diff=<d> tracks=<n>; vanilla Update for the rest of this session calls=…
+```
+
+第一行（`mode=on`／`verify`／`off`，設了旗標時附原值）在第一台蒙皮車第一次更新時出現，off 也會印，可用來確認開關生效；統計行只在 on／verify 每 5 分鐘一行（每 4096 次呼叫檢查一次時間）。
+
+**不做的事**：
+- 同幀去重：見根因最後一點；只讓最後一次呼叫算骨頭、其他次只推進時間的版本可以保住倍速，但本刀上線後停著的車已經全部跳過，它只剩開門那一秒有用。
+- `ModelInfo.getAnimationPlayer` 的查找快取（同一份 JFR 每幀 0.71 ms）：有 parent 的零件會遞迴到 parent 的 `getAnimationPlayer`，每次都 `ModelManager.getLoadedModel(檔名)`，裡面是 `ScriptManager.getModelScript` 的字串雜湊查表（`ScriptBucketCollection.getScript` 做 `contains(".")`、模組與名稱查表），`getModelInfoForPart` 的線性掃描只是比對參照、成本小得多。快取 `getLoadedModel` 的結果無法證明與原版逐次相同：Lua 重載、腳本重載、`ModelScript.loadedModel` 被清掉、`setModelVisible` 換模型都會讓結果改變，沒有單一失效訊號可掛。只快取 `getModelInfoForPart` 也不划算：`models` 是 `ArrayList`，`modCount` 在 `java.base` 裡不能讀，一個零件也可能有多個 ModelInfo（原版回第一個），驗證快取等於重掃一遍。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：存在理由與設計前提——`updateAnimationPlayer` 是 private 且全 class 只在 `postupdate` 被呼叫 2 次、方法內恰一個 `Update(F)V` 且在 `getModelInfoForPart` 之前、`tickCurrentTimeInternal` 讀 `isPlaying`、`getSkinTransforms` 讀寫 `dirty`；手術後除了這一個呼叫之外方法文字（含 frames）與原版相同；`postupdate`、`playPartAnim` 未改動。LoadCheck：`VehicleAnimGate.update(AnimationPlayer, float)` 為 public static void。
+- `VehicleAnimGateBehaviorTest`（裸 JVM，真 `AnimationPlayer`／`AnimationTrack`／`SkinningData`／`AnimationClip`；`build-client.ps1` 對兩個變體各跑 on、verify、off 三次）：合成一台 KI5 式的車（門的 player 由門、窗、裝甲共用，另有後車廂），同一組輸入跑原版（A）與改道（B），零件呼叫順序與善後照 javap 的 `updateAnimationPlayer` 與 `playPartAnim`，每幀比對 `modelTransforms`、蒙皮矩陣（逐位）與每條 track 的時間。情境：S1 靜止 300 幀；S2 搖窗後停住；S3 開門動畫（仍是 3 倍速）；S4 播完換 Opened；S5 player 還回池再配置（拿回同一物件）；S6 換 skinningData；S7 `parentPlayer` 與沒有 track；S8 `updateBones=false`；S9 就地改 clip 的關鍵影格（簽章看不到）。on 每幀 A==B 逐位相同，S9 由抽樣在 42 幀內抓到並回原版，之後每幀 A==B；verify 不跳過、本來會跳過的 2,537 次全部比對；off 每次呼叫都落到原版（N1）。負對照：同幀只 Update 一次（N2）測試抓得到門變慢；窗時間改變那幀不算（N3）測試抓得到姿勢不同。
+
+**預期**：停著的蒙皮車每台每幀只剩簽章比對，主 agent 排程以 JFR 量每台成本、以截圖差分比對 on／off（開關門、搖窗、開車）；量測前不宣稱效益數字。
+
+**殘留**：簽章看不到的輸入（同一個 track 物件就地換骨頭遮罩、clip 資料被改、debug 選項）會讓畫面最多停在舊姿勢 256 次跳過，由抽樣比對抓到後本次回原版。
+
+<a id="2bs"></a>
+## 2bs. `isBoneReparented` 快速路徑（W55，client，預設 on；client 包 0.2.5）
+
+**問題**：`AnimationPlayer.updateMultiTrackBoneTransformsInternal` 對每根骨頭呼叫一次 `isBoneReparented(int)`，原版每次都 `Integer.valueOf`、`Lambda.predicate`（從池配置）再 `PZArrayUtil.contains(reparentedBoneBindings, …)`。車輛、殭屍與多數角色的清單是空的，結果一定是 false。車輛 JFR 中它約佔 `AnimationPlayer.updateInternal` 樣本的 27%（SemiTruck 100／373、M998 94／341）。
+
+**手術**：該方法內唯一的 `invokevirtual AnimationPlayer.isBoneReparented(I)Z`（offset 115，也是全 jar 唯一呼叫點）1:1 改道 `zombie/mdc/BoneReparentFastPath.isBoneReparented(AnimationPlayer, int)`，`expectedHits = 1`，新 ClassPatch `zombie/core/skinnedmodel/animation/AnimationPlayer`。helper 以 `MethodHandles.privateLookupIn` 取得 private final `reparentedBoneBindings` 的 VarHandle；清單為空回 false，否則呼叫原版 `isBoneReparented`（本體未改）。結果與原版逐位相同，所有走標準動畫路徑的 player 都受惠（角色、殭屍、動物、車、機械介面 3D 車）。欄位找不到時記一行並一律委派原版。
+
+**kill switch**：`-Dmdc.boneReparentFast=off`（或 `0`）一律委派原版，需重啟。第一次用到時在 console.txt 記一行 `[MinidoracatJavaPatch][BoneReparentFastPath] active=true|false`（設了旗標時附原值）。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：存在理由——原版 `isBoneReparented` 以 `Lambda.predicate`＋`PZArrayUtil.contains` 掃 `reparentedBoneBindings`（TIS 自己加快速路徑時轉紅＝重估撤刀），欄位是 `ArrayList`；`AnimationPlayer` 內唯一的呼叫點在這個方法；手術後除了這一個呼叫之外方法文字與原版相同；`isBoneReparented` 本體未改。LoadCheck：helper 為 public static boolean。
+- `BoneReparentFastPathBehaviorTest`（兩個變體各跑 on、off）：沒有 reparent、有 reparent、池回收後清空三種狀態下每根骨頭 helper 與原版相同；60 幀真動畫（含 reparent 的 player）的 `modelTransforms` SHA-256 摘要 on 與 off 必須相同，由 `build-client.ps1` 比對。裸 JVM 微基準（只報告）：空清單時原版約 90–100 ns／次。
 
 ---
 

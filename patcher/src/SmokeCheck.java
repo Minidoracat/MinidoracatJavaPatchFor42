@@ -3444,6 +3444,83 @@ public final class SmokeCheck {
                         .equals(methodText(methodFromJar(jar, treeCls, "isPlayerCloseToARoom", playerArgDesc)))
                 && methodText(method(distJava, treeCls, "render", treeRenderDesc))
                         .equals(methodText(methodFromJar(jar, treeCls, "render", treeRenderDesc))));
+
+        // ---- W54 車輛靜止姿勢跳過（docs/patches.md 2br）----
+        // 前提：updateAnimationPlayer 只由 postupdate 呼叫（2 次，車身＋models 迴圈），方法內恰一個 Update 且在
+        // getModelInfoForPart（窗時間、playPartAnim 的善後）之前；沒在播放的 track 時間不前進；renderer 只在
+        // SkinTransformData.dirty 時才重算蒙皮矩陣（不跑 Update 就沿用上一次）。
+        String vehCls = "zombie/vehicles/BaseVehicle";
+        String apCls = "zombie/core/skinnedmodel/animation/AnimationPlayer";
+        String trackCls = "zombie/core/skinnedmodel/animation/AnimationTrack";
+        String uapDesc = "(L" + apCls + ";Lzombie/vehicles/VehiclePart;)V";
+        String gateCls = "zombie/mdc/VehicleAnimGate";
+        MethodNode vUap = methodFromJar(jar, vehCls, "updateAnimationPlayer", uapDesc);
+        ClassNode vVeh = classNodeFromJar(jar, vehCls);
+        int uapCallers = 0;
+        int uapCallersInPostupdate = 0;
+        for (MethodNode m : vVeh.methods) {
+            int n = countExactCalls(m, Opcodes.INVOKEVIRTUAL, vehCls, "updateAnimationPlayer", uapDesc);
+            uapCallers += n;
+            if (m.name.equals("postupdate") && m.desc.equals("()V")) {
+                uapCallersInPostupdate += n;
+            }
+        }
+        failed += check("W54 vanilla 前提：updateAnimationPlayer 只在 postupdate 被呼叫 2 次（車身＋models 迴圈）",
+                uapCallers == 2 && uapCallersInPostupdate == 2 && (vUap.access & Opcodes.ACC_PRIVATE) != 0);
+        failed += check("W54 vanilla 前提：updateAnimationPlayer 恰一個 Update(F)V，且在 getModelInfoForPart 之前",
+                countExactCalls(vUap, Opcodes.INVOKEVIRTUAL, apCls, "Update", "(F)V") == 1
+                && firstCallIndex(vUap, Opcodes.INVOKEVIRTUAL, apCls, "Update", "(F)V")
+                        < firstCallIndex(vUap, Opcodes.INVOKEVIRTUAL, vehCls, "getModelInfoForPart",
+                                "(Lzombie/vehicles/VehiclePart;)Lzombie/vehicles/BaseVehicle$ModelInfo;"));
+        failed += check("W54 vanilla 前提：tickCurrentTimeInternal 讀 isPlaying（沒在播放時間不前進）、"
+                        + "getSkinTransforms 只在 dirty 時重算",
+                countFieldTouches(methodFromJar(jar, trackCls, "tickCurrentTimeInternal", "(F)V"),
+                        trackCls, "isPlaying") == 1
+                && countFieldTouches(methodFromJar(jar, apCls, "getSkinTransforms",
+                        "(Lzombie/core/skinnedmodel/model/SkinningData;)[Lorg/lwjgl/util/vector/Matrix4f;"),
+                        apCls + "$SkinTransformData", "dirty") == 2);
+        MethodNode pUap = method(distJava, vehCls, "updateAnimationPlayer", uapDesc);
+        failed += check("W54 updateAnimationPlayer 唯一 Update 同形改道 VehicleAnimGate.update，其餘指令與 frames 保留",
+                countExactCalls(pUap, Opcodes.INVOKEVIRTUAL, apCls, "Update", "(F)V") == 0
+                && countExactCalls(pUap, Opcodes.INVOKESTATIC, gateCls, "update", "(L" + apCls + ";F)V") == 1
+                && methodText(vUap).replace("INVOKEVIRTUAL " + apCls + ".Update (F)V",
+                        "INVOKESTATIC " + gateCls + ".update (L" + apCls + ";F)V").equals(methodText(pUap)));
+        failed += check("W54 負對照：postupdate 與 playPartAnim 未改動",
+                methodText(method(distJava, vehCls, "postupdate", "()V"))
+                        .equals(methodText(methodFromJar(jar, vehCls, "postupdate", "()V")))
+                && methodText(method(distJava, vehCls, "playPartAnim", "(Lzombie/vehicles/VehiclePart;Ljava/lang/String;)V"))
+                        .equals(methodText(methodFromJar(jar, vehCls, "playPartAnim",
+                                "(Lzombie/vehicles/VehiclePart;Ljava/lang/String;)V"))));
+
+        // ---- W55 isBoneReparented 快速路徑（docs/patches.md 2bs）----
+        // 存在理由：原版每次呼叫都 Lambda.predicate＋PZArrayUtil.contains（TIS 自己加快速路徑時轉紅＝重估撤刀）；
+        // helper 以 VarHandle 讀 private final ArrayList reparentedBoneBindings（名稱與型別鎖進建置期）。
+        String reparentCls = "zombie/mdc/BoneReparentFastPath";
+        String boneLoopName = "updateMultiTrackBoneTransformsInternal";
+        MethodNode vReparented = methodFromJar(jar, apCls, "isBoneReparented", "(I)Z");
+        failed += check("W55 vanilla 前提：isBoneReparented 以 Lambda.predicate＋PZArrayUtil.contains 掃 reparentedBoneBindings",
+                countExactCalls(vReparented, Opcodes.INVOKESTATIC, "zombie/util/Lambda", "predicate",
+                        "(Ljava/lang/Object;Lzombie/util/lambda/Predicates$Params1$ICallback;)Ljava/util/function/Predicate;") == 1
+                && countExactCalls(vReparented, Opcodes.INVOKESTATIC, "zombie/util/list/PZArrayUtil", "contains",
+                        "(Ljava/util/List;Ljava/util/function/Predicate;)Z") == 1
+                && countFieldTouches(vReparented, apCls, "reparentedBoneBindings") == 1
+                && hasField(classNodeFromJar(jar, apCls), "reparentedBoneBindings", "Ljava/util/ArrayList;"));
+        int reparentCallers = 0;
+        for (MethodNode m : classNodeFromJar(jar, apCls).methods) {
+            reparentCallers += countExactCalls(m, Opcodes.INVOKEVIRTUAL, apCls, "isBoneReparented", "(I)Z");
+        }
+        MethodNode vBoneLoop = methodFromJar(jar, apCls, boneLoopName, "(F)V");
+        MethodNode pBoneLoop = method(distJava, apCls, boneLoopName, "(F)V");
+        failed += check("W55 vanilla 前提：AnimationPlayer 內唯一的 isBoneReparented 呼叫在 " + boneLoopName,
+                reparentCallers == 1
+                && countExactCalls(vBoneLoop, Opcodes.INVOKEVIRTUAL, apCls, "isBoneReparented", "(I)Z") == 1);
+        failed += check("W55 " + boneLoopName + " 唯一 isBoneReparented 同形改道，其餘指令與 frames 保留",
+                countExactCalls(pBoneLoop, Opcodes.INVOKEVIRTUAL, apCls, "isBoneReparented", "(I)Z") == 0
+                && methodText(vBoneLoop).replace("INVOKEVIRTUAL " + apCls + ".isBoneReparented (I)Z",
+                        "INVOKESTATIC " + reparentCls + ".isBoneReparented (L" + apCls + ";I)Z")
+                        .equals(methodText(pBoneLoop)));
+        failed += check("W55 負對照：isBoneReparented 本體未改動",
+                methodText(method(distJava, apCls, "isBoneReparented", "(I)Z")).equals(methodText(vReparented)));
         return failed;
     }
 
