@@ -1238,6 +1238,27 @@ public final class PatchConfig {
         coopParse.expectedHits = 2;   // headCall＋getUTF 改道（stage 1 名稱，javap offset 137）
         patches.add(coopPacket);
 
+        // W53：步行時縮小車輛相關範圍（docs/patches.md 2bq）。client 持有的車＝伺服器 isRelevantTo（1080p ±88 正方形）
+        // ∩ client chunk map；改道兩個方法內各自唯一的 isRelevantTo(FF)Z（sendVehicles javap offset 75、
+        // processServer offset 83），helper 回原版結果的子集：連線上有人在車內或 connectArea 非 null 照原版，
+        // 否則只留圓形 R 內的車。兩處同一判定、不做遲滯。兩個方法都只在伺服器執行（serverUpdate／processServer），
+        // client 不自行重算範圍，無 desync。-Dmdc.vehicleRelevancy 預設 observe（只計數），on 才縮；
+        // -Dmdc.vehicleRelevancyRadius 預設 64。
+        String vehGate = "zombie/mdc/VehicleRelevancyGate";
+        Patcher.ClassPatch vehManager = new Patcher.ClassPatch("zombie/vehicles/VehicleManager");
+        Patcher.MethodOps vehSend = vehManager.method("sendVehicles", "(Lzombie/core/raknet/UdpConnection;)V");
+        vehSend.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection",
+                "isRelevantTo", "(FF)Z", vehGate, "sendRelevant"));
+        vehSend.expectedHits = 1;
+        patches.add(vehManager);
+        Patcher.ClassPatch vehRequest = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehicleRequestPacket");
+        Patcher.MethodOps vehKeep = vehRequest.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        vehKeep.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection",
+                "isRelevantTo", "(FF)Z", vehGate, "keepRelevant"));
+        vehKeep.expectedHits = 1;
+        patches.add(vehRequest);
+
         return patches;
     }
 

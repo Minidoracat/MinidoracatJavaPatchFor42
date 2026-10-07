@@ -3481,6 +3481,61 @@ observe 印 `wouldRename`／`wouldReject`；`reason=noLogin` 是 0 號連線沒�
 
 **上線驗收（2026-10-04 21:34）**：06:06 起四個 session 的橫幅都是 `server patch 13dbc29`，120 個 loose class 逐檔 SHA 與 manifest 相符，沒有 linkage 錯誤，各刀心跳的 `anomalies` 都是 0。主玩家重生 11 次（四個 session 依序 4、0、3、4 次），每個有重生的 session 都在第一次重生時印出 `[CoopNameGuard] 首次生效 mode=enforce`，沒有任何 `renamed`／`rejected`：正常客戶端重生送的都是登入名，守衛不需要介入。正式服 `AllowCoop=false`，分割畫面沒有樣本。
 
+<a id="2bq"></a>
+## 2bq. 步行時縮小車輛相關範圍（W53，server，預設 observe）
+
+**問題（2026-10-07）**：KI5 與 rSemiTruck 系模組車的門、窗、引擎蓋是蒙皮模型。client 對每台已載入的車每幀都跑 `BaseVehicle.postupdate`，對每個蒙皮零件無條件重算骨架，沒有距離、可見性或靜止閘門（`BaseVehicle.getMinimumSimulationLevel` 固定 FULL）。新生成的 KI5 車每台每幀 22–47 µs、原版車 3–5 µs。正式服車多的一處，client 載入 107 輛（KI5 55、KI5 拖車 18、rSemi 11），JFR 量到車輛 `postupdate`＋`update` 每幀約 5.4 ms。要每位玩家各自安裝 client 修補不實際，Lua 也碰不到這條路徑。
+
+**client 持有哪些車由伺服器決定（42.21.0 反編譯＋javap）**：
+- client 讀 chunk 不載入車：`IsoChunk` 只在 `!GameClient.client` 時讀 vehicles 區段。client 只對伺服器 `VehicleUpdate` 告知過的車（`VehiclePacket.parse` 寫入 `VehicleCache`）要 `VehicleFullUpdate`，而且只有該格已載入時才建車。
+- 伺服器 `VehicleManager.sendVehicles` 每 100 ms 對每條連線、每台車判 `isRelevantTo` 才送；伺服器每 1000 ms 對所有車加 Passengers 旗標，client 每 1000 ms 對自己持有的每台車送 `VehicleRequest(16384)`，`VehicleRequestPacket.processServer` 判 `!isRelevantTo` 就回 `VehicleRemove`。
+- 範圍來自 client：`ConnectPacket` 送 `IsoChunkMap.chunkGridWidth`（1080p 以上是 19），`GameServer.receivePlayerConnect` 算 `relevantRange = clamp(w,12,20)/2 + 2`，`isRelevantTo` 是 `±relevantRange*8` 的正方形（1080p ⇒ ±88）。這比 client 19×19 chunk map（約 −79…+72）還寬，所以 client 載入的車數由自己的 chunk map 決定。用正式服 `vehicles.db` 快照驗證：上述地點 chunk map 內 107 輛、伺服器 ±88 內 146 輛，兩者交集仍是 107 輛。
+- ServerOptions 沒有任何相關選項。直接改 `relevantRange`（constChange）不行：`isRelevantTo` 有 32 個檔案在用，包括門窗、物件、屍體同步與 `ServerMap.outsidePlayerInfluence`（決定伺服器 cell 何時卸載）。
+
+**手術**：兩個方法內各自唯一的 `UdpConnection.isRelevantTo(FF)Z` 1:1 改道（新 ClassPatch ×2，各 `expectedHits=1`）：
+- `VehicleManager.sendVehicles`（javap offset 75，後接 `ifeq` 跳過送出）→ `VehicleRelevancyGate.sendRelevant`。
+- `VehicleRequestPacket.processServer`（offset 83，在 `flag == 16384` 分支，後接 `ifne`、否則送 `VehicleRemove`）→ `keepRelevant`。
+
+helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結果一律是原版結果的子集：
+1. 原版 `isRelevantTo` 為 false ⇒ false（只縮不放；720p 的 ±64 不會被放寬）。
+2. 任一 `connectArea[n]` 非 null（握手中、co-op 加入中）⇒ 原版。
+3. 任一本地玩家的 `releventPos` 與車的平面距離 ≤ R（圓形，含等於）⇒ true。
+4. 連線上任一本地玩家在車內（駕駛或乘客，`getVehicle() != null`）⇒ 原版。理由：車內 client 會自動縮到最遠、鏡頭往行進方向平移（2.5 倍縮放下畫面角落約 71 格），chunk 中心也往前移（`IsoChunkMap.ProcessChunkPos`），伺服器無從得知；AutoDrive 的前視 60–110 m 也要看到停著的車。
+5. 其餘：`on` 回 false（不送、或叫 client 移除），`observe` 照原版回 true，兩者都計數。
+
+兩個呼叫點用同一個 R、不做遲滯：如果「送」比「留」窄，留在 client 的環帶車收不到零件更新，而 `vehicle.updateFlags` 每個 tick 送完就清，漏掉的門窗變更不會補送。車再次進入 R 時走原版流程：伺服器的 Passengers `VehicleUpdate` → client `doRequest` → `VehicleFullUpdate`。兩個方法都只在伺服器執行，client 不自行重算範圍，沒有 desync。
+
+**開關**（需重啟）：
+- `-Dmdc.vehicleRelevancy`：未設定／`2`／`observe`＝只計數、照原版（預設；未知值也是 observe）；`1`／`on`／`enforce`＝縮小；`0`／`off`＝原版。
+- `-Dmdc.vehicleRelevancyRadius`：R（格），預設 64，夾在 32–160。
+- `-Dmdc.vehicleRelevancyBeatSec`：心跳最短間隔（秒），預設 300，夾在 10–3600（本機量測時調短用）。
+
+**log**（首次判定時一行；之後每 4096 次判定看一次時間，間隔到了才印）：
+
+```text
+[MinidoracatJavaPatch][VehicleRelevancy] 首次生效 mode=observe radius=64（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius）
+[MinidoracatJavaPatch][VehicleRelevancy] mode=observe radius=64 sendOutside=<n> keepOutside=<n> passVehicle=<n> passConnectArea=<n> anomalies=<n>
+```
+
+- `sendOutside`：`sendVehicles` 判定「原版會送、在 R 外」的次數（每連線每台車每 100 ms 一次，所以是判定次數，不是車數）。`on` 時這些更新沒送。
+- `keepOutside`：Passengers 請求判定「原版會留、在 R 外」的次數，約等於每秒每連線的 R 外車數。`on` 時每一次都是一個 `VehicleRemove`，observe 下用來估計會移除多少車。
+- `passVehicle`／`passConnectArea`：在 R 外但因車內或 connectArea 照原版的次數。`anomalies` 恆應為 0。
+
+**預期效果（推測，以正式服 `vehicles.db` 快照計算）**：上述地點原版 107 輛；圓形 R=64 剩 57 輛、R=56 剩 40 輛、R=48 剩 28 輛。依車型加權（KI5 35、KI5 拖車 12、rSemi 25、其他 4.5 µs/輛）約為原本的 54％／38％／24％。實測 5.4 ms 與車型表估算的 2.3 ms 有落差，原因未查，所以毫秒數只是推測。
+
+**副作用**：
+- 畫面：1920×1080 的可視範圍是世界座標的菱形，角落約 16 格 × 縮放倍數（預設約 16 格、最遠 2.5 倍約 40 格）。步行時 R=64 遠在畫面外；R=48 在最遠縮放下約有 8 格餘裕。車在 R 外收到 Passengers 更新後約 0.2–1.2 秒出現，衝刺約 6–7 格/秒，所以約在 R−9 格處出現（推測）。
+- 流量：一台車的 `VehicleFullUpdate` 就是 `vehicle.save()`，正式服快照中位數約 10 KB、最大約 118 KB（載滿的貨櫃拖車）。單次接近時要下載的量比原版少，但在 R 邊界來回會「移除→重送」，原版不會。下車時 1 秒內移除 R 外的車；上車時一次補回環帶的車，client 解析可能卡頓（推測，要實機量）。
+- 別人開的車：駛入 R 時伺服器送 `VehicleUpdate`，client 隨即要 Full，約 0.2 秒加 RTT 後出現。`VehiclePhysics` 仍以原版 ±88 轉發，client 沒有那台車時會每個物理包送一次 `VehicleRequest(1)`，伺服器只記旗標、車進入 R 時才送，不形成迴圈。
+- 拖車：掛接表以 `sendToAll` 廣播，牽引車每幀 `tryReconnectToTowedVehicle`，拖車抵達後自動接回。
+- 殘留風險：車剛出 R、在下一次 1 秒輪詢前又回到 R 內，這段空窗的零件變更沒送、client 也沒被移除，零件狀態可能過期到下一次該零件變化為止。原版範圍比 chunk map 寬，沒有這個空窗。
+- 家族 MOD：MiniMap 的車輛圖示預設不限距離，步行時會縮到 R；AutoDrive、VehicleManager 的掃描是車內、近距離或伺服器端，不受影響。
+
+**驗證**：
+- SmokeCheck（存在理由，TIS 改即紅＝重估）：原版 `sendVehicles` 唯一 `isRelevantTo`、參數是車的 `getX／getY`、後接 `IFEQ`，方法內送 `VehicleFullUpdate`；`processServer` 唯一 `isRelevantTo` 後接 `IFNE`、再來是 `ALOAD 2` 與 `VehicleRemove`，方法內有 `SIPUSH 16384`；`isRelevantTo` 讀 `relevantRange` 兩次、不讀 `chunkGridWidth`。手術後兩個方法除了 `isRelevantTo`→helper 之外方法文字（含 frames）與原版相同、全 class 真指令數不變；兩個 class 的 `isRelevantTo` 都歸零且各只改道到自己的入口。helper 契約：兩個入口共用 `decide`，`decide` 恰呼叫原版 `isRelevantTo` 一次，並各查一次 connectArea、半徑與車內。
+- `VehicleRelevancyGateTest`（observe R=64、on R=64、on R=48、on R=5 夾到 32、off，`-Xverify:all`）：真 `UdpConnection.isRelevantTo` 做原版負對照（環帶與正方形角落原版相關、89 格不相關）；R−1、恰等於 R 一律相關，`Math.nextUp(R)`、R+1、圓外正方形內的對角依模式分流；原版外一律不相關；兩個入口各自計數；車內（含分割畫面 2 號乘客）與 connectArea 照原版；分割畫面任一玩家 R 內即相關；parseMode 別名。另外走 dist 手術後的真 `VehicleRequestPacket.processServer`：真 wire 請求、真 `VehicleRemovePacket` 寫出再解碼，R 內不移除、環帶只有 on 回 `VehicleRemove`、原版外三模式都移除、Full 請求只記旗標、車內照原版。
+- 本機實機 E2E（2026-10-07，正式服 139 個 MOD 的本機複本，在車輛密集區站 20–25 秒，JFR MainThread 每幀）：off 80 fps（每幀 12.5 ms，client 持有 113 輛，`postupdate` 3.11＋`update` 1.25 ms）；on R=48 190 fps（5.2 ms，37 輛，0.81＋0.27 ms）；on R=64 137 fps（7.3 ms，57 輛，1.51＋0.49 ms）。沿同一條路步行，最大幀 off／R=48／R=64 為 119／72／96 ms，超過 50 ms 的幀 7／3／6；`anomalies=0`。
+
 <a id="2br"></a>
 ## 2br. 車輛靜止姿勢跳過（W54，client，預設 on；client 包 0.2.5）
 
@@ -3521,7 +3576,7 @@ observe 印 `wouldRename`／`wouldReject`；`reason=noLogin` 是 0 號連線沒�
 - SmokeCheck（兩個變體）：存在理由與設計前提——`updateAnimationPlayer` 是 private 且全 class 只在 `postupdate` 被呼叫 2 次、方法內恰一個 `Update(F)V` 且在 `getModelInfoForPart` 之前、`tickCurrentTimeInternal` 讀 `isPlaying`、`getSkinTransforms` 讀寫 `dirty`；手術後除了這一個呼叫之外方法文字（含 frames）與原版相同；`postupdate`、`playPartAnim` 未改動。LoadCheck：`VehicleAnimGate.update(AnimationPlayer, float)` 為 public static void。
 - `VehicleAnimGateBehaviorTest`（裸 JVM，真 `AnimationPlayer`／`AnimationTrack`／`SkinningData`／`AnimationClip`；`build-client.ps1` 對兩個變體各跑 on、verify、off 三次）：合成一台 KI5 式的車（門的 player 由門、窗、裝甲共用，另有後車廂），同一組輸入跑原版（A）與改道（B），零件呼叫順序與善後照 javap 的 `updateAnimationPlayer` 與 `playPartAnim`，每幀比對 `modelTransforms`、蒙皮矩陣（逐位）與每條 track 的時間。情境：S1 靜止 300 幀；S2 搖窗後停住；S3 開門動畫（仍是 3 倍速）；S4 播完換 Opened；S5 player 還回池再配置（拿回同一物件）；S6 換 skinningData；S7 `parentPlayer` 與沒有 track；S8 `updateBones=false`；S9 就地改 clip 的關鍵影格（簽章看不到）。on 每幀 A==B 逐位相同，S9 由抽樣在 42 幀內抓到並回原版，之後每幀 A==B；verify 不跳過、本來會跳過的 2,537 次全部比對；off 每次呼叫都落到原版（N1）。負對照：同幀只 Update 一次（N2）測試抓得到門變慢；窗時間改變那幀不算（N3）測試抓得到姿勢不同。
 
-**預期**：停著的蒙皮車每台每幀只剩簽章比對，主 agent 排程以 JFR 量每台成本、以截圖差分比對 on／off（開關門、搖窗、開車）；量測前不宣稱效益數字。
+**實機量測**（2026-10-07，同一份正式服複本、同一處車輛密集區，JFR MainThread 每幀，W54＋W55 一起）：off 75.6 fps（每幀 13.2 ms；`postupdate` 3.45 ms，其中 `updateAnimationPlayer` 2.62、`ModelInfo.getAnimationPlayer` 0.71）→ on 113 fps（8.8 ms；`postupdate` 0.78 ms，`updateAnimationPlayer` 0.15、`getAnimationPlayer` 0.53）。verify 模式在 113 台正式服車、每台再額外呼叫 1000 次 `postupdate` 下 0 次 pose mismatch；開關門動畫截圖與原版相同。
 
 **殘留**：簽章看不到的輸入（同一個 track 物件就地換骨頭遮罩、clip 資料被改、debug 選項）會讓畫面最多停在舊姿勢 256 次跳過，由抽樣比對抓到後本次回原版。
 
