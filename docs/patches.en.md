@@ -2932,6 +2932,61 @@ per session); each session with a respawn printed `[CoopNameGuard] 首次生效 
 line: normal clients send their login name when respawning, so the guard never had to act. Production runs `AllowCoop=false`, so there is no
 split-screen sample.
 
+<a id="2bq"></a>
+## 2bq. Smaller vehicle relevance range while on foot (W53, server, default observe)
+
+**Problem (2026-10-07)**: the doors, windows and hoods of KI5 and rSemiTruck modded vehicles are skinned models. Every frame the client runs `BaseVehicle.postupdate` for every loaded vehicle and recomputes the skeleton of every skinned part unconditionally, with no distance, visibility or idle gate (`BaseVehicle.getMinimumSimulationLevel` is fixed at FULL). A freshly spawned KI5 vehicle costs 22–47 µs per frame, a vanilla vehicle 3–5 µs. At one vehicle-dense spot on the production server the client loads 107 vehicles (55 KI5, 18 KI5 trailers, 11 rSemi) and JFR measured about 5.4 ms per frame in vehicle `postupdate` + `update`. Asking every player to install a client patch is not practical, and Lua cannot reach this path.
+
+**The server decides which vehicles a client holds (42.21.0 decompile + javap)**:
+- The client does not load vehicles from chunk data: `IsoChunk` only reads the vehicles section when `!GameClient.client`. The client requests `VehicleFullUpdate` only for vehicles the server announced with a `VehicleUpdate` (`VehiclePacket.parse` writes `VehicleCache`), and only builds one when its square is loaded.
+- Every 100 ms `VehicleManager.sendVehicles` checks `isRelevantTo` for each connection and each vehicle before sending. Every 1000 ms the server sets the Passengers flag on all vehicles, and the client sends `VehicleRequest(16384)` for every vehicle it holds; `VehicleRequestPacket.processServer` answers `VehicleRemove` when `!isRelevantTo`.
+- The range comes from the client: `ConnectPacket` sends `IsoChunkMap.chunkGridWidth` (19 at 1080p and above), `GameServer.receivePlayerConnect` computes `relevantRange = clamp(w,12,20)/2 + 2`, and `isRelevantTo` is a `±relevantRange*8` square (±88 at 1080p). That is wider than the client's 19×19 chunk map (about −79…+72), so the client's own chunk map decides how many vehicles it loads. Checked against a production `vehicles.db` snapshot: 107 vehicles inside the chunk map at that spot, 146 inside the server's ±88, and the intersection is still 107.
+- ServerOptions has no setting for this. Changing `relevantRange` itself (constChange) is not an option: 32 files use `isRelevantTo`, including door, window, object and corpse sync and `ServerMap.outsidePlayerInfluence` (which decides when server cells unload).
+
+**Surgery**: the only `UdpConnection.isRelevantTo(FF)Z` in each of two methods is redirected 1:1 (two new ClassPatches, `expectedHits=1` each):
+- `VehicleManager.sendVehicles` (javap offset 75, followed by `ifeq` that skips sending) → `VehicleRelevancyGate.sendRelevant`.
+- `VehicleRequestPacket.processServer` (offset 83, in the `flag == 16384` branch, followed by `ifne`, otherwise `VehicleRemove`) → `keepRelevant`.
+
+The helper `zombie.mdc.VehicleRelevancyGate` uses one decision for both entry points, and the result is always a subset of the vanilla result:
+1. Vanilla `isRelevantTo` false ⇒ false (it only shrinks; the ±64 of a 720p client is never widened).
+2. Any `connectArea[n]` non-null (handshake or co-op join in progress) ⇒ vanilla.
+3. Any local player's `releventPos` within a planar distance ≤ R of the vehicle (circle, inclusive) ⇒ true.
+4. Any local player on the connection in a vehicle (driver or passenger, `getVehicle() != null`) ⇒ vanilla. In a vehicle the client zooms all the way out and pans the camera ahead (screen corners reach about 71 tiles at 2.5× zoom), and the chunk-map centre moves ahead too (`IsoChunkMap.ProcessChunkPos`), which the server cannot see; AutoDrive's 60–110 m look-ahead also needs parked vehicles.
+5. Otherwise `on` returns false (not sent, or the client is told to remove it) and `observe` returns the vanilla true; both count it.
+
+Both call sites use the same R with no hysteresis: if "send" were narrower than "keep", vehicles left in the ring on the client would miss part updates, and `vehicle.updateFlags` is cleared after every tick, so missed door or window changes would never be resent. When a vehicle comes back inside R the vanilla flow resumes: the server's Passengers `VehicleUpdate` → client `doRequest` → `VehicleFullUpdate`. Both methods run only on the server and the client never recomputes the range, so there is no desync.
+
+**Switches** (restart required):
+- `-Dmdc.vehicleRelevancy`: unset / `2` / `observe` = count only, vanilla behaviour (default; unknown values also mean observe); `1` / `on` / `enforce` = shrink; `0` / `off` = vanilla.
+- `-Dmdc.vehicleRelevancyRadius`: R in tiles, default 64, clamped to 32–160.
+- `-Dmdc.vehicleRelevancyBeatSec`: minimum heartbeat interval in seconds, default 300, clamped to 10–3600 (shorten it for local measurements).
+
+**Log** (one line at the first decision; afterwards the time is checked every 4096 decisions and a line is printed when the interval has passed):
+
+```text
+[MinidoracatJavaPatch][VehicleRelevancy] 首次生效 mode=observe radius=64（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius）
+[MinidoracatJavaPatch][VehicleRelevancy] mode=observe radius=64 sendOutside=<n> keepOutside=<n> passVehicle=<n> passConnectArea=<n> anomalies=<n>
+```
+
+- `sendOutside`: `sendVehicles` decisions that vanilla would send but are outside R (once per connection per vehicle every 100 ms, so it counts decisions, not vehicles). In `on` these updates are not sent.
+- `keepOutside`: Passengers-request decisions that vanilla would keep but are outside R, roughly the number of out-of-R vehicles per connection per second. In `on` each one is a `VehicleRemove`; in observe it estimates how many vehicles would be removed.
+- `passVehicle` / `passConnectArea`: outside R but kept vanilla because of a vehicle occupant or a connect area. `anomalies` should always be 0.
+
+**Expected effect (estimate from the production `vehicles.db` snapshot)**: 107 vehicles at that spot in vanilla; a circle of R=64 leaves 57, R=56 leaves 40, R=48 leaves 28. Weighted by model (KI5 35, KI5 trailer 12, rSemi 25, other 4.5 µs per vehicle) that is about 54% / 38% / 24% of the original cost. The measured 5.4 ms and the 2.3 ms predicted by the per-model table do not agree and the cause is not known yet, so the millisecond figures are estimates.
+
+**Side effects**:
+- Screen: at 1920×1080 the visible area is a diamond in world coordinates whose corners are about 16 tiles × zoom (about 16 tiles by default, about 40 at the farthest 2.5×). On foot R=64 is far off screen; R=48 leaves about 8 tiles of margin at the farthest zoom. A vehicle outside R appears 0.2–1.2 s after its Passengers update and a sprint covers about 6–7 tiles per second, so vehicles appear at about R−9 tiles (estimate).
+- Traffic: a `VehicleFullUpdate` is `vehicle.save()`; in the production snapshot the median is about 10 KB and the largest about 118 KB (a fully loaded cargo trailer). A single approach downloads less than vanilla, but moving back and forth across R causes remove/resend cycles that vanilla does not have. Leaving a vehicle removes the out-of-R vehicles within a second; entering one brings back the ring at once, and parsing may stutter on the client (estimate, needs in-game measurement).
+- Vehicles driven by others: when they enter R the server sends a `VehicleUpdate` and the client asks for the full update, so they appear after about 0.2 s plus RTT. `VehiclePhysics` is still relayed with the vanilla ±88; a client without that vehicle sends a `VehicleRequest(1)` per physics packet, and the server only records the flag and sends once the vehicle enters R, so there is no loop.
+- Trailers: the towing map is broadcast with `sendToAll` and the towing vehicle calls `tryReconnectToTowedVehicle` every frame, so the trailer reattaches when it arrives.
+- Remaining risk: if a vehicle leaves R and comes back before the next one-second poll, part changes in that window are not sent and the client was not told to remove it, so part state can stay stale until that part changes again. Vanilla has no such window because its range is wider than the chunk map.
+- Family mods: MiniMap's vehicle icons default to unlimited distance and shrink to R on foot; AutoDrive and VehicleManager scan from inside a vehicle, at short range or on the server and are not affected.
+
+**Verification**:
+- SmokeCheck (reasons for the patch; red when TIS changes it = reassess): vanilla `sendVehicles` has one `isRelevantTo` taking the vehicle's `getX/getY`, followed by `IFEQ`, and sends `VehicleFullUpdate`; `processServer` has one `isRelevantTo` followed by `IFNE`, then `ALOAD 2` and `VehicleRemove`, with `SIPUSH 16384` in the method; `isRelevantTo` reads `relevantRange` twice and never `chunkGridWidth`. After surgery the method text of both methods (frames included) equals vanilla except `isRelevantTo` → helper, and the class-wide real instruction count is unchanged; `isRelevantTo` is gone from both classes and each redirects only to its own entry point. Helper contract: both entry points share `decide`, which calls vanilla `isRelevantTo` exactly once and checks the connect area, the radius and vehicle occupancy once each.
+- `VehicleRelevancyGateTest` (observe R=64, on R=64, on R=48, on R=5 clamped to 32, off; `-Xverify:all`): the real `UdpConnection.isRelevantTo` is the vanilla control (ring and square corner relevant, 89 tiles not); R−1 and exactly R are always relevant, `Math.nextUp(R)`, R+1 and a diagonal outside the circle but inside the square follow the mode; outside vanilla is never relevant; each entry point has its own counter; vehicle occupants (including a split-screen passenger at index 2) and a connect area keep vanilla; any split-screen player within R makes it relevant; parseMode aliases. It also drives the real patched `VehicleRequestPacket.processServer` from dist with a real wire request and decodes the `VehicleRemovePacket` it writes: no removal inside R, a removal in the ring only in `on`, a removal outside vanilla in all modes, a full request only records the flag, and vanilla when a player is in a vehicle.
+- In-game E2E: not done yet (scheduled by the maintainer).
+
 ---
 
 <a id="3"></a>

@@ -3111,6 +3111,95 @@ public final class SmokeCheck {
                 && classWideCalls(gCoop, Opcodes.INVOKEVIRTUAL, swdCls, "containsCaseinsensitiveUser",
                         "(Ljava/lang/String;)Z") == 1
                 && coopNameWrites == 0);
+
+        // W53：步行時縮小車輛相關範圍（docs/patches.md 2bq）。存在理由（TIS 改即紅＝重估）：sendVehicles 與
+        // VehicleRequestPacket.processServer 各只有一個 isRelevantTo(FF)Z，前者決定送不送、後者判 false 就送
+        // VehicleRemove；範圍是 relevantRange 的正方形（isRelevantTo 讀 relevantRange 兩次）。
+        String vmCls = "zombie/vehicles/VehicleManager";
+        String vrpCls = "zombie/network/packets/vehicle/VehicleRequestPacket";
+        String relGateCls = "zombie/mdc/VehicleRelevancyGate";
+        String w53Udp = "zombie/core/raknet/UdpConnection";
+        String sendVehDesc = "(L" + w53Udp + ";)V";
+        String vrpDesc = "(Lzombie/network/PacketTypes$PacketType;L" + w53Udp + ";)V";
+        String isRelDesc = "(FF)Z";
+        String gateDesc = "(L" + w53Udp + ";FF)Z";
+        String isRelText = "INVOKEVIRTUAL " + w53Udp + ".isRelevantTo " + isRelDesc;
+        MethodNode vSendVeh = methodFromJar(jar, vmCls, "sendVehicles", sendVehDesc);
+        MethodNode vVrp = methodFromJar(jar, vrpCls, "processServer", vrpDesc);
+        MethodInsnNode sendSite = null;
+        MethodInsnNode keepSite = null;
+        for (AbstractInsnNode in : vSendVeh.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.name.equals("isRelevantTo")) {
+                sendSite = mi;
+            }
+        }
+        for (AbstractInsnNode in : vVrp.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.name.equals("isRelevantTo")) {
+                keepSite = mi;
+            }
+        }
+        failed += check("W53 原版：sendVehicles 唯一 isRelevantTo（車 getX／getY 為參數）後接 IFEQ 跳過送出，方法內送 VehicleFullUpdate",
+                countExactCalls(vSendVeh, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, vmCls), Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo",
+                        isRelDesc) == 1
+                && sendSite != null && nextReal(sendSite).getOpcode() == Opcodes.IFEQ
+                && prevReal(sendSite) instanceof MethodInsnNode sendY && sendY.name.equals("getY")
+                && sendY.owner.equals("zombie/vehicles/BaseVehicle")
+                && methodText(vSendVeh).contains("GETSTATIC zombie/network/PacketTypes$PacketType.VehicleFullUpdate"));
+        failed += check("W53 原版：processServer 唯一 isRelevantTo 在 16384 分支，false 才送 VehicleRemove",
+                countExactCalls(vVrp, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, vrpCls), Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo",
+                        isRelDesc) == 1
+                && keepSite != null && nextReal(keepSite).getOpcode() == Opcodes.IFNE
+                && nextReal(nextReal(keepSite)) instanceof VarInsnNode keepLoad && keepLoad.var == 2
+                && nextReal(keepLoad) instanceof FieldInsnNode removeType && removeType.name.equals("VehicleRemove")
+                && methodText(vVrp).contains("SIPUSH 16384"));
+        failed += check("W53 原版：isRelevantTo 的半徑來自 relevantRange（兩軸各讀一次），不讀 chunkGridWidth",
+                countExactFields(methodFromJar(jar, w53Udp, "isRelevantTo", isRelDesc), Opcodes.GETFIELD, w53Udp,
+                        "relevantRange", "B") == 2
+                && countExactFields(methodFromJar(jar, w53Udp, "isRelevantTo", isRelDesc), Opcodes.GETFIELD, w53Udp,
+                        "chunkGridWidth", "I") == 0);
+        MethodNode pSendVeh = method(distJava, vmCls, "sendVehicles", sendVehDesc);
+        MethodNode pVrp = method(distJava, vrpCls, "processServer", vrpDesc);
+        failed += check("W53 手術後：sendVehicles 唯一 isRelevantTo 改道 sendRelevant，其餘指令與 frames 不變；全 class 真指令數不變",
+                methodText(pSendVeh).equals(methodText(vSendVeh).replace(isRelText,
+                        "INVOKESTATIC " + relGateCls + ".sendRelevant " + gateDesc))
+                && countExactCalls(pSendVeh, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 0
+                && realInsnCount(pSendVeh) == realInsnCount(vSendVeh)
+                && classRealInsnCount(classNode(distJava, vmCls)) == classRealInsnCount(classNodeFromJar(jar, vmCls)));
+        failed += check("W53 手術後：processServer 唯一 isRelevantTo 改道 keepRelevant，其餘指令與 frames 不變；全 class 真指令數不變",
+                methodText(pVrp).equals(methodText(vVrp).replace(isRelText,
+                        "INVOKESTATIC " + relGateCls + ".keepRelevant " + gateDesc))
+                && countExactCalls(pVrp, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 0
+                && realInsnCount(pVrp) == realInsnCount(vVrp)
+                && classRealInsnCount(classNode(distJava, vrpCls)) == classRealInsnCount(classNodeFromJar(jar, vrpCls)));
+        failed += check("W53 負對照：兩個 class 的 isRelevantTo 都恰少 1（歸零）、各自只改道到自己的 helper 入口",
+                classWideCalls(classNode(distJava, vmCls), Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 0
+                && classWideCalls(classNode(distJava, vrpCls), Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 0
+                && classWideCalls(classNode(distJava, vmCls), Opcodes.INVOKESTATIC, relGateCls, "sendRelevant", gateDesc) == 1
+                && classWideCalls(classNode(distJava, vmCls), Opcodes.INVOKESTATIC, relGateCls, "keepRelevant", gateDesc) == 0
+                && classWideCalls(classNode(distJava, vrpCls), Opcodes.INVOKESTATIC, relGateCls, "keepRelevant", gateDesc) == 1
+                && classWideCalls(classNode(distJava, vrpCls), Opcodes.INVOKESTATIC, relGateCls, "sendRelevant", gateDesc) == 0);
+        String decideDesc = "(L" + w53Udp + ";FFLjava/util/concurrent/atomic/AtomicLong;)Z";
+        MethodNode gDecide = method(distJava, relGateCls, "decide", decideDesc);
+        MethodNode gInVehicle = method(distJava, relGateCls, "anyPlayerInVehicle", "(L" + w53Udp + ";)Z");
+        failed += check("W53 helper 契約：兩個入口共用同一個 decide；decide 先呼叫原版 isRelevantTo 恰 1 次（只縮不放），"
+                        + "並各查一次 connectArea／半徑／車內",
+                countExactCalls(method(distJava, relGateCls, "sendRelevant", gateDesc), Opcodes.INVOKESTATIC, relGateCls,
+                        "decide", decideDesc) == 1
+                && countExactCalls(method(distJava, relGateCls, "keepRelevant", gateDesc), Opcodes.INVOKESTATIC, relGateCls,
+                        "decide", decideDesc) == 1
+                && classWideCalls(classNode(distJava, relGateCls), Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo",
+                        isRelDesc) == 1
+                && countExactCalls(gDecide, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 1
+                && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "anyConnectArea", "(L" + w53Udp + ";)Z") == 1
+                && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "withinRadius", gateDesc) == 1
+                && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "anyPlayerInVehicle",
+                        "(L" + w53Udp + ";)Z") == 1
+                && countExactCalls(gInVehicle, Opcodes.INVOKEVIRTUAL, w53Udp, "getPlayerAt",
+                        "(I)Lzombie/characters/IsoPlayer;") == 1
+                && countExactCalls(gInVehicle, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "getVehicle",
+                        "()Lzombie/vehicles/BaseVehicle;") == 1);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",
