@@ -3594,6 +3594,51 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - SmokeCheck（兩個變體）：存在理由——原版 `isBoneReparented` 以 `Lambda.predicate`＋`PZArrayUtil.contains` 掃 `reparentedBoneBindings`（TIS 自己加快速路徑時轉紅＝重估撤刀），欄位是 `ArrayList`；`AnimationPlayer` 內唯一的呼叫點在這個方法；手術後除了這一個呼叫之外方法文字與原版相同；`isBoneReparented` 本體未改。LoadCheck：helper 為 public static boolean。
 - `BoneReparentFastPathBehaviorTest`（兩個變體各跑 on、off）：沒有 reparent、有 reparent、池回收後清空三種狀態下每根骨頭 helper 與原版相同；60 幀真動畫（含 reparent 的 player）的 `modelTransforms` SHA-256 摘要 on 與 off 必須相同，由 `build-client.ps1` 比對。裸 JVM 微基準（只報告）：空清單時原版約 90–100 ns／次。
 
+<a id="2bt"></a>
+## 2bt. 補算等畜牧區就緒（W56，server，預設 on）
+
+**問題（2026-10-07 玩家回報）**：牧區有很多槽、槽裡飼料和水都是滿的，玩家離線幾小時回來，牛羊飢渴卻一片黃紅，「好像結算時當成沒吃沒喝」。正式服 10-01（W49 上線）起，畜牧區整區載入時的補算（zone 路徑）明細 15,730 筆中 15,569 筆 `applied=0`，涉及 323 個畜牧區；回報的牧場每一筆都是 0。
+
+**原因（42.21.0 反編譯＋javap）**：
+- 卸載時 `IsoFeedingTrough.removeFromWorld` 把槽移出 `zone.troughs`；槽回到清單只有兩條路：建構子（新蓋的槽）與 `DesignationZoneAnimal.check()`。`check()` 開頭 `isFullyStreamed()` 為假就 return（畜牧區兩個角落格都載入才跑），同時重建地上食物與河邊格；`addToWorld` 不登記。
+- 伺服器以 64×64 cell 為單位載入：`ServerMap.ServerCell.RecalcAll2` 在同一個呼叫裡依 x 遞增對 64 個 chunk 逐一 `doLoadGridsquare`；每個 chunk 先讓物件 `addToWorld`，再經 `AnimalPopulationManager.addChunkToWorld` → `AnimalManagerMain.fromWorker` 立刻呼叫 `updateStatsAway`（chunk 路徑補算）。這時槽還沒登記，補算的 `eatAndDrinkAfterMeta` 找不到槽，整段不吃不喝。
+- 原版之後在 `DesignationZone.update`（每 2.5 秒）偵測到畜牧區整區載入，`doMeta` 先 `check()` 再以 zone 時數補一次——等於重複補算，但第二次吃得到槽。W42（2be）為了擋重複補算取 min(zone 時數, 動物自身離線時數)，chunk 路徑補完後動物時鐘已到現在，第二次就變 0 小時。所以「吃不到槽」是補丁讓它浮現：原版靠重複補算才餵飽。
+- 本機 MP E2E（W56 之前的 dist）：牛群飢渴設 0.5、離開讓 chunk 卸載、撥快 10 小時再回來，槽所在格載入當下 `zone.troughs` 登記 0 個；出貨組態與 `-Dmdc.animalOwnClock=0` 回來後停在 0.56／0.61、槽沒動；`-Dmdc.animalCatchUpCap=0`（原版時數）+1 秒吃到 0.05。
+
+**手術**（共 5 個命中點；新 ClassPatch ×3，`IsoAnimal` 併入既有 ClassPatch）：
+- `IsoWorld.update` 內唯一的 `DesignationZone.update()`（javap offset 52）改道 `AnimalAwayProbe.zoneUpdate`。
+- `AnimalPopulationManager.removeChunkFromWorld` 內唯一的 `IsoAnimal.unloaded()`（offset 133）改道 `AnimalAwayProbe.unloaded`。
+- `IsoFeedingTrough.addToWorld` 兩個 `checkOverlayAfterAnimalEat()`（offset 40 副槽找到的主槽、45 主槽）改道 `AnimalAwayProbe.troughAddedToWorld`。
+- `IsoAnimal.removeFromWorld` 頭部 headCall `AnimalAwayProbe.leavingWorld`。
+
+**行為**（helper 在既有的 `zombie.mdc.AnimalAwayProbe`，延後條目是 `AnimalAwayProbe$Deferred`）：
+1. **延後**：chunk 路徑上有自身時鐘、不是野生、站在畜牧區內的動物，照 W49 算好時數後不當場補算，設 `fromMeta=true` 並排隊。原版 `updateInternal` 開頭 `fromMeta` 為真就整段 return，所以延後期間動物凍結，也不會刷新時鐘。畜牧區外、野生、沒有時鐘紀錄的照舊當場補。
+2. **排空**：`zoneUpdate` 先照原版 `DesignationZone.update()`，再（finally）處理佇列。一筆就緒的條件：動物所在畜牧區與所有相連畜牧區涵蓋的 chunk 都已載入（`getChunkForGridSquare`，伺服器走 `ServerMap`）；或延後超過 `-Dmdc.animalCatchUpDeferMs`（預設 10000）。就緒的那些先對涉及的畜牧區各 `check()` 一次，再依延後順序把時鐘還原成延後當下的值、以記下的時數補算。伺服器每幀先 `ServerMap.preupdate`（cell 載入）再 `IsoWorld.update`，所以整個 cell 內的畜牧區同一幀就補完。
+3. **一致性**：zone 路徑（`doMeta`）略過延後中的動物，避免同一段時間補兩次；直接呼叫（拖車 Lua、管理員指令，`entryHours`）接手時取消延後；延後中被 chunk 卸載時，原版 `unloaded()` 把時鐘寫成現在，helper 再還原成延後當下的值，下次載入從頭補（凍結期間沒有模擬）；延後中要離開世界（抱起、放進拖車、`remove()`）時在 `removeFromWorld` 頭部當場補完（`IsoChunk.removeFromWorld` 先交給 `AnimalPopulationManager` 才逐一 `removeFromWorld`，卸載走不到這裡）；補算對象跟著 `AnimalData.parent`（放下時原版 `copyFrom` 換新物件、共用同一份資料）；延後中死亡的不補。
+4. **存檔**：`MdcAnimalSave.clockToWrite`（W49-A3）原本對世界中的動物寫存檔當下；延後中的動物（`fromMeta` 為真）改寫自身時鐘，存檔後重啟不會丟掉那段離線時間。
+5. **槽登記**：`troughAddedToWorld` 先 `checkZone()`（原版建構子用的同一個登記）再呼叫原方法；畜牧區只載入一部分（例如跨 server cell、另一側沒載入）時，已載入的槽也看得到，活動物的 AI 同樣受惠。登記失敗只計數，不影響載入。
+6. **例外**：排空時 `check()` 或補算丟 RuntimeException 只計數、不外拋（不讓 `IsoWorld.update` 中斷），動物一律解凍；補算中途失敗時記一行（補到哪個時鐘、還差幾小時），剩下的時數與原版在 `fromWorker` 拋出時一樣不補。
+
+**開關**（需重啟）：`-Dmdc.animalCatchUpDefer=0` 停用延後（依賴 W49，`-Dmdc.animalOwnClock=0`／`-Dmdc.animalCatchUpCap=0` 時一併停用）；`-Dmdc.troughZoneRegister=0` 停用槽登記；`-Dmdc.animalCatchUpDeferMs` 等待上限（毫秒）。
+
+**log**：`[AnimalAwayProbe]` 心跳追加 `deferred`（排隊）、`deferDrained`（補完）、`deferTimeouts`（逾時才補）、`deferUnloaded`、`deferDead`、`deferZoneSkips`、`deferDirect`、`deferLeaving`、`deferTransferred`、`deferFailures`、`deferPending`、`maxDeferMs`、`zoneRefreshes`、`defer`、`troughRegister`；逾時才補的那筆另記 `source=chunk-timeout` 明細。`maxDeferMs` 通常是幾十毫秒；`deferTimeouts` 持續增加代表有畜牧區長期只載入一部分。
+
+**限制**：畜牧區一直只載入一部分時，逾時後只用已載入的槽補算；沒載入那一側的槽、河與地上食物用不到（活動物同樣走不到）。部分載入時河邊格與地上食物不重建，屬原版 `isFullyStreamed` 閘（待裁定，見 open-issues）。
+
+**驗證**：
+- SmokeCheck（存在理由，TIS 修好即紅＝重估）：槽 `removeFromWorld` 移出 `zone.troughs`、`addToWorld` 不登記、`checkZone` 全 jar 恰 2 處且都在建構子；`check()` 開頭 `isFullyStreamed()` 為假即 return、之後才碰三個清單；`updateInternal` 開頭 `fromMeta`→return，`IsoAnimal.update` 在其外不碰時鐘、`AnimalData.update` 全 jar 恰 1 處；`fromWorker` 先設 `fromMeta` 再補算；`unloaded()` 一開始把時鐘寫成現在、全 jar 恰 2 處；`IsoChunk.removeFromWorld` 先交給 `AnimalPopulationManager` 才逐一 `removeFromWorld`；`DesignationZone.update()` 全 jar 恰 1 處。手術後各方法除了改道／頭部兩條指令外文字（含 frames）與原版相同，三個新 class 其餘方法逐字不變。
+- `AnimalCatchUpDeferTest`（on、nodefer、noown、notrough、deferms0）：真 `DesignationZoneAnimal`（`getZoneF`／`getAllDZones` 走原版）配替身動物。on：排隊並凍結、重複 chunk 路徑不重排、zone 路徑略過、相連區未全部載入就等、就緒後先重建再補（補算當下看得到槽、從延後當下的時鐘起算）、同批共用畜牧區只重建一次並依順序補、逾時照補、延後中卸載還原時鐘、死亡不補、直接呼叫接手、畜牧區外／野生／無時鐘當場補、重建與補算例外不外拋且解凍、離開世界當場補、換成新物件時補在新物件。nodefer／noown 是原版負對照：chunk 路徑補算時看不到槽，之後 zone 路徑被截成 0 小時。deferms0 走正式入口 `zoneUpdate`。槽登記用真 `checkZone`。`MdcAnimalSaveTest` 四組態：延後中的動物在 objectList 也寫自身時鐘（noown 寫存檔當下）。
+- 本機實機 MP E2E（42.21.0 dedicated server，dist 放 classpath 最前；三頭牛、飼料槽＋水槽、飢渴設 0.5、離開卸載後撥快 10 小時再回來；每種組態各跑兩輪）：
+
+| 組態 | 牧場 | 回來第一筆 飢餓／口渴（兩輪） | 結果 |
+|---|---|---|---|
+| 出貨 | 8×8 一個 chunk | 0.044–0.056／0.088–0.097 | 第一筆就吃到；`maxDeferMs` 15、24 |
+| 出貨 | 16×8 跨兩個 chunk，牛在 x 較小、槽在 x 較大的 chunk | 0.046–0.054／0.000–0.097 | 第一筆就吃到；`maxDeferMs` 22、21 |
+| `animalCatchUpDefer=0` | 同上跨 chunk | 0.538–0.562／0.600–0.614 | 挨餓（槽在牛補算之後才進世界） |
+| `animalCatchUpDefer=0` | 8×8 一個 chunk | 0.046–0.055／0.000–0.094 | 吃到（同 chunk 只靠槽登記就夠） |
+
+  槽所在格載入當下 `zone.troughs` 登記數從 0 變成 1、2（槽登記生效）；八輪 `anomalies=0`、`deferTimeouts=0`。
+
 ---
 
 <a id="3"></a>

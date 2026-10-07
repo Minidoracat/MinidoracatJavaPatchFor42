@@ -3105,6 +3105,101 @@ zombies, animals, vehicles, the mechanics 3D view). If the field cannot be found
   vanilla for every bone; the SHA-256 digest of `modelTransforms` over 60 frames of real animation (including a re-parented player) must be the same in the on
   and off runs, compared by `build-client.ps1`. Bare-JVM micro-benchmark (report only): with an empty list vanilla takes about 90–100 ns per call.
 
+<a id="2bt"></a>
+## 2bt. Catch-up waits for the animal zone (W56, server, default on)
+
+**Problem (player report, 2026-10-07)**: a pen with many troughs full of feed and water, yet after a few hours offline the cows and sheep come back
+yellow and red on hunger and thirst, "as if the catch-up assumed they ate and drank nothing". Since W49 went live on 10-01, 15,569 of the 15,730
+zone-path catch-up detail lines on the production server show `applied=0`, across 323 animal zones; every line for the reported pen is 0.
+
+**Cause (42.21.0 decompile + javap)**:
+- On unload, `IsoFeedingTrough.removeFromWorld` removes the trough from `zone.troughs`. A trough comes back only through its constructor (newly built)
+  or `DesignationZoneAnimal.check()`, which returns at once unless `isFullyStreamed()` (both corner squares of the zone loaded) and also rebuilds ground
+  food and the near-water squares. `addToWorld` does not register.
+- The server loads 64×64 cells: `ServerMap.ServerCell.RecalcAll2` runs `doLoadGridsquare` on all 64 chunks in one call, in increasing x. Each chunk adds
+  its objects to the world and then goes through `AnimalPopulationManager.addChunkToWorld` → `AnimalManagerMain.fromWorker`, which calls
+  `updateStatsAway` right away (chunk-path catch-up). The troughs are not registered yet, so `eatAndDrinkAfterMeta` finds none and the animal neither
+  eats nor drinks during the whole catch-up.
+- Vanilla then sees the zone fully streamed in `DesignationZone.update` (every 2.5 s), and `doMeta` calls `check()` and catches up again with the zone
+  hours. That is a double catch-up, but the second one reaches the troughs. W42 (2be) takes min(zone hours, the animal's own offline hours) to stop
+  double catch-ups; after the chunk path the animal's clock is already at now, so the second catch-up is 0 hours. The patch exposed the problem:
+  vanilla only fed the animals through the double catch-up.
+- Local MP E2E (dist before W56): three cows primed to 0.5 hunger and thirst, chunk unloaded, 10 hours skipped, player back. `zone.troughs` had 0
+  troughs when the trough squares loaded; the shipped config and `-Dmdc.animalOwnClock=0` stayed at 0.56/0.61 with untouched troughs;
+  `-Dmdc.animalCatchUpCap=0` (vanilla hours) fed them to 0.05 within one second.
+
+**Surgery** (5 sites; 3 new ClassPatches, `IsoAnimal` joins its existing ClassPatch):
+- The only `DesignationZone.update()` in `IsoWorld.update` (javap offset 52) → `AnimalAwayProbe.zoneUpdate`.
+- The only `IsoAnimal.unloaded()` in `AnimalPopulationManager.removeChunkFromWorld` (offset 133) → `AnimalAwayProbe.unloaded`.
+- The two `checkOverlayAfterAnimalEat()` calls in `IsoFeedingTrough.addToWorld` (offset 40, the master found by a slave; offset 45, the master
+  itself) → `AnimalAwayProbe.troughAddedToWorld`.
+- Head call `AnimalAwayProbe.leavingWorld` in `IsoAnimal.removeFromWorld`.
+
+**Behavior** (in the existing helper `zombie.mdc.AnimalAwayProbe`; a deferred entry is `AnimalAwayProbe$Deferred`):
+1. **Defer**: on the chunk path, an animal that has its own clock, is not wild and stands in an animal zone gets its hours computed as in W49 but is not
+   caught up yet. It gets `fromMeta=true` and joins a queue. Vanilla `updateInternal` returns at once while `fromMeta` is true, so the animal is frozen
+   and its clock is not refreshed. Animals outside zones, wild animals and animals without a clock record are caught up immediately as before.
+2. **Drain**: `zoneUpdate` runs vanilla `DesignationZone.update()` and then, in a finally block, the queue. An entry is ready when every chunk covered by
+   its zone and all connected zones is loaded (`getChunkForGridSquare`, which goes to `ServerMap` on the server), or after
+   `-Dmdc.animalCatchUpDeferMs` (default 10000). Ready entries first get one `check()` per zone involved, then, in queue order, the clock is restored
+   to its value at deferral and the recorded hours are caught up. Each server frame runs `ServerMap.preupdate` (cell loads) before `IsoWorld.update`,
+   so zones inside one cell are drained in the same frame.
+3. **Consistency**: the zone path (`doMeta`) skips deferred animals so the same hours are not caught up twice. A direct call (trailer Lua, admin command,
+   `entryHours`) takes over and cancels the deferral. If a deferred animal's chunk unloads, vanilla `unloaded()` sets the clock to now and the helper
+   restores the value at deferral, so the next load catches up from there (the frozen period was never simulated). A deferred animal that leaves the
+   world (picked up, put in a trailer, `remove()`) is caught up at once at the head of `removeFromWorld`; `IsoChunk.removeFromWorld` hands animals to
+   `AnimalPopulationManager` before it calls `removeFromWorld` on each object, so unloads never get there. The catch-up follows `AnimalData.parent`
+   (vanilla `copyFrom` creates a new object that shares the same data when an animal is put down). Animals that died while deferred are not caught up.
+4. **Saves**: `MdcAnimalSave.clockToWrite` (W49-A3) writes the save time for animals in the world; a deferred animal (`fromMeta` true) now writes its own
+   clock, so a save and restart during the deferral does not lose the offline time.
+5. **Trough registration**: `troughAddedToWorld` calls `checkZone()` (the same registration the constructor uses) and then the original method. When a
+   zone is only partly loaded (for example across a server cell boundary), the loaded troughs are still visible, for the catch-up and for live animal AI.
+   A failed registration is only counted and does not affect loading.
+6. **Exceptions**: a RuntimeException from `check()` or the catch-up while draining is counted, not rethrown (so `IsoWorld.update` is not interrupted),
+   and the animal is always unfrozen. A catch-up that fails part way logs one line (the clock it reached and the hours left); the remaining hours are not
+   caught up, as in vanilla when `fromWorker` throws.
+
+**Switches** (restart required): `-Dmdc.animalCatchUpDefer=0` disables the deferral (it depends on W49 and is also off with `-Dmdc.animalOwnClock=0` or
+`-Dmdc.animalCatchUpCap=0`); `-Dmdc.troughZoneRegister=0` disables trough registration; `-Dmdc.animalCatchUpDeferMs` sets the wait limit (ms).
+
+**Log**: the `[AnimalAwayProbe]` heartbeat adds `deferred` (queued), `deferDrained` (caught up), `deferTimeouts` (caught up only after the wait limit),
+`deferUnloaded`, `deferDead`, `deferZoneSkips`, `deferDirect`, `deferLeaving`, `deferTransferred`, `deferFailures`, `deferPending`, `maxDeferMs`,
+`zoneRefreshes`, `defer` and `troughRegister`; an entry caught up after the wait limit also logs a `source=chunk-timeout` detail line. `maxDeferMs` is
+normally tens of milliseconds; a growing `deferTimeouts` means some zone stays only partly loaded.
+
+**Limits**: if a zone stays partly loaded, the catch-up after the wait limit uses only the loaded troughs; troughs, river and ground food on the unloaded
+side are out of reach (live animals cannot reach them either). Near-water squares and ground food are not rebuilt for a partly loaded zone; that is the
+vanilla `isFullyStreamed` gate (pending decision, see open-issues).
+
+**Verification**:
+- SmokeCheck (reasons for the patch; red if TIS fixes it = reconsider): trough `removeFromWorld` removes it from `zone.troughs`, `addToWorld` does not
+  register, `checkZone` has exactly 2 call sites in the jar, both in the constructor; `check()` returns at its head when `isFullyStreamed()` is false and
+  touches the three lists only after that; `updateInternal` starts with `fromMeta` → return, `IsoAnimal.update` does not touch the clock outside it and
+  `AnimalData.update` has exactly 1 call site in the jar; `fromWorker` sets `fromMeta` before the catch-up; `unloaded()` first sets the clock to now and
+  has exactly 2 call sites; `IsoChunk.removeFromWorld` hands animals to `AnimalPopulationManager` before calling `removeFromWorld` on each object;
+  `DesignationZone.update()` has exactly 1 call site. After the patch each method's text (frames included) equals vanilla except for the redirect or the
+  two head instructions, and all other methods of the three new classes are unchanged.
+- `AnimalCatchUpDeferTest` (on, nodefer, noown, notrough, deferms0) uses real `DesignationZoneAnimal` objects (vanilla `getZoneF`/`getAllDZones`) with
+  stand-in animals. on: queues and freezes, does not queue twice on a repeated chunk path, skips the zone path, waits while a connected zone is not fully
+  loaded, rebuilds before the catch-up (the catch-up sees the troughs and starts from the clock at deferral), rebuilds a shared zone once per batch and
+  keeps queue order, catches up after the wait limit, restores the clock on unload, skips dead animals, yields to direct calls, catches up animals outside
+  zones, wild or without a clock immediately, does not rethrow rebuild or catch-up exceptions and always unfreezes, catches up an animal that leaves the
+  world, and puts the catch-up on the new object after a replacement. nodefer and noown are the vanilla negative controls: the chunk-path catch-up sees no
+  troughs and the later zone path is cut to 0 hours. deferms0 goes through the real entry `zoneUpdate`. Trough registration uses the real `checkZone`.
+  `MdcAnimalSaveTest` (four configs): a deferred animal in the objectList writes its own clock (noown writes the save time).
+- Local MP E2E (42.21.0 dedicated server, dist first on the classpath; three cows, a feed trough and a water trough, hunger and thirst primed to 0.5,
+  chunk unloaded, 10 hours skipped, player back; two runs per config):
+
+| Config | Pen | First sample after return, hunger / thirst (two runs) | Result |
+|---|---|---|---|
+| shipped | 8×8, one chunk | 0.044–0.056 / 0.088–0.097 | fed at the first sample; `maxDeferMs` 15, 24 |
+| shipped | 16×8 over two chunks, cows in the lower-x chunk, troughs in the higher-x chunk | 0.046–0.054 / 0.000–0.097 | fed at the first sample; `maxDeferMs` 22, 21 |
+| `animalCatchUpDefer=0` | same two-chunk pen | 0.538–0.562 / 0.600–0.614 | starved (the troughs entered the world after the cows' catch-up) |
+| `animalCatchUpDefer=0` | 8×8, one chunk | 0.046–0.055 / 0.000–0.094 | fed (within one chunk trough registration alone is enough) |
+
+  When the trough squares loaded, `zone.troughs` held 1 and then 2 troughs instead of 0 (registration works); `anomalies=0` and `deferTimeouts=0` in
+  all eight runs.
+
 ---
 
 <a id="3"></a>

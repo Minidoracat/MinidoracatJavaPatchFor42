@@ -1105,6 +1105,35 @@ public final class PatchConfig {
                 "(Lzombie/characters/animals/AnimalManagerWorker;)V");
         realSnapshots.expectedHits = 1;
 
+        // W56：補算等畜牧區就緒（docs/patches.md 2bt）。chunk 載入時槽還沒登記回畜牧區（只有 check() 會重建），
+        // chunk 路徑補算因而吃不到槽；W42 又把會先 check() 的 zone 路徑補算截成 0。延後與排空都在 AnimalAwayProbe：
+        // (1) IsoWorld.update 唯一的 DesignationZone.update() 改道 zoneUpdate：照原版更新後補完已就緒的延後補算。
+        // (2) AnimalPopulationManager.removeChunkFromWorld 唯一的 unloaded() 改道：延後中被卸載時還原時鐘。
+        // (3) IsoFeedingTrough.addToWorld 兩個 checkOverlayAfterAnimalEat()（主槽、副槽找到的主槽）改道：
+        //     槽進世界就登記回所在畜牧區。
+        // (4) IsoAnimal.removeFromWorld 頭部 leavingWorld：延後中要離開世界（抱起、放進拖車、被移除）時當場補完。
+        Patcher.ClassPatch isoWorld = new Patcher.ClassPatch("zombie/iso/IsoWorld");
+        Patcher.MethodOps worldUpdate = isoWorld.method("update", "()V");
+        worldUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/iso/areas/DesignationZone", "update", "()V", awayProbe, "zoneUpdate"));
+        worldUpdate.expectedHits = 1;
+        patches.add(isoWorld);
+        Patcher.ClassPatch animalPop = new Patcher.ClassPatch("zombie/characters/animals/AnimalPopulationManager");
+        Patcher.MethodOps chunkRemoved = animalPop.method("removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V");
+        chunkRemoved.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "unloaded", "()V", awayProbe, "unloaded"));
+        chunkRemoved.expectedHits = 1;
+        patches.add(animalPop);
+        Patcher.ClassPatch trough = new Patcher.ClassPatch("zombie/iso/objects/IsoFeedingTrough");
+        Patcher.MethodOps troughAdded = trough.method("addToWorld", "()V");
+        troughAdded.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/objects/IsoFeedingTrough", "checkOverlayAfterAnimalEat", "()V", awayProbe, "troughAddedToWorld"));
+        troughAdded.expectedHits = 2;
+        patches.add(trough);
+        Patcher.MethodOps leaving = animal.method("removeFromWorld", "()V");
+        leaving.headCall = new Patcher.HeadCall(awayProbe, "leavingWorld", "(Lzombie/characters/animals/IsoAnimal;)V");
+        leaving.expectedHits = 1;
+
         // W40／W41：IsoCell.ProcessItems null 容錯＋跨執行緒寫入觀測與補登記（docs/patches.md 2bc／2bd）。
         // processItems 混進 null 時原版每次 ProcessItems 都 NPE、清單不再縮減，chunk 載入的線性 contains
         // 凍結 5–16 秒。ProcessItems 頭部 beginPass（補登記 W41 佇列、開始計時）、唯一 RETURN 前 endPass。

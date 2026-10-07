@@ -2913,6 +2913,7 @@ public final class SmokeCheck {
                         "(Lzombie/characters/animals/IsoAnimal;)V", 0)
                 && realInsnCount(pOnDeath) == realInsnCount(vOnDeath) + 2);
         failed += checkAnimalCatchUpAndHookSave(jar, distJava);
+        failed += checkCatchUpDefer(jar, distJava);
         // W40：存在理由＝原版 ProcessItems 對 processItems.get(n) 不做 null 檢查（TIS 補檢查時會紅＝撤刀）。
         String isoCellCls = "zombie/iso/IsoCell";
         String piGuard = "zombie/mdc/ProcessItemsGuard";
@@ -4224,6 +4225,127 @@ public final class SmokeCheck {
         failed += check("W50 saveRealAnimals 頭部 aload_0→clearStaleRealSnapshots、真指令恰 +2",
                 headCallSlotsOk(pReal, cellHelper, "clearStaleRealSnapshots", "(L" + worker + ";)V", 0)
                 && realInsnCount(pReal) == realInsnCount(vReal) + 2);
+        return failed;
+    }
+
+    /**
+     * W56 補算等畜牧區就緒（docs/patches.md 2bt）。存在理由釘在原版 jar 上（TIS 修好時紅＝重估）：槽卸載時移出畜牧區、
+     * 進世界時不登記，只有 check()（兩角都載入才跑）重建；從離線載入的動物在 fromMeta 期間整段不更新（延後時凍結的依據）；
+     * unloaded() 先把時鐘寫成現在（延後中卸載要還原的原因）。手術以「原版文字置換後與 dist 逐字相同」鎖同形改道，
+     * 三個 class 其餘方法不變。
+     */
+    static int checkCatchUpDefer(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String animal = "zombie/characters/animals/IsoAnimal";
+        String probe = "zombie/mdc/AnimalAwayProbe";
+        String dza = "zombie/iso/areas/DesignationZoneAnimal";
+        String troughCls = "zombie/iso/objects/IsoFeedingTrough";
+        String worldCls = "zombie/iso/IsoWorld";
+        String popCls = "zombie/characters/animals/AnimalPopulationManager";
+        String chunkArg = "(Lzombie/iso/IsoChunk;)V";
+
+        MethodNode vTroughRemove = methodFromJar(jar, troughCls, "removeFromWorld", "()V");
+        MethodNode vTroughAdd = methodFromJar(jar, troughCls, "addToWorld", "()V");
+        MethodNode vTroughCtor = methodFromJar(jar, troughCls, "<init>",
+                "(Lzombie/iso/IsoGridSquare;Ljava/lang/String;Lzombie/iso/IsoGridSquare;)V");
+        failed += check("W56 vanilla 槽 removeFromWorld 移出 zone.troughs；addToWorld 不登記（checkZone 全 jar 恰 2、都在建構子）",
+                countExactFields(vTroughRemove, Opcodes.GETFIELD, dza, "troughs", "Ljava/util/ArrayList;") == 1
+                && countExactCalls(vTroughRemove, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "remove",
+                        "(Ljava/lang/Object;)Z") == 1
+                && countExactCalls(vTroughAdd, Opcodes.INVOKEVIRTUAL, troughCls, "checkZone", "()V") == 0
+                && countExactCalls(vTroughCtor, Opcodes.INVOKEVIRTUAL, troughCls, "checkZone", "()V") == 2
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, troughCls, "checkZone", "()V") == 2);
+        MethodNode vCheckNode = methodFromJar(jar, dza, "check", "()V");
+        AbstractInsnNode[] checkHead = firstReal(vCheckNode, 4);
+        failed += check("W56 vanilla check()：開頭 isFullyStreamed() 為假就 return，之後才重建 troughs／foodOnGround／nearWaterSquares",
+                checkHead[0] != null && checkHead[0].getOpcode() == Opcodes.ALOAD
+                && checkHead[1] instanceof MethodInsnNode fs && fs.name.equals("isFullyStreamed") && fs.desc.equals("()Z")
+                && checkHead[2] != null && checkHead[2].getOpcode() == Opcodes.IFNE
+                && checkHead[3] != null && checkHead[3].getOpcode() == Opcodes.RETURN
+                && countFieldTouches(vCheckNode, dza, "troughs") > 0
+                && countFieldTouches(vCheckNode, dza, "foodOnGround") > 0
+                && countFieldTouches(vCheckNode, dza, "nearWaterSquares") > 0);
+
+        List<AbstractInsnNode> head = new ArrayList<>();
+        for (AbstractInsnNode in : methodFromJar(jar, animal, "updateInternal", "()V").instructions) {
+            if (in.getOpcode() >= 0 && head.size() < 4) {
+                head.add(in);
+            }
+        }
+        failed += check("W56 vanilla updateInternal 開頭 fromMeta 為真就整段 return（延後期間凍結、也不刷新時鐘）",
+                head.size() == 4 && head.get(0).getOpcode() == Opcodes.ALOAD
+                && head.get(1) instanceof FieldInsnNode fm && fm.getOpcode() == Opcodes.GETFIELD
+                && fm.owner.equals(animal) && fm.name.equals("fromMeta")
+                && head.get(2).getOpcode() == Opcodes.IFEQ && head.get(3).getOpcode() == Opcodes.RETURN);
+        MethodNode vAnimalUpdate = methodFromJar(jar, animal, "update", "()V");
+        failed += check("W56 vanilla IsoAnimal.update 在 updateInternal 外不碰時鐘、不跑 AnimalData.update；AnimalData.update 全 jar 恰 1（updateInternal）",
+                countFieldTouches(vAnimalUpdate, animal, "timeSinceLastUpdate") == 0
+                && countExactCalls(vAnimalUpdate, Opcodes.INVOKEVIRTUAL, animal, "updateLastTimeSinceUpdate", "()V") == 0
+                && countExactCalls(vAnimalUpdate, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/datas/AnimalData",
+                        "update", "()V") == 0
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/characters/animals/datas/AnimalData",
+                        "update", "()V") == 1);
+        String vChunkRemove = methodText(methodFromJar(jar, "zombie/iso/IsoChunk", "removeFromWorld", "()V"));
+        int handoffAt = vChunkRemove.indexOf("INVOKEVIRTUAL " + popCls + ".removeChunkFromWorld");
+        int objRemoveAt = vChunkRemove.indexOf("INVOKEVIRTUAL zombie/iso/IsoMovingObject.removeFromWorld ()V");
+        failed += check("W56 vanilla IsoChunk.removeFromWorld 先交給 AnimalPopulationManager（unloaded）再逐一 removeFromWorld",
+                handoffAt >= 0 && objRemoveAt > handoffAt);
+        String leaveHead = "    ALOAD 0\n    INVOKESTATIC " + probe + ".leavingWorld (L" + animal + ";)V\n";
+        String pRemoveText = methodText(method(distJava, animal, "removeFromWorld", "()V"));
+        failed += check("W56 IsoAnimal.removeFromWorld 頭部 aload_0→leavingWorld，其餘指令與 frames 保留",
+                pRemoveText.startsWith(leaveHead) && methodText(methodFromJar(jar, animal, "removeFromWorld", "()V"))
+                        .equals(pRemoveText.substring(leaveHead.length())));
+        String vFromWorker = methodText(methodFromJar(jar, "zombie/characters/animals/AnimalManagerMain", "fromWorker",
+                "(Ljava/util/ArrayList;)V"));
+        int fromMetaAt = vFromWorker.indexOf("PUTFIELD " + animal + ".fromMeta : Z");
+        failed += check("W56 vanilla fromWorker 先設 fromMeta 再呼叫 updateStatsAway",
+                fromMetaAt >= 0 && vFromWorker.indexOf("INVOKEVIRTUAL " + animal + ".updateStatsAway (I)V") > fromMetaAt);
+        MethodNode vUnloaded = methodFromJar(jar, animal, "unloaded", "()V");
+        List<String> unloadedCalls = callNames(vUnloaded);
+        failed += check("W56 vanilla unloaded() 一開始就把時鐘寫成現在；全 jar 恰兩處呼叫（removeChunkFromWorld、virtualizeAnimal）",
+                unloadedCalls.size() >= 3 && unloadedCalls.subList(0, 3).equals(List.of("zombie/GameTime.getInstance",
+                        "zombie/GameTime.getCalender", "zombie/util/PZCalendar.getTimeInMillis"))
+                && countExactFields(vUnloaded, Opcodes.PUTFIELD, animal, "timeSinceLastUpdate", "J") == 1
+                && jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, animal, "unloaded", "()V") == 2);
+
+        failed += check("W56 DesignationZone.update() 全 jar 恰一處呼叫（IsoWorld.update）",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKESTATIC, "zombie/iso/areas/DesignationZone", "update", "()V") == 1);
+        failed += check("W56 IsoWorld.update 唯一 DesignationZone.update 同形改道 zoneUpdate，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, worldCls, "update", "()V"))
+                        .replace("INVOKESTATIC zombie/iso/areas/DesignationZone.update ()V",
+                                "INVOKESTATIC " + probe + ".zoneUpdate ()V")
+                        .equals(methodText(method(distJava, worldCls, "update", "()V"))));
+        failed += check("W56 removeChunkFromWorld 唯一 unloaded() 同形改道 unloaded，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, popCls, "removeChunkFromWorld", chunkArg))
+                        .replace("INVOKEVIRTUAL " + animal + ".unloaded ()V",
+                                "INVOKESTATIC " + probe + ".unloaded (L" + animal + ";)V")
+                        .equals(methodText(method(distJava, popCls, "removeChunkFromWorld", chunkArg))));
+        failed += check("W56 槽 addToWorld 兩個 checkOverlayAfterAnimalEat 同形改道 troughAddedToWorld，其餘指令與 frames 保留",
+                countExactCalls(vTroughAdd, Opcodes.INVOKEVIRTUAL, troughCls, "checkOverlayAfterAnimalEat", "()V") == 2
+                && methodText(vTroughAdd)
+                        .replace("INVOKEVIRTUAL " + troughCls + ".checkOverlayAfterAnimalEat ()V",
+                                "INVOKESTATIC " + probe + ".troughAddedToWorld (L" + troughCls + ";)V")
+                        .equals(methodText(method(distJava, troughCls, "addToWorld", "()V"))));
+        String[][] targets = {{worldCls, "update", "()V"}, {popCls, "removeChunkFromWorld", chunkArg},
+                {troughCls, "addToWorld", "()V"}};
+        for (String[] t : targets) {
+            ClassNode patched = classNode(distJava, t[0]);
+            int changed = 0;
+            int seen = 0;
+            for (MethodNode original : classNodeFromJar(jar, t[0]).methods) {
+                if (original.name.equals(t[1]) && original.desc.equals(t[2])) {
+                    continue;
+                }
+                seen++;
+                String want = methodText(original);
+                boolean same = patched.methods.stream().anyMatch(m -> m.name.equals(original.name)
+                        && m.desc.equals(original.desc) && methodText(m).equals(want));
+                if (!same) {
+                    changed++;
+                }
+            }
+            failed += check("W56 " + t[0] + " 非目標方法逐字不變（" + seen + " 個）", seen > 0 && changed == 0);
+        }
         return failed;
     }
 

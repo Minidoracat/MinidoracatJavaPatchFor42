@@ -28,7 +28,8 @@ import zombie.util.PZCalendar;
  * 只在這個上下文中、且動物不在 {@code currentCell.getObjectList()}（{@code saveRealAnimals} 收集世界中動物的
  * 條件正是這個集合，兩者在 {@code AnimalPopulationManager.save()} 同一執行緒依序執行）時寫動物自身時鐘；
  * 時鐘無紀錄、在未來、取不到 cell 或例外，一律照原版寫存檔當下。上下文在第一次時鐘寫入時消耗，只屬於該筆紀錄。
- * 跟隨 {@code -Dmdc.animalOwnClock}（依賴 W42）。
+ * W56 延後補算中的動物雖在 objectList，但凍結、尚未補算（{@link AnimalAwayProbe#awaitingCatchUp}），同樣寫自身時鐘，
+ * 這時存檔再重啟不會丟掉那段離線時間。跟隨 {@code -Dmdc.animalOwnClock}（依賴 W42）。
  *
  * <p><b>W50</b>：原版只在 {@code isOnHook() && hook != null && hook.getSquare() != null} 時寫 onHook=1＋鉤子座標；
  * {@code hook} 不存檔，從磁碟載入的屠體要等進世界後第一次 {@code update()} 的 {@code reattachBackToHook()}
@@ -94,7 +95,8 @@ public final class MdcAnimalSave {
         try {
             long clock = animal.timeSinceLastUpdate;
             IsoCell cell = IsoWorld.instance == null ? null : IsoWorld.instance.getCell();
-            if (clock <= 0L || clock > now || cell == null || cell.getObjectList().contains(animal)) {
+            if (clock <= 0L || clock > now || cell == null
+                    || cell.getObjectList().contains(animal) && !AnimalAwayProbe.awaitingCatchUp(animal)) {
                 saveNow++;
                 return now;
             }

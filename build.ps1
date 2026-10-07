@@ -96,6 +96,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalUpdateGuard.class',
     'zombie/mdc/FishingDataBroadcast.class',
     'zombie/mdc/AnimalAwayProbe.class',
+    'zombie/mdc/AnimalAwayProbe$Deferred.class',
     'zombie/mdc/BabyBreedGuard.class',
     'zombie/mdc/AnimalSpawnGuard.class',
     'zombie/characters/animals/MdcAnimalCellSave.class',
@@ -372,7 +373,7 @@ Assert-Ok "MdcUsingPlayerIndexTest（enforce）"
 java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest off
 Assert-Ok "MdcUsingPlayerIndexTest（off kill switch）"
 
-Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）＋離線補算根治（W49）行為驗證＋kill switch（獨立 JVM）..."
+Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）＋離線補算根治（W49）＋補算等畜牧區就緒（W56）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
 Assert-Ok "AnimalAwayProbeTest（出貨組態：觀測＋W42 上限＋W49 自身時鐘與屠體守衛）"
 java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest off
@@ -388,6 +389,17 @@ java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.Animal
 Assert-Ok "AnimalCatchUpAccrualTest（on，出貨組態）"
 java "-Dmdc.animalCatchUpAccrual=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpAccrualTest off
 Assert-Ok "AnimalCatchUpAccrualTest（animalCatchUpAccrual=0，原版一次性 age＋午夜 growUp）"
+# W56 補算等畜牧區就緒：nodefer／noown 是原版負對照（chunk 路徑當場補算時看不到槽，zone 路徑被 W42 截成 0h）。
+java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest on
+Assert-Ok "AnimalCatchUpDeferTest（on，出貨組態）"
+java "-Dmdc.animalCatchUpDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest nodefer
+Assert-Ok "AnimalCatchUpDeferTest（animalCatchUpDefer=0，原版負對照）"
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest noown
+Assert-Ok "AnimalCatchUpDeferTest（animalOwnClock=0，延後隨 W49 停用）"
+java "-Dmdc.troughZoneRegister=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest notrough
+Assert-Ok "AnimalCatchUpDeferTest（troughZoneRegister=0，槽進世界照原版不登記）"
+java "-Dmdc.animalCatchUpDeferMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest deferms0
+Assert-Ok "AnimalCatchUpDeferTest（animalCatchUpDeferMs=0，正式入口 zoneUpdate 排空）"
 
 Write-Host "[9r3/10] 分娩品種守衛（W33）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest

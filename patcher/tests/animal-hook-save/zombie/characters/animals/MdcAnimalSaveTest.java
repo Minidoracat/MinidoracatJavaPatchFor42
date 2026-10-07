@@ -91,6 +91,11 @@ public final class MdcAnimalSaveTest {
         Carcass inWorld = clock(now - 5 * HOUR, now);
         objects.add(inWorld);
         expect("在 objectList（世界中）：寫存檔當下", clockWritten(inWorld) == now);
+        Carcass awaiting = clock(now - 5 * HOUR, now);
+        objects.add(awaiting);
+        awaiting.fromMeta = true;   // W56 延後補算中：凍結、尚未補算
+        expect("在 objectList 但延後補算中：寫自身時鐘（noown 寫存檔當下）",
+                clockWritten(awaiting) == (own ? now - 5 * HOUR : now));
         expect("時鐘在未來：寫存檔當下", clockWritten(clock(now + HOUR, now)) == now);
         expect("無時鐘紀錄：寫存檔當下", clockWritten(clock(-1L, now)) == now);
         Carcass nested = clock(now - 5 * HOUR, now);
