@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 65 patched classes, 172 patch sites and 62 helper classes on 42.21.0.
+  actions and log noise. 65 patched classes, 172 patch sites and 63 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles, the 42.21.0
   "player-built room" rendering bug, mod vehicles re-animated every frame while parked). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -114,7 +114,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W35 Using-player index ([2ax](docs/patches.en.md#2ax)) | `UsingPlayerUpdateSystem` scans every IsoObject entity each frame (5.9% in JFR) only to clear `usingPlayer` when a player walks away. | Tracks the objects that have a `usingPlayer`, with periodic audits. | not reported |
 | W34 Emitter parameters ([2aw](docs/patches.en.md#2aw)) | The server computes FMOD footstep parameters for a dummy emitter that nothing reads (1.6%). | Skips them on the server. | not reported |
 | W4-1 Chunk request packing ([2p](docs/patches.en.md#2p)) | Chunk supply per player is capped at main-loop FPS × one row of chunks; at 3 FPS a car outruns it (black edges). | Packs queued requests into larger batches (observe mode by default). | not reported |
-| W53 Smaller vehicle range on foot ([2bq](docs/patches.en.md#2bq)) | The client recomputes the skeleton of every skinned part of every loaded vehicle each frame (22–47 µs per KI5/rSemiTruck vehicle), and the server's vehicle relevance range (±88 tiles at 1080p) is wider than the client's own chunk map, so busy spots load over a hundred vehicles and cost several ms per frame. | On foot, only sends and keeps vehicles within a circle of R tiles (default 64; always a subset of vanilla); vanilla while anyone on the connection is in a vehicle or joining. Observe (count only) by default; at a spot with 107 vehicles in a production snapshot, R=64/48 leaves 57/28. | not reported |
+| W53 Smaller vehicle range on foot ([2bq](docs/patches.en.md#2bq)) | The client recomputes the skeleton of every skinned part of every loaded vehicle each frame (22–47 µs per KI5/rSemiTruck vehicle), and the server's vehicle relevance range (±88 tiles at 1080p) is wider than the client's own chunk map, so busy spots load over a hundred vehicles and cost several ms per frame. | On foot, only sends and keeps vehicles within a circle of R tiles (default 64; always a subset of vanilla); vanilla while anyone on the connection is in a vehicle or joining. Observe (count only) by default; at a spot with 107 vehicles in a production snapshot, R=64/48 leaves 57/28. It also counts players sitting in parked vehicles, to evaluate treating them like walking. | not reported |
 
 ### Network: bandwidth and resend loops
 

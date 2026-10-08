@@ -3500,26 +3500,34 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 1. 原版 `isRelevantTo` 為 false ⇒ false（只縮不放；720p 的 ±64 不會被放寬）。
 2. 任一 `connectArea[n]` 非 null（握手中、co-op 加入中）⇒ 原版。
 3. 任一本地玩家的 `releventPos` 與車的平面距離 ≤ R（圓形，含等於）⇒ true。
-4. 連線上任一本地玩家在車內（駕駛或乘客，`getVehicle() != null`）⇒ 原版。理由：車內 client 的 chunk map 中心會往行進方向前移「時速 ÷ 5」格（`IsoChunkMap.ProcessChunkPos`，時速 100 公里約 20 格），伺服器無從得知；玩家若開了「自動縮放」或「開車時平移鏡頭」選項（兩者預設關閉；`MultiTextureFBO2.update`、`PlayerCamera.java:102-142`），車內會縮到最遠、鏡頭往前偏，1920×1080 下畫面角落最遠約 71 格；AutoDrive 的前視 60–110 m 也要看到停著的車。
+4. 連線上任一本地玩家在車內（駕駛或乘客，`getVehicle() != null`）⇒ 原版（停著的車另外計數，見下方「停著的車」）。理由：車內 client 的 chunk map 中心會往行進方向前移「時速 ÷ 5」格（`IsoChunkMap.ProcessChunkPos`，時速 100 公里約 20 格），伺服器無從得知；玩家若開了「自動縮放」或「開車時平移鏡頭」選項（兩者預設關閉；`MultiTextureFBO2.update`、`PlayerCamera.java:102-142`），車內會縮到最遠、鏡頭往前偏，1920×1080 下畫面角落最遠約 71 格；AutoDrive 的前視 60–110 m 也要看到停著的車。
 5. 其餘：`on` 回 false（不送、或叫 client 移除），`observe` 照原版回 true，兩者都計數。
 
 兩個呼叫點用同一個 R、不做遲滯：如果「送」比「留」窄，留在 client 的環帶車收不到零件更新，而 `vehicle.updateFlags` 每個 tick 送完就清，漏掉的門窗變更不會補送。車再次進入 R 時走原版流程：伺服器的 Passengers `VehicleUpdate` → client `doRequest` → `VehicleFullUpdate`。兩個方法都只在伺服器執行，client 不自行重算範圍，沒有 desync。
+
+**停著的車（只計數，2026-10-09）**：坐車照原版的代價，在同一個停車場實測是步行 108 fps、坐上車 75 fps（2026-10-09 本機實機 E2E，R=64，同一輪的相對值）。車停著時 chunk map 不前移（位移是時速 ÷ 5 再四捨五入，2.5 km/h 以下為 0 格），開車平移鏡頭也只在時速 >1 時動（`PlayerCamera.java:102`），照步行算不會多看到什麼。為了評估「停著的車照步行算」，車內分支另外計數，回傳值不變：
+- 車速取 `getCurrentAbsoluteSpeedKmHour()`：伺服器收到駕駛的 `VehiclePhysicsPacket` 時寫入（`VehiclePhysicsPacket.java:94-95`），沒有遠端駕駛時讀到 0（`BaseVehicle.getCurrentSpeedKmHour`）。
+- 連線上每位在車內的玩家，車速低於 1 km/h 持續 `stillSec` 秒才算停著；車一動或換車就重新計時。helper 以 `WeakHashMap<IsoPlayer, …>` 記每位玩家，只記車輛 ID、不持有車。
+- 在車內的玩家全部停著時，這次 R 外判定計入 `stillSend`／`stillKeep`；已算停著的玩家又開動，計入 `stillResumes`。
+- 已知偏差：被拖的車沒有駕駛，車速讀成 0，坐在裡面會被算成停著；下車再上同一台車開走也算一次 resume（略為高估）。
 
 **開關**（需重啟）：
 - `-Dmdc.vehicleRelevancy`：未設定／`2`／`observe`＝只計數、照原版（預設；未知值也是 observe）；`1`／`on`／`enforce`＝縮小；`0`／`off`＝原版。
 - `-Dmdc.vehicleRelevancyRadius`：R（格），預設 64，夾在 32–160。
 - `-Dmdc.vehicleRelevancyBeatSec`：心跳最短間隔（秒），預設 300，夾在 10–3600（本機量測時調短用）。
+- `-Dmdc.vehicleRelevancyStillSec`：停多久才算停著（秒），預設 10，夾在 0–600；只影響停車計數。
 
 **log**（首次判定時一行；之後每 4096 次判定看一次時間，間隔到了才印）：
 
 ```text
-[MinidoracatJavaPatch][VehicleRelevancy] 首次生效 mode=observe radius=64（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius）
-[MinidoracatJavaPatch][VehicleRelevancy] mode=observe radius=64 sendOutside=<n> keepOutside=<n> passVehicle=<n> passConnectArea=<n> anomalies=<n>
+[MinidoracatJavaPatch][VehicleRelevancy] 首次生效 mode=observe radius=64 stillSec=10（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius，-Dmdc.vehicleRelevancyStillSec）
+[MinidoracatJavaPatch][VehicleRelevancy] mode=observe radius=64 sendOutside=<n> keepOutside=<n> passVehicle=<n> passConnectArea=<n> stillSend=<n> stillKeep=<n> stillResumes=<n> anomalies=<n>
 ```
 
 - `sendOutside`：`sendVehicles` 判定「原版會送、在 R 外」的次數（每連線每台車每 100 ms 一次，所以是判定次數，不是車數）。`on` 時這些更新沒送。
 - `keepOutside`：Passengers 請求判定「原版會留、在 R 外」的次數，約等於每秒每連線的 R 外車數。`on` 時每一次都是一個 `VehicleRemove`，observe 下用來估計會移除多少車。
 - `passVehicle`／`passConnectArea`：在 R 外但因車內或 connectArea 照原版的次數。`anomalies` 恆應為 0。
+- `stillSend`／`stillKeep`／`stillResumes`：見上方「停著的車」。`(stillSend + stillKeep) ÷ passVehicle` 是車內 R 外判定中停著的比例；`stillKeep` 約等於「停著時環帶的車 × 秒」，也就是改成照步行算後 client 少持有的車量；`stillResumes` 是開動時要整圈補回的次數。
 
 **預期效果（推測，以正式服 `vehicles.db` 快照計算）**：上述地點原版 107 輛；圓形 R=64 剩 57 輛、R=56 剩 40 輛、R=48 剩 28 輛。依車型加權（KI5 35、KI5 拖車 12、rSemi 25、其他 4.5 µs/輛）約為原本的 54％／38％／24％。實測 5.4 ms 與車型表估算的 2.3 ms 有落差，原因未查，所以毫秒數只是推測。
 
@@ -3532,8 +3540,8 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - 家族 MOD：MiniMap 的車輛圖示預設不限距離，步行時會縮到 R；AutoDrive、VehicleManager 的掃描是車內、近距離或伺服器端，不受影響。
 
 **驗證**：
-- SmokeCheck（存在理由，TIS 改即紅＝重估）：原版 `sendVehicles` 唯一 `isRelevantTo`、參數是車的 `getX／getY`、後接 `IFEQ`，方法內送 `VehicleFullUpdate`；`processServer` 唯一 `isRelevantTo` 後接 `IFNE`、再來是 `ALOAD 2` 與 `VehicleRemove`，方法內有 `SIPUSH 16384`；`isRelevantTo` 讀 `relevantRange` 兩次、不讀 `chunkGridWidth`。手術後兩個方法除了 `isRelevantTo`→helper 之外方法文字（含 frames）與原版相同、全 class 真指令數不變；兩個 class 的 `isRelevantTo` 都歸零且各只改道到自己的入口。helper 契約：兩個入口共用 `decide`，`decide` 恰呼叫原版 `isRelevantTo` 一次，並各查一次 connectArea、半徑與車內。
-- `VehicleRelevancyGateTest`（observe R=64、on R=64、on R=48、on R=5 夾到 32、off，`-Xverify:all`）：真 `UdpConnection.isRelevantTo` 做原版負對照（環帶與正方形角落原版相關、89 格不相關）；R−1、恰等於 R 一律相關，`Math.nextUp(R)`、R+1、圓外正方形內的對角依模式分流；原版外一律不相關；兩個入口各自計數；車內（含分割畫面 2 號乘客）與 connectArea 照原版；分割畫面任一玩家 R 內即相關；parseMode 別名。另外走 dist 手術後的真 `VehicleRequestPacket.processServer`：真 wire 請求、真 `VehicleRemovePacket` 寫出再解碼，R 內不移除、環帶只有 on 回 `VehicleRemove`、原版外三模式都移除、Full 請求只記旗標、車內照原版。
+- SmokeCheck（存在理由，TIS 改即紅＝重估）：原版 `sendVehicles` 唯一 `isRelevantTo`、參數是車的 `getX／getY`、後接 `IFEQ`，方法內送 `VehicleFullUpdate`；`processServer` 唯一 `isRelevantTo` 後接 `IFNE`、再來是 `ALOAD 2` 與 `VehicleRemove`，方法內有 `SIPUSH 16384`；`isRelevantTo` 讀 `relevantRange` 兩次、不讀 `chunkGridWidth`。手術後兩個方法除了 `isRelevantTo`→helper 之外方法文字（含 frames）與原版相同、全 class 真指令數不變；兩個 class 的 `isRelevantTo` 都歸零且各只改道到自己的入口。helper 契約：兩個入口共用 `decide`，`decide` 恰呼叫原版 `isRelevantTo` 一次，並各查一次 connectArea、半徑與車內；停車判定只讀一次車速。
+- `VehicleRelevancyGateTest`（observe R=64、on R=64、on R=64 stillSec=0、on R=48、on R=5 夾到 32、off，`-Xverify:all`）：真 `UdpConnection.isRelevantTo` 做原版負對照（環帶與正方形角落原版相關、89 格不相關）；R−1、恰等於 R 一律相關，`Math.nextUp(R)`、R+1、圓外正方形內的對角依模式分流；原版外一律不相關；兩個入口各自計數；車內（含分割畫面 2 號乘客）與 connectArea 照原版；分割畫面任一玩家 R 內即相關；parseMode 別名。停著的車回傳一律照原版：stillSec=0 時兩個入口各計一次、預設 10 秒時未滿不計；0.99 km/h 算停著、倒車 1.0 km/h 算在動；已算停著的車開動計一次 resume、持續在動不重複計、換到在動的車不計；分割畫面有人在動就不算停著。另外走 dist 手術後的真 `VehicleRequestPacket.processServer`：真 wire 請求、真 `VehicleRemovePacket` 寫出再解碼，R 內不移除、環帶只有 on 回 `VehicleRemove`、原版外三模式都移除、Full 請求只記旗標、車內照原版。
 - 本機實機 E2E（2026-10-07，正式服 139 個 MOD 的本機複本，在車輛密集區站 20–25 秒，JFR MainThread 每幀）：off 80 fps（每幀 12.5 ms，client 持有 113 輛，`postupdate` 3.11＋`update` 1.25 ms）；on R=48 190 fps（5.2 ms，37 輛，0.81＋0.27 ms）；on R=64 137 fps（7.3 ms，57 輛，1.51＋0.49 ms）。沿同一條路步行，最大幀 off／R=48／R=64 為 119／72／96 ms，超過 50 ms 的幀 7／3／6；`anomalies=0`。
 - 車內照原版的實機驗證（同一套複本，R=48）：在 56 格外圈生 6 台車，步行時 client 載入 0 台（關閉時 4 台，另 2 台關閉時也沒有載入）；坐進車後外圈載入 4 台，與關閉時相同；`passVehicle` 計數隨之增加、`anomalies=0`。另與 W54 一起開：同一處站立 198 fps（5.0 ms，37 輛），步行最大幀 68 ms。
 

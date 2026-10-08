@@ -1,12 +1,14 @@
 package zombie.mdc;
 
 import java.util.Locale;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import zombie.characters.IsoPlayer;
 import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
 import zombie.iso.Vector3;
+import zombie.vehicles.BaseVehicle;
 
 /**
  * W53 步行時縮小車輛相關範圍（2026-10-07；docs/patches.md 2bq）。
@@ -35,14 +37,21 @@ import zombie.iso.Vector3;
  *   <li>原版 {@code isRelevantTo} 為 false ⇒ false。</li>
  *   <li>{@code off} ⇒ 原版結果。</li>
  *   <li>任一 {@code connectArea[n]} 非 null（握手中／co-op 加入中）或任一本地玩家在車內（駕駛或乘客）⇒ 原版。
- *       車內時 client 會自動縮到最遠、鏡頭往行進方向平移（畫面角落可到約 71 格），chunk 中心也往前移，
- *       伺服器無從得知；AutoDrive 之類的感測也要看到前方停著的車。</li>
+ *       車內時 client 的 chunk map 中心往行進方向前移「時速 ÷ 5」格（{@code IsoChunkMap.ProcessChunkPos}），伺服器無從得知；
+ *       開了「自動縮放」或「開車時平移鏡頭」選項（預設關閉）時畫面角落可到約 71 格；AutoDrive 之類的感測也要看到前方停著的車。</li>
  *   <li>任一 {@code releventPos[n]} 與車的平面距離 ≤ R ⇒ true；否則 {@code on} 回 false、{@code observe} 回 true，兩者都計數。</li>
  * </ol>
  *
  * <p><b>開關</b>（需重啟）：{@code -Dmdc.vehicleRelevancy}：未設定／{@code 2}／{@code observe}＝只計數照原版（預設；未知值也是 observe）；
  * {@code 1}／{@code on}／{@code enforce}＝縮小；{@code 0}／{@code off}＝原版。{@code -Dmdc.vehicleRelevancyRadius}＝R（格，預設 64，
  * 夾在 32–160）；{@code -Dmdc.vehicleRelevancyBeatSec}＝心跳最短間隔（秒，預設 300，夾在 10–3600）。
+ *
+ * <p><b>停著的車（只計數，2026-10-09）</b>：車內一律照原版，但車停著時 chunk map 不前移、開車平移鏡頭也不動，
+ * 照步行算不會多看到什麼。為了評估「停著的車照步行算」，車內分支另計：連線上每位在車內的玩家，車速（伺服器收駕駛回報的
+ * {@code VehiclePhysicsPacket}，沒有駕駛時為 0）低於 {@value #STILL_KMH} km/h 持續 {@code -Dmdc.vehicleRelevancyStillSec}
+ * 秒（預設 10，夾在 0–600）才算停著；車一動或換車就重新計時。全部在車內的玩家都停著時，這次 R 外的判定計入
+ * {@code stillSend}／{@code stillKeep}；已算停著的玩家再開動計入 {@code stillResumes}（啟用後每次都要補回環帶的車）。
+ * 回傳值不變，仍照原版。
  *
  * <p>兩個呼叫點都在伺服器主執行緒；判定的 RuntimeException 計入 anomalies 並回原版結果。
  */
@@ -78,6 +87,33 @@ public final class VehicleRelevancyGate {
     private static final AtomicLong passConnectArea = new AtomicLong();
     /** helper 自身診斷失敗數；恆應為 0。 */
     private static final AtomicLong anomalies = new AtomicLong();
+    /** 車內分支裡，連線上在車內的玩家全部停著時的 R 外判定次數（{@code sendVehicles}／{@code processServer}）。 */
+    private static final AtomicLong stillSend = new AtomicLong();
+    private static final AtomicLong stillKeep = new AtomicLong();
+    /** 已算停著的玩家又開動的次數。 */
+    private static final AtomicLong stillResumes = new AtomicLong();
+
+    /** 低於這個時速（絕對值）算停著；原版 {@code BaseVehicle.isStopped} 用 0.8 km/h。 */
+    static final float STILL_KMH = 1.0F;
+    /** 停多久才算停著；擋紅綠燈這類短暫停車。 */
+    static final long STILL_NS = clamp(Integer.getInteger("mdc.vehicleRelevancyStillSec", 10), 0, 600) * 1_000_000_000L;
+    private static final int NO_VEHICLE = 0;
+    private static final int MOVING = 1;
+    private static final int STILL = 2;
+
+    /**
+     * 每位玩家目前坐的車與開始停住的時間；只在主執行緒用。IsoPlayer 沒覆寫 equals／hashCode。
+     * 只記車輛 ID、不持有車：車的乘客欄位會參考玩家，持有車會讓斷線玩家的 key 回收不了。
+     */
+    private static final WeakHashMap<IsoPlayer, StillState> STILL_STATES = new WeakHashMap<>();
+
+    private static final class StillState {
+        int vehicleId = -1;
+        /** 開始停住的 nanoTime；在動時無意義。 */
+        long since;
+        boolean stopped;
+        boolean counted;
+    }
 
     // 主執行緒單線；只用來節流心跳，競態最多讓心跳早晚一次。
     private static int ticks;
@@ -101,15 +137,15 @@ public final class VehicleRelevancyGate {
 
     /** {@code VehicleManager.sendVehicles} 內唯一 {@code isRelevantTo(FF)Z} 的改道目標。 */
     public static boolean sendRelevant(UdpConnection connection, float x, float y) {
-        return decide(connection, x, y, sendOutside);
+        return decide(connection, x, y, sendOutside, stillSend);
     }
 
     /** {@code VehicleRequestPacket.processServer} 內唯一 {@code isRelevantTo(FF)Z} 的改道目標。 */
     public static boolean keepRelevant(UdpConnection connection, float x, float y) {
-        return decide(connection, x, y, keepOutside);
+        return decide(connection, x, y, keepOutside, stillKeep);
     }
 
-    private static boolean decide(UdpConnection connection, float x, float y, AtomicLong outside) {
+    private static boolean decide(UdpConnection connection, float x, float y, AtomicLong outside, AtomicLong stillOutside) {
         boolean vanilla = connection.isRelevantTo(x, y);
         if (!vanilla || MODE == OFF) {
             return vanilla;
@@ -123,8 +159,12 @@ public final class VehicleRelevancyGate {
             if (withinRadius(connection, x, y)) {
                 return true;
             }
-            if (anyPlayerInVehicle(connection)) {
+            int vehicles = vehicleState(connection);
+            if (vehicles != NO_VEHICLE) {
                 passVehicle.incrementAndGet();
+                if (vehicles == STILL) {
+                    stillOutside.incrementAndGet();
+                }
                 return true;
             }
             outside.incrementAndGet();
@@ -161,23 +201,66 @@ public final class VehicleRelevancyGate {
         return false;
     }
 
-    /** 該連線是否有任何本地玩家在車內（駕駛或乘客）。只在「R 外」時才查。 */
-    private static boolean anyPlayerInVehicle(UdpConnection connection) {
+    /**
+     * 連線上在車內的玩家（駕駛或乘客）：沒有人 ⇒ {@link #NO_VEHICLE}；有人的車在動或還沒停滿 {@link #STILL_NS} ⇒ {@link #MOVING}；
+     * 全部停著 ⇒ {@link #STILL}。只在「R 外」時才查。
+     */
+    private static int vehicleState(UdpConnection connection) {
+        int state = NO_VEHICLE;
+        long now = 0L;
         for (int n = 0; n < MAX_LOCAL_PLAYERS; n++) {
             IsoPlayer player = connection.getPlayerAt(n);
-            if (player != null && player.getVehicle() != null) {
-                return true;
+            BaseVehicle vehicle = player == null ? null : player.getVehicle();
+            if (vehicle == null) {
+                continue;
+            }
+            if (now == 0L) {
+                now = System.nanoTime();
+            }
+            if (!isStill(player, vehicle, now)) {
+                state = MOVING;
+            } else if (state == NO_VEHICLE) {
+                state = STILL;
             }
         }
-        return false;
+        return state;
+    }
+
+    private static boolean isStill(IsoPlayer player, BaseVehicle vehicle, long now) {
+        StillState s;
+        synchronized (STILL_STATES) {
+            s = STILL_STATES.computeIfAbsent(player, k -> new StillState());
+        }
+        if (s.vehicleId != vehicle.getId()) {
+            s.vehicleId = vehicle.getId();
+            s.stopped = false;
+            s.counted = false;
+        }
+        if (vehicle.getCurrentAbsoluteSpeedKmHour() >= STILL_KMH) {
+            if (s.counted) {
+                stillResumes.incrementAndGet();
+            }
+            s.stopped = false;
+            s.counted = false;
+            return false;
+        }
+        if (!s.stopped) {
+            s.stopped = true;
+            s.since = now;
+        }
+        if (now - s.since < STILL_NS) {
+            return false;
+        }
+        s.counted = true;
+        return true;
     }
 
     private static void tick() {
         if (!announced) {
             announced = true;
             lastBeatNs = System.nanoTime();
-            log("首次生效 mode=" + modeName() + " radius=" + (int) RADIUS
-                    + "（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius）");
+            log("首次生效 mode=" + modeName() + " radius=" + (int) RADIUS + " stillSec=" + STILL_NS / 1_000_000_000L
+                    + "（-Dmdc.vehicleRelevancy=observe|on|off，-Dmdc.vehicleRelevancyRadius，-Dmdc.vehicleRelevancyStillSec）");
             return;
         }
         if ((++ticks & BEAT_CHECK_MASK) != 0) {
@@ -193,6 +276,9 @@ public final class VehicleRelevancyGate {
                 + " keepOutside=" + keepOutside.get()
                 + " passVehicle=" + passVehicle.get()
                 + " passConnectArea=" + passConnectArea.get()
+                + " stillSend=" + stillSend.get()
+                + " stillKeep=" + stillKeep.get()
+                + " stillResumes=" + stillResumes.get()
                 + " anomalies=" + anomalies.get());
     }
 
@@ -228,6 +314,18 @@ public final class VehicleRelevancyGate {
 
     static long anomalyCount() {
         return anomalies.get();
+    }
+
+    static long stillSendCount() {
+        return stillSend.get();
+    }
+
+    static long stillKeepCount() {
+        return stillKeep.get();
+    }
+
+    static long stillResumeCount() {
+        return stillResumes.get();
     }
 
     private VehicleRelevancyGate() {}

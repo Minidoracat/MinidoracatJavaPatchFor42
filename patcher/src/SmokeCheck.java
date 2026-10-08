@@ -3181,11 +3181,13 @@ public final class SmokeCheck {
                 && classWideCalls(classNode(distJava, vmCls), Opcodes.INVOKESTATIC, relGateCls, "keepRelevant", gateDesc) == 0
                 && classWideCalls(classNode(distJava, vrpCls), Opcodes.INVOKESTATIC, relGateCls, "keepRelevant", gateDesc) == 1
                 && classWideCalls(classNode(distJava, vrpCls), Opcodes.INVOKESTATIC, relGateCls, "sendRelevant", gateDesc) == 0);
-        String decideDesc = "(L" + w53Udp + ";FFLjava/util/concurrent/atomic/AtomicLong;)Z";
+        String decideDesc = "(L" + w53Udp + ";FFLjava/util/concurrent/atomic/AtomicLong;Ljava/util/concurrent/atomic/AtomicLong;)Z";
         MethodNode gDecide = method(distJava, relGateCls, "decide", decideDesc);
-        MethodNode gInVehicle = method(distJava, relGateCls, "anyPlayerInVehicle", "(L" + w53Udp + ";)Z");
+        MethodNode gInVehicle = method(distJava, relGateCls, "vehicleState", "(L" + w53Udp + ";)I");
+        MethodNode gStill = method(distJava, relGateCls, "isStill",
+                "(Lzombie/characters/IsoPlayer;Lzombie/vehicles/BaseVehicle;J)Z");
         failed += check("W53 helper 契約：兩個入口共用同一個 decide；decide 先呼叫原版 isRelevantTo 恰 1 次（只縮不放），"
-                        + "並各查一次 connectArea／半徑／車內",
+                        + "並各查一次 connectArea／半徑／車內；停車判定只讀一次車速",
                 countExactCalls(method(distJava, relGateCls, "sendRelevant", gateDesc), Opcodes.INVOKESTATIC, relGateCls,
                         "decide", decideDesc) == 1
                 && countExactCalls(method(distJava, relGateCls, "keepRelevant", gateDesc), Opcodes.INVOKESTATIC, relGateCls,
@@ -3195,12 +3197,14 @@ public final class SmokeCheck {
                 && countExactCalls(gDecide, Opcodes.INVOKEVIRTUAL, w53Udp, "isRelevantTo", isRelDesc) == 1
                 && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "anyConnectArea", "(L" + w53Udp + ";)Z") == 1
                 && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "withinRadius", gateDesc) == 1
-                && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "anyPlayerInVehicle",
-                        "(L" + w53Udp + ";)Z") == 1
+                && countExactCalls(gDecide, Opcodes.INVOKESTATIC, relGateCls, "vehicleState",
+                        "(L" + w53Udp + ";)I") == 1
                 && countExactCalls(gInVehicle, Opcodes.INVOKEVIRTUAL, w53Udp, "getPlayerAt",
                         "(I)Lzombie/characters/IsoPlayer;") == 1
                 && countExactCalls(gInVehicle, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "getVehicle",
-                        "()Lzombie/vehicles/BaseVehicle;") == 1);
+                        "()Lzombie/vehicles/BaseVehicle;") == 1
+                && countExactCalls(gStill, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                        "getCurrentAbsoluteSpeedKmHour", "()F") == 1);
         failed += check("W32 vanilla 以 zone.hourLastSeen 推算離線時數",
                 methodText(vFromWorker).contains("GETFIELD zombie/iso/areas/DesignationZone.hourLastSeen"));
         failed += check("W32 唯一改道同形，其餘指令與 frames 保留",

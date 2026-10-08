@@ -23,8 +23,8 @@ import zombie.vehicles.VehicleManager;
 /**
  * W53 步行時縮小車輛相關範圍的行為驗證（docs/patches.md 2bq）。
  *
- * <p>argv：{@code observe}（預設出貨）／{@code on}／{@code off}，第二個參數是預期半徑（預設 64）。測試自驗
- * MODE 與 RADIUS 和 argv 相符——property 名稱拼錯會炸在這裡，不會把同一組態跑幾遍假綠。
+ * <p>argv：{@code observe}（預設出貨）／{@code on}／{@code off}，第二個參數是預期半徑（預設 64），第三個是預期 stillSec（預設 10）。
+ * 測試自驗 MODE、RADIUS、STILL_NS 和 argv 相符——property 名稱拼錯會炸在這裡，不會把同一組態跑幾遍假綠。
  *
  * <p>兩層：
  * <ol>
@@ -64,11 +64,15 @@ public final class VehicleRelevancyGateTest {
         expect("自驗：argv=" + want + " 與 MODE 相符（mode=" + VehicleRelevancyGate.modeName() + "）", mode == wantMode);
         expect("自驗：RADIUS=" + radius + " 與預期 " + wantRadius + " 相符", radius == wantRadius);
         expect("幾何前提：R < 原版半寬 " + VANILLA_HALF + "（否則本刀無環帶可縮）", radius < VANILLA_HALF);
+        long wantStillSec = args.length > 2 ? Long.parseLong(args[2]) : 10L;
+        expect("自驗：STILL_NS=" + VehicleRelevancyGate.STILL_NS + " 與預期 " + wantStillSec + " 秒相符",
+                VehicleRelevancyGate.STILL_NS == wantStillSec * 1_000_000_000L);
 
         testGeometry();
         testCounters();
         testPassthrough();
         testSplitScreen();
+        testStill();
         testParseMode();
         testRealProcessServer();
 
@@ -169,6 +173,72 @@ public final class VehicleRelevancyGateTest {
         c.releventPos[3] = new Vector3(PX + 60.0f, PY, 0.0f);
         float x = PX + 60.0f + radius - 1.0f;
         expect("分割畫面：0 號 R 外、3 號 R 內 ⇒ 相關", c.isRelevantTo(x, PY) && VehicleRelevancyGate.sendRelevant(c, x, PY));
+    }
+
+    /**
+     * 停著的車只計數、回傳照原版：時速絕對值低於 1 km/h 持續 stillSec 才算停著；已算停著的車開動算一次 resume；
+     * 換車重新計時；同一連線有人在動就不算停著。stillSec=0 的組態驗轉換，預設 10 秒的組態驗「未滿不計」。
+     */
+    private static void testStill() throws Exception {
+        boolean counts = mode != VehicleRelevancyGate.OFF;
+        boolean still = counts && VehicleRelevancyGate.STILL_NS == 0L;
+        int stillHit = still ? 1 : 0;
+        float ring = PX + radius + 1.0f;
+
+        BaseVehicle parked = alloc(BaseVehicle.class);
+        parked.vehicleId = 201;
+        IsoPlayer sitter = player(parked);
+        UdpConnection c = conn();
+        c.players[0] = sitter;
+
+        long send0 = VehicleRelevancyGate.stillSendCount();
+        long keep0 = VehicleRelevancyGate.stillKeepCount();
+        long pass0 = VehicleRelevancyGate.passVehicleCount();
+        expect("停著的車：兩個入口的環帶回傳仍照原版",
+                VehicleRelevancyGate.sendRelevant(c, ring, PY) && VehicleRelevancyGate.keepRelevant(c, ring, PY));
+        expect("停著的車：" + (still ? "stillSend／stillKeep 各 +1" : counts ? "未滿停留時間不計" : "off 不計")
+                        + "，passVehicle " + (counts ? "+2" : "不動"),
+                VehicleRelevancyGate.stillSendCount() == send0 + stillHit
+                && VehicleRelevancyGate.stillKeepCount() == keep0 + stillHit
+                && VehicleRelevancyGate.passVehicleCount() == pass0 + (counts ? 2 : 0));
+        expect("停著的車：R 內照常相關、不計 still",
+                VehicleRelevancyGate.sendRelevant(c, PX + 1.0f, PY)
+                && VehicleRelevancyGate.stillSendCount() == send0 + stillHit);
+
+        parked.setSpeedKmHour(0.99f);
+        long send1 = VehicleRelevancyGate.stillSendCount();
+        VehicleRelevancyGate.sendRelevant(c, ring, PY);
+        expect("0.99 km/h 仍算停著", VehicleRelevancyGate.stillSendCount() == send1 + stillHit);
+
+        long resume0 = VehicleRelevancyGate.stillResumeCount();
+        parked.setSpeedKmHour(-1.0f);
+        long send2 = VehicleRelevancyGate.stillSendCount();
+        expect("倒車 1.0 km/h（取絕對值、含等於）算在動：照原版、不計 still",
+                VehicleRelevancyGate.sendRelevant(c, ring, PY) && VehicleRelevancyGate.stillSendCount() == send2);
+        expect("已算停著的車開動：stillResumes " + (still ? "+1" : "不動"),
+                VehicleRelevancyGate.stillResumeCount() == resume0 + stillHit);
+        VehicleRelevancyGate.sendRelevant(c, ring, PY);
+        expect("持續在動不重複計 resume", VehicleRelevancyGate.stillResumeCount() == resume0 + stillHit);
+
+        // 分割畫面：0 號停著、1 號在動、3 號停著 ⇒ 有人在動就不算停著（兩種先後順序都在內）
+        parked.setSpeedKmHour(0.0f);
+        BaseVehicle driving = alloc(BaseVehicle.class);
+        driving.vehicleId = 202;
+        driving.setSpeedKmHour(40.0f);
+        UdpConnection mixed = conn();
+        mixed.players[0] = player(parked);
+        mixed.players[1] = player(driving);
+        mixed.players[3] = player(parked);
+        long send3 = VehicleRelevancyGate.stillSendCount();
+        expect("分割畫面有人在動：照原版、不計 still",
+                VehicleRelevancyGate.sendRelevant(mixed, ring, PY) && VehicleRelevancyGate.stillSendCount() == send3);
+
+        // 換車：已算停著的人換到在動的車，重新計時、不算 resume（上車本來就會補回環帶的車）
+        VehicleRelevancyGate.sendRelevant(c, ring, PY);
+        long resume1 = VehicleRelevancyGate.stillResumeCount();
+        seat(sitter, driving);
+        VehicleRelevancyGate.sendRelevant(c, ring, PY);
+        expect("換到在動的車：不算 resume", VehicleRelevancyGate.stillResumeCount() == resume1);
     }
 
     private static void testParseMode() {
@@ -277,15 +347,24 @@ public final class VehicleRelevancyGateTest {
         return v;
     }
 
-    /** getVehicle() 是純欄位讀取；車內玩家只需該欄位非 null。 */
     private static IsoPlayer player(boolean inVehicle) throws Exception {
+        return player(inVehicle ? alloc(BaseVehicle.class) : null);
+    }
+
+    /**
+     * getVehicle() 是純欄位讀取；車內玩家只需該欄位非 null。以 Unsafe 配置的車 physics 為 null，
+     * {@code getCurrentSpeedKmHour} 直接回 {@code setSpeedKmHour} 設的值（未設為 0）。
+     */
+    private static IsoPlayer player(BaseVehicle vehicle) throws Exception {
         IsoPlayer p = alloc(IsoPlayer.class);
-        if (inVehicle) {
-            Field vehicle = findField(p.getClass(), "vehicle");
-            vehicle.setAccessible(true);
-            vehicle.set(p, alloc(BaseVehicle.class));
-        }
+        seat(p, vehicle);
         return p;
+    }
+
+    private static void seat(IsoPlayer p, BaseVehicle vehicle) throws Exception {
+        Field field = findField(IsoPlayer.class, "vehicle");
+        field.setAccessible(true);
+        field.set(p, vehicle);
     }
 
     /** 只覆寫 buffer 端點與 getPacket 的真連線：VehicleRemove 內容由真 packet／PacketType 寫出。 */

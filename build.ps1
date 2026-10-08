@@ -117,6 +117,7 @@ $helperEntries = @(
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
     'zombie/network/packets/connection/MdcCoopNameGuard.class',
     'zombie/mdc/VehicleRelevancyGate.class',
+    'zombie/mdc/VehicleRelevancyGate$StillState.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -551,13 +552,16 @@ Assert-Ok "MdcCoopNameGuardTest（observe，只計數照原版）"
 java -Xverify:all "-Dmdc.coopNameGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest off
 Assert-Ok "MdcCoopNameGuardTest（off，原版冒名負對照）"
 
-Write-Host "[9zf/10] 步行時縮小車輛相關範圍（W53）：真 isRelevantTo 負對照、圓形 R 邊界、車內與 connectArea 照原版、真 processServer..."
+Write-Host "[9zf/10] 步行時縮小車輛相關範圍（W53）：真 isRelevantTo 負對照、圓形 R 邊界、車內與 connectArea 照原版、停車只計數、真 processServer..."
 # observe＝出貨組態（只計數照原版）；on＝縮小（預設 R=64、使用者可選 48、下限 clamp 32）；off＝原版。
-# 測試自驗 argv 與實際 MODE／RADIUS 相符，property 拼錯不得假綠。
+# stillSec=0 那輪驗「停住立即算停著」的轉換，其餘用預設 10 秒驗「未滿不計」。
+# 測試自驗 argv 與實際 MODE／RADIUS／STILL_NS 相符，property 拼錯不得假綠。
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest observe 64
 Assert-Ok "VehicleRelevancyGateTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.vehicleRelevancy=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 64
 Assert-Ok "VehicleRelevancyGateTest（on，R=64）"
+java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyStillSec=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 64 0
+Assert-Ok "VehicleRelevancyGateTest（on，R=64，stillSec=0 停住立即算停著）"
 java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=48" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 48
 Assert-Ok "VehicleRelevancyGateTest（on，R=48）"
 java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=5" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 32
