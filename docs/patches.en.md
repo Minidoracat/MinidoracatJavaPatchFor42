@@ -3165,7 +3165,9 @@ zone-path catch-up detail lines on the production server show `applied=0`, acros
 **Log**: the `[AnimalAwayProbe]` heartbeat adds `deferred` (queued), `deferDrained` (caught up), `deferTimeouts` (caught up only after the wait limit),
 `deferUnloaded`, `deferDead`, `deferZoneSkips`, `deferDirect`, `deferLeaving`, `deferTransferred`, `deferFailures`, `deferPending`, `maxDeferMs`,
 `zoneRefreshes`, `defer` and `troughRegister`; an entry caught up after the wait limit also logs a `source=chunk-timeout` detail line. `maxDeferMs` is
-normally tens of milliseconds; a growing `deferTimeouts` means some zone stays only partly loaded.
+normally tens of milliseconds; right after a boot it reaches 1–3 minutes when the first player joins: with `PauseEmpty=true` the server is paused and
+skips `IsoWorld.update` until a player is in the world, so draining waits too, and the world itself does not advance meanwhile. `deferTimeouts` comes from
+pens that cross a 64-square server cell boundary (or connect to one) and are loaded on one side only.
 
 **Limits**: if a zone stays partly loaded, the catch-up after the wait limit uses only the loaded troughs; troughs, river and ground food on the unloaded
 side are out of reach (live animals cannot reach them either). Near-water squares and ground food are not rebuilt for a partly loaded zone; that is the
@@ -3199,6 +3201,16 @@ vanilla `isFullyStreamed` gate (pending decision, see open-issues).
 
   When the trough squares loaded, `zone.troughs` held 1 and then 2 troughs instead of 0 (registration works); `anomalies=0` and `deferTimeouts=0` in
   all eight runs.
+
+**Production acceptance (2026-10-08 17:58)**: applied at the 03:45 mod-update restart on 10-08 (job state `APPLIED`, the new banner from the 03:46
+session on, the old 123 classes archived in the job's `state/`; every later boot logged `[mdc-javagate] OK: 127`). The six sessions since then (all
+restarts were mod-update or scheduled restarts, no crash) show the banner
+`server patch ffed4ff`, all 127 loose classes match the manifest SHA, no linkage errors, `anomalies` 0 in every heartbeat, and `deferFailures` and
+`delegateFailures` 0. Summed over each session's last heartbeat: 20,342 deferred, 20,259 caught up (1,308 after the wait limit), 71 unloaded while
+deferred. `maxDeferMs` of 57–181 s all came from the first player joining after a boot (see above); timeouts cluster in pens that cross a server cell
+boundary. Livestock that died within 2 s of a catch-up with hunger or thirst ≥0.8: inside animal zones from 227/644 (35%, 41 sessions since 10-04) to
+2/62 (3%); outside zones (not handled by W56) unchanged at 47% and 44%. The longest catch-up run within one frame was 240–702 ms, the same range as
+before (11–790 ms); every watchdog freeze was at shutdown.
 
 ---
 

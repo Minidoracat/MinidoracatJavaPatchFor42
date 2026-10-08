@@ -3621,7 +3621,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **開關**（需重啟）：`-Dmdc.animalCatchUpDefer=0` 停用延後（依賴 W49，`-Dmdc.animalOwnClock=0`／`-Dmdc.animalCatchUpCap=0` 時一併停用）；`-Dmdc.troughZoneRegister=0` 停用槽登記；`-Dmdc.animalCatchUpDeferMs` 等待上限（毫秒）。
 
-**log**：`[AnimalAwayProbe]` 心跳追加 `deferred`（排隊）、`deferDrained`（補完）、`deferTimeouts`（逾時才補）、`deferUnloaded`、`deferDead`、`deferZoneSkips`、`deferDirect`、`deferLeaving`、`deferTransferred`、`deferFailures`、`deferPending`、`maxDeferMs`、`zoneRefreshes`、`defer`、`troughRegister`；逾時才補的那筆另記 `source=chunk-timeout` 明細。`maxDeferMs` 通常是幾十毫秒；`deferTimeouts` 持續增加代表有畜牧區長期只載入一部分。
+**log**：`[AnimalAwayProbe]` 心跳追加 `deferred`（排隊）、`deferDrained`（補完）、`deferTimeouts`（逾時才補）、`deferUnloaded`、`deferDead`、`deferZoneSkips`、`deferDirect`、`deferLeaving`、`deferTransferred`、`deferFailures`、`deferPending`、`maxDeferMs`、`zoneRefreshes`、`defer`、`troughRegister`；逾時才補的那筆另記 `source=chunk-timeout` 明細。`maxDeferMs` 平時是幾十毫秒；開機後第一位玩家進場時會到 1–3 分鐘：`PauseEmpty=true` 時，玩家還沒進入世界前伺服器暫停、不跑 `IsoWorld.update`，排空跟著停，這段期間世界本身也沒有前進。`deferTimeouts` 來自跨 64 格 server cell 邊界（或與這種畜牧區相連）、只載入一側的牧場。
 
 **限制**：畜牧區一直只載入一部分時，逾時後只用已載入的槽補算；沒載入那一側的槽、河與地上食物用不到（活動物同樣走不到）。部分載入時河邊格與地上食物不重建，屬原版 `isFullyStreamed` 閘（待裁定，見 open-issues）。
 
@@ -3638,6 +3638,8 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 | `animalCatchUpDefer=0` | 8×8 一個 chunk | 0.046–0.055／0.000–0.094 | 吃到（同 chunk 只靠槽登記就夠） |
 
   槽所在格載入當下 `zone.troughs` 登記數從 0 變成 1、2（槽登記生效）；八輪 `anomalies=0`、`deferTimeouts=0`。
+
+**上線驗收（2026-10-08 17:58）**：10-08 03:45 MOD 更新重啟時套用（job 狀態 `APPLIED`、03:46 起的 session 橫幅即為新版，舊的 123 個 class 封存在 job 的 `state/`；之後每次開服 `[mdc-javagate] OK: 127`）。之後六個 session（重啟都是 MOD 更新或定時重啟，沒有當機）橫幅都是 `server patch ffed4ff`，127 個 loose class 逐檔 SHA 與 manifest 相符，零 linkage 錯誤，各刀心跳 `anomalies` 都是 0；`deferFailures`、`delegateFailures` 都是 0。各 session 最後一筆心跳合計延後 20,342 筆、補完 20,259 筆（逾時才補 1,308 筆）、延後中卸載 71 筆。`maxDeferMs` 57–181 秒都出在開機後第一位玩家進場（見上段），逾時集中在跨 server cell 邊界的牧場。補算後 2 秒內死亡、飢或渴 ≥0.8 的家畜：畜牧區內從 227／644（35%，10-04 起 41 個 session）降到 2／62（3%）；畜牧區外（W56 不處理）47% 與 44% 不變。同一幀連續補算的最長耗時 240–702 ms，與之前 11–790 ms 同範圍；看門狗記到的凍結都在關服。
 
 ---
 
