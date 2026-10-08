@@ -3500,7 +3500,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 1. 原版 `isRelevantTo` 為 false ⇒ false（只縮不放；720p 的 ±64 不會被放寬）。
 2. 任一 `connectArea[n]` 非 null（握手中、co-op 加入中）⇒ 原版。
 3. 任一本地玩家的 `releventPos` 與車的平面距離 ≤ R（圓形，含等於）⇒ true。
-4. 連線上任一本地玩家在車內（駕駛或乘客，`getVehicle() != null`）⇒ 原版。理由：車內 client 會自動縮到最遠、鏡頭往行進方向平移（2.5 倍縮放下畫面角落約 71 格），chunk 中心也往前移（`IsoChunkMap.ProcessChunkPos`），伺服器無從得知；AutoDrive 的前視 60–110 m 也要看到停著的車。
+4. 連線上任一本地玩家在車內（駕駛或乘客，`getVehicle() != null`）⇒ 原版。理由：車內 client 的 chunk map 中心會往行進方向前移「時速 ÷ 5」格（`IsoChunkMap.ProcessChunkPos`，時速 100 公里約 20 格），伺服器無從得知；玩家若開了「自動縮放」或「開車時平移鏡頭」選項（兩者預設關閉；`MultiTextureFBO2.update`、`PlayerCamera.java:102-142`），車內會縮到最遠、鏡頭往前偏，1920×1080 下畫面角落最遠約 71 格；AutoDrive 的前視 60–110 m 也要看到停著的車。
 5. 其餘：`on` 回 false（不送、或叫 client 移除），`observe` 照原版回 true，兩者都計數。
 
 兩個呼叫點用同一個 R、不做遲滯：如果「送」比「留」窄，留在 client 的環帶車收不到零件更新，而 `vehicle.updateFlags` 每個 tick 送完就清，漏掉的門窗變更不會補送。車再次進入 R 時走原版流程：伺服器的 Passengers `VehicleUpdate` → client `doRequest` → `VehicleFullUpdate`。兩個方法都只在伺服器執行，client 不自行重算範圍，沒有 desync。
@@ -3524,7 +3524,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 **預期效果（推測，以正式服 `vehicles.db` 快照計算）**：上述地點原版 107 輛；圓形 R=64 剩 57 輛、R=56 剩 40 輛、R=48 剩 28 輛。依車型加權（KI5 35、KI5 拖車 12、rSemi 25、其他 4.5 µs/輛）約為原本的 54％／38％／24％。實測 5.4 ms 與車型表估算的 2.3 ms 有落差，原因未查，所以毫秒數只是推測。
 
 **副作用**：
-- 畫面：1920×1080 的可視範圍是世界座標的菱形，角落約 16 格 × 縮放倍數（預設約 16 格、最遠 2.5 倍約 40 格）。步行時 R=64 遠在畫面外；R=48 在最遠縮放下約有 8 格餘裕。車在 R 外收到 Passengers 更新後約 0.2–1.2 秒出現，衝刺約 6–7 格/秒，所以約在 R−9 格處出現（推測）。
+- 畫面：看到的世界範圍是螢幕像素 × 縮放倍率（`MultiTextureFBO2.getWidth`），在世界座標是菱形，畫面四角離角色最遠。1920×1080 約 16 格 × 縮放倍率（100% 約 16 格、最遠 250% 約 40 格）；同樣縮放下 2560×1440 最遠約 53 格、3440×1440 約 62 格、3840×2160 約 80 格（已超出原版 chunk map 的 ±72–79 格）。縮放 25%–250% 預設全部開啟（`MultiTextureFBO2.zoomLevelsDefault`、`MainOptions.lua:1426-1444`）。車在角色視線外會淡出，15 格內例外（`BaseVehicle.java:3476-3484`）。車在 R 外收到 Passengers 更新後約 0.2–1.2 秒出現，衝刺約 6–7 格/秒，所以約在 R−9 格處出現（推測）。因此步行時，R=64 在 1920×1080、2560×1440 的任何縮放下都在畫面外，3440×1440 拉到最遠、3840×2160 縮放 200% 以上時，衝刺可能在畫面四角看到車出現；R=48 在 1920×1080 最遠縮放下約有 8 格餘裕，2560×1440 以上拉到最遠就看得到（推測）。
 - 流量：一台車的 `VehicleFullUpdate` 就是 `vehicle.save()`，正式服快照中位數約 10 KB、最大約 118 KB（載滿的貨櫃拖車）。單次接近時要下載的量比原版少，但在 R 邊界來回會「移除→重送」，原版不會。下車時 1 秒內移除 R 外的車；上車時一次補回環帶的車，client 解析可能卡頓（推測，要實機量）。
 - 別人開的車：駛入 R 時伺服器送 `VehicleUpdate`，client 隨即要 Full，約 0.2 秒加 RTT 後出現。`VehiclePhysics` 仍以原版 ±88 轉發，client 沒有那台車時會每個物理包送一次 `VehicleRequest(1)`，伺服器只記旗標、車進入 R 時才送，不形成迴圈。
 - 拖車：掛接表以 `sendToAll` 廣播，牽引車每幀 `tryReconnectToTowedVehicle`，拖車抵達後自動接回。
