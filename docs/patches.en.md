@@ -3287,6 +3287,14 @@ thread (a different moment, not reported).
   exterior while outside ones are, `associatedBuilding` points at the new building, the player's light switch is attached to the new room, room lights
   are registered with the chunk and the cell; room removed — no exception, all 64 squares have no room and are exterior. Off: `active=false`, and stale
   squares throw the same NPE as vanilla.
+- Reproduction and in-game check (2026-10-09, local single player with `-debug`, zombies off): start at 14322,4969 (the spot of the vanilla Trailer3
+  building scenario), build 8 enclosed 3×3 player rooms with a z=1 floor as the roof, 20–50 tiles around, each in its own chunk; each round
+  teleports about 4000 tiles away, waits 6 s, teleports back and then adds or removes a wall next to the player on every tick for 8 s. Steam vanilla
+  (no loose classes at all) threw the NPE from the player's log, line for line (`IsoRoom.java:604` ← `IsoLightSwitch.java:879` ←
+  `IsoChunk.java:2930` ← `IsoChunkMap.updateInternal`), on the first return in both runs and dropped to the main menu. Client package 0.2.6
+  (`client v3.3(b932af1)`, standard variant, installed with the installer into a hard-link copy of the game) ran all 12 rounds without an exception,
+  and all 8 rooms stayed recognized; the first two returns already logged 20 re-bindings (the per-start log limit) of 3–9 squares each. One more
+  run was closed before the world loaded and is not counted.
 
 **Retirement**: once TIS fixes it, the SmokeCheck reasons turn red; then remove this patch from `PatchConfig.client()` and delete the helper and its test.
 
