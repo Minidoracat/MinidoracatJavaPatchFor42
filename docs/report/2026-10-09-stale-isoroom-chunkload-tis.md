@@ -1,6 +1,6 @@
-# TIS 論壇回覆草稿 — 102213：自建房 chunk 載入時 `IsoRoom.hasLightSwitches` NPE 的成因與修法
+# TIS 論壇回覆 — 102213：自建房 chunk 載入時 `IsoRoom.hasLightSwitches` NPE 的成因與修法
 
-**狀態**：草稿，回覆既有主題 https://theindiestone.com/forums/topic/102213-title-b4221-nullpointerexception-in-isoroomhaslightswitches-roomdef-is-null-when-loading-chunks-in-player-built-areas/ （原回報者寫了「I could not determine how a square ends up pointing to such a room」，本文補上這段並附重現方法與修法建議）。發文前要使用者核准。與 R1（[2026-09-05-client-metagrid-isorooms-race-tis.md](2026-09-05-client-metagrid-isorooms-race-tis.md)，論壇 101035）同一個上游缺陷。
+**狀態**：**已回覆 2026-10-09** → https://theindiestone.com/forums/topic/102213-title-b4221-nullpointerexception-in-isoroomhaslightswitches-roomdef-is-null-when-loading-chunks-in-player-built-areas/#findComment-494741 （回覆既有主題；原回報者寫了「I could not determine how a square ends up pointing to such a room」，本文補上這段並附重現方法與修法建議）。論壇版本與下方本文相同，貼上時編輯器把網址轉成連結。與 R1（[2026-09-05-client-metagrid-isorooms-race-tis.md](2026-09-05-client-metagrid-isorooms-race-tis.md)，論壇 101035）同一個上游缺陷。
 
 ## 中文摘要
 
@@ -46,7 +46,7 @@ Reproduction (single player, -debug, vanilla 42.21.0, no mods needed)
 -------------------------------------------------------------------
 
 1. Start at 14322,4969 (the spot of the Trailer3 building debug scenario), zombies off.
-2. Build 8 small enclosed rooms (3x3, walls walls_exterior_wooden_01_40 / _41, floor carpentry_02_58 on z=1 as the roof) 20-50 tiles around the player, each in its own chunk, and wait until their squares report a room.
+2. Build 8 small enclosed rooms (3x3, walls `walls_exterior_wooden_01_40` / `walls_exterior_wooden_01_41`, floor `carpentry_02_58` on z=1 as the roof) 20-50 tiles around the player, each in its own chunk, and wait until their squares report a room.
 3. Teleport about 4000 tiles away, wait 6 seconds, teleport back, and add or remove one wall next to the player on every tick for 8 seconds.
 
 Vanilla threw on the first return in both runs, with the same stack as the report above (IsoRoom.java:604, IsoLightSwitch.java:879, IsoChunk.java:2930 on our build), and dropped back to the main menu. With the stopgap described below, all 12 rounds ran without an exception; on the first two returns alone it logged 20 queued chunks (3-9 squares each) that pointed at a cleared room and re-bound them. I can share the Lua scenario if it helps.
@@ -59,7 +59,7 @@ Returning false from hasLightSwitches when def is null avoids this NPE, but the 
 Suggested fix
 -------------
 
-- Bind rooms on the main thread. During deserialization keep at most the room ID, and resolve each square's room (getRoomAt / setRoomID) in loadInMainThread before anything reads it (before the room.addSquare loop). Main-thread binding cannot interleave with clientProcessBuildings, and it also stops the World Streamer thread from inserting into IsoMetaCell.isoRooms, which is the other half of the same problem (the HashMap race with an AIOOBE in recalculateBuildingAndRoomIDs, topic 101035).
+- Bind rooms on the main thread. During deserialization keep at most the room ID, and resolve each square's room (getRoomAt / setRoomID) in loadInMainThread before anything reads it (before the room.addSquare loop). IsoLightSwitch.load also registers the switch with square.getRoom() while the chunk is deserialized, so that registration would move along. Main-thread binding cannot interleave with clientProcessBuildings, and it also stops the World Streamer thread from inserting into IsoMetaCell.isoRooms, which is the other half of the same problem (the HashMap race with an AIOOBE in recalculateBuildingAndRoomIDs, topic 101035).
 - A smaller change: in loadInMainThread, if any square's room has def == null, run the per-square steps of updateSquares (lambda$updateSquares$0 and $1 in 42.21.0) and its per-chunk invalidation on that chunk before IsoLightSwitch.chunkLoaded, i.e. treat it as one of the chunks the last rebuild should have updated. This is the stopgap we ship in our client patch; chunks without a stale room are not touched.
 
 Details with bytecode offsets: https://github.com/Minidoracat/MinidoracatJavaPatchFor42/blob/main/docs/patches.en.md#2bu
