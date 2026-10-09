@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.5'
+$PACKAGE_VERSION = '0.2.6'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -72,8 +72,8 @@ Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.2($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.2-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.3($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.3-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -166,6 +166,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         throw "W55 姿勢摘要 on／off 不一致 $id：$($digests['on']) vs $($digests['off'])"
     }
     Write-Host "  W55 on／off 姿勢摘要相同（$id）"
+    # W57：on 與 off 各跑一次（off＝kill switch 實跑，結果必須與原版相同）
+    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.staleRoomHeal=off')))) {
+        $jvmArgs = @($run[1])
+        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.StaleRoomGuardBehaviorTest $run[0]
+        Assert-Ok "StaleRoomGuardBehaviorTest $($run[0]) $id"
+    }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
 if (Test-Path "$R\patcher\tests-client-common") {
@@ -203,6 +209,10 @@ loose .class files placed next to projectzomboid.jar; the jar itself is not modi
 - Enclosed player-built rooms next to or on top of a pre-built building: as soon as
   you walk in, furniture, trees and fences disappear and the ERROR counter in the
   bottom-right keeps climbing (a 42.21.0 bug; TIS has fixed it internally).
+- Walking or driving into an area with player-built houses: an error in the
+  bottom-right, the screen goes black and you are disconnected to the main menu
+  (a 42.21.0 bug; it happens when someone builds or tears something down nearby
+  while that part of the map is loading).
 - Mod vehicles with many moving parts (KI5, rSemiTruck and similar) cost frame time
   even when parked: their doors, hoods and windows are re-animated every frame.
   Parked vehicles no longer recompute an unchanged pose (the picture stays the same).
@@ -250,12 +260,14 @@ Modules
   32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one.
   Both include the texture leak fixes, a chunk-streaming log for black-edge reports
   (logging only), the 42.21.0 player-built room fix (XL trees are simply not faded
-  inside such rooms) and two vehicle animation speed-ups that keep the picture
-  identical: an unchanged vehicle part pose is not recomputed (checked against a full
-  recomputation now and then; any difference switches it off for the session), and a
-  per-bone check that allocates in vanilla is answered directly when the model has no
-  re-parented bones. JVM flags -Dmdc.vehAnimSkip=off and -Dmdc.boneReparentFast=off
-  turn them off.
+  inside such rooms), the 42.21.0 player-built room disconnect fix (a chunk whose
+  rooms were rebuilt while it was loading is re-bound to the new rooms, the same way
+  the game updates chunks that are already loaded) and two vehicle animation speed-ups
+  that keep the picture identical: an unchanged vehicle part pose is not recomputed
+  (checked against a full recomputation now and then; any difference switches it off
+  for the session), and a per-bone check that allocates in vanilla is answered directly
+  when the model has no re-parented bones. JVM flags -Dmdc.staleRoomHeal=off,
+  -Dmdc.vehAnimSkip=off and -Dmdc.boneReparentFast=off turn them off.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
   this game session actually reached the hook.
@@ -276,10 +288,12 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 (English: README-INSTALL.txt)
 
 【這是什麼】
-只改你自己電腦上的遊戲，修兩個畫面問題、減輕一個效能問題：
+只改你自己電腦上的遊戲，修三個問題、減輕一個效能問題：
 - 隊友、殭屍、車輛看不到，只剩影子和名牌。
 - 在預製房子旁邊或上面加蓋的封閉房間，一走進去家具、樹、圍籬就消失，
   右下角 ERROR 一直往上跳（42.21.0 官方 bug）。
+- 走進或開車進入有自建房的區域時，右下角跳錯、畫面一黑，被斷線送回主選單
+  （42.21.0 官方 bug：那一帶地圖載入途中剛好有人在附近蓋或拆東西時發生）。
 - KI5、rSemiTruck 這類門、引擎蓋、車窗會動的模組車，停著也每幀重算動畫，車多的地方會卡；
   停著沒變的車不再重算（畫面不變）。
 沒遇過這些問題的人可以不用裝。
@@ -325,9 +339,11 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 - 客戶端修復：標準版把貼圖等待門檻放寬到 4 GiB（建議 32GB 以上 RAM）；
   省記憶體版保留原版 50 MiB 門檻。兩者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
   兩版都含 42.21.0 自建房間 XL 樹例外修補：這種房間裡的 XL 樹不做室內淡化，其餘同原版。
+  兩版都含 42.21.0 自建房斷線修補：chunk 載入途中自建房被重建時，照遊戲更新已載入 chunk 的方式
+  把格子重新綁到新房間，不再斷線。
   兩版也都含兩項車輛動畫加速，畫面與原版相同：零件姿勢沒變就不重算（不定期抽查一次完整重算，
   不一致就本次遊戲停用），以及模型沒有骨頭改掛時，每根骨頭的檢查不再配置物件。
-  JVM 參數 -Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off 可分別關閉。
+  JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off 可分別關閉。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
 

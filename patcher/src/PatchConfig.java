@@ -1444,6 +1444,19 @@ public final class PatchConfig {
         boneLoop.expectedHits = 1;
         patches.add(animPlayer);
 
+        // ---- W57 自建房 chunk 載入斷線（docs/patches.md 2bu）----
+        // 格子在 World Streamer 執行緒反序列化時就綁上 IsoRoom；主執行緒接手前若 clientProcessBuildings 重建了
+        // 這一帶的自建建築，舊 IsoRoom 被 clear()（def=null），updateSquares 又只重綁 ChunkMap 裡的 chunk，
+        // loadInMainThread 的 IsoLightSwitch.chunkLoaded（javap offset 1863）讀 def.objects 即 NPE → 斷線。
+        // 1:1 改道 StaleRoomGuard.chunkLoaded：沒有指向已清空房間的格子時直接呼叫原版；有的話先對這個 chunk
+        // 補跑原版 updateSquares 的兩段逐格 lambda 與 chunk 收尾，再呼叫原版。
+        Patcher.ClassPatch chunk = new Patcher.ClassPatch("zombie/iso/IsoChunk");
+        Patcher.MethodOps mainLoad = chunk.method("loadInMainThread", "()V");
+        mainLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/objects/IsoLightSwitch",
+                "chunkLoaded", "(Lzombie/iso/IsoChunk;)V", "zombie/mdc/StaleRoomGuard", "chunkLoaded"));
+        mainLoad.expectedHits = 1;
+        patches.add(chunk);
+
         return patches;
     }
 

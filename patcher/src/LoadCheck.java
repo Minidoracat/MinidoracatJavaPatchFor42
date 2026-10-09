@@ -118,6 +118,12 @@ public final class LoadCheck {
                 }
                 System.out.println("vehicle anim OK VehicleAnimGate.update(AnimationPlayer,float)、"
                         + "BoneReparentFastPath.isBoneReparented(AnimationPlayer,int) 簽名一致");
+                var staleRoom = Class.forName("zombie.mdc.StaleRoomGuard", false, cl).getDeclaredMethod(
+                        "chunkLoaded", Class.forName("zombie.iso.IsoChunk", false, cl));
+                if (staleRoom.getReturnType() != void.class || (staleRoom.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("StaleRoomGuard.chunkLoaded signature");
+                }
+                System.out.println("stale room guard OK StaleRoomGuard.chunkLoaded(IsoChunk) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

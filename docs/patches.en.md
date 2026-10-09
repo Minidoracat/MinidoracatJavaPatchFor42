@@ -3220,6 +3220,76 @@ boundary. Livestock that died within 2 s of a catch-up with hunger or thirst ≥
 2/62 (3%); outside zones (not handled by W56) unchanged at 47% and 44%. The longest catch-up run within one frame was 240–702 ms, the same range as
 before (11–790 ms); every watchdog freeze was at shutdown.
 
+<a id="2bu"></a>
+## 2bu. Player-built room chunk-load disconnect (W57, client, default on; client package 0.2.6)
+
+**Symptom** (player report, 2026-10-09; TIS bug report [102213](https://theindiestone.com/forums/topic/102213-title-b4221-nullpointerexception-in-isoroomhaslightswitches-roomdef-is-null-when-loading-chunks-in-player-built-areas/)
+is the same problem reported by another MP player): when crossing into chunks of an area with player-built houses, an error appears in the bottom-right,
+the screen goes black and the client is disconnected to the main menu; the same area loads fine one time and fails the next. The player's client log
+(42.21.0 `4a0e9546ec`) has a single exception: `NullPointerException: Cannot read field "objects" because "this.def" is null at
+IsoRoom.hasLightSwitches(IsoRoom.java:604)`, called from `IsoLightSwitch.chunkLoaded(IsoLightSwitch.java:879)` ← `IsoChunk.loadInMainThread(IsoChunk.java:2930)`
+← `IsoChunkMap.updateInternal`. The catch in `IngameState.updateInternal` stops the `WorldStreamer`, saves and calls `doDisconnect("crash")`.
+
+**Root cause** (javap against the 42.21.0 jar `e1a69eb7`; LineNumberTable: IsoRoom 604 = offsets 12–27, `getfield def` → `getfield RoomDef.objects`;
+IsoLightSwitch 879 = offsets 61–82, including `hasLightSwitches`; IsoChunk 2930 = `IsoLightSwitch.chunkLoaded` at offsets 1862–1863 of `loadInMainThread`):
+- Squares are bound to rooms while the chunk is deserialized on the World Streamer thread: the only `IsoGridSquare.setRoomID` in
+  `IsoChunk.LoadFromDiskOrBufferInternal` (offset 880) gets or creates the IsoRoom in `IsoMetaCell.isoRooms` through `IsoChunk.getRoom` and
+  `IsoMetaGrid.getRoomByID`. The chunk then waits in the `IsoChunk.loadGridSquare` queue; the main thread's `IsoChunkMap.updateInternal` takes a
+  limited number per frame, puts each into the ChunkMap with `setChunkDirect` and only then runs `doLoadGridsquare` → `loadInMainThread`.
+- In that window, any IsoRegions change in the same or a neighbouring cell (256×256 tiles) — someone builds, removes or breaks a wall, floor, door or
+  fence; the server broadcasts region changes to every connection — makes the client main thread run `IsoRegions.update` →
+  `DataRoot.clientProcessBuildings` → `WorldRegionToMetaGrid.clientProcessBuildings`, which removes and rebuilds **every** user-defined building in those
+  cells: `removeIsoRoom` → `IsoRoom.clear()` sets `def` to null and empties `lightSwitches`. The following `updateSquares` only walks
+  `IsoCell.getChunkMap(i).getChunk(x, y)`; the queued chunk is not in the ChunkMap yet, so its squares still point at the cleared IsoRoom (`roomId` is
+  not -1, so `getRoom()` still returns it).
+- `IsoLightSwitch.chunkLoaded` in `loadInMainThread` calls `hasLightSwitches()` for every square with a room: `lightSwitches` is empty, the next read of
+  `def.objects` throws, and with a switch present `createLights(room.def.lightsActive)` would throw the same way. One square pointing at a cleared room
+  is therefore always a disconnect in vanilla.
+- Only player-built rooms are affected, because `clientProcessBuildings` never removes pre-built buildings. It is intermittent because a rebuild has to
+  land inside the window; the more chunks queue up while moving, the longer the window.
+- Same upstream defect as R1 ([101035](https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/),
+  the 42.20.4 AIOOBE from concurrent `isoRooms` HashMap access): the main thread rebuilds the metagrid without coordinating with the World Streamer.
+  R1 is two threads writing one HashMap; here a chunk in hand-over keeps a room that has been cleared.
+
+**Patch**: the only `invokestatic IsoLightSwitch.chunkLoaded(IsoChunk)V` in `IsoChunk.loadInMainThread()V` (offset 1863) →
+`invokestatic zombie/mdc/StaleRoomGuard.chunkLoaded(IsoChunk)V` (same descriptor, 3 bytes for 3 bytes, frames unchanged), `expectedHits = 1`, new ClassPatch
+`zombie/iso/IsoChunk`. The other call site, `recalcNeighboursNow` (@Deprecated, no callers in the jar), is left alone. The helper first counts the
+squares whose room has a null `def`, walking the squares exactly as vanilla `chunkLoaded` does:
+- None: it calls vanilla `IsoLightSwitch.chunkLoaded` directly; the result is bit-identical.
+- Some (vanilla always throws here): it looks up `lambda$updateSquares$0` and `$1` of `WorldRegionToMetaGrid` with `MethodHandles.privateLookupIn`. These two
+  private static methods are the per-square steps `updateSquares` hands to `forEachSquare`: the first calls `setRoomID` again, sets `roofHideBuilding`,
+  creates the room lights and registers them with the cell, marks toxic buildings and attaches the square's light switches to the room; the second sets
+  `associatedBuilding`, runs `RecalcProperties` and notifies pathfinding. The helper runs each of them over the chunk's squares in vanilla `forEachSquare`
+  order, then does what `updateSquares` does for every updated chunk — `invalidateRenderChunkLevels(2112L)`, `getCutawayData().invalidateAll()`,
+  `checkLightingLater_AllPlayers_AllLevels()` — and finally calls vanilla `chunkLoaded`. This adds the re-binding vanilla skipped, leaving the chunk in
+  the same state as if it had been in the ChunkMap during the rebuild. Pathfinding has not received the chunk yet (`addChunkToWorld` comes later in
+  `doLoadGridsquare`), so `PolygonalMap2.squareChanged` does nothing for it: native pathfinding gates on `loadedBits`, the Java version skips an unknown chunk.
+
+**Kill switch**: `-Dmdc.staleRoomHeal=off` (or `0`) always calls vanilla; restart required. The first chunk load logs one line to console.txt:
+`[MinidoracatJavaPatch][StaleRoomGuard] active=true|false` (with the raw flag value when set). Every re-binding logs
+`chunk <wx>,<wy>: <N> squares pointed to a cleared IsoRoom; rebound like WorldRegionToMetaGrid.updateSquares (#<n>)`, at most 20 lines per start.
+
+**Not handled**: the R1 HashMap race; squares that had no room before the rebuild and are inside one after it (no crash; they get the room at the next
+rebuild or reload, the same as vanilla for chunks that are already loaded); `IsoLightSwitch.load` reading a room that is being cleared on the streamer
+thread (a different moment, not reported).
+
+**Checks and verification**:
+- SmokeCheck (both variants): reasons for the patch — `LoadFromDiskOrBufferInternal` has exactly one `setRoomID`, `IsoRoom.clear` sets `def` to null,
+  `hasLightSwitches` reads `def.objects` without a null check (red if TIS changes any of them = reconsider); helper dependencies — `updateSquares` only walks
+  `IsoChunkMap.getChunk`, calls `forEachSquare` with static `lambda$updateSquares$0` (contains `setRoomID`) and then `$1` (contains `RecalcProperties`), and
+  ends with one each of `2112L`, the cutaway and the lighting call, and the helper's `RENDER_DIRTY_FLAGS` equals the vanilla constant; after the patch
+  `loadInMainThread` equals vanilla text (frames included) except for that one call; negative control: `recalcNeighboursNow` is unchanged. LoadCheck:
+  the helper is public static void.
+- `StaleRoomGuardBehaviorTest` (on and off per variant): a real `IsoMetaGrid` with one cell (IsoMetaCell/IsoMetaChunk room lookups, the IsoRoom and
+  IsoBuilding created by `getRoomByID`) and the real `IsoChunk`/`IsoGridSquare` constructors; only IsoWorld, IsoCell and IsoMetaGrid are allocated with Unsafe.
+  Vanilla negative control: with 16 squares bound to a cleared room, vanilla `chunkLoaded` throws the NPE from the player's log, word for word. Without
+  stale squares the helper matches vanilla item by item. On: room rebuilt — no exception, the 16 squares move to the new IsoRoom, inside squares are not
+  exterior while outside ones are, `associatedBuilding` points at the new building, the player's light switch is attached to the new room, room lights
+  are registered with the chunk and the cell; room removed — no exception, all 64 squares have no room and are exterior. Off: `active=false`, and stale
+  squares throw the same NPE as vanilla.
+
+**Retirement**: once TIS fixes it, the SmokeCheck reasons turn red; then remove this patch from `PatchConfig.client()` and delete the helper and its test.
+
 ---
 
 <a id="3"></a>

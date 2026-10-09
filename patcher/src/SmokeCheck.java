@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -27,6 +28,7 @@ import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
@@ -3615,6 +3617,65 @@ public final class SmokeCheck {
                         .equals(methodText(pBoneLoop)));
         failed += check("W55 負對照：isBoneReparented 本體未改動",
                 methodText(method(distJava, apCls, "isBoneReparented", "(I)Z")).equals(methodText(vReparented)));
+
+        // ---- W57 自建房 chunk 載入斷線（docs/patches.md 2bu）----
+        // 存在理由：格子在 World Streamer 執行緒反序列化時綁房間（LoadFromDiskOrBufferInternal 唯一的 setRoomID），
+        // IsoRoom.clear 把 def 設成 null，hasLightSwitches 讀 def.objects 不檢查 null（TIS 改了任一處就轉紅＝重估撤刀）。
+        // helper 以 MethodHandle 呼叫 updateSquares 的兩個 lambda 並照抄 chunk 收尾：名稱、順序與收尾內容鎖進建置期。
+        String chunkCls = "zombie/iso/IsoChunk";
+        String roomCls = "zombie/iso/areas/IsoRoom";
+        String wrtmgCls = "zombie/iso/areas/isoregion/metagrid/WorldRegionToMetaGrid";
+        String lightSwitchCls = "zombie/iso/objects/IsoLightSwitch";
+        String staleCls = "zombie/mdc/StaleRoomGuard";
+        String chunkArg = "(L" + chunkCls + ";)V";
+        String squareArg = "(L" + squareCls + ";)V";
+        MethodNode vHasSwitches = methodFromJar(jar, roomCls, "hasLightSwitches", "()Z");
+        boolean clearNullsDef = false;
+        for (AbstractInsnNode in : methodFromJar(jar, roomCls, "clear", "(Z)V").instructions) {
+            if (in.getOpcode() == Opcodes.ACONST_NULL && nextReal(in) instanceof FieldInsnNode put
+                    && put.getOpcode() == Opcodes.PUTFIELD && put.owner.equals(roomCls) && put.name.equals("def")) {
+                clearNullsDef = true;
+            }
+        }
+        failed += check("W57 vanilla 前提：chunk 在 streamer 執行緒綁房間、IsoRoom.clear 把 def 設 null、hasLightSwitches 讀 def.objects 不檢查 null",
+                countExactCalls(methodFromJar(jar, chunkCls, "LoadFromDiskOrBufferInternal", "(Ljava/nio/ByteBuffer;)V"),
+                        Opcodes.INVOKEVIRTUAL, squareCls, "setRoomID", "(J)V") == 1
+                && clearNullsDef
+                && countFieldTouches(vHasSwitches, "zombie/iso/RoomDef", "objects") > 0
+                && countOpcode(vHasSwitches, Opcodes.IFNULL) + countOpcode(vHasSwitches, Opcodes.IFNONNULL) == 0);
+        MethodNode vUpdateSquares = methodFromJar(jar, wrtmgCls, "updateSquares", "()V");
+        List<String> squareSteps = new ArrayList<>();
+        for (AbstractInsnNode in : vUpdateSquares.instructions) {
+            if (in instanceof InvokeDynamicInsnNode indy && indy.bsmArgs.length > 1 && indy.bsmArgs[1] instanceof Handle step) {
+                squareSteps.add(step.getOwner() + "." + step.getName() + step.getDesc()
+                        + (step.getTag() == Opcodes.H_INVOKESTATIC ? " static" : ""));
+            }
+        }
+        failed += check("W57 vanilla 前提：updateSquares 只走 ChunkMap，依序以 static lambda$updateSquares$0（setRoomID）、$1（RecalcProperties）走訪，收尾 2112L＋cutaway＋lighting 且與 helper 常數連動",
+                countExactCalls(vUpdateSquares, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunkMap", "getChunk", "(II)L" + chunkCls + ";") == 1
+                && squareSteps.equals(List.of(wrtmgCls + ".lambda$updateSquares$0" + squareArg + " static",
+                        wrtmgCls + ".lambda$updateSquares$1" + squareArg + " static"))
+                && countExactCalls(methodFromJar(jar, wrtmgCls, "lambda$updateSquares$0", squareArg),
+                        Opcodes.INVOKEVIRTUAL, squareCls, "setRoomID", "(J)V") == 1
+                && countExactCalls(methodFromJar(jar, wrtmgCls, "lambda$updateSquares$1", squareArg),
+                        Opcodes.INVOKEVIRTUAL, squareCls, "RecalcProperties", "()V") == 1
+                && countLongConst(vUpdateSquares, 2112L) == 1
+                && countExactCalls(vUpdateSquares, Opcodes.INVOKEVIRTUAL, chunkCls, "invalidateRenderChunkLevels", "(J)V") == 1
+                && countExactCalls(vUpdateSquares, Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/fboRenderChunk/FBORenderCutaways$ChunkLevelsData", "invalidateAll", "()V") == 1
+                && countExactCalls(vUpdateSquares, Opcodes.INVOKEVIRTUAL, chunkCls, "checkLightingLater_AllPlayers_AllLevels", "()V") == 1
+                && classNode(distJava, staleCls).fields.stream().anyMatch(f -> f.name.equals("RENDER_DIRTY_FLAGS")
+                        && f.value instanceof Long v && v == 2112L));
+        MethodNode vMainLoad = methodFromJar(jar, chunkCls, "loadInMainThread", "()V");
+        MethodNode pMainLoad = method(distJava, chunkCls, "loadInMainThread", "()V");
+        failed += check("W57 loadInMainThread 唯一 IsoLightSwitch.chunkLoaded 同形改道 StaleRoomGuard.chunkLoaded，其餘指令與 frames 保留",
+                countExactCalls(vMainLoad, Opcodes.INVOKESTATIC, lightSwitchCls, "chunkLoaded", chunkArg) == 1
+                && countExactCalls(pMainLoad, Opcodes.INVOKESTATIC, lightSwitchCls, "chunkLoaded", chunkArg) == 0
+                && methodText(vMainLoad).replace("INVOKESTATIC " + lightSwitchCls + ".chunkLoaded " + chunkArg,
+                        "INVOKESTATIC " + staleCls + ".chunkLoaded " + chunkArg).equals(methodText(pMainLoad)));
+        failed += check("W57 負對照：IsoChunk.recalcNeighboursNow（另一個 chunkLoaded 呼叫點）未改動",
+                methodText(method(distJava, chunkCls, "recalcNeighboursNow", "()V"))
+                        .equals(methodText(methodFromJar(jar, chunkCls, "recalcNeighboursNow", "()V"))));
         return failed;
     }
 

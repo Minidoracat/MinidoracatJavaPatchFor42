@@ -3649,6 +3649,32 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **上線驗收（2026-10-08 17:58）**：10-08 03:45 MOD 更新重啟時套用（job 狀態 `APPLIED`、03:46 起的 session 橫幅即為新版，舊的 123 個 class 封存在 job 的 `state/`；之後每次開服 `[mdc-javagate] OK: 127`）。之後六個 session（重啟都是 MOD 更新或定時重啟，沒有當機）橫幅都是 `server patch ffed4ff`，127 個 loose class 逐檔 SHA 與 manifest 相符，零 linkage 錯誤，各刀心跳 `anomalies` 都是 0；`deferFailures`、`delegateFailures` 都是 0。各 session 最後一筆心跳合計延後 20,342 筆、補完 20,259 筆（逾時才補 1,308 筆）、延後中卸載 71 筆。`maxDeferMs` 57–181 秒都出在開機後第一位玩家進場（見上段），逾時集中在跨 server cell 邊界的牧場。補算後 2 秒內死亡、飢或渴 ≥0.8 的家畜：畜牧區內從 227／644（35%，10-04 起 41 個 session）降到 2／62（3%）；畜牧區外（W56 不處理）47% 與 44% 不變。同一幀連續補算的最長耗時 240–702 ms，與之前 11–790 ms 同範圍；看門狗記到的凍結都在關服。
 
+<a id="2bu"></a>
+## 2bu. 自建房 chunk 載入斷線（W57，client，預設 on；client 包 0.2.6）
+
+**症狀**（2026-10-09 玩家回報；官方 bug report [102213](https://theindiestone.com/forums/topic/102213-title-b4221-nullpointerexception-in-isoroomhaslightswitches-roomdef-is-null-when-loading-chunks-in-player-built-areas/) 是另一位 MP 玩家回報的同一問題）：跨 chunk 走進有自建房的區域時，右下角跳錯、畫面一黑、被斷線送回主選單；同一區時好時壞。玩家的 client log（42.21.0 `4a0e9546ec`）只有一條例外：`NullPointerException: Cannot read field "objects" because "this.def" is null at IsoRoom.hasLightSwitches(IsoRoom.java:604)`，往上是 `IsoLightSwitch.chunkLoaded(IsoLightSwitch.java:879)` ← `IsoChunk.loadInMainThread(IsoChunk.java:2930)` ← `IsoChunkMap.updateInternal`。`IngameState.updateInternal` 的 catch 接住後停掉 `WorldStreamer`、存檔、`doDisconnect("crash")`。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`；LineNumberTable：IsoRoom 604＝offset 12–27 的 `getfield def`→`getfield RoomDef.objects`，IsoLightSwitch 879＝offset 61–82，含 `hasLightSwitches`，IsoChunk 2930＝`loadInMainThread` offset 1862–1863 的 `IsoLightSwitch.chunkLoaded`）：
+- 格子在 World Streamer 執行緒反序列化 chunk 時就綁房間：`IsoChunk.LoadFromDiskOrBufferInternal` 唯一的 `IsoGridSquare.setRoomID`（offset 880）經 `IsoChunk.getRoom`、`IsoMetaGrid.getRoomByID` 取得或建立 `IsoMetaCell.isoRooms` 裡的 IsoRoom。之後 chunk 進 `IsoChunk.loadGridSquare` 佇列；主執行緒的 `IsoChunkMap.updateInternal` 每幀只取有限數量，`setChunkDirect` 放進 ChunkMap 後才 `doLoadGridsquare` → `loadInMainThread`。
+- 在這段空窗裡，只要同一個或相鄰 cell（256×256 格）的 IsoRegions 有變更（有人蓋、拆或打壞牆、地板、門、圍籬；server 把區域變更廣播給所有連線），client 主執行緒的 `IsoRegions.update` → `DataRoot.clientProcessBuildings` → `WorldRegionToMetaGrid.clientProcessBuildings` 就把這些 cell 的**所有** user-defined building 拆掉重建：`removeIsoRoom` → `IsoRoom.clear()` 把 def 設成 null、清空 lightSwitches。重建後的 `updateSquares` 只走 `IsoCell.getChunkMap(i).getChunk(x, y)`；佇列裡的 chunk 不在 ChunkMap，格子仍指向被清空的 IsoRoom（roomId 不是 -1，`getRoom()` 照樣回它）。
+- `loadInMainThread` 的 `IsoLightSwitch.chunkLoaded` 對每個有房間的格子呼叫 `hasLightSwitches()`：lightSwitches 已空，接著讀 `def.objects` 就 NPE；有開關時下一步的 `createLights(room.def.lightsActive)` 也一樣。所以只要有一格指向被清空的房間，原版一定斷線。
+- 只有自建房會遇到：預製建築不會被 `clientProcessBuildings` 拆掉。時好時壞是因為要剛好在空窗內遇到重建；移動時排隊的 chunk 越多，空窗越長。
+- 與 R1（[101035](https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/)，42.20.4 `isoRooms` HashMap 並行存取的 AIOOBE）同一個上游缺陷：主執行緒重建 metagrid 時沒有和 World Streamer 協調。R1 是兩個執行緒同時寫同一個 HashMap，這次是交接中的 chunk 拿到已被清空的房間。
+
+**手術**：`IsoChunk.loadInMainThread()V` 內唯一的 `invokestatic IsoLightSwitch.chunkLoaded(IsoChunk)V`（offset 1863）1:1 改道 `invokestatic zombie/mdc/StaleRoomGuard.chunkLoaded(IsoChunk)V`（描述子相同、3 bytes 換 3 bytes、frames 原樣），`expectedHits = 1`，新 ClassPatch `zombie/iso/IsoChunk`。另一個呼叫點 `recalcNeighboursNow`（@Deprecated，jar 內沒有呼叫者）不動。helper 先用與原版 `chunkLoaded` 相同的走訪，數出房間 def 為 null 的格子：
+- 沒有：直接呼叫原版 `IsoLightSwitch.chunkLoaded`，結果逐位相同。
+- 有（原版必定 NPE）：以 `MethodHandles.privateLookupIn` 取得 `WorldRegionToMetaGrid` 的 `lambda$updateSquares$0`、`$1`。這兩個 private static 方法是 `updateSquares` 交給 `forEachSquare` 的逐格邏輯：前者重新 `setRoomID`、設 `roofHideBuilding`、建房間燈並登記到 cell、標毒氣、把格子上的開關掛到房間；後者設 `associatedBuilding`、`RecalcProperties`、通知尋路。helper 依原版 `forEachSquare` 的順序對這個 chunk 的格子各跑一遍，再做 `updateSquares` 對每個更新 chunk 的收尾：`invalidateRenderChunkLevels(2112L)`、`getCutawayData().invalidateAll()`、`checkLightingLater_AllPlayers_AllLevels()`，最後呼叫原版 `chunkLoaded`。這等於補上原版漏掉的「重建後重綁這個 chunk」，狀態與「重建時這個 chunk 已在 ChunkMap 裡」相同。此時 chunk 還沒交給尋路（`addChunkToWorld` 在 `doLoadGridsquare` 後段），`PolygonalMap2.squareChanged` 對它不做事：原生尋路以 `loadedBits` 擋掉，Java 版查不到 chunk 就略過。
+
+**kill switch**：`-Dmdc.staleRoomHeal=off`（或 `0`）一律直接呼叫原版，需重啟。第一次載入 chunk 時在 console.txt 記一行 `[MinidoracatJavaPatch][StaleRoomGuard] active=true|false`（設了旗標時附原值）；每次補綁記一行 `chunk <wx>,<wy>: <N> squares pointed to a cleared IsoRoom; rebound like WorldRegionToMetaGrid.updateSquares (#<n>)`，每次啟動最多 20 行。
+
+**不處理**：R1 的 HashMap 並行存取；格子原本沒有房間、重建後才有的情況（不會當機，要等下一次重建或重新載入，原版對已載入的 chunk 也是這樣）；`IsoLightSwitch.load` 在 streamer 執行緒讀到正在被清空的房間（另一個時間點，沒有回報）。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：存在理由——`LoadFromDiskOrBufferInternal` 恰一個 `setRoomID`、`IsoRoom.clear` 把 def 設成 null、`hasLightSwitches` 讀 `def.objects` 前沒有 null 檢查（TIS 改了任一處就轉紅＝重估撤刀）；helper 依賴——`updateSquares` 只走 `IsoChunkMap.getChunk`，依序以 static `lambda$updateSquares$0`（含 `setRoomID`）、`$1`（含 `RecalcProperties`）呼叫 `forEachSquare`，收尾的 `2112L`、cutaway、lighting 各一，helper 的 `RENDER_DIRTY_FLAGS` 與原版常數相同；手術後 `loadInMainThread` 除了這一個呼叫之外文字（含 frames）與原版相同；負對照 `recalcNeighboursNow` 未改動。LoadCheck：helper 為 public static void。
+- `StaleRoomGuardBehaviorTest`（兩個變體各跑 on、off）：真 `IsoMetaGrid` 一個 cell（IsoMetaCell／IsoMetaChunk 的房間查詢、`getRoomByID` 建出的 IsoRoom 與 IsoBuilding）、真 `IsoChunk`／`IsoGridSquare` 建構子，只有 IsoWorld、IsoCell、IsoMetaGrid 以 Unsafe 配置。原版負對照：16 格綁在已 `clear()` 的房間，原版 `chunkLoaded` 拋出與玩家 log 一字不差的 NPE。沒有過期格子時 helper 與原版逐項相同。on：房間被重建——不拋例外、16 格改綁新的 IsoRoom、室內不是 exterior 而室外是、`associatedBuilding` 指向新建築、玩家擺的開關掛到新房間、房間燈登記到 chunk 與 cell；房間被拆掉——不拋例外、64 格都沒有房間且是 exterior。off：`active=false`，過期格子照原版拋同一個 NPE。
+
+**退場**：官方修好後 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
+
 ---
 
 <a id="3"></a>
