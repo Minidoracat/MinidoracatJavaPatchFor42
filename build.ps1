@@ -118,6 +118,8 @@ $helperEntries = @(
     'zombie/network/packets/connection/MdcCoopNameGuard.class',
     'zombie/mdc/VehicleRelevancyGate.class',
     'zombie/mdc/VehicleRelevancyGate$StillState.class',
+    'zombie/mdc/SyncIsoObjectProbe.class',
+    'zombie/mdc/SyncIsoObjectProbe$Conn.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -568,6 +570,12 @@ java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=5" -
 Assert-Ok "VehicleRelevancyGateTest（on，R=5 夾到下限 32）"
 java -Xverify:all "-Dmdc.vehicleRelevancy=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest off 64
 Assert-Ok "VehicleRelevancyGateTest（off，原版）"
+
+Write-Host "[9zg/10] SyncIsoObject 洪流觀測（W58）：原方法恰一次、原版負對照、門檻與 10 秒限頻、beat 清閒置連線、簿記例外隔離、off 不記帳..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SyncIsoObjectProbeTest on
+Assert-Ok "SyncIsoObjectProbeTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SyncIsoObjectProbeTest off
+Assert-Ok "SyncIsoObjectProbeTest（off，只呼叫原方法）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -3316,6 +3316,29 @@ public final class SmokeCheck {
                 countExactCalls(method(distJava, wdCls, "dump", "(JI)V"),
                         Opcodes.INVOKESTATIC, soundProbe, "describeActive", "()Ljava/lang/String;") == 1);
 
+        // ---- W58 SyncIsoObject 洪流觀測（docs/patches.md 2bv）----
+        // receiveSyncIsoObject 內唯一的 IsoObject.syncIsoObject 同形改道；helper 照原版呼叫原方法恰一次。
+        String w58Gs = "zombie/network/GameServer";
+        String w58Iso = "zombie/iso/IsoObject";
+        String w58Probe = "zombie/mdc/SyncIsoObjectProbe";
+        String w58Desc = "(ZBLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)V";
+        String w58ProbeDesc = "(L" + w58Iso + ";" + w58Desc.substring(1);
+        String w58RecvDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V";
+        MethodNode w58VRecv = methodFromJar(jar, w58Gs, "receiveSyncIsoObject", w58RecvDesc);
+        MethodNode w58PRecv = method(distJava, w58Gs, "receiveSyncIsoObject", w58RecvDesc);
+        failed += check("W58 vanilla 前提：receiveSyncIsoObject 內恰 1 個 IsoObject.syncIsoObject，且是 GameServer 全 class 唯一",
+                countExactCalls(w58VRecv, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1
+                && classWideCalls(classNodeFromJar(jar, w58Gs), Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1);
+        failed += check("W58 手術後：唯一 syncIsoObject 同形改道 SyncIsoObjectProbe.syncIsoObject，其餘指令與 frames 保留",
+                methodText(w58VRecv).replace("INVOKEVIRTUAL " + w58Iso + ".syncIsoObject " + w58Desc,
+                        "INVOKESTATIC " + w58Probe + ".syncIsoObject " + w58ProbeDesc).equals(methodText(w58PRecv))
+                && classWideCalls(classNode(distJava, w58Gs), Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 0
+                && classWideCalls(classNode(distJava, w58Gs), Opcodes.INVOKESTATIC, w58Probe, "syncIsoObject", w58ProbeDesc) == 1);
+        failed += check("W58 helper 契約：原方法在 helper 內恰呼叫 1 次",
+                countExactCalls(method(distJava, w58Probe, "syncIsoObject", w58ProbeDesc),
+                        Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1
+                && classWideCalls(classNode(distJava, w58Probe), Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

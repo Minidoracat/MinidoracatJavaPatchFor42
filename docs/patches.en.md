@@ -3298,6 +3298,62 @@ thread (a different moment, not reported).
 
 **Retirement**: once TIS fixes it, the SmokeCheck reasons turn red; then remove this patch from `PatchConfig.client()` and delete the helper and its test.
 
+<a id="2bv"></a>
+## 2bv. SyncIsoObject flood probe (W58, server, observe only)
+
+**Why**: on 2026-10-11 the production console printed `Packets limit has exceeded for SyncIsoObject` 163 times around 01:40 and 01:42
+(`MaxPacketsPerSecond=1000`, so a single connection sent more than 1000 packets in one second), while two players near one base dropped below 1 FPS.
+The vanilla warning (`PacketsCache.isLimitExceeded`) does not say which connection it is about, so neither the sender nor the object can be found.
+After the server receives a SyncIsoObject, the `bRemote` branch of `IsoObject.syncIsoObject` forwards it to every other connection regardless of
+distance (`IsoObject.java:910-921`), so one player's flood becomes one copy for every connection on the server.
+
+**Patch**: the only `invokevirtual IsoObject.syncIsoObject(ZBLUdpConnection;LByteBufferReader;)V` in
+`GameServer.receiveSyncIsoObject(ByteBufferReader, UdpConnection, short)` (offset 115, after `sq.getObjects().get(index)` and `checkcast IsoObject`) →
+`invokestatic zombie/mdc/SyncIsoObjectProbe.syncIsoObject` (receiver becomes the first argument), `expectedHits = 1`, on the existing GameServer
+ClassPatch. The method is dispatched on the main thread from `mainLoopDealWithNetData`. The javap context is in
+`docs/specs/zombie_network_GameServer.json`. The helper does its bookkeeping inside a try, then calls the original method outside it, so the return
+and exceptions are vanilla:
+- One 1-second window per connection (connected GUID); the first packet after the window expires starts a new one. The 201st packet in a window
+  (threshold 200) counts one flood and prints one line; another flood from the same connection within 10 s only counts as `suppressed`, and the next
+  line reports how many.
+- One beat line every 5 minutes (a first-use line on the first call), which also drops connections that sent nothing for 60 s.
+- No allocation on the hot path (except for a new connection and when logging); bookkeeping exceptions only count `anomalies`.
+
+```text
+[MinidoracatJavaPatch][SyncIsoObjectProbe] flood#<n> player=<account> steamId=<id> guid=<guid> packets=201 windowMs=<ms> rate=<packets/s>/s obj=<class> sprite=<name|?> at=<x>,<y>,<z> state=<byte> first=<class> sprite=<name|?> at=<x>,<y>,<z> sameAsFirst=<n>/201 suppressed=<n>
+[MinidoracatJavaPatch][SyncIsoObjectProbe] beat calls=<n> floods=<n> logged=<n> suppressed=<n> maxWindow=<largest window in these 5 minutes> maxPlayer=<account> tracked=<connections> anomalies=<n>
+```
+
+`obj` is the packet that crossed the threshold and `first` is the first packet of the window; `sameAsFirst` is how many packets of the window hit
+the same object as the first one (close to 201 means one object is flooding). `windowMs` is the main-thread time from the first to the 201st packet
+and `rate` is derived from it; packets queued in the same frame are processed together, so a `windowMs` near 0 only means 201 packets arrived within
+one frame. `maxWindow` includes connections that never crossed the threshold, so it also shows the normal peak.
+
+**Kill switch**: `-Dmdc.syncIsoObjectProbe=0|off` (on by default; the redirect stays and only calls the original method, nothing is counted or
+logged); needs a restart.
+
+**Deployment**: the manifest adds `zombie/mdc/SyncIsoObjectProbe.class` and `SyncIsoObjectProbe$Conn.class` (128 → 130 classes), and `GameServer.class`
+is replaced by the version with one more patch site. The manifest only grows, so no uninstall is needed first: stage and arm with the deferred-activation
+flow (no manual restart), and the switch happens at the next scheduled restart. After it is live, check that the banner shows the new fingerprint and
+`[mdc-javagate] OK: 130`, then look for the first-use line in the console.
+
+**Reading it**: when `Packets limit has exceeded for SyncIsoObject` appears, the flood line around the same second names the connection and the
+object; use the class, sprite and position of `obj`/`first` to see in game what the object is and who is using it. The threshold of 200 is far below
+vanilla's 1000, so the flood is logged before the warning.
+
+**Not done**: no packet is dropped or throttled and the forwarding range is unchanged; that waits until the sender and the object are known.
+
+**Gates and tests**:
+- SmokeCheck: vanilla `receiveSyncIsoObject` has exactly one `IsoObject.syncIsoObject`, the only one in the whole GameServer class; after the patch
+  the method text (frames included) differs only in that call; the helper calls the original method exactly once.
+- `SyncIsoObjectProbeTest` (on and off, separate JVMs): vanilla negative control — calling the original method directly (the unpatched path) counts
+  and logs nothing; 200 packets are not a flood and the 201st prints exactly one line with every field (account, steamId, guid, the object and the first
+  object, `sameAsFirst=150/201`); no second flood in the same window; a flood within 10 s only counts as suppressed, one after 10 s prints again with
+  `suppressed=1`; connections are counted separately; the beat carries the largest window and its player and drops idle connections; an exception
+  while reading the sprite during logging only counts `anomalies` and the original method is still called; an exception from the original method
+  propagates unchanged; `connection=null` still calls through. off: the original method runs once per packet, nothing is counted, zero log lines in the
+  whole JVM.
+
 ---
 
 <a id="3"></a>

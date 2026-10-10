@@ -3676,6 +3676,35 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **退場**：官方修好後 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 
+<a id="2bv"></a>
+## 2bv. SyncIsoObject 洪流觀測（W58，server，純觀測）
+
+**為什麼要記**：2026-10-11 正式服 console 在 01:40 與 01:42 兩個時段共印了 163 次 `Packets limit has exceeded for SyncIsoObject`（`MaxPacketsPerSecond=1000`，代表單一連線 1 秒內送超過 1000 包），同時段某基地附近兩位玩家的客戶端卡到 1 FPS 以下。原版這行警告（`PacketsCache.isLimitExceeded`）不記是哪條連線，抓不到送的人，也看不出是哪個物件。伺服器收到 SyncIsoObject 後，`IsoObject.syncIsoObject` 的 bRemote 分支會不分距離轉送給其他所有連線（`IsoObject.java:910-921`），一位玩家的洪流會變成全服每條連線各收一份。
+
+**手術**：`GameServer.receiveSyncIsoObject(ByteBufferReader, UdpConnection, short)` 內唯一的 `invokevirtual IsoObject.syncIsoObject(ZBLUdpConnection;LByteBufferReader;)V`（offset 115，前面是 `sq.getObjects().get(index)` 與 `checkcast IsoObject`）1:1 改道 `invokestatic zombie/mdc/SyncIsoObjectProbe.syncIsoObject`（receiver 變第一參數），`expectedHits = 1`，掛在既有的 GameServer ClassPatch 上。這個方法在主執行緒的 `mainLoopDealWithNetData` 派送。javap 語境見 `docs/specs/zombie_network_GameServer.json`。helper 先在 try 內記帳，再在 try 外照原樣呼叫原方法，回傳與例外都與原版相同：
+- 每條連線（connected GUID）一個 1 秒視窗：視窗過期後的第一包重新起算。同一視窗第 201 包（門檻 200）計一次 flood 並印一行；同一連線 10 秒內的下一次 flood 只計 `suppressed`，下一行帶上這段期間的數目。
+- 每 5 分鐘一行 beat（首次呼叫立即印首次生效行），同時清掉 60 秒沒送封包的連線。
+- 熱路徑不配置物件（新連線與 log 除外）；簿記例外只計 `anomalies`。
+
+```text
+[MinidoracatJavaPatch][SyncIsoObjectProbe] flood#<n> player=<帳號> steamId=<id> guid=<guid> packets=201 windowMs=<ms> rate=<包/秒>/s obj=<class> sprite=<名稱|?> at=<x>,<y>,<z> state=<byte> first=<class> sprite=<名稱|?> at=<x>,<y>,<z> sameAsFirst=<n>/201 suppressed=<n>
+[MinidoracatJavaPatch][SyncIsoObjectProbe] beat calls=<n> floods=<n> logged=<n> suppressed=<n> maxWindow=<這 5 分鐘單一視窗最大包數> maxPlayer=<帳號> tracked=<連線數> anomalies=<n>
+```
+
+`obj` 是越過門檻的那一包，`first` 是這個視窗的第一包；`sameAsFirst` 是視窗內有幾包打在第一包的同一個物件上（接近 201 就是同一個物件在洪流）。`windowMs` 是主執行緒處理第一包到第 201 包經過的毫秒，`rate` 由它換算；同一幀排隊的封包會一起處理，`windowMs` 接近 0 時 `rate` 只代表一幀內就收到 201 包。`maxWindow` 也算沒越過門檻的連線，可看出平常的峰值。
+
+**kill switch**：`-Dmdc.syncIsoObjectProbe=0|off`（預設開；改道仍在，只呼叫原方法，不記也不印），需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/SyncIsoObjectProbe.class` 與 `SyncIsoObjectProbe$Conn.class`（128 → 130 個 class），`GameServer.class` 換成多一個命中點的版本。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm（不手動重啟），下一次排程重啟時切換。上線後先確認橫幅指紋是新版、`[mdc-javagate] OK: 130`，再看 console 出現首次生效行。
+
+**判讀**：出現 `Packets limit has exceeded for SyncIsoObject` 時，同一秒附近的 flood 行就是來源連線與物件；拿 `obj`／`first` 的 class、sprite 與座標到現場看是什麼物件、誰在操作。門檻 200 遠低於原版的 1000，警告之前就會先記到。
+
+**未做**：不擋包、不限速、不改轉送範圍；等抓到來源與物件再決定修哪裡。
+
+**守門與驗證**：
+- SmokeCheck：原版 `receiveSyncIsoObject` 恰一個 `IsoObject.syncIsoObject`，且是 GameServer 全 class 唯一；手術後方法文字（含 frames）只差這一個呼叫；helper 內原方法恰呼叫一次。
+- `SyncIsoObjectProbeTest`（on、off 兩個 JVM）：原版負對照——直接呼叫原方法（未改道的路徑）不記帳、不印；200 包不算 flood、第 201 包恰一行且欄位齊全（帳號、steamId、guid、物件與第一包物件、`sameAsFirst=150/201`）；同一視窗不重複計；10 秒內的下一次 flood 只計 suppressed，10 秒後再印並帶上 `suppressed=1`；另一條連線各自計數；beat 帶最大視窗與玩家、清掉閒置連線；log 時讀 sprite 拋例外只計 `anomalies`、原方法照常呼叫；原方法拋出的例外原樣上拋；`connection=null` 照常呼叫。off：原方法每包一次、不記帳、整個 JVM 零 log 行。
+
 ---
 
 <a id="3"></a>

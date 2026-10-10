@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 65 patched classes, 172 patch sites and 63 helper classes on 42.21.0.
+  actions and log noise. 65 patched classes, 173 patch sites and 65 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two 42.21.0
   player-built room bugs, vanishing objects and disconnects while chunks load; mod vehicles re-animated every frame while parked). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -155,8 +155,9 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 
 Observe-only probes that change no behavior: the main-loop watchdog ([2ac](docs/patches.en.md#2ac)), the
 animal offline catch-up probe ([2au](docs/patches.en.md#2au)), the animal death ledger
-([2bb](docs/patches.en.md#2bb)), the animal ID miss log ([2bo](docs/patches.en.md#2bo)) and the slow
-sound-packet probe ([2at](docs/patches.en.md#2at)).
+([2bb](docs/patches.en.md#2bb)), the animal ID miss log ([2bo](docs/patches.en.md#2bo)), the slow
+sound-packet probe ([2at](docs/patches.en.md#2at)) and the SyncIsoObject flood probe ([2bv](docs/patches.en.md#2bv); vanilla's
+`Packets limit has exceeded` warning does not name the connection, so this logs the player and object behind a flood).
 They write rate-limited heartbeat lines to the console and are how most of the issues above were found.
 
 ### Client patches (release package)
