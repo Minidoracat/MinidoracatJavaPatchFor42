@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 65 patched classes, 173 patch sites and 65 helper classes on 42.21.0.
+  actions and log noise. 65 patched classes, 175 patch sites and 66 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two 42.21.0
   player-built room bugs, vanishing objects and disconnects while chunks load; mod vehicles re-animated every frame while parked). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -133,6 +133,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W10 Stuck timed actions ([2x](docs/patches.en.md#2x)) | A packet argument that deserializes to null makes the Lua action constructor throw before `processServer`. The client gets neither Accept nor Reject, and its whole action queue is stuck. | A fuse around the constructor and the argument parse; the client gets a proper Reject. (The Reject written from the wrong object, W10-A, was fixed in 42.21.0.) | [#100905](https://theindiestone.com/forums/topic/100905/) |
 | W10-C Interrupted actions ([2aj](docs/patches.en.md#2aj)) | A new request silently stops the player's accepted action on the server without telling the client. | Sends a Reject for the interrupted action (enforce mode) and only dispatches action packets whose player belongs to the sending connection. | draft |
 | W20 Clothing sync ([2ah](docs/patches.en.md#2ah)) | One worn item with a null visual throws in `ItemDescription` and stops all clothing broadcasts for that player; a count mismatch drops the whole `SyncVisuals` packet. | Guards the tint read; observability for the other two clusters. | [#100911](https://theindiestone.com/forums/topic/100911/) |
+| W59 Teammates missing from the map ([2bw](docs/patches.en.md#2bw)) | A client only requests a remote player's full map data when its change count differs from the server's, and draws the player only after that data arrives. Both sides start the entry at 1 (the client's first frame bumps a new entry from 0 to 1), and the request and reply are unreliable, so one lost packet leaves the counts equal forever: that teammate never appears on the player's mini map or world map. | The server sends `base + 2 × count` (base: an even number of at least 1024, random per boot), which a client without the data can never match, so it keeps requesting every second until the data arrives. Same traffic as vanilla otherwise; server only. | not reported |
 | LootRespawn fixed containers ([2e](docs/patches.en.md#2e)) | On custom maps without a vanilla TownZone, original fixed containers never respawn loot. | Narrow fallback for original, unmoved containers only. | design issue |
 | Animal stress tuning ([2b](docs/patches.en.md#2b)) | Gameplay tuning, not a bug. | Idle stress decay ×2, sound stress ÷3, slaughter chain cap halved. | — |
 

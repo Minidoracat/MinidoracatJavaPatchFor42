@@ -1,6 +1,6 @@
 {
   "className": "zombie/network/GameServer",
-  "kind": "observability",
+  "kind": "observability+behavior-fix",
   "buildBaseline": "42.21.0 / jar SHA-256 e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33",
   "patches": [
     {
@@ -26,7 +26,55 @@
       "rationale": "SyncIsoObject 是 PacketTypes 註冊給 GameServer::receiveSyncIsoObject 的舊式封包，在主執行緒 mainLoopDealWithNetData 派送。它依封包座標與 index 取出物件後呼叫 IsoObject.syncIsoObject(true, state, connection, bb)；後者的 bRemote 分支讀完狀態，再對 udpEngine.connections 中 GUID 不同於來源的每條連線各送一包，不看距離。單一連線 1 秒內超過 MaxPacketsPerSecond 時 PacketsCache.isLimitExceeded 只印 'Packets limit has exceeded for SyncIsoObject'，不記連線，抓不到送的人與物件。改道這唯一的呼叫點：helper 先在 try 內記帳（每連線 1 秒視窗、門檻 200 包、每連線 10 秒最多一行 flood、每 5 分鐘 beat），之後在 try 外照原樣呼叫原方法，原版例外語意不變。",
       "evidence": "javap -c -v -p 對 42.21.0 jar：\n  static void receiveSyncIsoObject(zombie.core.network.ByteBufferReader, zombie.core.raknet.UdpConnection, short);\n    stack=5, locals=10, args_size=3\n        97: aload         9\n        99: invokevirtual #2745  // Method zombie/iso/IsoGridSquare.getObjects:()Lzombie/util/list/PZArrayList;\n       102: iload         6\n       104: invokevirtual #2752  // Method zombie/util/list/PZArrayList.get:(I)Ljava/lang/Object;\n       107: checkcast     #2753  // class zombie/iso/IsoObject\n       110: iconst_1\n       111: iload         8\n       113: aload_1\n       114: aload_0\n       115: invokevirtual #3912  // Method zombie/iso/IsoObject.syncIsoObject:(ZBLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)V\n       118: goto          157\n（LineNumberTable line 2999 = offset 97；slot 8 = state、slot 1 = connection、slot 0 = bb。常數池 #3912 在全 class 只被 offset 115 引用一次；前置 offset 0–18 是 DebugOptions.network.server.syncIsoObject 開關、offset 54–60 是 exist==1 檢查。）",
       "verification": "建置：SmokeCheck 釘原版 receiveSyncIsoObject 恰一個 IsoObject.syncIsoObject 且全 class 唯一、手術後方法文字（含 frames）只差這一個呼叫、helper 內原方法恰一次；SyncIsoObjectProbeTest on／off。部署後：console 首次生效行 '[MinidoracatJavaPatch][SyncIsoObjectProbe] 首次生效（純觀測；…）'，之後每 5 分鐘一行 beat、anomalies=0；再出現 'Packets limit has exceeded for SyncIsoObject' 時同一秒附近應有 flood 行，帶玩家、steamId、guid 與物件。"
+    },
+    {
+      "id": "W59",
+      "op": "redirect",
+      "method": {
+        "name": "sendWorldMapPlayerPosition",
+        "desc": "(Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/worldMap/WorldMapRemotePlayer",
+        "name": "getChangeCount",
+        "desc": "()S",
+        "expectedCount": 1
+      },
+      "helper": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/mdc/WorldMapChangeCount",
+        "name": "getChangeCount",
+        "desc": "(Lzombie/worldMap/WorldMapRemotePlayer;)S"
+      },
+      "rationale": "WorldMapPlayerPosition（UNRELIABLE_SEQUENCED）：伺服器每秒送 onlineId、changeCount、x、y，客戶端 GameClient.receiveWorldMapPlayerPosition 只在本機條目計數 != 收到的值時索取完整資料，setFullData 後才 hasFullData=true，UIWorldMap.shouldShowRemotePlayer 沒有它就不畫。客戶端每幀 IsoPlayer.resetDisplayName → WorldMapRemotePlayer.setPlayer 把新條目 0 推到 1，伺服器條目首次 setPlayer 後也是 1；索取或回覆掉一包，兩邊恆等、永不再索取。GameServer 全 class 只有這兩個 getChangeCount，都直接寫到 wire（下一條 putShort），改道後送出 BASE + 2 × 原計數（BASE 每次開機隨機取 [1024, 16382] 的偶數），沒拿到資料的客戶端對不上而持續索取；伺服器條目計數不動，伺服器不讀客戶端計數。",
+      "evidence": "javap -c -v -p 對 42.21.0 jar：\n  private static void sendWorldMapPlayerPosition(zombie.core.raknet.UdpConnection);\n    stack=2, locals=5, args_size=1\n       127: aload_1\n       128: aload         4\n       130: invokevirtual #4250  // Method zombie/worldMap/WorldMapRemotePlayer.getOnlineID:()S\n       133: invokevirtual #2593  // Method zombie/core/network/ByteBufferWriter.putShort:(S)V\n       136: aload_1\n       137: aload         4\n       139: invokevirtual #4251  // Method zombie/worldMap/WorldMapRemotePlayer.getChangeCount:()S\n       142: invokevirtual #2593  // Method zombie/core/network/ByteBufferWriter.putShort:(S)V\n（LineNumberTable line 3446 = offset 136；slot 1 = ByteBufferWriter b、slot 4 = remotePlayer。#4251 在全 class 只被 offset 139 與 receiveWorldMapPlayerPosition offset 174 引用。）",
+      "verification": "建置：SmokeCheck 釘原版 GameServer 恰 2 個 getChangeCount（各在一個送出方法、下一條 putShort）、GameClient 只在 receiveWorldMapPlayerPosition 讀 1 次；手術後兩個方法文字（含 frames）只差這個呼叫；helper 內原計數恰讀一次。WorldMapChangeCountTest on／off：真 GameServer 送出與回覆、真 GameClient 接收，掉一次回覆或索取後 off 與原版計數負對照卡住、on 每秒索取直到拿到資料，沒掉包時索取次數兩種模式相同。部署後：console 首次生效行 '[MinidoracatJavaPatch][WorldMapChangeCount] 首次生效 base=<BASE>（-Dmdc.worldMapChangeCount=0|off 回原版）'。"
+    },
+    {
+      "id": "W59",
+      "op": "redirect",
+      "method": {
+        "name": "receiveWorldMapPlayerPosition",
+        "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V"
+      },
+      "site": {
+        "opcode": "INVOKEVIRTUAL",
+        "owner": "zombie/worldMap/WorldMapRemotePlayer",
+        "name": "getChangeCount",
+        "desc": "()S",
+        "expectedCount": 1
+      },
+      "helper": {
+        "opcode": "INVOKESTATIC",
+        "owner": "zombie/mdc/WorldMapChangeCount",
+        "name": "getChangeCount",
+        "desc": "(Lzombie/worldMap/WorldMapRemotePlayer;)S"
+      },
+      "rationale": "WorldMapPlayerPosition（UNRELIABLE_SEQUENCED）：伺服器每秒送 onlineId、changeCount、x、y，客戶端 GameClient.receiveWorldMapPlayerPosition 只在本機條目計數 != 收到的值時索取完整資料，setFullData 後才 hasFullData=true，UIWorldMap.shouldShowRemotePlayer 沒有它就不畫。客戶端每幀 IsoPlayer.resetDisplayName → WorldMapRemotePlayer.setPlayer 把新條目 0 推到 1，伺服器條目首次 setPlayer 後也是 1；索取或回覆掉一包，兩邊恆等、永不再索取。GameServer 全 class 只有這兩個 getChangeCount，都直接寫到 wire（下一條 putShort），改道後送出 BASE + 2 × 原計數（BASE 每次開機隨機取 [1024, 16382] 的偶數），沒拿到資料的客戶端對不上而持續索取；伺服器條目計數不動，伺服器不讀客戶端計數。",
+      "evidence": "javap -c -v -p 對 42.21.0 jar：\n  public static void receiveWorldMapPlayerPosition(zombie.core.network.ByteBufferReader, zombie.core.raknet.UdpConnection, short);\n    stack=2, locals=8, args_size=3\n       160: aload         4\n       162: aload         7\n       164: invokevirtual #4250  // Method zombie/worldMap/WorldMapRemotePlayer.getOnlineID:()S\n       167: invokevirtual #2593  // Method zombie/core/network/ByteBufferWriter.putShort:(S)V\n       170: aload         4\n       172: aload         7\n       174: invokevirtual #4251  // Method zombie/worldMap/WorldMapRemotePlayer.getChangeCount:()S\n       177: invokevirtual #2593  // Method zombie/core/network/ByteBufferWriter.putShort:(S)V\n（LineNumberTable line 3498 = offset 170；slot 4 = ByteBufferWriter b、slot 7 = remotePlayer；這是 isFullUpdate=true 的完整資料回覆。）",
+      "verification": "建置：SmokeCheck 釘原版 GameServer 恰 2 個 getChangeCount（各在一個送出方法、下一條 putShort）、GameClient 只在 receiveWorldMapPlayerPosition 讀 1 次；手術後兩個方法文字（含 frames）只差這個呼叫；helper 內原計數恰讀一次。WorldMapChangeCountTest on／off：真 GameServer 送出與回覆、真 GameClient 接收，掉一次回覆或索取後 off 與原版計數負對照卡住、on 每秒索取直到拿到資料，沒掉包時索取次數兩種模式相同。部署後：console 首次生效行 '[MinidoracatJavaPatch][WorldMapChangeCount] 首次生效 base=<BASE>（-Dmdc.worldMapChangeCount=0|off 回原版）'。"
     }
   ],
-  "behaviorNotes": "只觀測：原方法每包恰呼叫一次、參數原樣，回傳與例外與原版相同。kill switch -Dmdc.syncIsoObjectProbe=0|off（預設開）：只呼叫原方法，不記帳也不印。同一 class 的其他手術（sendToxicBuilding log 改道、W29 mainLoopDealWithNetData 的 onServerPacket 改道）共用同一個 ClassPatch，不在本檔。"
+  "behaviorNotes": "W58 只觀測：原方法每包恰呼叫一次、參數原樣，回傳與例外與原版相同；kill switch -Dmdc.syncIsoObjectProbe=0|off（預設開）只呼叫原方法，不記帳也不印。W59 只改送出到 wire 的計數，伺服器條目本身與其他欄位不動；kill switch -Dmdc.worldMapChangeCount=0|off（預設開）回傳原值，wire 與原版相同。同一 class 的其他手術（sendToxicBuilding log 改道、W29 mainLoopDealWithNetData 的 onServerPacket 改道）共用同一個 ClassPatch，不在本檔。"
 }

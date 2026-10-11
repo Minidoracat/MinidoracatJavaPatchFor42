@@ -3354,6 +3354,69 @@ vanilla's 1000, so the flood is logged before the warning.
   propagates unchanged; `connection=null` still calls through. off: the original method runs once per packet, nothing is counted, zero log lines in the
   whole JVM.
 
+<a id="2bw"></a>
+## 2bw. Teammates missing from the map (W59, server, default on)
+
+**Symptom** (2026-10-12, production 42.21.0, `MapRemotePlayerVisibility=2`, faction or safehouse members only): after a server restart, two ordinary
+players of the same faction came online almost together, about 12 tiles apart, and were on each other's screen from the start. Player-A's mini map and
+world map never showed Player-B, while Player-B could see Player-A. Ruled out: the map mod's layer switch (the engine draws the local name tag under the
+same setting, and the tag was drawn), other mods, the server visibility rule (`shouldSendWorldMapPlayerPosition` compares the two players' Faction, same
+result both ways), disguises and invisibility. The client's internal state cannot be observed, so the root cause is an inference; the mechanism follows
+fully from the decompiled code and is reproduced with the real code in the behavior test.
+
+**Vanilla mechanism** (42.21.0, decompiled and javap):
+- The engine draws teammates: the first check in `UIWorldMap.renderRemotePlayers` → `shouldShowRemotePlayer` is `WorldMapRemotePlayer.hasFullData()`,
+  which only `setFullData` sets to true.
+- Every second the server sends `WorldMapPlayerPosition` to each connection (`isFullUpdate=false`: onlineId, changeCount, x, y).
+  `GameClient.receiveWorldMapPlayerPosition` sends a request back only when its local entry's count differs from the received one; the server's
+  `receiveWorldMapPlayerPosition` replies with the full data (`isFullUpdate=true`), and only `setFullData` on the client sets `hasFullData`. The packet
+  type is `UNRELIABLE_SEQUENCED`; a lost request or reply is never resent.
+- Every frame the client runs `IsoGameCharacter.renderlast` → `updateUserName` → `IsoPlayer.resetDisplayName` → `WorldMapRemotePlayer.setPlayer`, which
+  does `changeCount++` whenever a field differs and never touches `hasFullData`. A new entry starts at 0, so with the teammate on screen the first frame
+  bumps it to 1.
+- The server entry is 1 after its first `setPlayer` and stays 1 until a name, role, invisibility or disguise change. onlineIds are reassigned at every
+  boot, so after a restart every entry starts at 1.
+- Result: if one packet is lost while the entry is new, the client's first frame bumps it to 1, exactly the server's 1, and it never requests again; that
+  teammate is never drawn on this player's mini map or world map. It only recovers when the entry is deleted (the 5-second remote player timeout, or
+  PlayerTimeout) or the server's count changes. One-way because only one direction lost a packet.
+
+**Patch**: the GameServer class has exactly two `invokevirtual WorldMapRemotePlayer.getChangeCount()S`, each followed by
+`ByteBufferWriter.putShort(S)V`: `sendWorldMapPlayerPosition(UdpConnection)` offset 139 (after `aload 4`) and
+`receiveWorldMapPlayerPosition(ByteBufferReader, UdpConnection, short)` offset 174 (after `aload 7`). Both → `invokestatic
+zombie/mdc/WorldMapChangeCount.getChangeCount(WorldMapRemotePlayer)S`, `expectedHits = 1` each, on the existing GameServer ClassPatch; the javap context
+is in `docs/specs/zombie_network_GameServer.json`. The helper returns `BASE + 2 × count` (cast to short), where `BASE` is an even number between 1024 and
+16382 picked at random at every boot. The server entry's own count is not changed, and the server never reads the client's count.
+
+**Why that is enough**: before a client has the full data, its local value is the number of field changes `setPlayer` saw since the entry was created,
+normally 1; the server now sends an even value of at least 1024 (for counts up to 8192). They cannot be equal, so the client requests again every second
+until a reply arrives. Once it has the data, its local value equals the sent value and from then on equality works as in vanilla. Side effect: the
+client's local +1 can no longer happen to equal the server's next count, so server-side changes are not missed.
+
+**Traffic**: the same as vanilla. Vanilla already re-requests an on-screen teammate every second (the server sends accessLevel `None` while the client's
+role name is `user`, so the next frame's `setPlayer` adds 1 after every reply), and still does; an off-screen teammate's counts are equal once the data
+arrives, so there are no more requests. Only an entry that would have been stuck gets one extra request per second until its data arrives.
+
+**Kill switch**: `-Dmdc.worldMapChangeCount=0|off` (on by default) returns the original count, so the wire is vanilla; needs a restart. The first send
+logs one console line `[MinidoracatJavaPatch][WorldMapChangeCount] 首次生效 base=<BASE>（-Dmdc.worldMapChangeCount=0|off 回原版）`.
+
+**Deployment**: server only; players install nothing. The manifest adds `zombie/mdc/WorldMapChangeCount.class` (130 → 131 classes), and `GameServer.class`
+is replaced by the version with two more patch sites. The manifest only grows, so no uninstall is needed first: stage and arm with the deferred-activation
+flow, and the switch happens at the next scheduled restart. After it is live, check that the banner shows the new fingerprint and
+`[mdc-javagate] OK: 131`, and look for the first-use line once players can see each other.
+
+**Gates and tests**:
+- SmokeCheck: reasons for the patch — vanilla GameServer has exactly two `getChangeCount` (one in each sending method, each followed by `putShort`) and
+  GameClient reads it once, in `receiveWorldMapPlayerPosition` (red if TIS changes the comparison, then reassess); after the patch both methods' text
+  (frames included) differs only in that call and GameServer no longer reads the count directly; the helper reads the original count exactly once.
+- `WorldMapChangeCountTest` (on and off, separate JVMs): the server side runs the real patched `GameServer.sendWorldMapPlayerPosition(UdpConnection)` and
+  `receiveWorldMapPlayerPosition`, the client side the real `GameClient.receiveWorldMapPlayerPosition`; packets are written by the real writer and
+  `PacketType` into connections that only override the buffer endpoints, the test decides whether each one is delivered or lost, and every client frame
+  calls the real `setPlayer`. Two scenarios, one lost reply and one lost request: the vanilla negative control (run in both modes, a position packet with
+  the vanilla count) and off never request again in the next 10 seconds and `hasFullData` stays false, reproducing the symptom; on requests every second
+  and `hasFullData` becomes true once the reply arrives. Without loss, both modes request 10 times in 10 seconds on screen and 0 times off screen. The
+  server entry's count is unchanged; for counts 0–8192 the sent value is always an even number of at least 1024; off sends the original count and logs
+  nothing.
+
 ---
 
 <a id="3"></a>

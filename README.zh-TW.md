@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 65 個 patched class、173 個命中點、65 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 65 個 patched class、175 個命中點、66 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -119,6 +119,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W10 卡讀條（[2x](docs/patches.md#2x)） | 封包參數反序列化成 null 時，Lua 動作建構子在 `processServer` 之前就丟例外；client 既收不到 Accept 也收不到 Reject，整條動作佇列卡死。 | 在建構子與參數解析外加保險絲，client 會收到正確的 Reject。（從錯的物件寫出 Reject 的 W10-A 已在 42.21.0 由官方修掉。） | [#100905](https://theindiestone.com/forums/topic/100905/) |
 | W10-C 被打斷的動作（[2aj](docs/patches.md#2aj)） | 新的請求會在伺服器上靜默停掉玩家已被接受的動作，卻不通知 client。 | 對被打斷的動作補送 Reject（enforce 模式），並且只派送玩家屬於發送連線的動作封包。 | 草稿 |
 | W20 衣物同步（[2ah](docs/patches.md#2ah)） | 一件 visual 為 null 的穿戴物會讓 `ItemDescription` 丟例外，該玩家的衣物廣播全部停擺；數量不符時整個 `SyncVisuals` 封包被丟棄。 | 守住 tint 讀取；另外兩個叢集加觀測。 | [#100911](https://theindiestone.com/forums/topic/100911/) |
+| W59 地圖上看不到隊友（[2bw](docs/patches.md#2bw)） | 客戶端只在遠端玩家的變更計數和伺服器不同時索取完整的地圖資料，拿到資料才畫這位玩家。兩邊的條目一開始都是 1（客戶端第一幀把新條目從 0 推到 1），索取和回覆又是不可靠封包，只要掉一包，兩邊計數就一直相等：這位隊友永遠不會出現在玩家的小地圖和世界地圖上。 | 伺服器改送「基準＋2×計數」（基準是每次開機隨機、至少 1024 的偶數），沒拿到資料的客戶端對不上，會每秒持續索取直到拿到；其餘流量與原版相同，只改伺服器。 | 未回報 |
 | LootRespawn 固定容器（[2e](docs/patches.md#2e)） | 沒有原版 TownZone 的自訂地圖上，原生固定容器永遠不刷新。 | 只對未搬動的原生固定容器放行的窄範圍 fallback。 | 設計問題 |
 | 動物壓力調整（[2b](docs/patches.md#2b)） | 玩法調整，不是 bug。 | 閒置壓力衰減 ×2、聲音壓力 ÷3、屠宰連鎖上限減半。 | — |
 

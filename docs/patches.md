@@ -3705,6 +3705,32 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - SmokeCheck：原版 `receiveSyncIsoObject` 恰一個 `IsoObject.syncIsoObject`，且是 GameServer 全 class 唯一；手術後方法文字（含 frames）只差這一個呼叫；helper 內原方法恰呼叫一次。
 - `SyncIsoObjectProbeTest`（on、off 兩個 JVM）：原版負對照——直接呼叫原方法（未改道的路徑）不記帳、不印；200 包不算 flood、第 201 包恰一行且欄位齊全（帳號、steamId、guid、物件與第一包物件、`sameAsFirst=150/201`）；同一視窗不重複計；10 秒內的下一次 flood 只計 suppressed，10 秒後再印並帶上 `suppressed=1`；另一條連線各自計數；beat 帶最大視窗與玩家、清掉閒置連線；log 時讀 sprite 拋例外只計 `anomalies`、原方法照常呼叫；原方法拋出的例外原樣上拋；`connection=null` 照常呼叫。off：原方法每包一次、不記帳、整個 JVM 零 log 行。
 
+<a id="2bw"></a>
+## 2bw. 世界地圖隊友點錯位（W59，server，預設 on）
+
+**症狀**（2026-10-12 正式服 42.21.0，`MapRemotePlayerVisibility=2`，只顯示同陣營或同安全屋）：伺服器重啟後，同陣營的兩位一般玩家幾乎同時上線，出生點相距約 12 格，一進遊戲就在彼此畫面上。Player-A 的小地圖和世界地圖都看不到 Player-B，Player-B 卻看得到 Player-A。已排除：地圖 MOD 的圖層開關（引擎畫的本機名牌和隊友點綁同一個設定，名牌有畫）、其他 MOD、伺服器可見規則（`shouldSendWorldMapPlayerPosition` 比對兩人的 Faction，兩個方向結果相同）、偽裝與隱形。看不到客戶端內部狀態，所以根因是推論；機制可以從反編譯完整推出，並在行為測試裡用真程式重現。
+
+**原版機制**（42.21.0 反編譯＋javap）：
+- 隊友點由引擎畫：`UIWorldMap.renderRemotePlayers` → `shouldShowRemotePlayer` 的第一個檢查是 `WorldMapRemotePlayer.hasFullData()`，只有 `setFullData` 會把它設成 true。
+- 伺服器每秒對每條連線送 `WorldMapPlayerPosition`（`isFullUpdate=false`：onlineId、changeCount、x、y）。客戶端 `GameClient.receiveWorldMapPlayerPosition` 只在本機條目的計數和收到的值不同時回送索取；伺服器 `receiveWorldMapPlayerPosition` 回完整資料（`isFullUpdate=true`），客戶端 `setFullData` 之後才有 `hasFullData`。這個封包型別是 `UNRELIABLE_SEQUENCED`，索取或回覆掉了都不會重送。
+- 客戶端每幀 `IsoGameCharacter.renderlast` → `updateUserName` → `IsoPlayer.resetDisplayName` → `WorldMapRemotePlayer.setPlayer`；`setPlayer` 只要有欄位不同就 `changeCount++`，不碰 `hasFullData`。新條目是 0，畫面上有這位隊友時第一幀就被推到 1。
+- 伺服器條目第一次 `setPlayer` 後是 1，之後沒有改名、改身分、隱形或偽裝就一直是 1。onlineId 每次開機重新分配，所以重啟後每個條目都從 1 開始。
+- 結果：條目剛建立時只要掉一包，客戶端被第一幀推到 1，剛好等於伺服器的 1，從此不再索取，這位隊友在這位玩家的大小地圖都不畫。要等條目被刪掉（遠端玩家 5 秒沒更新的逾時、PlayerTimeout）或伺服器端計數改變才恢復。單向是因為只有一個方向掉了封包。
+
+**手術**：GameServer 全 class 恰 2 個 `invokevirtual WorldMapRemotePlayer.getChangeCount()S`，下一條都是 `ByteBufferWriter.putShort(S)V`：`sendWorldMapPlayerPosition(UdpConnection)` offset 139（前面是 `aload 4`）與 `receiveWorldMapPlayerPosition(ByteBufferReader, UdpConnection, short)` offset 174（前面是 `aload 7`）。兩處 1:1 改道 `invokestatic zombie/mdc/WorldMapChangeCount.getChangeCount(WorldMapRemotePlayer)S`，各自 `expectedHits = 1`，掛在既有的 GameServer ClassPatch 上；javap 語境見 `docs/specs/zombie_network_GameServer.json`。helper 回傳 `BASE + 2 × 原計數`（轉成 short），`BASE` 是每次開機隨機選的偶數，範圍 1024–16382。伺服器條目本身的計數不動，伺服器也從不讀客戶端的計數。
+
+**為什麼這樣就夠**：客戶端還沒拿到完整資料時，本機值是條目建立後 `setPlayer` 偵測到的欄位變化次數，通常是 1；伺服器送出的值是偶數，原計數 8192 以內至少 1024。兩邊不會相等，客戶端每秒重新索取，直到回覆送達。拿到之後本機值等於送出值，之後的相等條件與原版相同。附帶效果：客戶端本機的 +1 不會再剛好等於伺服器下一次的計數，伺服器端的變化不會被漏掉。
+
+**流量**：和原版相同。畫面上的隊友原版就每秒重新索取一次（伺服器送 accessLevel `None`，客戶端的角色名是 `user`，每次拿到資料後下一幀 `setPlayer` 都會 +1），改了以後一樣；畫面外的隊友拿到資料後計數相等，不再索取。只有原本會卡住的條目多出每秒一次索取，直到拿到資料為止。
+
+**kill switch**：`-Dmdc.worldMapChangeCount=0|off`（預設開）回傳原值，送出的 wire 與原版相同，需重啟。第一次送出時在 console 記一行 `[MinidoracatJavaPatch][WorldMapChangeCount] 首次生效 base=<BASE>（-Dmdc.worldMapChangeCount=0|off 回原版）`。
+
+**部署**：只改伺服器，玩家不用裝任何東西。manifest 新增 `zombie/mdc/WorldMapChangeCount.class`（130 → 131 個 class），`GameServer.class` 換成多兩個命中點的版本。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm，下一次排程重啟時切換。上線後確認橫幅指紋是新版、`[mdc-javagate] OK: 131`，有玩家看得到別人之後 console 出現首次生效行。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——原版 GameServer 恰 2 個 `getChangeCount`（兩個送出方法各 1，下一條都是 `putShort`），GameClient 只在 `receiveWorldMapPlayerPosition` 讀 1 次（TIS 改了比較方式就轉紅，屆時重估）；手術後兩個方法文字（含 frames）只差這個呼叫、GameServer 不再直接讀計數；helper 內原計數恰讀一次。
+- `WorldMapChangeCountTest`（on、off 兩個 JVM）：伺服器端跑手術後的真 `GameServer.sendWorldMapPlayerPosition(UdpConnection)` 與 `receiveWorldMapPlayerPosition`，客戶端跑真 `GameClient.receiveWorldMapPlayerPosition`；封包由真 writer 與 `PacketType` 寫進只覆寫 buffer 端點的連線，由測試決定送達或丟掉，客戶端每幀直接呼叫真 `setPlayer`。掉一次回覆、掉一次索取兩種情境：原版負對照（兩種模式都跑，餵原版計數的位置包）與 off 之後 10 秒都不索取、`hasFullData` 一直是 false，重現症狀；on 每秒索取，回覆送達後 `hasFullData=true`。沒掉包時畫面上 10 秒索取 10 次、畫面外 0 次，兩種模式相同。伺服器條目計數不被改；原計數 0–8192 的送出值都是至少 1024 的偶數；off 送原值、零 log 行。
+
 ---
 
 <a id="3"></a>

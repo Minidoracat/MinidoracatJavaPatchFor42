@@ -973,6 +973,23 @@ public final class PatchConfig {
                 "zombie/mdc/SyncIsoObjectProbe", "syncIsoObject"));
         syncIsoIngress.expectedHits = 1;
 
+        // W59：世界地圖隊友點錯位（docs/patches.md 2bw）。客戶端只在計數不同時索取完整資料，原版兩邊建條目後都是 1，
+        // 索取或回覆掉一包就永遠相等、hasFullData 永遠 false、隊友不畫。送出計數的兩個 getChangeCount
+        // （sendWorldMapPlayerPosition offset 139、receiveWorldMapPlayerPosition offset 174，後面都是 putShort）
+        // 改道 WorldMapChangeCount：送出 BASE（每次開機隨機、至少 1024 的偶數）+ 2 × 原計數，伺服器條目不動。
+        // kill switch -Dmdc.worldMapChangeCount=0|off。
+        Patcher.Site wmChangeCount = new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/worldMap/WorldMapRemotePlayer", "getChangeCount", "()S",
+                "zombie/mdc/WorldMapChangeCount", "getChangeCount");
+        Patcher.MethodOps wmPosition = gameServer.method("sendWorldMapPlayerPosition",
+                "(Lzombie/core/raknet/UdpConnection;)V");
+        wmPosition.redirects.add(wmChangeCount);
+        wmPosition.expectedHits = 1;
+        Patcher.MethodOps wmFullData = gameServer.method("receiveWorldMapPlayerPosition",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V");
+        wmFullData.redirects.add(wmChangeCount);
+        wmFullData.expectedHits = 1;
+
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");
         for (String methodName : new String[]{"updateSeed", "updateFishingData"}) {

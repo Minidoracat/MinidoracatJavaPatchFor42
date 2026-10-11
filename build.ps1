@@ -120,6 +120,7 @@ $helperEntries = @(
     'zombie/mdc/VehicleRelevancyGate$StillState.class',
     'zombie/mdc/SyncIsoObjectProbe.class',
     'zombie/mdc/SyncIsoObjectProbe$Conn.class',
+    'zombie/mdc/WorldMapChangeCount.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -576,6 +577,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "SyncIsoObjectProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SyncIsoObjectProbeTest off
 Assert-Ok "SyncIsoObjectProbeTest（off，只呼叫原方法）"
+
+Write-Host "[9zh/10] 世界地圖隊友點錯位（W59）：真 GameServer／GameClient 往返，掉一次回覆或索取後 on 持續索取、off 與原版計數負對照卡住，沒掉包時索取次數與原版相同..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldMapChangeCountTest on
+Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldMapChangeCountTest off
+Assert-Ok "WorldMapChangeCountTest（off，原版計數）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

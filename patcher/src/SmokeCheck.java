@@ -3339,6 +3339,43 @@ public final class SmokeCheck {
                         Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1
                 && classWideCalls(classNode(distJava, w58Probe), Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1);
 
+        // ---- W59 世界地圖隊友點錯位（docs/patches.md 2bw）----
+        // GameServer 送出計數的兩個 getChangeCount 同形改道；客戶端唯一讀點是 receiveWorldMapPlayerPosition 的相等比較。
+        String w59Gs = "zombie/network/GameServer";
+        String w59Wm = "zombie/worldMap/WorldMapRemotePlayer";
+        String w59Helper = "zombie/mdc/WorldMapChangeCount";
+        String w59HelperDesc = "(L" + w59Wm + ";)S";
+        String[][] w59Methods = {
+                {"sendWorldMapPlayerPosition", "(Lzombie/core/raknet/UdpConnection;)V"},
+                {"receiveWorldMapPlayerPosition", "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V"}};
+        boolean w59Vanilla = classWideCalls(classNodeFromJar(jar, w59Gs), Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 2
+                && classWideCalls(classNodeFromJar(jar, "zombie/network/GameClient"),
+                        Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 1
+                && countExactCalls(methodFromJar(jar, "zombie/network/GameClient", "receiveWorldMapPlayerPosition",
+                        "(Lzombie/core/network/ByteBufferReader;S)V"), Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 1;
+        boolean w59Patched = classWideCalls(classNode(distJava, w59Gs), Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 0
+                && classWideCalls(classNode(distJava, w59Gs), Opcodes.INVOKESTATIC, w59Helper, "getChangeCount", w59HelperDesc) == 2;
+        for (String[] w59M : w59Methods) {
+            MethodNode w59V = methodFromJar(jar, w59Gs, w59M[0], w59M[1]);
+            boolean w59ToWire = false;
+            for (AbstractInsnNode in : w59V.instructions) {
+                if (isCall(in, Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S")) {
+                    w59ToWire = isCall(nextReal(in), Opcodes.INVOKEVIRTUAL, "zombie/core/network/ByteBufferWriter", "putShort", "(S)V");
+                }
+            }
+            w59Vanilla &= countExactCalls(w59V, Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 1 && w59ToWire;
+            w59Patched &= methodText(w59V).replace("INVOKEVIRTUAL " + w59Wm + ".getChangeCount ()S",
+                    "INVOKESTATIC " + w59Helper + ".getChangeCount " + w59HelperDesc)
+                    .equals(methodText(method(distJava, w59Gs, w59M[0], w59M[1])));
+        }
+        failed += check("W59 vanilla 前提：GameServer 恰 2 個 getChangeCount（兩個送出方法各 1，下一條是 putShort），GameClient 只在 receiveWorldMapPlayerPosition 讀 1 次",
+                w59Vanilla);
+        failed += check("W59 手術後：兩個 getChangeCount 同形改道 WorldMapChangeCount.getChangeCount，其餘指令與 frames 保留",
+                w59Patched);
+        failed += check("W59 helper 契約：原計數在 helper 內恰讀 1 次",
+                countExactCalls(method(distJava, w59Helper, "getChangeCount", w59HelperDesc),
+                        Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
