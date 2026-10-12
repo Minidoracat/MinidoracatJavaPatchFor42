@@ -3376,6 +3376,62 @@ public final class SmokeCheck {
                 countExactCalls(method(distJava, w59Helper, "getChangeCount", w59HelperDesc),
                         Opcodes.INVOKEVIRTUAL, w59Wm, "getChangeCount", "()S") == 1);
 
+        // ---- W60 動物遺失／複製觀測（docs/patches.md 2bx）----
+        // 四個方法各自的原呼叫同形改道 AnimalLossProbe；放下動物的三個呼叫必須依序 copyFrom → get → add（helper 靠這個順序配對）。
+        String w60Probe = "zombie/mdc/AnimalLossProbe";
+        String w60Animal = "zombie/characters/animals/IsoAnimal";
+        String w60Aim = "zombie/popman/animal/AnimalInstanceManager";
+        String w60Chunk = "zombie/iso/IsoChunk";
+        String w60AnimalArg = "(L" + w60Animal + ";)";
+        // {class, method, desc, owner, callee, calleeDesc, helper, helperDesc}
+        String[][] w60Sites = {
+                {"zombie/iso/IsoGridSquare", "AddWorldInventoryItem", "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;",
+                        w60Animal, "copyFrom", w60AnimalArg + "V", "dropCopy", "(L" + w60Animal + ";L" + w60Animal + ";)V"},
+                {"zombie/iso/IsoGridSquare", "AddWorldInventoryItem", "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;",
+                        w60Aim, "get", "(S)L" + w60Animal + ";", "dropLookup", "(L" + w60Aim + ";S)L" + w60Animal + ";"},
+                {"zombie/iso/IsoGridSquare", "AddWorldInventoryItem", "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;",
+                        w60Aim, "add", "(L" + w60Animal + ";S)V", "dropRegister", "(L" + w60Aim + ";L" + w60Animal + ";S)V"},
+                {"zombie/network/ServerChunkLoader$LoaderThread", "run", "()V",
+                        w60Chunk, "LoadChunk", "(IILjava/nio/ByteBuffer;)Z", "loadChunk", "(L" + w60Chunk + ";IILjava/nio/ByteBuffer;)Z"},
+                {"zombie/network/ServerChunkLoader$SaveUnloadedTask", "save", "()V",
+                        w60Chunk, "Save", "(Z)V", "saveUnloaded", "(L" + w60Chunk + ";Z)V"},
+                {"zombie/characters/animals/datas/AnimalData", "grow", "(Ljava/lang/String;)V",
+                        w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z", "growDuplicate", "(L" + w60Animal + ";L" + w60Animal + ";)Z"}};
+        boolean w60Vanilla = true;
+        boolean w60Helper = true;
+        // 方法 → {class, name, desc, 預期手術後文字}；同一個方法的多個改道依序套到同一份文字上
+        java.util.Map<String, String[]> w60Expected = new java.util.LinkedHashMap<>();
+        for (String[] s : w60Sites) {
+            MethodNode v = methodFromJar(jar, s[0], s[1], s[2]);
+            w60Vanilla &= countExactCalls(v, Opcodes.INVOKEVIRTUAL, s[3], s[4], s[5]) == 1;
+            String[] exp = w60Expected.computeIfAbsent(s[0] + "." + s[1] + s[2], k -> new String[]{s[0], s[1], s[2], methodText(v)});
+            exp[3] = exp[3].replace("INVOKEVIRTUAL " + s[3] + "." + s[4] + " " + s[5], "INVOKESTATIC " + w60Probe + "." + s[6] + " " + s[7]);
+            w60Helper &= countExactCalls(method(distJava, w60Probe, s[6], s[7]), Opcodes.INVOKEVIRTUAL, s[3], s[4], s[5]) == 1;
+        }
+        // 放下動物的順序，以及 LoadChunk 緊接在 saveNow 之後
+        int w60Copy = -1, w60Get = -1, w60Add = -1, w60SaveNow = -1, w60Load = -1, w60I = 0;
+        for (AbstractInsnNode in : methodFromJar(jar, "zombie/iso/IsoGridSquare", "AddWorldInventoryItem",
+                "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;").instructions) {
+            w60I++;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "copyFrom", w60AnimalArg + "V")) w60Copy = w60I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Aim, "get", "(S)L" + w60Animal + ";")) w60Get = w60I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Aim, "add", "(L" + w60Animal + ";S)V")) w60Add = w60I;
+        }
+        w60I = 0;
+        for (AbstractInsnNode in : methodFromJar(jar, "zombie/network/ServerChunkLoader$LoaderThread", "run", "()V").instructions) {
+            w60I++;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, "zombie/network/ServerChunkLoader$SaveChunkThread", "saveNow", "(II)V")) w60SaveNow = w60I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Chunk, "LoadChunk", "(IILjava/nio/ByteBuffer;)Z")) w60Load = w60I;
+        }
+        failed += check("W60 vanilla 前提：四個方法各恰 1 個被觀測的呼叫；放下動物依序 copyFrom → get → add；LoaderThread 先 saveNow 再 LoadChunk",
+                w60Vanilla && 0 < w60Copy && w60Copy < w60Get && w60Get < w60Add && 0 < w60SaveNow && w60SaveNow < w60Load);
+        boolean w60Patched = true;
+        for (String[] exp : w60Expected.values()) {
+            w60Patched &= exp[3].equals(methodText(method(distJava, exp[0], exp[1], exp[2])));
+        }
+        failed += check("W60 手術後：六個呼叫同形改道 AnimalLossProbe，其餘指令與 frames 保留", w60Patched);
+        failed += check("W60 helper 契約：每個原方法在 helper 內恰呼叫 1 次", w60Helper);
+
         if (failed > 0) {
             System.exit(1);
         }

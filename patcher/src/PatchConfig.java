@@ -1032,7 +1032,47 @@ public final class PatchConfig {
         liveUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/characters/animals/datas/AnimalData", "hourGrow", "(Z)V", awayProbe, "liveHourGrow"));
         liveUpdate.expectedHits = 1;
+        // W60 之三：grow 內唯一 checkForChickenpocalypse（±4 格同 animalId 就刪掉長大前與長大後的動物）改道觀測。
+        String lossProbe = "zombie/mdc/AnimalLossProbe";
+        Patcher.MethodOps growOps = animalData.method("grow", "(Ljava/lang/String;)V");
+        growOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "checkForChickenpocalypse",
+                "(Lzombie/characters/animals/IsoAnimal;)Z", lossProbe, "growDuplicate"));
+        growOps.expectedHits = 1;
         patches.add(animalData);
+
+        // ---- W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）----
+        // 純觀測、kill switch -Dmdc.animalLossProbe=0|off。之一：放下動物時以手上動物的 onlineID 查前持有者並移出世界
+        // （雞舍載入的動物在伺服器上沒有登記 onlineID）；之二：chunk 卸載存檔還在寫時同一個 chunk 被重新載入；
+        // 之三（grow）掛在上面的 AnimalData ClassPatch。
+        Patcher.ClassPatch dropSquare = new Patcher.ClassPatch("zombie/iso/IsoGridSquare");
+        Patcher.MethodOps dropOps = dropSquare.method("AddWorldInventoryItem",
+                "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;");
+        dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "copyFrom", "(Lzombie/characters/animals/IsoAnimal;)V",
+                lossProbe, "dropCopy"));
+        dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/popman/animal/AnimalInstanceManager", "get", "(S)Lzombie/characters/animals/IsoAnimal;",
+                lossProbe, "dropLookup"));
+        dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/popman/animal/AnimalInstanceManager", "add", "(Lzombie/characters/animals/IsoAnimal;S)V",
+                lossProbe, "dropRegister"));
+        dropOps.expectedHits = 3;   // javap offset 144 copyFrom、168 get、210 add
+        patches.add(dropSquare);
+
+        Patcher.ClassPatch chunkLoaderThread = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$LoaderThread");
+        Patcher.MethodOps loaderRun = chunkLoaderThread.method("run", "()V");
+        loaderRun.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoChunk", "LoadChunk", "(IILjava/nio/ByteBuffer;)Z", lossProbe, "loadChunk"));
+        loaderRun.expectedHits = 1;   // offset 226，緊接在 saveNow(wx, wy) 之後
+        patches.add(chunkLoaderThread);
+
+        Patcher.ClassPatch unloadedSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveUnloadedTask");
+        Patcher.MethodOps unloadedSaveOps = unloadedSave.method("save", "()V");
+        unloadedSaveOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoChunk", "Save", "(Z)V", lossProbe, "saveUnloaded"));
+        unloadedSaveOps.expectedHits = 1;
+        patches.add(unloadedSave);
 
         // W37：動物半建構物件守衛＋apop 存檔先序列化再開檔（docs/patches.md 2az）。
         // (1) IsoAnimal 四個帶座標建構子每個 RETURN 前 afterCtor：建構檢查失敗（data null）時把

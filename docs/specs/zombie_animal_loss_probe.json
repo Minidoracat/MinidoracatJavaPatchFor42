@@ -1,0 +1,115 @@
+{
+  "classNames": [
+    "zombie/iso/IsoGridSquare",
+    "zombie/network/ServerChunkLoader$LoaderThread",
+    "zombie/network/ServerChunkLoader$SaveUnloadedTask",
+    "zombie/characters/animals/datas/AnimalData"
+  ],
+  "kind": "observability",
+  "buildBaseline": "42.21.0 / jar SHA-256 e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33",
+  "note": "W60 動物遺失／複製觀測（docs/patches.md 2bx）。六個呼叫各自 1:1 同形改道 zombie/mdc/AnimalLossProbe（receiver 變第一參數），helper 在 try 外照原樣呼叫原方法恰一次。kill switch -Dmdc.animalLossProbe=0|off。",
+  "patches": [
+    {
+      "id": "W60-drop",
+      "op": "redirect",
+      "class": "zombie/iso/IsoGridSquare",
+      "method": {
+        "name": "AddWorldInventoryItem",
+        "desc": "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/characters/animals/IsoAnimal",
+          "name": "copyFrom",
+          "desc": "(Lzombie/characters/animals/IsoAnimal;)V",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.dropCopy(Lzombie/characters/animals/IsoAnimal;Lzombie/characters/animals/IsoAnimal;)V"
+        },
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/popman/animal/AnimalInstanceManager",
+          "name": "get",
+          "desc": "(S)Lzombie/characters/animals/IsoAnimal;",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.dropLookup(Lzombie/popman/animal/AnimalInstanceManager;S)Lzombie/characters/animals/IsoAnimal;"
+        },
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/popman/animal/AnimalInstanceManager",
+          "name": "add",
+          "desc": "(Lzombie/characters/animals/IsoAnimal;S)V",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.dropRegister(Lzombie/popman/animal/AnimalInstanceManager;Lzombie/characters/animals/IsoAnimal;S)V"
+        }
+      ],
+      "rationale": "放下 AnimalInventoryItem 時新建 IsoAnimal 並 copyFrom 手上的動物，再以手上動物的 onlineID 查 AnimalInstanceManager；查到的前持有者不是新動物就 removeFromWorld＋removeFromSquare＋AIM.remove。伺服器上從雞舍 chunk 載入的動物用 IsoAnimal(IsoCell) 建構（type=null，不走 init，不 allocateID），IsoAnimal.load 只在 GameClient.client 時 setOnlineID，onlineID 停在 IsoPlayer 欄位預設 1；從雞舍抓起再放下時，查到的是當下持有 1（或其他過期 ID）的別隻動物，牠被移出世界、不再存檔。三個呼叫依序發生（SmokeCheck 鎖順序），helper 以這個順序配對：copyFrom 記來源，get 在原版移走前記下前持有者的位置與狀態，add 判定 drop-evict（前持有者不是來源）與 drop-dup（來源放下後仍在世界上）。",
+      "evidence": "javap -c -p 對 42.21.0 jar（AddWorldInventoryItem(InventoryItem,float,float,float,boolean,boolean)）：\n       132: invokespecial #3255  // IsoAnimal.\"<init>\":(IsoCell;IIILjava/lang/String;AnimalBreed;)V\n       135: astore 9\n       137: aload 9\n       139: aload 8\n       141: invokevirtual #3244  // AnimalInventoryItem.getAnimal\n       144: invokevirtual #3258  // IsoAnimal.copyFrom:(LIsoAnimal;)V\n       147: aload 8\n       149: invokevirtual #3244  // AnimalInventoryItem.getAnimal\n       152: invokevirtual #3262  // IsoAnimal.getOnlineID:()S\n       155: istore 10\n       157: invokestatic #3265   // LuaManager$GlobalObject.isMultiplayer:()Z\n       160: ifeq 203\n       163: invokestatic #3270   // AnimalInstanceManager.getInstance\n       166: iload 10\n       168: invokevirtual #3275  // AnimalInstanceManager.get:(S)LIsoAnimal;\n       171: astore 11\n       173: aload 11\n       175: ifnull 203\n       178: aload 11\n       180: aload 9\n       182: if_acmpeq 203\n       185: aload 11\n       187: invokevirtual #3278  // IsoAnimal.removeFromWorld:()V\n       190: aload 11\n       192: invokevirtual #3279  // IsoAnimal.removeFromSquare:()V\n       195: invokestatic #3270   // AnimalInstanceManager.getInstance\n       198: aload 11\n       200: invokevirtual #3280  // AnimalInstanceManager.remove:(LIsoAnimal;)V\n       203: invokestatic #3270   // AnimalInstanceManager.getInstance\n       206: aload 9\n       208: iload 10\n       210: invokevirtual #3282  // AnimalInstanceManager.add:(LIsoAnimal;S)V\n反編譯 42.21.0：IsoGridSquare.java:6082-6097；IsoAnimal.java:213-220（IsoAnimal(IsoCell) → this(cell,0,0,0,null,\"\")，type=null 時 adef=null、不呼叫 init）、1495-1500（load 只在 client setOnlineID）、1520-1522（init 才 allocateID）；IsoPlayer.java:334（onlineId = 1）。"
+    },
+    {
+      "id": "W60-reload",
+      "op": "redirect",
+      "class": "zombie/network/ServerChunkLoader$LoaderThread",
+      "method": {
+        "name": "run",
+        "desc": "()V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/iso/IsoChunk",
+          "name": "LoadChunk",
+          "desc": "(IILjava/nio/ByteBuffer;)Z",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.loadChunk(Lzombie/iso/IsoChunk;IILjava/nio/ByteBuffer;)Z"
+        }
+      ],
+      "rationale": "LoaderThread 對 cell 的每個 chunk 先 saveNow(wx,wy) 再 LoadChunk。saveNow 把存檔佇列 drainTo 出來，只同步執行同一個 chunk 的工作，再把其餘放回；存檔執行緒已經 take() 走、正在 save() 的那份不在佇列裡，LoadChunk 可能讀到舊檔或寫到一半的檔。helper 在載入前後查本類登記的進行中卸載存檔（另一條執行緒、同一個 chunk）。",
+      "evidence": "javap -c -p 對 42.21.0 jar（ServerChunkLoader$LoaderThread.run）：\n       207: getfield #133  // ServerChunkLoader.threadSave\n       210: iload 6\n       212: iload 7\n       214: invokevirtual #137  // ServerChunkLoader$SaveChunkThread.saveNow:(II)V\n       217: aload 8\n       219: aload 8\n       221: iload 6\n       223: iload 7\n       225: aconst_null\n       226: invokevirtual #143  // IsoChunk.LoadChunk:(IILjava/nio/ByteBuffer;)Z\n       229: putfield #147  // IsoChunk.loaded:Z\n反編譯 42.21.0：ServerChunkLoader.java:207-209（LoaderThread）、443-461（SaveChunkThread.run：take → save → fromThread.add）、490-511（saveNow）。"
+    },
+    {
+      "id": "W60-reload",
+      "op": "redirect",
+      "class": "zombie/network/ServerChunkLoader$SaveUnloadedTask",
+      "method": {
+        "name": "save",
+        "desc": "()V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/iso/IsoChunk",
+          "name": "Save",
+          "desc": "(Z)V",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.saveUnloaded(Lzombie/iso/IsoChunk;Z)V"
+        }
+      ],
+      "rationale": "cell 卸載時每個 chunk 排一個 SaveUnloadedTask（ServerMap.ServerCell.Unload → addSaveUnloadedJob），在 SaveChunk 執行緒或 LoaderThread（saveNow）執行 chunk.Save(false)，序列化與寫檔都在這一步。helper 在 Save 前登記（執行緒、開始時間），finally 移除；另一條執行緒也在存同一個 chunk 時記 double-write。",
+      "evidence": "javap -c -p 對 42.21.0 jar（ServerChunkLoader$SaveUnloadedTask.save）：\n         0: aload_0\n         1: getfield #13  // chunk:Lzombie/iso/IsoChunk;\n         4: iconst_0\n         5: invokevirtual #19  // IsoChunk.Save:(Z)V\n         8: return\n反編譯 42.21.0：ServerChunkLoader.java:624-641、ServerMap.java:972-1011。"
+    },
+    {
+      "id": "W60-grow",
+      "op": "redirect",
+      "class": "zombie/characters/animals/datas/AnimalData",
+      "method": {
+        "name": "grow",
+        "desc": "(Ljava/lang/String;)V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/characters/animals/IsoAnimal",
+          "name": "checkForChickenpocalypse",
+          "desc": "(Lzombie/characters/animals/IsoAnimal;)Z",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/AnimalLossProbe.growDuplicate(Lzombie/characters/animals/IsoAnimal;Lzombie/characters/animals/IsoAnimal;)Z"
+        }
+      ],
+      "rationale": "grow 先 newAnimal.setAnimalID(parent.getAnimalID())，再 parent.checkForChickenpocalypse(newAnimal)：±4 格內有別隻同 animalId 的動物就 parent.delete() 並回 true，grow 接著 newAnimal.delete() 後 return；只印 DebugType.Animal.println，伺服器 Animal 等級 Warning 不印。複製體長大時兩隻都被刪。helper 在呼叫前記下長大前的動物與所在格，回 true 時在同範圍找同 ID 的另一隻一起記。",
+      "evidence": "javap -c -p 對 42.21.0 jar（AnimalData.grow）：\n       304: invokevirtual #1362  // IsoAnimal.setAnimalID:(I)V\n       307: aload_0\n       308: getfield #67   // parent\n       311: aload 4\n       313: invokevirtual #1365  // IsoAnimal.checkForChickenpocalypse:(LIsoAnimal;)Z\n       316: ifne 329\n       319: aload_0\n       320: getfield #67\n       323: invokevirtual #1368  // IsoAnimal.checkForWater:()Z\n       326: ifeq 335\n       329: aload 4\n       331: invokevirtual #1371  // IsoAnimal.delete:()V\n       334: return\n反編譯 42.21.0：AnimalData.java:1383-1445、IsoAnimal.java:275-296。"
+    }
+  ],
+  "behaviorNotes": "只觀測：每個原方法恰呼叫一次、參數原樣，回傳與例外與原版相同（SaveUnloadedTask 的登記在 finally 移除）。放下與長大在主執行緒；載入與卸載存檔在 LoaderThread／SaveChunk 執行緒，計數 AtomicLong、進行中的存檔 ConcurrentHashMap。明細每 60 秒最多 30 行，每 5 分鐘一行 beat。AnimalData 的其他手術（W33 checkPregnancy、W42 update）共用同一個 ClassPatch，不在本檔。",
+  "verification": "建置：SmokeCheck 釘原版四個方法各恰 1 個被觀測的呼叫、放下動物依序 copyFrom → get → add、LoaderThread 先 saveNow 再 LoadChunk；手術後四個方法文字（含 frames）只差這六個呼叫；helper 內每個原方法恰呼叫一次。AnimalLossProbeTest on／off。部署後：console 首次生效行 '[MinidoracatJavaPatch][AnimalLossProbe] 首次生效（純觀測；…）'，之後每 5 分鐘 beat、anomalies=0。"
+}

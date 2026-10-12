@@ -3731,6 +3731,45 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - SmokeCheck：存在理由——原版 GameServer 恰 2 個 `getChangeCount`（兩個送出方法各 1，下一條都是 `putShort`），GameClient 只在 `receiveWorldMapPlayerPosition` 讀 1 次（TIS 改了比較方式就轉紅，屆時重估）；手術後兩個方法文字（含 frames）只差這個呼叫、GameServer 不再直接讀計數；helper 內原計數恰讀一次。
 - `WorldMapChangeCountTest`（on、off 兩個 JVM）：伺服器端跑手術後的真 `GameServer.sendWorldMapPlayerPosition(UdpConnection)` 與 `receiveWorldMapPlayerPosition`，客戶端跑真 `GameClient.receiveWorldMapPlayerPosition`；封包由真 writer 與 `PacketType` 寫進只覆寫 buffer 端點的連線，由測試決定送達或丟掉，客戶端每幀直接呼叫真 `setPlayer`。掉一次回覆、掉一次索取兩種情境：原版負對照（兩種模式都跑，餵原版計數的位置包）與 off 之後 10 秒都不索取、`hasFullData` 一直是 false，重現症狀；on 每秒索取，回覆送達後 `hasFullData=true`。沒掉包時畫面上 10 秒索取 10 次、畫面外 0 次，兩種模式相同。伺服器條目計數不被改；原計數 0–8192 的送出值都是至少 1024 的偶數；off 送原值、零 log 行。
 
+<a id="2bx"></a>
+## 2bx. 動物遺失／複製觀測（W60，server，純觀測）
+
+**為什麼要記**：2026-10-13 一位玩家回報雞舍裡原本有 4 隻公雞，搬走一隻後回來只剩 2 隻。存檔顯示這 4 隻是同一隻公雞的複製體（同一個 animalId，從 10-08 起 1 隻慢慢變成 4 隻），搬走後總數少了一隻，沒有死亡紀錄，也不在背包或附近的車上。全服 apop 另有 15 群、61 隻同 ID 複製體。伺服器 Animal log 等級是 Warning，原版會刪除或丟失動物的幾條路徑都不留紀錄，看不出是哪一條。
+
+**原版機制**（42.21.0 反編譯＋javap）：
+- **放下動物**：`IsoGridSquare.AddWorldInventoryItem` 遇到 `AnimalInventoryItem` 時新建 `IsoAnimal`、`copyFrom` 手上的動物，再以手上動物的 onlineID 查 `AnimalInstanceManager`；查到的「前持有者」只要不是新動物，就 `removeFromWorld`、`removeFromSquare`、從管理器移除（`IsoGridSquare.java:6082-6097`）。伺服器上從雞舍 chunk 載入的動物用 `IsoAnimal(IsoCell)` 建構（不走 `init`，不配 onlineID），`IsoAnimal.load` 只在客戶端設定 onlineID（`IsoAnimal.java:1495-1500`），所以 onlineID 停在 `IsoPlayer` 的欄位預設值 1（`IsoPlayer.java:334`）。從雞舍抓起再放下時，查到的是當下持有這個 ID 的別隻動物，牠被移出世界、之後不再存檔。這是推論，還沒有實際抓到。
+- **chunk 卸載後立刻重載**：`ServerChunkLoader$LoaderThread` 對每個 chunk 先 `saveNow(wx, wy)` 再 `LoadChunk`。`saveNow` 只處理還在存檔佇列裡的工作（`ServerChunkLoader.java:490-511`），存檔執行緒已經取走、正在寫的那份不在佇列裡，載入可能讀到舊檔或寫到一半的檔。雞舍內的動物跟著 chunk 存，舍外的在 APM 記憶體：讀到舊雞舍時，同一隻會同時出現在雞舍和舍外（複製），或兩邊都沒有（消失）。
+- **長大**：`AnimalData.grow` 先讓新動物沿用舊 animalId，再 `checkForChickenpocalypse`：±4 格內有別隻同 ID 的動物就刪掉長大前的動物，grow 接著刪掉新動物（`AnimalData.java:1406-1444`、`IsoAnimal.java:275-296`），只印 `DebugType.Animal.println`。複製體長大時兩隻一起消失。
+
+**手術**：六個呼叫各自 1:1 同形改道 `zombie/mdc/AnimalLossProbe`（receiver 變第一參數），helper 在 try 外照原樣呼叫原方法恰一次，回傳與例外都與原版相同；javap 語境見 `docs/specs/zombie_animal_loss_probe.json`。
+- `IsoGridSquare.AddWorldInventoryItem(InventoryItem, float, float, float, boolean, boolean)`：offset 144 `IsoAnimal.copyFrom` → `dropCopy`、168 `AnimalInstanceManager.get` → `dropLookup`、210 `AnimalInstanceManager.add` → `dropRegister`，`expectedHits = 3`（新的 ClassPatch）。三個呼叫依序發生，helper 照這個順序配對：`copyFrom` 記手上的動物，`get` 在原版移走前記下前持有者的位置與狀態，`add` 判定。
+- `ServerChunkLoader$LoaderThread.run()`：offset 226 `IsoChunk.LoadChunk` → `loadChunk`，`expectedHits = 1`（新的 ClassPatch）。載入前後各查一次：另一條執行緒正在存同一個 chunk 的卸載存檔就記一行。
+- `ServerChunkLoader$SaveUnloadedTask.save()`：offset 5 `IsoChunk.Save(Z)V` → `saveUnloaded`，`expectedHits = 1`（新的 ClassPatch）。存檔前登記執行緒與開始時間，finally 移除；另一條執行緒也在存同一個 chunk 時記一行。
+- `AnimalData.grow(String)`：offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`，`expectedHits = 1`（掛在既有的 AnimalData ClassPatch）。回 true 時在同範圍找出同 ID 的另一隻一起記。
+
+```text
+[MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> evicted=<種類>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
+[MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> source=<種類>#<animalId> pos=… inWorld=1 … prev=<none|種類#animalId>
+[MinidoracatJavaPatch][AnimalLossProbe] reload-race#<n> chunk=<wx>,<wy> phase=<before|during> savingThread=<執行緒名> saveElapsedMs=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] double-write#<n> chunk=<wx>,<wy> threads=<先>,<後> otherElapsedMs=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<種類>#<animalId> pos=… newType=<長大後種類> twin=<種類>#<animalId> pos=…
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> loads=<n> unloadedSaves=<n> reloadRaces=<n> doubleWrites=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+```
+
+`drop-evict` 是放下動物時被移出世界的別隻（`evicted` 是牠被移走前的狀態；描述失敗時寫 `?`）。`drop-dup` 是手上的動物放下後仍在世界上，等於多了一隻。明細每 60 秒最多 30 行，其餘計 `suppressed`；第一次事件（通常是開機後第一次載入 chunk）印首次生效行，之後每 5 分鐘一行 beat。簿記例外只計 `anomalies`。
+
+**kill switch**：`-Dmdc.animalLossProbe=0|off`（預設開；改道仍在，只呼叫原方法，不記也不印），需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/AnimalLossProbe.class`、`AnimalLossProbe$Saving.class` 與三個新 patched class（`IsoGridSquare`、`ServerChunkLoader$LoaderThread`、`ServerChunkLoader$SaveUnloadedTask`），`AnimalData.class` 換成多一個命中點的版本（131 → 136 個 class）。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm，下一次排程重啟時切換。上線後確認橫幅指紋是新版、`[mdc-javagate] OK: 136`，再看 console 出現首次生效行。
+
+**判讀**：玩家再回報動物變多或消失時，先找同一時段、座標附近的明細。`drop-evict` 的 `evicted` 就是消失的那隻；`reload-race` 的 chunk 座標（×8＝格座標）對到雞舍或圍欄時，用 `hutch-animal-scan.py` 比對前後存檔看多了或少了哪隻。三種都沒有出現，就是還有別的路徑，再加觀測。
+
+**未做**：不擋、不修；等抓到是哪條路徑再決定怎麼修（放下時只移走同一隻、載入前等正在寫的存檔寫完等）。
+
+**守門與驗證**：
+- SmokeCheck：原版四個方法各恰 1 個被觀測的呼叫；放下動物依序 `copyFrom` → `get` → `add`；LoaderThread 先 `saveNow` 再 `LoadChunk`。手術後四個方法文字（含 frames）只差這六個呼叫；helper 內每個原方法恰呼叫一次。
+- `AnimalLossProbeTest`（on、off 兩個 JVM）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。chunk：另一條執行緒持有存檔登記時載入同一個 chunk 記 `reload-race`；不同 chunk、同一條執行緒先存後載（`saveNow`）都不記；兩條執行緒同時存同一個 chunk 記 `double-write`；改道後的 `saveUnloaded` 跑真 `IsoChunk.Save`（noSave）不留登記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
+
 ---
 
 <a id="3"></a>

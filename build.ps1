@@ -121,6 +121,8 @@ $helperEntries = @(
     'zombie/mdc/SyncIsoObjectProbe.class',
     'zombie/mdc/SyncIsoObjectProbe$Conn.class',
     'zombie/mdc/WorldMapChangeCount.class',
+    'zombie/mdc/AnimalLossProbe.class',
+    'zombie/mdc/AnimalLossProbe$Saving.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -583,6 +585,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldMapChangeCountTest off
 Assert-Ok "WorldMapChangeCountTest（off，原版計數）"
+
+Write-Host "[9zi/10] 動物遺失／複製觀測（W60）：放下動物移走別隻、來源仍在世界、長大撞同 ID、chunk 存檔中重載與雙寫，原方法恰一次、原版負對照、off 不記帳..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLossProbeTest on
+Assert-Ok "AnimalLossProbeTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLossProbeTest off
+Assert-Ok "AnimalLossProbeTest（off，只呼叫原方法）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 65 patched classes, 175 patch sites and 66 helper classes on 42.21.0.
+  actions and log noise. 68 patched classes, 181 patch sites and 68 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two 42.21.0
   player-built room bugs, vanishing objects and disconnects while chunks load; mod vehicles re-animated every frame while parked). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -157,8 +157,10 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 Observe-only probes that change no behavior: the main-loop watchdog ([2ac](docs/patches.en.md#2ac)), the
 animal offline catch-up probe ([2au](docs/patches.en.md#2au)), the animal death ledger
 ([2bb](docs/patches.en.md#2bb)), the animal ID miss log ([2bo](docs/patches.en.md#2bo)), the slow
-sound-packet probe ([2at](docs/patches.en.md#2at)) and the SyncIsoObject flood probe ([2bv](docs/patches.en.md#2bv); vanilla's
-`Packets limit has exceeded` warning does not name the connection, so this logs the player and object behind a flood).
+sound-packet probe ([2at](docs/patches.en.md#2at)), the SyncIsoObject flood probe ([2bv](docs/patches.en.md#2bv); vanilla's
+`Packets limit has exceeded` warning does not name the connection, so this logs the player and object behind a flood) and the
+animal loss probe ([2bx](docs/patches.en.md#2bx); logs when putting an animal down removes a different animal, when a chunk is
+reloaded while its unload save is still being written, and when a growing animal is deleted because a copy with the same ID is nearby).
 They write rate-limited heartbeat lines to the console and are how most of the issues above were found.
 
 ### Client patches (release package)

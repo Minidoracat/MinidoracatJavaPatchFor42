@@ -3417,6 +3417,88 @@ flow, and the switch happens at the next scheduled restart. After it is live, ch
   server entry's count is unchanged; for counts 0–8192 the sent value is always an even number of at least 1024; off sends the original count and logs
   nothing.
 
+<a id="2bx"></a>
+## 2bx. Animal loss and duplication probe (W60, server, observe only)
+
+**Why**: on 2026-10-13 a player reported that a hen house held four roosters, and after carrying one away only two were left. The saves show that
+the four were copies of one rooster (the same animalId; one became four from 10-08 on). After the move the total was one short, with no death record
+and nothing in the player's inventory or nearby vehicles. The server's animal save files hold 15 more groups of same-ID copies (61 animals). The
+server logs the Animal type at Warning, and none of the vanilla paths that delete or lose an animal write anything at that level, so there is no way to
+tell which one ran.
+
+**Vanilla mechanism** (42.21.0 decompile and javap):
+- **Putting an animal down**: when `IsoGridSquare.AddWorldInventoryItem` gets an `AnimalInventoryItem`, it creates a new `IsoAnimal`, calls
+  `copyFrom` with the held animal, then looks up the held animal's onlineID in `AnimalInstanceManager`. If the "previous holder" it finds is not the
+  new animal, it is removed from the world and from the manager (`IsoGridSquare.java:6082-6097`). On the server, animals loaded from a hen house chunk
+  are built with `IsoAnimal(IsoCell)` (no `init`, no onlineID), and `IsoAnimal.load` only sets the onlineID on clients (`IsoAnimal.java:1495-1500`),
+  so the onlineID stays at the `IsoPlayer` field default 1 (`IsoPlayer.java:334`). Taking such an animal out of a hen house and putting it down looks
+  up whichever other animal holds that ID at the moment; that animal is removed from the world and never saved again. This is inferred and has not
+  been caught yet.
+- **A chunk reloaded right after unloading**: `ServerChunkLoader$LoaderThread` calls `saveNow(wx, wy)` and then `LoadChunk` for each chunk. `saveNow`
+  only handles jobs still in the save queue (`ServerChunkLoader.java:490-511`); a job the save thread has already taken and is writing is not in the
+  queue, so the load can read the old file or a half-written one. Hen house animals are saved with the chunk; animals outside are kept in the animal
+  population manager's memory. Reading an old hen house puts the same animal both inside and outside (a copy) or in neither place (lost).
+- **Growing up**: `AnimalData.grow` gives the new animal the old animalId, then calls `checkForChickenpocalypse`: if another animal with that ID is
+  within ±4 tiles, it deletes the animal that is growing up, and `grow` deletes the new one (`AnimalData.java:1406-1444`, `IsoAnimal.java:275-296`),
+  printing only `DebugType.Animal.println`. When a copy grows up, both disappear.
+
+**Patch**: six calls, each redirected 1:1 to `zombie/mdc/AnimalLossProbe` with the same stack shape (the receiver becomes the first argument). The
+helper calls the original exactly once outside its try, so results and exceptions match vanilla; javap context is in
+`docs/specs/zombie_animal_loss_probe.json`.
+- `IsoGridSquare.AddWorldInventoryItem(InventoryItem, float, float, float, boolean, boolean)`: offset 144 `IsoAnimal.copyFrom` → `dropCopy`, 168
+  `AnimalInstanceManager.get` → `dropLookup`, 210 `AnimalInstanceManager.add` → `dropRegister`, `expectedHits = 3` (new ClassPatch). The three calls
+  run in this order and the helper pairs them that way: `copyFrom` records the held animal, `get` records the previous holder's position and state
+  before vanilla removes it, and `add` decides.
+- `ServerChunkLoader$LoaderThread.run()`: offset 226 `IsoChunk.LoadChunk` → `loadChunk`, `expectedHits = 1` (new ClassPatch). Checks before and after
+  the load; logs a line when another thread is writing the unload save of the same chunk.
+- `ServerChunkLoader$SaveUnloadedTask.save()`: offset 5 `IsoChunk.Save(Z)V` → `saveUnloaded`, `expectedHits = 1` (new ClassPatch). Registers the
+  thread and start time before the save and removes them in `finally`; logs a line when another thread is saving the same chunk.
+- `AnimalData.grow(String)`: offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`, `expectedHits = 1` (on the existing AnimalData
+  ClassPatch). When it returns true, also logs the other animal with the same ID in the same range.
+
+```text
+[MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> evicted=<type>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
+[MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> source=<type>#<animalId> pos=… inWorld=1 … prev=<none|type#animalId>
+[MinidoracatJavaPatch][AnimalLossProbe] reload-race#<n> chunk=<wx>,<wy> phase=<before|during> savingThread=<thread name> saveElapsedMs=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] double-write#<n> chunk=<wx>,<wy> threads=<first>,<second> otherElapsedMs=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<type>#<animalId> pos=… newType=<grown type> twin=<type>#<animalId> pos=…
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> loads=<n> unloadedSaves=<n> reloadRaces=<n> doubleWrites=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+```
+
+`drop-evict` is the other animal removed from the world when one was put down (`evicted` is its state before removal; `?` if it could not be
+described). `drop-dup` means the held animal is still in the world after being put down, so there is one more. At most 30 detail lines per 60
+seconds, the rest are counted in `suppressed`; the first event (normally the first chunk load) prints a first-effect line, then a beat every 5
+minutes. Bookkeeping exceptions only count `anomalies`.
+
+**Kill switch**: `-Dmdc.animalLossProbe=0|off` (on by default; the redirects stay and only call the original, nothing is counted or logged), needs a
+restart.
+
+**Deployment**: the manifest gains `zombie/mdc/AnimalLossProbe.class`, `AnimalLossProbe$Saving.class` and three new patched classes (`IsoGridSquare`,
+`ServerChunkLoader$LoaderThread`, `ServerChunkLoader$SaveUnloadedTask`), and `AnimalData.class` is replaced by a version with one more site (131 →
+136 classes). The manifest only grows, so no uninstall first: stage and arm with the deferred-activation flow, switching at the next scheduled
+restart. After it goes live, check that the banner shows the new fingerprint and `[mdc-javagate] OK: 136`, then look for the first-effect line.
+
+**Reading it**: when a player reports animals multiplying or vanishing again, look for detail lines near that time and place. The `evicted` animal of
+a `drop-evict` is the one that vanished; when the chunk of a `reload-race` (×8 for tile coordinates) is a hen house or pen, compare the saves before
+and after with `hutch-animal-scan.py`. If none of the three shows up, there is another path and it needs more probes.
+
+**Not done**: nothing is blocked or fixed; the fix waits until we know which path it is (only remove the same animal when putting one down, wait for
+a save in progress before loading, and so on).
+
+**Guards and verification**:
+- SmokeCheck: vanilla has exactly one observed call in each of the four methods; putting an animal down calls `copyFrom` → `get` → `add` in this
+  order; LoaderThread calls `saveNow` before `LoadChunk`. After the patch the four method texts (with frames) differ only in these six calls; each helper
+  calls its original exactly once.
+- `AnimalLossProbeTest` (on and off, separate JVMs): putting an animal down calls the three helpers in the patched order with the real
+  `AnimalInstanceManager`. The vanilla negative control (calling the originals directly) counts and logs nothing. Nothing is logged when the previous
+  holder is the held animal; when it is another animal holding onlineID 1, one `drop-evict` line with the drop position and that animal's type, ID and
+  position; when the held animal is still in the world after the drop, one `drop-dup` line; an exception while describing the previous holder only
+  counts `anomalies` and the originals still run; an exception from `copyFrom` propagates unchanged. Growing up: when `checkForChickenpocalypse`
+  returns true, one `grow-dup` line with the other same-ID animal found by the real `IsoGridSquare.getAnimals` within ±4 tiles (a `ServerMap` stand-in
+  returns the squares); nothing when it returns false. Chunks: loading a chunk while another thread holds its save registration logs `reload-race`; a
+  different chunk, or the same thread saving then loading (`saveNow`), logs nothing; two threads saving the same chunk log `double-write`; the redirected
+  `saveUnloaded` runs the real `IsoChunk.Save` (noSave) and leaves no registration. Off: the originals run, nothing is counted and the JVM logs nothing.
+
 ---
 
 <a id="3"></a>
