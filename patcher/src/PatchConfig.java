@@ -1506,12 +1506,32 @@ public final class PatchConfig {
         // 參照，resetForStore 回收後物件被重用到別處（LoadChunk 排入載入就 refs.add），車被夾到幾十到幾百格外。
         // 夾回區塊內唯一的 setWorldTransform（javap offset 1776）1:1 改道 VehicleClampGuard：原版目標 chunk
         // 已載入、車在它的清單裡、就在車旁邊時照原版；否則改夾進車周圍最近的已載入 chunk，都沒有就留在原地。
-        Patcher.MethodOps vehicleClamp = vehicle.method("update", "()V");
-        vehicleClamp.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+        Patcher.MethodOps vehicleUpdate = vehicle.method("update", "()V");
+        vehicleUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/vehicles/BaseVehicle", "setWorldTransform", "(Lzombie/core/physics/Transform;)V",
                 "zombie/mdc/VehicleClampGuard", "setWorldTransform"));
-        vehicleClamp.expectedHits = 1;
+        // ---- W62 車掛在已卸載 chunk 上時 update 每幀提早結束（docs/patches.md 2bz）----
+        // update() 開頭 this.chunk.vehicles.contains(this)（javap offset 57）為真且 chunk.refs 空時呼叫 removeFromWorld 後 return；
+        // 車上有本機乘客時 removeFromWorld 提早 return，整個 update 每幀被跳過。方法內 4 個 ArrayList.contains 全部 1:1 改道
+        // VehicleOrphanGuard.contains：只在這個情況回 false（走原版「chunk 已回收」分支：送 VehicleRequest(2) 後往下跑），
+        // 其餘呼叫回傳原值（另 3 個是 animals.contains 與兩個 assert，SmokeCheck 鎖住位置與數量）。
+        vehicleUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z",
+                "zombie/mdc/VehicleOrphanGuard", "contains"));
+        vehicleUpdate.expectedHits = 5;   // W61 setWorldTransform 1＋W62 contains 4
         patches.add(vehicle);
+
+        // ---- W63 doRemove 把本機模擬的車的駕駛移到伺服器舊位置（docs/patches.md 2bz）----
+        // VehiclePacket.doRemove 在客戶端沒有伺服器位置的格子、車上有本機玩家時 player.setPosition(伺服器 x, y, 0)
+        // （javap offset 75，方法內唯一）。1:1 改道 VehicleOrphanGuard.setPosition：車由本機模擬（Local／LocalCollide）時不移動，
+        // 其餘照原版。VehicleUpdatePacket 與 VehicleFullUpdatePacket 都走這個繼承來的方法。
+        Patcher.ClassPatch vehiclePacket = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehiclePacket");
+        Patcher.MethodOps doRemove = vehiclePacket.method("doRemove", "(Lzombie/network/IConnection;)Z");
+        doRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/IsoPlayer", "setPosition", "(FFF)V",
+                "zombie/mdc/VehicleOrphanGuard", "setPosition"));
+        doRemove.expectedHits = 1;
+        patches.add(vehiclePacket);
 
         // ---- W55 isBoneReparented 快速路徑（docs/patches.md 2bs）----
         // updateMultiTrackBoneTransformsInternal 每根骨頭呼叫一次 isBoneReparented（javap offset 115，全 jar 唯一

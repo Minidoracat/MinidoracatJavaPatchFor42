@@ -131,6 +131,16 @@ public final class LoadCheck {
                     throw new NoSuchMethodException("VehicleClampGuard.setWorldTransform signature");
                 }
                 System.out.println("vehicle clamp guard OK VehicleClampGuard.setWorldTransform(BaseVehicle,Transform) 簽名一致");
+                Class<?> orphanGuard = Class.forName("zombie.mdc.VehicleOrphanGuard", false, cl);
+                var orphanContains = orphanGuard.getDeclaredMethod("contains", java.util.ArrayList.class, Object.class);
+                var orphanRecall = orphanGuard.getDeclaredMethod("setPosition",
+                        Class.forName("zombie.characters.IsoPlayer", false, cl), float.class, float.class, float.class);
+                if (orphanContains.getReturnType() != boolean.class || (orphanContains.getModifiers() & psf) != psf
+                        || orphanRecall.getReturnType() != void.class || (orphanRecall.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("VehicleOrphanGuard signature");
+                }
+                System.out.println("vehicle orphan guard OK VehicleOrphanGuard.contains(ArrayList,Object)、"
+                        + "setPosition(IsoPlayer,float,float,float) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

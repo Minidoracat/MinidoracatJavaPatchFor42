@@ -3805,7 +3805,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **不處理**：
 - 觸發塌陷的整張重建本身（觸發點未定，見「根因」），以及一般黑邊（成因在 chunk 串流，見 [2o](#2o)、W4-1）：本刀只讓「拉回」不拉到別處。
-- 同一族的另外三條路徑（見 [2026-10-01 回報](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)，修法建議 2、3）：(a) 車掛在已卸載的 chunk 上時，`update()` 每幀提早 return，不送 VehiclePhysics、引擎聲停、乘客位置不更新，直到倒車把那塊 chunk 帶回來或物件被重用；(b) `VehiclePacket.doRemove()`：客戶端沒有伺服器位置的格子、車上有本機玩家時，把駕駛移到伺服器的舊位置（2026-10-01 的 175 格、2026-10-14 的 755／891 格大跳）；(c) 沒有本機乘客的車（例：拖車）在 `update()` 開頭 `refs` 為空時直接 `removeFromWorld()`，或 `VehicleManager.clientUpdateVehiclePos` 在伺服器位置沒載入時移除，可能就是拖車只在客戶端消失（推論，未實證）。
+- 同一族的另外三條路徑（見 [2026-10-01 回報](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)，修法建議 2、3）：(a) 車掛在已卸載的 chunk 上時，`update()` 每幀提早 return，不送 VehiclePhysics、引擎聲停、乘客位置不更新；(b) `VehiclePacket.doRemove()`：客戶端沒有伺服器位置的格子、車上有本機玩家時，把駕駛移到伺服器的舊位置（2026-10-01 的 175 格、2026-10-14 的 755／891 格大跳）。這兩條由 [2bz](#2bz) 的 W62、W63 處理。(c) 沒有本機乘客的車（例：拖車）在 chunk 卸載時直接被 `removeFromWorld()`，或 `VehicleManager.clientUpdateVehiclePos` 在伺服器位置沒載入時移除，可能就是拖車只在客戶端消失（推論，未實證），仍未處理。
 - 掉穿地面：車所在的 chunk 有格子、但物理地面還沒建好時，這段不會觸發（z 一律用 0 查格子）。2026-10-14 換駕駛後掉到地圖下（z −33 以下）屬於這一類；坐在車上時鏡頭高度直接用車的物理高度，畫面全黑但 HUD 照常（同上回報第 4 點），另案處理。
 
 **守門與驗證**：
@@ -3814,6 +3814,44 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - 實機驗證：未做。要重現得先造出整張重建（例如單幀把玩家位置拉遠 13 個 chunk 以上），再碰上車的 chunk 物件被重用的時機，本機還沒做出來；上線後看玩家 console.txt 的 `VehicleClampGuard` 行（每行附原版會把車放到哪裡）。
 
 **退場**：官方修好（夾回前檢查 chunk，或卸載時解除車的參照）時 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
+
+<a id="2bz"></a>
+## 2bz. 車被留在已卸載 chunk 上的兩條路徑（W62、W63，client，預設 on；client 包 0.2.7）
+
+**症狀**：開車時引擎聲突然消失、車自己慢下來，接著駕駛被拉回幾百格外的舊位置，有時落進河裡、畫面全黑（[2026-10-01 回報](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)：175 格；2026-10-14 伺服器 cmd.txt：755、891 格，落點都在 1–3 分鐘前開過的地方附近）。玩家之間流傳的避開法是「引擎聲一停就沿原路倒車」。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- chunk 卸載（一般平移或整張重建，見 [2by](#2by)）時，`IsoChunk.removeFromWorld` 對還在 cell 裡的車呼叫 `BaseVehicle.removeFromWorld()`。那個方法先 `breakConstraint(false,false)`、`VehiclesDB2.setVehicleUnloaded`，接著只要任一座位是 `IsoPlayer.players` 裡的人就 RETURN，不設 `removedFromWorld`，車仍掛在已卸載的 chunk 上。
+- W62 的對象：`BaseVehicle.update()` 開頭（offset 49–106）`this.chunk.vehicles.contains(this)` 為真、`!GameServer.server`、`this.chunk.refs.isEmpty()` 時呼叫 `removeFromWorld()`（又在本機乘客那裡 RETURN）後 RETURN。所以那個 chunk 物件被回收之前，整個 update 每幀被跳過：不送 VehiclePhysics（伺服器留著舊位置）、乘客不擺位、`updateSounds` 不跑（引擎聲停），也不夾回。倒車把那塊 chunk 帶回 ChunkMap、或物件被回收後，才恢復。同一段的另一個分支是 chunk 物件已回收（`vehicles` 已清空）：客戶端只送 `VehicleRequest(2)` 就往下跑。
+- W63 的對象：`VehiclePacket.doRemove()`（`VehicleUpdatePacket`、`VehicleFullUpdatePacket` 的 parse 都會先走它）在 `this.square == null`（伺服器位置在客戶端沒有格子，z 一律用 0 查）時，對坐在這台車上的本機玩家 `player.setPosition(伺服器 x, y, 0)`（offset 75），再送 `VehicleRequest(2)`；整個方法不看車的授權。駕駛的客戶端是這台車的物理權威（Local／LocalCollide），伺服器的位置只是它送出去的值；W62 那段停送位置時，這個值就停在舊處，doRemove 便把駕駛移回去。位移超過網格寬時 chunk map 整張重建，接著車可能被夾到別處（[2by](#2by)）。
+
+**手術**：
+- W62：`update()V` 內 4 個 `invokevirtual java/util/ArrayList.contains(Object)Z` 全部 1:1 改道 `invokestatic zombie/mdc/VehicleOrphanGuard.contains(ArrayList, Object)Z`。開頭那個是要處理的判斷；另 3 個是 `getAnimals().contains(animal)`（只在非客戶端執行）與兩個 `assert this.chunk.vehicles.contains(this)`（沒開 `-ea` 不執行），helper 對它們回傳原值。與 W61 同一個 MethodOps，`expectedHits = 5`（W61 1＋W62 4）。
+- W63：`VehiclePacket.doRemove(IConnection)Z` 內唯一的 `invokevirtual IsoPlayer.setPosition(FFF)V` 1:1 改道 `invokestatic zombie/mdc/VehicleOrphanGuard.setPosition(IsoPlayer, float, float, float)V`，`expectedHits = 1`，新的 client ClassPatch。
+- 兩刀都是 3 bytes 換 3 bytes、堆疊形狀不變、frames 原樣；標準版與省記憶體版都含，模組版本仍是 `v3.4`。
+
+**判定**：
+- W62：清單是車自己 chunk 的 `vehicles`、清單裡有這台車、不是伺服器、那塊 chunk 的 `refs` 為空、任一座位是 `IsoPlayer.players` 裡的人（與 `removeFromWorld` 提早 RETURN 的條件相同）時回 false；其餘一律回 `list.contains(o)`。回 false 之後原版走「chunk 已回收」那條分支：客戶端送 `VehicleRequest(2)`（批次送出，伺服器只把下次更新附上位置），然後照常往下跑。物理照原版：周圍沒載入時 `checkSurroundingChunks` 已經停住車；`refs` 為空所以不夾回；`updatePhysicsNetwork()` 照送位置，伺服器跟上；車底下的 chunk 載入後，offset 1818 起原版把 `this.chunk` 換過去並從舊 chunk 的清單移除。也就是讓這段與原版回收後那段相同，不再每幀跳過。沒有本機乘客的車照原版被移除。
+- W63：玩家所在的車 `isLocalPhysicSim()`（客戶端 Local 或 LocalCollide）時不移動玩家，其餘照原版（別人開的車上的乘客、Server 授權、不在車上）。原版接著照常送 `VehicleRequest(2)`，這個封包照樣被吃掉；伺服器收到本機下一次 VehiclePhysics 就改回本機的位置。
+
+**kill switch**：`-Dmdc.vehicleOrphanUpdate=off`（W62）、`-Dmdc.driverRecallGuard=off`（W63），或 `0`，一律照原版，需重啟。第一次用到時在 console.txt 記一行 `[MinidoracatJavaPatch][VehicleOrphanGuard] active orphanUpdate=true|false driverRecall=true|false`；每次介入記一行（同一台車掛在同一塊 chunk 上算一次，每次啟動各最多 20 行）：
+
+```text
+[MinidoracatJavaPatch][VehicleOrphanGuard] vehicle <id> <車型> at <x>,<y>: its chunk <wx>,<wy> was unloaded with a local passenger aboard; vanilla would skip every update, kept updating (#<n>)
+[MinidoracatJavaPatch][VehicleOrphanGuard] vehicle <id> <車型> at <x>,<y>: server position <x>,<y> is not loaded here and this client simulates the vehicle; vanilla would move the driver there, kept in the vehicle (#<n>)
+```
+
+**不處理**：
+- chunk 卸載當下那次 `removeFromWorld()` 的 `breakConstraint`（斷開拖車約束）與拖車本身被移出客戶端世界（2by「不處理」(c)）。
+- 掉穿地面、整張重建的觸發點：見 2by。
+- 開 `-ea` 時，W62 讓 offset 1869 的 assert 在車換到新 chunk 那一幀不成立；原版回收後那段（`vehicles` 已清空）本來就同樣不成立，遊戲預設不開 `-ea`。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：W62 存在理由——`update()` 恰 4 個 `ArrayList.contains`，第一個的前後指令逐條核對（`aload_0; getfield chunk; getfield vehicles; aload_0; contains; ifne` → 不含：`GameClient.client`、`sendVehicleRequest(id, 2)`、`goto` 續行點；含：`GameServer.server`、`chunk.refs.isEmpty()`、`removeFromWorld()`、`RETURN`，所有分支都跳到同一個續行點），另 3 個是 animals 1、assert 2；`BaseVehicle.removeFromWorld` 讀 `IsoPlayer.players`，第一個 RETURN 在設 `removedFromWorld` 之前；`IsoChunk.removeFromWorld` 恰一個 `BaseVehicle.removeFromWorld()`。W63 存在理由——`doRemove` 恰一個 `IsoPlayer.setPosition(FFF)V`，前面是 `player.getVehicle() == vehicleID.getVehicle()`（IF_ACMPNE），參數是 `position.getX()、getY()、0`，之後 `sendVehicleRequest(…, 2)`；方法只呼叫 BaseVehicle 的 `removeFromWorld`、`removeFromSquare`（TIS 補上授權判斷就轉紅）。手術後 `update()` 與 `doRemove` 除了改道的呼叫之外文字（含 frames）與原版相同；負對照：`VehiclePacket.doRequest`、`parse` 未改動。LoadCheck：兩個 helper 的簽名。
+- `VehicleOrphanGuardBehaviorTest`（兩個變體各跑 on、`updateOff`、`recallOff`，關掉的那一把必須與原版相同、另一把照常）：W62——chunk 已卸載、車上有本機乘客回 false（同一段只記一次），關掉時回 true（原版負對照）；車上只有別人、chunk 仍被參照、別的清單、chunk 物件已回收、伺服器端，都與 `ArrayList.contains` 相同。W63——Local、LocalCollide 不移動，關掉時照原版移到伺服器位置；Remote、Server 授權與不在車上都照原版移動。
+- 實機驗證：未做（與 W61 同樣要先造出卸載時機）。上線後看玩家 console.txt 的 `VehicleOrphanGuard` 行，以及引擎聲突然消失的回報是否減少。
+
+**退場**：官方修好（卸載時把車移到已載入的 chunk、`update()` 不再對本機乘客的車提早 return，或 `doRemove` 不傳送本機模擬的車的駕駛）時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig.client()` 移除對應的改道，並刪除 helper 與測試。
 
 ---
 

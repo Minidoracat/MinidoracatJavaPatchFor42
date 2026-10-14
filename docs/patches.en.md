@@ -3588,11 +3588,11 @@ repairs the stale reference. If the decision throws, vanilla runs (logged once).
   patch only keeps the pull-back from landing somewhere else.
 - Three more paths of the same family (see the [2026-10-01 report](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md), suggested fixes 2
   and 3): (a) while the vehicle is assigned to an unloaded chunk, `update()` returns early every frame, so no VehiclePhysics is sent, the engine goes
-  silent and passengers are not placed, until reversing brings that chunk back or the object is reused; (b) `VehiclePacket.doRemove()`: when the client
-  has no square at the server's position and a local player is aboard, the driver is moved to the server's stale position (175 tiles on 2026-10-01,
-  755 and 891 tiles on 2026-10-14); (c) a vehicle without local passengers (a trailer, for example) is removed directly at the top of `update()` when
-  `refs` is empty, or by `VehicleManager.clientUpdateVehiclePos` when the server's position is not loaded, which may be how a trailer vanishes only on
-  the client (inferred, not shown).
+  silent and passengers are not placed; (b) `VehiclePacket.doRemove()`: when the client has no square at the server's position and a local player is
+  aboard, the driver is moved to the server's stale position (175 tiles on 2026-10-01, 755 and 891 tiles on 2026-10-14). W62 and W63 in [2bz](#2bz)
+  handle these two. (c) A vehicle without local passengers (a trailer, for example) is removed outright when its chunk unloads, or by
+  `VehicleManager.clientUpdateVehiclePos` when the server's position is not loaded, which may be how a trailer vanishes only on the client (inferred,
+  not shown); still not handled.
 - Falling through the ground: when the vehicle's chunk has squares but its physics ground is not built yet, this block does not run (squares are always
   looked up at z 0). The 2026-10-14 case of a vehicle falling below the map (z below −33) after a driver change belongs here; while seated, the camera
   height is the vehicle's raw physics height, so the view goes black while the HUD keeps working (item 4 of the same report). Handled separately.
@@ -3620,6 +3620,89 @@ repairs the stale reference. If the decision throws, vanilla runs (logged once).
 
 **Retirement**: when TIS fixes it (checks the chunk before clamping, or unlinks vehicles when a chunk unloads), the SmokeCheck reasons to exist turn red;
 then remove this patch from `PatchConfig.client()` and delete the helper and its test.
+
+<a id="2bz"></a>
+## 2bz. A vehicle left on an unloaded chunk: two paths (W62, W63, client, default on; client package 0.2.7)
+
+**Symptom**: while driving, the engine sound suddenly stops and the car slows down by itself; then the driver is pulled back hundreds of tiles to an old
+position, sometimes into a river with a black screen ([2026-10-01 report](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md): 175 tiles;
+2026-10-14 server cmd.txt: 755 and 891 tiles, both landing near places driven 1–3 minutes earlier). Players tell each other to reverse along the road as
+soon as the engine goes quiet.
+
+**Root cause** (javap of the 42.21.0 jar `e1a69eb7`):
+- When a chunk unloads (a normal shift or a full rebuild, see [2by](#2by)), `IsoChunk.removeFromWorld` calls `BaseVehicle.removeFromWorld()` on vehicles
+  still in the cell. That method first calls `breakConstraint(false,false)` and `VehiclesDB2.setVehicleUnloaded`, then returns as soon as any seat holds
+  one of `IsoPlayer.players`, without setting `removedFromWorld`. The vehicle stays assigned to the unloaded chunk.
+- W62's target: at the top of `BaseVehicle.update()` (offsets 49–106), when `this.chunk.vehicles.contains(this)`, `!GameServer.server` and
+  `this.chunk.refs.isEmpty()`, it calls `removeFromWorld()` (which returns early again for the local passenger) and returns. Until that chunk object is
+  recycled, the whole update is skipped every frame: no VehiclePhysics (the server keeps the old position), no passenger placement, no `updateSounds`
+  (the engine goes quiet), no clamp. Reversing the chunk back into the ChunkMap, or the object being recycled, ends it. The other branch of the same
+  check is the recycled object (`vehicles` already cleared): the client only sends `VehicleRequest(2)` and carries on.
+- W63's target: `VehiclePacket.doRemove()` (both `VehicleUpdatePacket` and `VehicleFullUpdatePacket` parse through it first), when `this.square == null`
+  (no square at the server's position on this client, looked up at z 0), calls `player.setPosition(server x, y, 0)` for each local player seated in
+  the vehicle (offset 75), then sends `VehicleRequest(2)`; the method never looks at the vehicle's authorization. The driver's client is the physics
+  authority for the vehicle (Local/LocalCollide), so the server's position is only what that client sent. While W62's stage stops sending, the value
+  stays at the old place and doRemove moves the driver back there. A move wider than the grid rebuilds the whole chunk map, and the vehicle may then be
+  clamped elsewhere ([2by](#2by)).
+
+**Surgery**:
+- W62: all 4 `invokevirtual java/util/ArrayList.contains(Object)Z` in `update()V` are redirected 1:1 to
+  `invokestatic zombie/mdc/VehicleOrphanGuard.contains(ArrayList, Object)Z`. The first one is the check above; the other 3 are
+  `getAnimals().contains(animal)` (runs only off the client) and two `assert this.chunk.vehicles.contains(this)` (not run without `-ea`), and the helper
+  returns the original value for them. Same MethodOps as W61, `expectedHits = 5` (W61 1 + W62 4).
+- W63: the only `invokevirtual IsoPlayer.setPosition(FFF)V` in `VehiclePacket.doRemove(IConnection)Z` is redirected 1:1 to
+  `invokestatic zombie/mdc/VehicleOrphanGuard.setPosition(IsoPlayer, float, float, float)V`, `expectedHits = 1`, a new client ClassPatch.
+- Both are 3 bytes for 3 bytes with the same stack shape and unchanged frames; in both standard and low-memory variants; module version stays `v3.4`.
+
+**Decision**:
+- W62: returns false when the list is the vehicle's own chunk `vehicles`, the list holds the vehicle, this is not the server, that chunk's `refs` is
+  empty and any seat holds one of `IsoPlayer.players` (the same condition that makes `removeFromWorld` return early); otherwise it returns
+  `list.contains(o)`. After false, vanilla takes the recycled-chunk branch: the client sends `VehicleRequest(2)` (batched; the server only attaches the
+  position to its next update) and carries on. Physics stays vanilla: `checkSurroundingChunks` has already stopped the vehicle when its surroundings are
+  missing, `refs` is empty so there is no clamp, `updatePhysicsNetwork()` keeps sending the position and the server follows, and once the chunk under
+  the vehicle loads, vanilla moves `this.chunk` there from offset 1818 and removes the vehicle from the old chunk's list. In short, this stage now
+  behaves like the recycled stage instead of skipping every frame. Vehicles without local passengers are still removed as in vanilla.
+- W63: when the player's vehicle is `isLocalPhysicSim()` (Local or LocalCollide on the client), the player is not moved; otherwise vanilla (a passenger
+  in someone else's vehicle, Server authorization, not in a vehicle). Vanilla then still sends `VehicleRequest(2)` and the packet is still consumed; the
+  server takes this client's position again from its next VehiclePhysics.
+
+**Kill switches**: `-Dmdc.vehicleOrphanUpdate=off` (W62) and `-Dmdc.driverRecallGuard=off` (W63), or `0`, always run vanilla; need a restart. The first
+use logs `[MinidoracatJavaPatch][VehicleOrphanGuard] active orphanUpdate=true|false driverRecall=true|false` to console.txt; each intervention logs one
+line (one vehicle on one unloaded chunk counts once; at most 20 of each per start):
+
+```text
+[MinidoracatJavaPatch][VehicleOrphanGuard] vehicle <id> <script> at <x>,<y>: its chunk <wx>,<wy> was unloaded with a local passenger aboard; vanilla would skip every update, kept updating (#<n>)
+[MinidoracatJavaPatch][VehicleOrphanGuard] vehicle <id> <script> at <x>,<y>: server position <x>,<y> is not loaded here and this client simulates the vehicle; vanilla would move the driver there, kept in the vehicle (#<n>)
+```
+
+**Not handled**:
+- The `breakConstraint` in that one `removeFromWorld()` call at unload time (it drops the towing constraint), and the trailer itself leaving the client
+  world (2by "Not handled" (c)).
+- Falling through the ground and the trigger of the full rebuild: see 2by.
+- With `-ea`, W62 makes the assert at offset 1869 fail on the frame the vehicle moves to its new chunk; vanilla's recycled stage (`vehicles` already
+  cleared) fails it the same way, and the game does not run with `-ea` by default.
+
+**Checks and verification**:
+- SmokeCheck (both variants): W62 reasons to exist — `update()` has exactly 4 `ArrayList.contains`; the instructions around the first are checked one by
+  one (`aload_0; getfield chunk; getfield vehicles; aload_0; contains; ifne` → not listed: `GameClient.client`, `sendVehicleRequest(id, 2)`, `goto` the
+  resume point; listed: `GameServer.server`, `chunk.refs.isEmpty()`, `removeFromWorld()`, `RETURN`, with every branch jumping to the same resume point),
+  and the other 3 are animals 1 and assert 2; `BaseVehicle.removeFromWorld` reads `IsoPlayer.players` and its first RETURN comes before it sets
+  `removedFromWorld`; `IsoChunk.removeFromWorld` has exactly one `BaseVehicle.removeFromWorld()`. W63 reasons to exist — `doRemove` has exactly one
+  `IsoPlayer.setPosition(FFF)V`, after `player.getVehicle() == vehicleID.getVehicle()` (IF_ACMPNE), with arguments `position.getX(), getY(), 0`,
+  followed by `sendVehicleRequest(…, 2)`; the method only calls `removeFromWorld` and `removeFromSquare` on BaseVehicle (red if TIS adds an
+  authorization check). After surgery, `update()` and `doRemove` text (including frames) equals vanilla except for the redirected calls; negative
+  controls: `VehiclePacket.doRequest` and `parse` are unchanged. LoadCheck: both helper signatures.
+- `VehicleOrphanGuardBehaviorTest` (both variants, `on`, `updateOff` and `recallOff`; the switched-off patch must match vanilla while the other keeps
+  working): W62 — unloaded chunk with a local passenger returns false (logged once per episode), and true when switched off (vanilla negative
+  control); only someone else aboard, a chunk still referenced, another list, a recycled chunk object and the server side all match
+  `ArrayList.contains`. W63 — Local and LocalCollide are not moved, and are moved to the server's position when switched off; Remote and Server
+  authorization and a player not in a vehicle are moved as in vanilla.
+- In game: not done (it needs the same unload timing as W61). After release, check players' console.txt for `VehicleOrphanGuard` lines and whether
+  reports of the engine suddenly going silent drop.
+
+**Retirement**: when TIS fixes it (moves the vehicle to a loaded chunk on unload, stops returning early in `update()` for a vehicle with a local
+passenger, or stops `doRemove` from moving the driver of a locally simulated vehicle), the SmokeCheck reasons to exist turn red; then remove the
+matching redirect from `PatchConfig.client()` and delete the helper and its test.
 
 ---
 

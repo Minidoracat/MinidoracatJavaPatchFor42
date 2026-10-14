@@ -154,6 +154,8 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W55 `isBoneReparented` 快速路徑（[2bs](docs/patches.md#2bs)） | 骨架更新每根骨頭呼叫一次 `isBoneReparented`，每次都從池配置一個 lambda 再掃清單；車輛、殭屍與多數角色的清單是空的。 | 清單為空直接回 false，否則照原版；結果逐位相同，所有角色與車都受惠。 | 未回報 |
 | W57 自建房 chunk 載入斷線（[2bu](docs/patches.md#2bu)） | 42.21.0：chunk 的格子在 World Streamer 執行緒就綁好房間。主執行緒接手前，client 若重建這一帶的自建建築（同一個或相鄰 cell 有人蓋或拆東西），舊的 `IsoRoom` 被清空（`def = null`），`updateSquares` 又跳過排隊中的 chunk；接著 `IsoLightSwitch.chunkLoaded` 丟例外，client 被斷線送回主選單。 | chunk 有格子指向被清空的房間時，先對這個 chunk 補跑遊戲自己的 `updateSquares` 步驟（原版漏掉的重綁），否則照原版。 | [#102213](https://theindiestone.com/forums/topic/102213/) |
 | W61 開車被夾回過期 chunk 的瞬移（[2by](docs/patches.md#2by)） | 42.21.0：客戶端把行駛中的車周圍的 chunk 一起卸載（整張 chunk map 重建）時，車仍指著舊的 chunk 物件。這個物件被回收、排入別處的載入後，`BaseVehicle.update` 把車夾回它，條件只看 `refs` 非空，車被丟到那一塊的角落，幾十到幾百格外。 | 那個 chunk 已載入、車在它的清單裡、相鄰時照原版；否則夾進相鄰最近的已載入 chunk；相鄰都沒載入就留在原地（原版已經停掉它的物理）等那一塊載入。 | 未回報 |
+| W62 車被留在已卸載 chunk 上就不再更新（[2bz](docs/patches.md#2bz)） | 42.21.0：車上有本機乘客時，chunk 卸載的 `removeFromWorld` 移不掉這台車，車仍掛在那塊 chunk 上；之後 `BaseVehicle.update` 每幀再呼叫一次 `removeFromWorld` 就 return，車不再回報位置、引擎聲消失、乘客不擺位。 | 只在這個情況讓 `update` 改走原版「chunk 已回收」的分支（請求車輛更新後照常往下跑），車照常更新，等車底下的 chunk 載入後就換過去。 | 未回報 |
+| W63 駕駛被拉回伺服器的舊位置（[2bz](docs/patches.md#2bz)） | 42.21.0：伺服器位置的格子在 client 沒載入時，`VehiclePacket.doRemove` 把坐在車上的本機玩家移到那個位置；就算這台車由本機模擬、伺服器的位置只是本機送出去的舊值也一樣。 | 本機模擬的車（Local／LocalCollide）不移動駕駛，其餘照原版。 | 未回報 |
 
 ### Native 防護（Linux dedicated server）
 
@@ -169,7 +171,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 | 問題 | 原版哪裡出錯 | 玩家可以怎麼做 | TIS |
 |---|---|---|---|
-| 駕駛中的車被留在已卸載的 chunk 上（[回報](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)） | client 卸載 chunk 時，車上有本機玩家的車移不掉，也沒有被移到已載入的 chunk。這台車之後不再回報位置、也不更新聲音（引擎聲「消失」）。等伺服器記的舊位置落到 client 的載入範圍外，一則車輛更新就會把駕駛拉回那個舊位置，車可能因此掉進水裡：下不了車，畫面一直全黑。 | 開車時引擎聲突然消失或車子自己煞停，就沿原路倒退，等引擎聲回來再開。已經卡在水裡就重登幾次（每次重登車都往岸邊移幾格），或請管理員移位。 | 草稿 |
+| 駕駛中的車被留在已卸載的 chunk 上（[回報](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)） | client 卸載 chunk 時，車上有本機玩家的車移不掉，也沒有被移到已載入的 chunk。這台車之後不再回報位置、也不更新聲音（引擎聲「消失」）。等伺服器記的舊位置落到 client 的載入範圍外，一則車輛更新就會把駕駛拉回那個舊位置，車可能因此掉進水裡：下不了車，畫面一直全黑。 | 客戶端修補包（0.2.7，W61–W63）讓這種車照常更新，兩種瞬移都不再發生。沒裝時：開車時引擎聲突然消失或車子自己煞停，就沿原路倒退，等引擎聲回來再開。已經卡在水裡就重登幾次（每次重登車都往岸邊移幾格），或請管理員移位。 | 草稿 |
 | 有雞舍的 chunk 卸載時被斷線踢回主選單（[回報](docs/report/2026-10-03-hutch-removefromworld-npe-tis.md)） | 42.21.0：`IsoHutch.removeFromWorld` 對 `animalInside` 的每個值呼叫 `removeFromUpdateLists()`，但 client 自己的動物同步會把 `null` 寫進這個 map（例如母雞進巢箱下蛋時）。client 卸載那個 chunk 時（走開、開車離開或傳送），NPE 一路拋到 `IngameState.updateInternal` 的 catch，client 被斷線送回主選單。已在本機伺服器實機重現。 | 重登就能回到遊戲。我們的 Lua 修復 MOD 會在 client 清掉這些空格（[MinidoracatFixesFor42](https://github.com/Minidoracat/MinidoracatFixesFor42) 的 `MDFX_HutchNullSlotGuard`，Workshop 42.21.0-0.13.0 起）。 | 草稿 |
 
 ## 官方已修
@@ -239,7 +241,7 @@ bash uninstall.sh  # 下次重啟回到原版
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速、開車瞬移修正（32GB 以上 RAM） |
+| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速、開車瞬移修正（三項，32GB 以上 RAM） |
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與標準版互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 

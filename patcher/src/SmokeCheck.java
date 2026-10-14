@@ -3908,17 +3908,169 @@ public final class SmokeCheck {
                 && countExactCalls(vSurround, Opcodes.INVOKEVIRTUAL, vehCls, "setPhysicsActive", "(Z)V") >= 1
                 && countFieldTouches(methodFromJar(jar, vehCls, "setPhysicsActive", "(ZZ)V"), vehCls, freezeFlag) == 1);
         String clampDesc = "(L" + vehCls + ";L" + transformCls + ";)V";
+        String orphanCls = "zombie/mdc/VehicleOrphanGuard";
+        String listContainsDesc = "(Ljava/lang/Object;)Z";
+        String orphanContainsDesc = "(Ljava/util/ArrayList;Ljava/lang/Object;)Z";
         MethodNode pVehUpdate = method(distJava, vehCls, "update", "()V");
-        failed += check("W61 update 唯一 setWorldTransform 同形改道 VehicleClampGuard.setWorldTransform，其餘指令與 frames 保留",
+        failed += check("W61／W62 update：setWorldTransform 1 個、ArrayList.contains 4 個同形改道，其餘指令與 frames 保留",
                 countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setWorldTransform", stwDesc) == 0
                 && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, clampCls, "setWorldTransform", clampDesc) == 1
-                && methodText(vVehUpdate).replace("INVOKEVIRTUAL " + vehCls + ".setWorldTransform " + stwDesc,
-                        "INVOKESTATIC " + clampCls + ".setWorldTransform " + clampDesc).equals(methodText(pVehUpdate)));
+                && countExactCalls(vVehUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc) == 4
+                && countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc) == 0
+                && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, orphanCls, "contains", orphanContainsDesc) == 4
+                && methodText(vVehUpdate)
+                        .replace("INVOKEVIRTUAL " + vehCls + ".setWorldTransform " + stwDesc,
+                                "INVOKESTATIC " + clampCls + ".setWorldTransform " + clampDesc)
+                        .replace("INVOKEVIRTUAL java/util/ArrayList.contains " + listContainsDesc,
+                                "INVOKESTATIC " + orphanCls + ".contains " + orphanContainsDesc)
+                        .equals(methodText(pVehUpdate)));
         failed += check("W61 負對照：setWorldTransform 本體與 flipUpright（另一個呼叫點）未改動",
                 methodText(method(distJava, vehCls, "setWorldTransform", stwDesc))
                         .equals(methodText(methodFromJar(jar, vehCls, "setWorldTransform", stwDesc)))
                 && methodText(method(distJava, vehCls, "flipUpright", "()V"))
                         .equals(methodText(methodFromJar(jar, vehCls, "flipUpright", "()V"))));
+
+        // ---- W62 車掛在已卸載 chunk 上時 update 每幀提早結束（docs/patches.md 2bz）----
+        // 存在理由：update 開頭第一個 ArrayList.contains 是 this.chunk.vehicles.contains(this)；不含時（chunk 物件已回收）
+        // 客戶端送 VehicleRequest(2) 後跳到續行點，含時若 !server 且 chunk.refs 空就 removeFromWorld 後 RETURN。
+        // removeFromWorld 遇到本機乘客在 RETURN 之前就離開（不設 removedFromWorld），所以整個 update 每幀被跳過。
+        // 另 3 個 contains（animals 一個、assert 兩個）位置釘住，helper 對它們回傳原值。TIS 改寫這段＝轉紅、重估撤刀。
+        int headContains = -1;
+        for (int i = 0; i < vehUpdateReal.size() && headContains < 0; i++) {
+            if (isCall(vehUpdateReal.get(i), Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc)) {
+                headContains = i;
+            }
+        }
+        String chunkDesc = "L" + chunkCls + ";";
+        boolean orphanHead = headContains >= 4 && headContains + 20 < vehUpdateReal.size();
+        if (orphanHead) {
+            AbstractInsnNode[] h = new AbstractInsnNode[25];
+            for (int i = 0; i < h.length; i++) {
+                h[i] = vehUpdateReal.get(headContains - 4 + i);
+            }
+            // h[4] 是 contains；h[24] 是續行點（分支全部跳到這裡）
+            AbstractInsnNode resume = h[24];
+            orphanHead = isVar(h[0], Opcodes.ALOAD, 0)
+                    && isField(h[1], Opcodes.GETFIELD, vehCls, "chunk", chunkDesc)
+                    && isField(h[2], Opcodes.GETFIELD, chunkCls, "vehicles", "Ljava/util/ArrayList;")
+                    && isVar(h[3], Opcodes.ALOAD, 0)
+                    && h[5] instanceof JumpInsnNode notListed && notListed.getOpcode() == Opcodes.IFNE
+                    && isField(h[6], Opcodes.GETSTATIC, "zombie/network/GameClient", "client", "Z")
+                    && h[7] instanceof JumpInsnNode notClient && notClient.getOpcode() == Opcodes.IFEQ
+                    && nextReal(notClient.label) == resume
+                    && isField(h[8], Opcodes.GETSTATIC, "zombie/vehicles/VehicleManager", "instance", "Lzombie/vehicles/VehicleManager;")
+                    && isVar(h[9], Opcodes.ALOAD, 0)
+                    && isField(h[10], Opcodes.GETFIELD, vehCls, "vehicleId", "S")
+                    && h[11].getOpcode() == Opcodes.ICONST_2
+                    && isCall(h[12], Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager", "sendVehicleRequest", "(SS)V")
+                    && h[13] instanceof JumpInsnNode toResume && toResume.getOpcode() == Opcodes.GOTO
+                    && nextReal(toResume.label) == resume
+                    && nextReal(notListed.label) == h[14]
+                    && isField(h[14], Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z")
+                    && h[15] instanceof JumpInsnNode isServer && isServer.getOpcode() == Opcodes.IFNE
+                    && nextReal(isServer.label) == resume
+                    && isVar(h[16], Opcodes.ALOAD, 0)
+                    && isField(h[17], Opcodes.GETFIELD, vehCls, "chunk", chunkDesc)
+                    && isField(h[18], Opcodes.GETFIELD, chunkCls, "refs", "Ljava/util/ArrayList;")
+                    && isCall(h[19], Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "isEmpty", "()Z")
+                    && h[20] instanceof JumpInsnNode refsLeft && refsLeft.getOpcode() == Opcodes.IFEQ
+                    && nextReal(refsLeft.label) == resume
+                    && isVar(h[21], Opcodes.ALOAD, 0)
+                    && isCall(h[22], Opcodes.INVOKEVIRTUAL, vehCls, "removeFromWorld", "()V")
+                    && h[23].getOpcode() == Opcodes.RETURN;
+        }
+        // 另 3 個 contains：animals.contains(animal)（getAnimals 之後）與兩個 assert（$assertionsDisabled 之後讀 chunk.vehicles）
+        int animalContains = 0;
+        int assertContains = 0;
+        for (int i = headContains + 1; orphanHead && i < vehUpdateReal.size(); i++) {
+            if (!isCall(vehUpdateReal.get(i), Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc)) {
+                continue;
+            }
+            if (isCall(vehUpdateReal.get(i - 2), Opcodes.INVOKEVIRTUAL, vehCls, "getAnimals", "()Ljava/util/ArrayList;")) {
+                animalContains++;
+            } else if (isField(vehUpdateReal.get(i - 2), Opcodes.GETFIELD, chunkCls, "vehicles", "Ljava/util/ArrayList;")
+                    && isField(vehUpdateReal.get(i - 6), Opcodes.GETSTATIC, vehCls, "$assertionsDisabled", "Z")) {
+                assertContains++;
+            }
+        }
+        MethodNode vVehRemove = methodFromJar(jar, vehCls, "removeFromWorld", "()V");
+        int firstReturn = Integer.MAX_VALUE;
+        int firstRemovedWrite = Integer.MAX_VALUE;
+        int removeIndex = 0;
+        for (AbstractInsnNode in : vVehRemove.instructions) {
+            if (in.getOpcode() < 0) {
+                continue;
+            }
+            if (in.getOpcode() == Opcodes.RETURN && firstReturn == Integer.MAX_VALUE) {
+                firstReturn = removeIndex;
+            }
+            if (isField(in, Opcodes.PUTFIELD, vehCls, "removedFromWorld", "Z") && firstRemovedWrite == Integer.MAX_VALUE) {
+                firstRemovedWrite = removeIndex;
+            }
+            removeIndex++;
+        }
+        failed += check("W62 vanilla 前提：update 開頭 chunk.vehicles.contains(this) 不含就送 VehicleRequest(2) 續行，含且 refs 空就 "
+                        + "removeFromWorld 後 RETURN；另 3 個 contains 是 animals 1、assert 2；removeFromWorld 遇本機乘客在設旗標前 RETURN",
+                orphanHead && animalContains == 1 && assertContains == 2
+                && countFieldTouches(vVehRemove, "zombie/characters/IsoPlayer", "players") >= 1
+                && firstReturn < firstRemovedWrite
+                && countExactCalls(methodFromJar(jar, chunkCls, "removeFromWorld", "()V"),
+                        Opcodes.INVOKEVIRTUAL, vehCls, "removeFromWorld", "()V") == 1);
+
+        // ---- W63 doRemove 把本機模擬的車的駕駛移到伺服器舊位置（docs/patches.md 2bz）----
+        // 存在理由：doRemove 唯一的 IsoPlayer.setPosition(伺服器 x, y, 0) 在「玩家坐在這台車上」的分支內，之後送 VehicleRequest(2)；
+        // 整個方法不看車的授權（只呼叫 BaseVehicle 的 removeFromWorld、removeFromSquare）。TIS 補上授權判斷＝轉紅、重估撤刀。
+        String vehiclePacketCls = "zombie/network/packets/vehicle/VehiclePacket";
+        String doRemoveDesc = "(Lzombie/network/IConnection;)Z";
+        String orphanRecallDesc = "(L" + playerCls + ";FFF)V";
+        MethodNode vDoRemove = methodFromJar(jar, vehiclePacketCls, "doRemove", doRemoveDesc);
+        List<AbstractInsnNode> doRemoveReal = new ArrayList<>();
+        for (AbstractInsnNode in : vDoRemove.instructions) {
+            if (in.getOpcode() >= 0) {
+                doRemoveReal.add(in);
+            }
+        }
+        int recallAt = -1;
+        for (int i = 0; i < doRemoveReal.size(); i++) {
+            if (isCall(doRemoveReal.get(i), Opcodes.INVOKEVIRTUAL, playerCls, "setPosition", "(FFF)V")) {
+                recallAt = i;
+            }
+        }
+        String positionCls = "zombie/network/fields/Position";
+        String vehicleIdCls = "zombie/network/fields/vehicle/VehicleID";
+        boolean recallShape = recallAt >= 15 && recallAt + 6 < doRemoveReal.size()
+                && isCall(doRemoveReal.get(recallAt - 15), Opcodes.INVOKEVIRTUAL, playerCls, "getVehicle", "()L" + vehCls + ";")
+                && isCall(doRemoveReal.get(recallAt - 12), Opcodes.INVOKEVIRTUAL, vehicleIdCls, "getVehicle", "()L" + vehCls + ";")
+                && doRemoveReal.get(recallAt - 11).getOpcode() == Opcodes.IF_ACMPNE
+                && isCall(doRemoveReal.get(recallAt - 5), Opcodes.INVOKEVIRTUAL, positionCls, "getX", "()F")
+                && isCall(doRemoveReal.get(recallAt - 2), Opcodes.INVOKEVIRTUAL, positionCls, "getY", "()F")
+                && doRemoveReal.get(recallAt - 1).getOpcode() == Opcodes.FCONST_0
+                && doRemoveReal.get(recallAt + 5).getOpcode() == Opcodes.ICONST_2
+                && isCall(doRemoveReal.get(recallAt + 6), Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager",
+                        "sendVehicleRequest", "(SS)V");
+        boolean doRemoveNoAuth = true;
+        for (AbstractInsnNode in : doRemoveReal) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(vehCls)
+                    && !mi.name.equals("removeFromWorld") && !mi.name.equals("removeFromSquare")) {
+                doRemoveNoAuth = false;
+            }
+        }
+        failed += check("W63 vanilla 前提：doRemove 唯一的 IsoPlayer.setPosition(伺服器 x, y, 0) 在玩家坐在這台車上的分支內、之後送 "
+                        + "VehicleRequest(2)；方法不看車的授權",
+                countExactCalls(vDoRemove, Opcodes.INVOKEVIRTUAL, playerCls, "setPosition", "(FFF)V") == 1
+                && recallShape && doRemoveNoAuth);
+        MethodNode pDoRemove = method(distJava, vehiclePacketCls, "doRemove", doRemoveDesc);
+        failed += check("W63 doRemove 的 setPosition 同形改道 VehicleOrphanGuard.setPosition，其餘指令與 frames 保留",
+                countExactCalls(pDoRemove, Opcodes.INVOKEVIRTUAL, playerCls, "setPosition", "(FFF)V") == 0
+                && countExactCalls(pDoRemove, Opcodes.INVOKESTATIC, orphanCls, "setPosition", orphanRecallDesc) == 1
+                && methodText(vDoRemove).replace("INVOKEVIRTUAL " + playerCls + ".setPosition (FFF)V",
+                        "INVOKESTATIC " + orphanCls + ".setPosition " + orphanRecallDesc).equals(methodText(pDoRemove)));
+        String vehiclePacketParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        failed += check("W63 負對照：VehiclePacket.doRequest 與 parse 未改動",
+                methodText(method(distJava, vehiclePacketCls, "doRequest", doRemoveDesc))
+                        .equals(methodText(methodFromJar(jar, vehiclePacketCls, "doRequest", doRemoveDesc)))
+                && methodText(method(distJava, vehiclePacketCls, "parse", vehiclePacketParseDesc))
+                        .equals(methodText(methodFromJar(jar, vehiclePacketCls, "parse", vehiclePacketParseDesc))));
         return failed;
     }
 

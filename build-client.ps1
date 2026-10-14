@@ -178,6 +178,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleClampGuardBehaviorTest $run[0]
         Assert-Ok "VehicleClampGuardBehaviorTest $($run[0]) $id"
     }
+    # W62／W63：on、只關 W62、只關 W63 各跑一次（關掉的那一把必須與原版相同，另一把照常）
+    foreach ($run in @(@('on', @()), @('updateOff', @('-Dmdc.vehicleOrphanUpdate=off')), @('recallOff', @('-Dmdc.driverRecallGuard=off')))) {
+        $jvmArgs = @($run[1])
+        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleOrphanGuardBehaviorTest $run[0]
+        Assert-Ok "VehicleOrphanGuardBehaviorTest $($run[0]) $id"
+    }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
 if (Test-Path "$R\patcher\tests-client-common") {
@@ -280,8 +286,12 @@ Modules
   chunk it is listed in, but that chunk may already have been unloaded and reused somewhere
   else; the vehicle is now pulled into the nearest adjacent loaded chunk instead, or, if no
   neighbour is loaded, left where it is (the game has already stopped it) until that area
-  loads. JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
-  -Dmdc.boneReparentFast=off and -Dmdc.vehicleClampGuard=off turn them off.
+  loads. Two related 42.21.0 fixes for a vehicle left on an unloaded chunk with you aboard:
+  the vehicle keeps updating (vanilla stops sending its position and the engine goes
+  silent), and the server's old position no longer pulls the driver back when this client
+  is driving it. JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
+  -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off
+  and -Dmdc.driverRecallGuard=off turn them off.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
   this game session actually reached the hook.
@@ -361,8 +371,10 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   不一致就本次遊戲停用），以及模型沒有骨頭改掛時，每根骨頭的檢查不再配置物件。
   兩版都含 42.21.0 開車瞬移修補：車開到還沒載入的格子時，遊戲會把車拉回它登記的 chunk，
   但那個 chunk 可能已經卸載並被重用到別處；改成拉進相鄰最近的已載入 chunk，相鄰都沒載入就留在原地（遊戲已經讓車停住）等載入。
+  兩版也含兩項相關修補（車上有你、車卻被留在已卸載的 chunk 上時）：車照常更新（原版會停止送位置、引擎聲消失），
+  以及你自己開的車不會再被伺服器的舊位置把駕駛拉回去。
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
-  -Dmdc.vehicleClampGuard=off 可分別關閉。
+  -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off 可分別關閉。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
 
