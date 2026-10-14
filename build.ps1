@@ -115,6 +115,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalSoundIndex$CellTable.class',
     'zombie/mdc/AnimalSoundIndex$SoundList.class',
     'zombie/network/packets/vehicle/MdcVehicleCollideResync.class',
+    'zombie/mdc/VehicleSinkRestore.class',
     'zombie/network/packets/connection/MdcCoopNameGuard.class',
     'zombie/mdc/VehicleRelevancyGate.class',
     'zombie/mdc/VehicleRelevancyGate$StillState.class',
@@ -591,6 +592,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "AnimalLossProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLossProbeTest off
 Assert-Ok "AnimalLossProbeTest（off，只呼叫原方法）"
+
+Write-Host "[9zj/10] 卡進地下的車交回伺服器時抬回（W64）：真 setNetPlayerAuthorization＋真 shouldSend，下車／碰撞歸還／掉很深都抬回並送完整更新，正常停放、門檻內、交給駕駛、沒有地板照原版..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleSinkRestoreTest on
+Assert-Ok "VehicleSinkRestoreTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.vehicleSinkRestore=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleSinkRestoreTest off
+Assert-Ok "VehicleSinkRestoreTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -3055,6 +3055,49 @@ public final class SmokeCheck {
                 && countExactCalls(gVcr, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager", "getVehicleState",
                         "(Lzombie/core/raknet/UdpConnection;Lzombie/vehicles/BaseVehicle;)L" + svsCls + ";") == 0);
 
+        // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。存在理由（TIS 修好即紅＝撤刀）：
+        // VehiclePhysicsPacket.processServer 把客戶端回報的高度直接寫進 setZ／jniTransform，不夾樓層；
+        // 原版只有 BaseVehicle.load 以 PZMath.clamp 把存檔高度夾回樓層；伺服器授權交回 Server 都經 setNetPlayerAuthorization；
+        // shouldSend 併入 vehicle.updateFlags（helper 以 Full 要求完整更新）。helper 的停放高度照 CarController 建構子。
+        String w64Veh = "zombie/vehicles/BaseVehicle";
+        String w64AuthDesc = "(Lzombie/vehicles/BaseVehicle$Authorization;I)V";
+        String w64Helper = "zombie/mdc/VehicleSinkRestore";
+        String w64HelperDesc = "(Lzombie/vehicles/BaseVehicle;Lzombie/vehicles/BaseVehicle$Authorization;)V";
+        MethodNode w64Physics = methodFromJar(jar, "zombie/network/packets/vehicle/VehiclePhysicsPacket", "processServer", vcpDesc);
+        MethodNode w64Load = methodFromJar(jar, w64Veh, "load", "(Ljava/nio/ByteBuffer;IZ)V");
+        MethodNode w64Car = methodFromJar(jar, "zombie/core/physics/CarController", "<init>", "(L" + w64Veh + ";)V");
+        String w64Script = "zombie/scripting/objects/VehicleScript";
+        failed += check("W64 vanilla 前提：VehiclePhysicsPacket.processServer 直接 setZ 客戶端高度、不夾樓層；只有 load 以 PZMath.clamp 夾回；"
+                        + "CarController 停放高度讀模型偏移、輪子、重心與車身高",
+                countExactCalls(w64Physics, Opcodes.INVOKEVIRTUAL, w64Veh, "setZ", "(F)F") == 1
+                && countExactCalls(w64Physics, Opcodes.INVOKESTATIC, "zombie/core/math/PZMath", "clamp", "(FFF)F") == 0
+                && countExactCalls(w64Load, Opcodes.INVOKESTATIC, "zombie/core/math/PZMath", "clamp", "(FFF)F") >= 1
+                && countExactCalls(w64Car, Opcodes.INVOKEVIRTUAL, w64Script, "getModelOffset", "()Lorg/joml/Vector3f;") == 1
+                && countExactCalls(w64Car, Opcodes.INVOKEVIRTUAL, w64Script, "getCenterOfMassOffset", "()Lorg/joml/Vector3f;") == 1
+                && countExactCalls(w64Car, Opcodes.INVOKEVIRTUAL, w64Script, "getExtents", "()Lorg/joml/Vector3f;") == 1
+                && countExactCalls(w64Car, Opcodes.INVOKEVIRTUAL, w64Script, "getWheel",
+                        "(I)Lzombie/scripting/objects/VehicleScript$Wheel;") == 2);
+        failed += check("W64 vanilla 前提：下車／換座（authorizationServerOnSeat）、碰撞歸還（authorizationServerCollide）、斷線（disconnectPlayer）"
+                        + "都經 setNetPlayerAuthorization 交回；shouldSend 併入 vehicle.updateFlags",
+                countExactCalls(methodFromJar(jar, w64Veh, "authorizationServerOnSeat", "(Lzombie/characters/IsoPlayer;Z)V"),
+                        Opcodes.INVOKEVIRTUAL, w64Veh, "setNetPlayerAuthorization", w64AuthDesc) >= 1
+                && countExactCalls(methodFromJar(jar, w64Veh, "authorizationServerCollide", "(SZ)V"),
+                        Opcodes.INVOKEVIRTUAL, w64Veh, "setNetPlayerAuthorization", w64AuthDesc) >= 1
+                && countExactCalls(methodFromJar(jar, "zombie/network/GameServer", "disconnectPlayer",
+                        "(Lzombie/characters/IsoPlayer;Lzombie/network/IConnection;)V"),
+                        Opcodes.INVOKEVIRTUAL, w64Veh, "setNetPlayerAuthorization", w64AuthDesc) == 1
+                && countExactFields(vShouldSend, Opcodes.GETFIELD, w64Veh, "updateFlags", "S") == 1);
+        MethodNode vW64Auth = methodFromJar(jar, w64Veh, "setNetPlayerAuthorization", w64AuthDesc);
+        MethodNode pW64Auth = method(distJava, w64Veh, "setNetPlayerAuthorization", w64AuthDesc);
+        failed += check("W64 手術後：setNetPlayerAuthorization 頭部 aload_0／aload_1／invokestatic 全序、真指令恰 +3",
+                headCallSlotsOk(pW64Auth, w64Helper, "onSetAuthorization", w64HelperDesc, 0, 1)
+                && realInsnCount(pW64Auth) == realInsnCount(vW64Auth) + 3);
+        failed += check("W64 helper 契約：只在 BaseVehicle 上寫 updateFlags 一處（Full），不改授權欄位",
+                countExactFields(method(distJava, w64Helper, "restore", "(L" + w64Veh + ";)Z"), Opcodes.PUTFIELD,
+                        w64Veh, "updateFlags", "S") == 1
+                && countFieldTouches(method(distJava, w64Helper, "restore", "(L" + w64Veh + ";)Z"), w64Veh,
+                        "netPlayerAuthorization") == 0);
+
         // W52：分割畫面與重生的名稱冒用守衛（docs/patches.md 2bp）。存在理由（TIS 修好即紅＝撤刀）：stage 1 唯一 getUTF
         // 的名稱存進 slot 4，兩個 setUserName 都直接拿它；parse 不比對連線登入名、不查帳號；receivePlayerConnect 把名稱參數
         // 設成 player.username；首次進場的 ConnectPacket 傳的是連線登入名（0 號改用登入名的依據）。
@@ -3912,17 +3955,33 @@ public final class SmokeCheck {
         String listContainsDesc = "(Ljava/lang/Object;)Z";
         String orphanContainsDesc = "(Ljava/util/ArrayList;Ljava/lang/Object;)Z";
         MethodNode pVehUpdate = method(distJava, vehCls, "update", "()V");
-        failed += check("W61／W62 update：setWorldTransform 1 個、ArrayList.contains 4 個同形改道，其餘指令與 frames 保留",
+        // W65 存在理由：update 在從物理回寫 x、y 並設好樓層 z（最後一個 setZ）、夾回區塊之後，唯一一次呼叫 updateTransform；
+        // 整個方法只用物理高度推算樓層，不把物理高度放回地板以上（唯一的 setWorldTransform 在 sq==null 的夾回區塊）。
+        // TIS 在這段補上地板夾回＝重估撤刀。helper 放在 zombie/vehicles 才能呼叫 protected 的 updateTransform。
+        String sinkCls = "zombie/vehicles/MdcVehicleSinkGuard";
+        String sinkDesc = "(L" + vehCls + ";)V";
+        int vUpdateTransformAt = firstCallIndex(vVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "updateTransform", "()V");
+        failed += check("W65 vanilla 前提：update 恰一個 updateTransform，在最後一個 setZ 與夾回的 setWorldTransform 之後；"
+                        + "updateTransform 是 protected",
+                countExactCalls(vVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "updateTransform", "()V") == 1
+                && lastCallIndex(vVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setZ", "(F)F") < vUpdateTransformAt
+                && firstCallIndex(vVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setWorldTransform", stwDesc) < vUpdateTransformAt
+                && (methodFromJar(jar, vehCls, "updateTransform", "()V").access & Opcodes.ACC_PROTECTED) != 0);
+        failed += check("W61／W62／W65 update：setWorldTransform 1 個、ArrayList.contains 4 個、updateTransform 1 個同形改道，其餘指令與 frames 保留",
                 countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setWorldTransform", stwDesc) == 0
                 && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, clampCls, "setWorldTransform", clampDesc) == 1
                 && countExactCalls(vVehUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc) == 4
                 && countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", listContainsDesc) == 0
                 && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, orphanCls, "contains", orphanContainsDesc) == 4
+                && countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "updateTransform", "()V") == 0
+                && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, sinkCls, "updateTransform", sinkDesc) == 1
                 && methodText(vVehUpdate)
                         .replace("INVOKEVIRTUAL " + vehCls + ".setWorldTransform " + stwDesc,
                                 "INVOKESTATIC " + clampCls + ".setWorldTransform " + clampDesc)
                         .replace("INVOKEVIRTUAL java/util/ArrayList.contains " + listContainsDesc,
                                 "INVOKESTATIC " + orphanCls + ".contains " + orphanContainsDesc)
+                        .replace("INVOKEVIRTUAL " + vehCls + ".updateTransform ()V",
+                                "INVOKESTATIC " + sinkCls + ".updateTransform " + sinkDesc)
                         .equals(methodText(pVehUpdate)));
         failed += check("W61 負對照：setWorldTransform 本體與 flipUpright（另一個呼叫點）未改動",
                 methodText(method(distJava, vehCls, "setWorldTransform", stwDesc))

@@ -3853,6 +3853,49 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **退場**：官方修好（卸載時把車移到已載入的 chunk、`update()` 不再對本機乘客的車提早 return，或 `doRemove` 不傳送本機模擬的車的駕駛）時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig.client()` 移除對應的改道，並刪除 helper 與測試。
 
+<a id="2ca"></a>
+## 2ca. 車被推到地板下（W64 server，預設 on；W65 client，預設 on，client 包 0.2.7）
+
+**症狀**（2026-10-14 正式服）：一位玩家開 '82 Oshkosh M911（KI5）在大門口以 0–1 km/h 倒車，碰到後面停著的 W900（rSemiTruck），畫面立刻全黑，只剩 HUD 與小地圖；下車後車陷在地面裡，上不去，重登也一樣。玩家錄影：碰撞那一幀之後全黑約 37 秒，下車後車身一半在地面下。伺服器 cmd.txt 同一秒有這台車的 `vehicle.crash`（客戶端判定水平速度變化超過 1 m/s 才送）。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`；伺服器 vehicles.db 唯讀查詢）：
+- 車的物理只在駕駛（或撞到它的人，LocalCollide）的客戶端算，這次是原生物理在碰撞中把 M911 推到地板下。伺服器 `VehiclePhysicsPacket.processServer` 照單全收客戶端回報的高度（`setZ`、`jniTransform.origin.set`），不看樓層。vehicles.db 裡這台車的物理高度是 −0.599（另外兩台 M911 是 0.506、0.507）。
+- `BaseVehicle.update()` 只用物理高度推算樓層（`fastfloor(y / 2.44949 + 0.05)`，那一格或下一格有地板才採用，否則 0），不把車放回地板以上；方法內唯一的 `setWorldTransform` 在「車的位置沒有格子」的夾回區塊（[2by](#2by)）。坐在車上時鏡頭高度取車的物理高度，原點在地板下就全黑（同一機制見 [2026-10-01 回報](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md) 第 4 點）。
+- 原版只有 `BaseVehicle.load` 以 `PZMath.clamp` 把存檔高度夾在所在樓層的地板以上。重登時客戶端 `VehicleFullUpdatePacket.parse` 先 `load`（夾到地板），接著 `Bullet.setOwnVehiclePhysics` 又套上伺服器記的高度，所以每個客戶端都拿到同一個地下的高度。伺服器從資料庫重新載入這台車（重啟）才會被夾回（推論，未實測）。
+
+**手術**：
+- W64（server）：`BaseVehicle.setNetPlayerAuthorization(Authorization, int)` 頭部 headCall（slots 0、1）→ `zombie/mdc/VehicleSinkRestore.onSetAuthorization(BaseVehicle, Authorization)`。頭部時欄位還是舊的授權。掛在 W3-4 既有的 BaseVehicle ClassPatch 上（同一 class 只能有一個 ClassPatch），`expectedHits = 1`。
+- W65（client）：`BaseVehicle.update()` 內唯一的 `invokevirtual updateTransform()V`（offset 1951，這時原版已從物理回寫 x、y 並把 z 設成樓層）1:1 改道 `invokestatic zombie/vehicles/MdcVehicleSinkGuard.updateTransform(BaseVehicle)V`；與 W61／W62 同一個 MethodOps，`expectedHits = 6`。helper 放在 `zombie.vehicles` 才能呼叫 protected 的 `updateTransform`。標準版與省記憶體版都含，模組版本仍是 `v3.4`。
+- 兩刀都不改堆疊形狀、frames 原樣。
+
+**判定**（兩刀相同）：
+- 車是正的（`getUpVectorDot()` 至少 `MINIMUM_DOT_UPRIGHT` 0.8）、物理原點比所在樓層的地板低 0.25 m 以上、那一格有地板（`hasFloor`）。判斷只看地板：原版 `load` 也把高度夾在地板以上，原點在地板下時坐進去就全黑。vehicles.db 7,574 台裡，除了這台 M911，原點最低的是 3 台車頭著地的半掛拖車（−0.07 至 −0.11 m），照原版。
+- 放回的高度＝樓層地板＋停放高度。停放高度照原版 `CarController` 建構子生成車輛的算法：−min(模型偏移＋第一個輪子偏移－半徑, 重心偏移－車身高÷2)，至少 0.1。M911 是 0.5666。
+- W64：只在授權從別人交回 Server 時檢查一次（下車、換到乘客座、斷線、碰撞歸還；`authorizationServerOnSeat`、`authorizationServerCollide`、`GameServer.disconnectPlayer` 都走 `setNetPlayerAuthorization`）。抬回後速度歸零、`updateFlags |= Full`，下一輪 `sendVehicles` 對每個連線送 `VehicleFullUpdate`，客戶端照原版用伺服器的高度放車。
+- W65：只處理本機模擬的車（`isLocalPhysicSim()`：Local、LocalCollide）；用原版 `setWorldTransform`（原生 `teleportVehicle`）放車，水平位置與方向不變、速度歸零，再照原版 `updateTransform`。本機下一則 VehiclePhysics 就把地面上的高度送給伺服器。在伺服器 JVM 裡不動（自建伺服器也會載入 client 包）。
+
+**kill switch**：`-Dmdc.vehicleSinkRestore=off`（W64）、`-Dmdc.vehicleSinkGuard=off`（W65），或 `0`，一律照原版，需重啟。第一次用到時記一行 `active=true|false`；每次介入記一行（每次啟動 W64 最多 50 行、W65 最多 20 行）：
+
+```text
+[MinidoracatJavaPatch][VehicleSinkRestore] vehicle <id> <車型> at <x>,<y> handed back to the server (<原授權> pid=<n>): physics height <y> is <m> m below the floor of level <z>; lifted to <h> and sent a full update (#<n>)
+[MinidoracatJavaPatch][VehicleSinkGuard] vehicle <id> <車型> at <x>,<y> (<授權>): physics height <y> is below the floor of level <z>; lifted to <h> (#<n>)
+```
+
+**不處理**：
+- 原生物理為什麼在這次碰撞中把車推下去：在 libPZBullet 裡，Java 端看不到。
+- 原點在地板下、那一格卻沒有地板的車，以及翻覆的車：照原版。
+- 交回伺服器之後就沒有人再開、也沒人撞的地下車：W64 不會再檢查；部署本身要重啟，重啟時原版 `load` 會夾回。
+- 同一位玩家 20:57 那次被踢回主選單是另一個原版缺陷（`IsoMetaCell.isoRooms` 跨執行緒競態，[2026-09-05 回報](report/2026-09-05-client-metagrid-isorooms-race-tis.md)，TIS #101035），與陷車無關。
+
+**守門與驗證**：
+- SmokeCheck（伺服器）：W64 存在理由——`VehiclePhysicsPacket.processServer` 恰一個 `setZ`、沒有 `PZMath.clamp`；`BaseVehicle.load` 有 `PZMath.clamp`；`CarController` 建構子讀 `getModelOffset`、`getWheel`×2、`getCenterOfMassOffset`、`getExtents`；三條交回路徑都呼叫 `setNetPlayerAuthorization`；`shouldSend` 讀 `vehicle.updateFlags`。手術後頭部 `aload_0; aload_1; invokestatic` 全序、真指令恰 +3；helper 只寫 `updateFlags` 一處、不碰授權欄位。
+- SmokeCheck（client 兩個變體）：W65 存在理由——`update()` 恰一個 `updateTransform`，在最後一個 `setZ` 與夾回的 `setWorldTransform` 之後；`updateTransform` 是 protected。手術後 `update()` 除了 W61、W62、W65 的改道之外逐指令與原版相同。
+- `VehicleSinkRestoreTest`（`build.ps1` [9zj/10]，on、off）：真 `setNetPlayerAuthorization`＋真 `ServerVehicleState.shouldSend`，查格子走真 `IsoCell.getGridSquare`。M911 下車（Local→Server）與碰撞歸還（LocalCollide→Server）：抬回 0.5666、速度歸零、下一輪送完整更新、送一次後不再重送；掉到 −80 m 也抬回 0 樓；停放高度算出來是負的拖車抬到 0.1；正常停放 0.506、地板下 0.109 與 0.24 m、交給駕駛、本來就是 Server、沒有地板、翻覆都不動。off：照原版留在 −0.599、不送完整更新（原版負對照）。
+- `MdcVehicleSinkGuardBehaviorTest`（`build-client.ps1`，兩個變體各 on、off）：Local、LocalCollide 的車拉回 0.5666；Remote、Server、正常行駛、地板下 0.109 與 0.24 m、翻覆、沒有地板、伺服器 JVM 都不動；放車只改高度，水平位置與方向不變、速度歸零。off：照原版留在地板下。
+- 實機驗證：未做（原生物理把車推下去的碰撞無法穩定重現）。上線後看伺服器 console 的 `VehicleSinkRestore` 行與玩家 console.txt 的 `VehicleSinkGuard` 行。
+
+**退場**：官方在伺服器收高度時夾樓層，或在 `update()` 把掉到地板下的車放回地面時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig` 移除對應的手術，並刪除 helper 與測試。
+
 ---
 
 <a id="3"></a>

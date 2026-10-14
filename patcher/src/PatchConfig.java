@@ -1319,6 +1319,17 @@ public final class PatchConfig {
         vcProcess.expectedHits = 1;
         patches.add(vcPacket);
 
+        // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。伺服器照單全收駕駛回報的物理高度
+        // （VehiclePhysicsPacket.processServer），原版只在從資料庫重新載入時把高度夾回樓層，客戶端物理把車推到地板下後
+        // 重登也救不回來。setNetPlayerAuthorization 頭部收 (this, 新授權)，授權從別人交回 Server 時，比停放高度
+        // （原版 CarController 生成車輛的算法）低 0.5 m 以上而且那一格有地板就抬回、要求送完整更新。
+        // 掛在 W3-4 既有的 BaseVehicle ClassPatch 上（同一 class 只能有一個 ClassPatch）。-Dmdc.vehicleSinkRestore=off。
+        Patcher.MethodOps vehAuth = baseVeh.method("setNetPlayerAuthorization",
+                "(Lzombie/vehicles/BaseVehicle$Authorization;I)V");
+        vehAuth.headCall = new Patcher.HeadCall("zombie/mdc/VehicleSinkRestore", "onSetAuthorization",
+                "(Lzombie/vehicles/BaseVehicle;Lzombie/vehicles/BaseVehicle$Authorization;)V", new int[]{0, 1});
+        vehAuth.expectedHits = 1;
+
         // W52：分割畫面與重生的名稱冒用守衛（docs/patches.md 2bp）。ConnectCoopPacket.parse stage 1 採用封包名稱
         // （只擋空字串與在線同名），兩個分支都 setUserName(playerIndex, 名稱)，stage 2 的 receivePlayerConnect 再設成
         // player.username；0 號不看 AllowCoop。頭部收 (this, connection)，唯一 getUTF（stage 1 名稱）改道：0 號改用
@@ -1518,7 +1529,14 @@ public final class PatchConfig {
         vehicleUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z",
                 "zombie/mdc/VehicleOrphanGuard", "contains"));
-        vehicleUpdate.expectedHits = 5;   // W61 setWorldTransform 1＋W62 contains 4
+        // ---- W65 本機模擬的車掉到地板下時拉回地面（docs/patches.md 2ca）----
+        // update() 從物理回寫 x、y 並把 z 設成所在樓層後，唯一的 updateTransform()（javap offset 1951）1:1 改道
+        // MdcVehicleSinkGuard（放在 zombie.vehicles 才能呼叫 protected 的 updateTransform）：車由本機模擬、是正的、
+        // 原點在樓層地板下 0.25 m 以上且那一格有地板時，先用 setWorldTransform 放回停放高度，再照原版呼叫。
+        vehicleUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/vehicles/BaseVehicle", "updateTransform", "()V",
+                "zombie/vehicles/MdcVehicleSinkGuard", "updateTransform"));
+        vehicleUpdate.expectedHits = 6;   // W61 setWorldTransform 1＋W62 contains 4＋W65 updateTransform 1
         patches.add(vehicle);
 
         // ---- W63 doRemove 把本機模擬的車的駕駛移到伺服器舊位置（docs/patches.md 2bz）----

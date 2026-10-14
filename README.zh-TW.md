@@ -5,8 +5,8 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 68 個 patched class、181 個命中點、68 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外），從
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 68 個 patched class、182 個命中點、69 個 helper class。
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -120,6 +120,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W10-C 被打斷的動作（[2aj](docs/patches.md#2aj)） | 新的請求會在伺服器上靜默停掉玩家已被接受的動作，卻不通知 client。 | 對被打斷的動作補送 Reject（enforce 模式），並且只派送玩家屬於發送連線的動作封包。 | 草稿 |
 | W20 衣物同步（[2ah](docs/patches.md#2ah)） | 一件 visual 為 null 的穿戴物會讓 `ItemDescription` 丟例外，該玩家的衣物廣播全部停擺；數量不符時整個 `SyncVisuals` 封包被丟棄。 | 守住 tint 讀取；另外兩個叢集加觀測。 | [#100911](https://theindiestone.com/forums/topic/100911/) |
 | W59 地圖上看不到隊友（[2bw](docs/patches.md#2bw)） | 客戶端只在遠端玩家的變更計數和伺服器不同時索取完整的地圖資料，拿到資料才畫這位玩家。兩邊的條目一開始都是 1（客戶端第一幀把新條目從 0 推到 1），索取和回覆又是不可靠封包，只要掉一包，兩邊計數就一直相等：這位隊友永遠不會出現在玩家的小地圖和世界地圖上。 | 伺服器改送「基準＋2×計數」（基準是每次開機隨機、至少 1024 的偶數），沒拿到資料的客戶端對不上，會每秒持續索取直到拿到；其餘流量與原版相同，只改伺服器。 | 未回報 |
+| W64 車卡在地板下（[2ca](docs/patches.md#2ca)） | 車的物理在駕駛的客戶端算，`VehiclePhysicsPacket.processServer` 照單全收客戶端回報的高度。客戶端物理把車推到地板下時（2026-10-14：低速倒車碰到停著的半掛卡車），之後每個客戶端都拿到這個高度，重登也一樣。原版只有 `BaseVehicle.load` 把高度夾回地板。 | 車交回伺服器時（下車、換座、斷線、碰撞歸還），車是正的、原點比有地板的那一格低 0.25 m 以上，就抬回生成時的停放高度，並對每個客戶端送完整更新。 | 未回報 |
 | LootRespawn 固定容器（[2e](docs/patches.md#2e)） | 沒有原版 TownZone 的自訂地圖上，原生固定容器永遠不刷新。 | 只對未搬動的原生固定容器放行的窄範圍 fallback。 | 設計問題 |
 | 動物壓力調整（[2b](docs/patches.md#2b)） | 玩法調整，不是 bug。 | 閒置壓力衰減 ×2、聲音壓力 ÷3、屠宰連鎖上限減半。 | — |
 
@@ -156,6 +157,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W61 開車被夾回過期 chunk 的瞬移（[2by](docs/patches.md#2by)） | 42.21.0：客戶端把行駛中的車周圍的 chunk 一起卸載（整張 chunk map 重建）時，車仍指著舊的 chunk 物件。這個物件被回收、排入別處的載入後，`BaseVehicle.update` 把車夾回它，條件只看 `refs` 非空，車被丟到那一塊的角落，幾十到幾百格外。 | 那個 chunk 已載入、車在它的清單裡、相鄰時照原版；否則夾進相鄰最近的已載入 chunk；相鄰都沒載入就留在原地（原版已經停掉它的物理）等那一塊載入。 | 未回報 |
 | W62 車被留在已卸載 chunk 上就不再更新（[2bz](docs/patches.md#2bz)） | 42.21.0：車上有本機乘客時，chunk 卸載的 `removeFromWorld` 移不掉這台車，車仍掛在那塊 chunk 上；之後 `BaseVehicle.update` 每幀再呼叫一次 `removeFromWorld` 就 return，車不再回報位置、引擎聲消失、乘客不擺位。 | 只在這個情況讓 `update` 改走原版「chunk 已回收」的分支（請求車輛更新後照常往下跑），車照常更新，等車底下的 chunk 載入後就換過去。 | 未回報 |
 | W63 駕駛被拉回伺服器的舊位置（[2bz](docs/patches.md#2bz)） | 42.21.0：伺服器位置的格子在 client 沒載入時，`VehiclePacket.doRemove` 把坐在車上的本機玩家移到那個位置；就算這台車由本機模擬、伺服器的位置只是本機送出去的舊值也一樣。 | 本機模擬的車（Local／LocalCollide）不移動駕駛，其餘照原版。 | 未回報 |
+| W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）是正的、原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。 | 未回報 |
 
 ### Native 防護（Linux dedicated server）
 

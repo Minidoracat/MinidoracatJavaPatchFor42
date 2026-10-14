@@ -184,6 +184,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleOrphanGuardBehaviorTest $run[0]
         Assert-Ok "VehicleOrphanGuardBehaviorTest $($run[0]) $id"
     }
+    # W65：on 與 off 各跑一次（off＝kill switch 實跑，車照原版留在地板下＝原版負對照）
+    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.vehicleSinkGuard=off')))) {
+        $jvmArgs = @($run[1])
+        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.vehicles.MdcVehicleSinkGuardBehaviorTest $run[0]
+        Assert-Ok "MdcVehicleSinkGuardBehaviorTest $($run[0]) $id"
+    }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
 if (Test-Path "$R\patcher\tests-client-common") {
