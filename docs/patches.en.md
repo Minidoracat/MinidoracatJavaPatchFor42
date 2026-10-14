@@ -400,7 +400,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.21.0-0.2.5.zip`) and never touches the server manifest; the
+(currently `MinidoracatClientPatches-42.21.0-0.2.7.zip`) and never touches the server manifest; the
 client classpath `[".", "projectzomboid.jar"]` is unchanged and loose classes override.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
 `client-fixes-standard`/`client-fixes-lowmem`) after jar/payload SHA and ownership checks;
@@ -3498,6 +3498,90 @@ a save in progress before loading, and so on).
   returns the squares); nothing when it returns false. Chunks: loading a chunk while another thread holds its save registration logs `reload-race`; a
   different chunk, or the same thread saving then loading (`saveNow`), logs nothing; two threads saving the same chunk log `double-write`; the redirected
   `saveUnloaded` runs the real `IsoChunk.Save` (noSave) and leaves no registration. Off: the originals run, nothing is counted and the JVM logs nothing.
+
+<a id="2by"></a>
+## 2by. Vehicle teleported by a clamp into a stale chunk (W61, client, default on; client package 0.2.7)
+
+**Symptom** (production server, 2026-10-14, several players at the same time): while driving into black edges (areas the client has not loaded yet), the
+vehicle was suddenly thrown tens or hundreds of tiles away, into woods or water, and AutoDrive handed control back with "too far from the route". Sometimes it
+jumped back a few dozen seconds later. Over the same window the server main loop ran at 9.1–10.0 fps with no chunk backlog, so server load and the mods added
+that day were ruled out.
+
+**Evidence**:
+- Three AutoDrive diagnostic clips from two players: just before the jump there is `area ahead` (the chunk ahead is not loaded), then one sample whose three
+  speed fields are exactly 0 (`frozen`), and the next sample lands on the corner of another chunk ±0.0005. Example: the car was in chunk (a,b) and landed on
+  `maxX − 0.0005`, `minY + 0.0005` of chunk (a−8,b+7), 77 tiles away; the other two jumped 55 and 71 tiles.
+- The server's anti-cheat logged `Anti-cheat="Speed" … VehiclePhysicsUnreliablePacket: speed=198–833 > limit=150` at the same times.
+  `NetworkCharacterAI.SpeedChecker`, which `AntiCheatSpeed` reads, divides the client's reported displacement by about one second, so these values are the
+  result of the jump; the anti-cheat only logs and does not move the vehicle (`react` is empty, `sync` is not overridden).
+- The server's cmd.txt shows two more jumps of 755 and 891 tiles whose landing x is a multiple of 8 and y a multiple of 8 minus 1, the (minX, maxY) corner
+  of a chunk; both landed near places the same player had driven past 1–3 minutes earlier.
+
+**Root cause** (javap of the 42.21.0 jar `e1a69eb7`):
+- `BaseVehicle.update()` (offset 1538–1815): `sq = getCell().getGridSquare(getX(), getY(), getZ())`; when `sq == null && !this.chunk.refs.isEmpty()`, it
+  clamps x and y into `this.chunk.wx*8` … `+8` (0.0005 from the edge, `5.0E-4f`), calls `setZ(0.2)`, builds t1 with the current rotation and calls
+  `setWorldTransform(t1)` (on the client this calls `Bullet.teleportVehicle`, which zeroes the velocity), then sets `current = getGridSquare(…)`. From offset
+  1818 on, `this.chunk` only moves to `current`'s chunk when `current` has a square in another chunk.
+- Unloading a chunk on the client (`IsoChunkMap.Up/Down/Left/Right` drop it at the edge → `refs.remove` → `removeFromWorld`) does not clear the vehicle's
+  `chunk`: `IsoChunk.removeFromWorld` only handles the moving objects on its squares, and `resetForStore()` clears `vehicles` and `refs`, zeroes `wx`/`wy`
+  and returns the object to `chunkStore`. Across every method of `IsoChunk` and `IsoChunkMap`, only `IsoChunk.update` writes `vehicle.chunk` (pointing it
+  back at itself).
+- `IsoChunkMap.LoadChunk` takes an object from `chunkStore`, gives it the new coordinates, calls `refs.add(this)` (offset 123) and only then
+  `WorldStreamer.addJob` (offset 135). A vehicle that still points at such an object passes vanilla's condition and is clamped onto a corner of the new
+  location. `refs` is non-empty before loading finishes, so the target may itself be unloaded and the vehicle is clamped again on the next frame.
+- The vehicle's `chunk` only follows `current`. While the vehicle is on squares that do not exist, `current` is null and `chunk` stays on the last chunk
+  that had a square; once that chunk is unloaded and recycled, the reference is stale (inferred: more black edges and chunk-map churn make it more likely).
+
+**Surgery**: the only `invokevirtual BaseVehicle.setWorldTransform(Transform)V` in `update()V` (offset 1776, inside the clamp block) is redirected 1:1 to
+`invokestatic zombie/mdc/VehicleClampGuard.setWorldTransform(BaseVehicle, Transform)V` (3 bytes for 3 bytes, same stack shape, frames unchanged),
+`expectedHits = 1`, added to the client `BaseVehicle` ClassPatch that W54 already uses. In both standard and low-memory variants; module version `v3.4`.
+
+**Decision** (when the helper is called, vanilla has already replaced x and y with the clamped values and set z to 0.2; `jniTransform.origin` is still the
+vehicle's real physics position P):
+1. If the `this.chunk` vanilla clamps into is loaded, lists the vehicle in `vehicles`, and is at most 2 chunks from P's chunk: vanilla. This is the chunk the
+   vehicle just left, the normal pull-back.
+2. Otherwise, among the chunks in the 5×5 around P's chunk that are loaded and sit in the ChunkMap slot matching their own coordinates, take the one
+   nearest to P, clamp into it the same way vanilla does (0.0005 from the edge), rewrite x, y and t1, and place the vehicle.
+3. If none is loaded: put x and y back to P and place the vehicle where it is (height 0.2, velocity zeroed) until that area loads; no teleport.
+
+From offset 1789 vanilla then reads `current` at the new position; once it has a square, `this.chunk` moves to the chunk the vehicle is really in, which
+repairs the stale reference. If the decision throws, vanilla runs (logged once).
+
+**Kill switch**: `-Dmdc.vehicleClampGuard=off` (or `0`) always runs vanilla; needs a restart. The first clamp logs
+`[MinidoracatJavaPatch][VehicleClampGuard] active=true|false` to console.txt; each intervention logs one line (at most 20 per start):
+
+```text
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <script> at <x>,<y>: vanilla would clamp it into chunk <wx>,<wy> (loaded=<b>, listed=<b>, <n> chunks away) at <x>,<y>; clamped into loaded chunk <wx>,<wy> at <x>,<y> (#<n>)
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <script> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk within 2, held in place (#<n>)
+```
+
+**Not handled**:
+- Driving onto unloaded squares in the first place: black edges come from chunk streaming (see [2o](#2o) and W4-1); this patch only makes the pull-back
+  pull to the right place.
+- Another path with the same stale reference at the top of `update()`: when `this.chunk.vehicles` does not contain the vehicle, the client sends
+  `VehicleRequest(2)` every frame; when `this.chunk.refs` is empty (unloaded but not yet recycled), it calls `removeFromWorld()` directly. A trailer
+  vanishing only on the client may take this path (inferred, not shown).
+- Falling through the ground: when the vehicle's chunk has squares but its physics ground is not built yet, this block does not run (squares are always
+  looked up at z 0). The 2026-10-14 case of a vehicle falling below the map (z below −33) after a driver change belongs here and is handled separately.
+
+**Checks and verification**:
+- SmokeCheck (both variants): reasons to exist — `update()` has exactly one `setWorldTransform`, inside the clamp block where `sq == null` (IFNONNULL) is
+  followed directly by `this.chunk.refs.isEmpty()`→IFNE, and the clamp reads only `wx`, `wy` and `5.0E-4f`, never `loaded` or `vehicles` (red if TIS adds
+  either check = reconsider the patch); the helper's `EDGE` is tied to the vanilla constant; `resetForStore` clears `vehicles` and `refs`, and in
+  `IsoChunk`/`IsoChunkMap` only `IsoChunk.update` writes `vehicle.chunk` (back to itself); `LoadChunk` takes the object from `chunkStore` and calls
+  `refs.add` before `addJob`. After surgery, `update()` text (including frames) equals vanilla except for this call; negative controls: the body of
+  `setWorldTransform` and the other caller `flipUpright` are unchanged. LoadCheck: the helper is public static void.
+- `VehicleClampGuardBehaviorTest` (both variants, on and off): lookups through the real `IsoCell.getChunk`→`IsoChunkMap.getChunk`, real `IsoChunk`, and the
+  real `BaseVehicle.setWorldTransform` (`GameServer.server=true`, so the native Bullet call is skipped); each case first prepares x, y, z and t1 exactly as the
+  vanilla clamp block does. Vanilla negative control: with the vehicle pointing at a chunk reused elsewhere, the clamp target is that chunk's corner, 77
+  tiles away, and off places the vehicle there. On: stale and far — clamped into the nearest loaded chunk, 1.6 tiles back, x and y consistent with the
+  physics position, height 0.2; the chunk just left (loaded, listed, adjacent) — same result as vanilla; loaded next door but not listing the vehicle —
+  clamped into the nearest chunk; nothing loaded within 2 chunks — held in place, no teleport.
+- In game: not done. Reproducing it needs a chunk to be recycled during a black edge, which cannot be produced on demand locally; after release, check
+  players' console.txt for `VehicleClampGuard` lines (each shows where vanilla would have put the vehicle).
+
+**Retirement**: when TIS fixes it (checks the chunk before clamping, or unlinks vehicles when a chunk unloads), the SmokeCheck reasons to exist turn red;
+then remove this patch from `PatchConfig.client()` and delete the helper and its test.
 
 ---
 

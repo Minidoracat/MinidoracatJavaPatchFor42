@@ -380,7 +380,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.5.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
+**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.7.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`（後兩者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：遊戲已更新而殘留時，安裝會換成新版，卸載會整組移除（0.2.4 起；之前因為綁舊 jar，遊戲一更新就認不出，玩家只能回頭找舊包 `uninstall.bat`）。認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
 **驗證**:build 守門＝命中恰 2;SmokeCheck client 模式——vanilla 前提守門(jar 內
@@ -3769,6 +3769,50 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 **守門與驗證**：
 - SmokeCheck：原版四個方法各恰 1 個被觀測的呼叫；放下動物依序 `copyFrom` → `get` → `add`；LoaderThread 先 `saveNow` 再 `LoadChunk`。手術後四個方法文字（含 frames）只差這六個呼叫；helper 內每個原方法恰呼叫一次。
 - `AnimalLossProbeTest`（on、off 兩個 JVM）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。chunk：另一條執行緒持有存檔登記時載入同一個 chunk 記 `reload-race`；不同 chunk、同一條執行緒先存後載（`saveNow`）都不記；兩條執行緒同時存同一個 chunk 記 `double-write`；改道後的 `saveUnloaded` 跑真 `IsoChunk.Save`（noSave）不留登記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
+
+<a id="2by"></a>
+## 2by. 開車被夾回過期 chunk 的瞬移（W61，client，預設 on；client 包 0.2.7）
+
+**症狀**（2026-10-14 正式服，同一時段多位玩家回報）：開車遇到黑邊（客戶端還沒載入的區域）時，車突然被丟到幾十到幾百格外（樹林、水裡），AutoDrive 交還並顯示「離路太遠停止」；有時跳過去幾十秒後又跳回來。同時段伺服器主迴圈 9.1–10.0 fps、chunk 供給沒有積壓，伺服器效能與當天新上線的 MOD 都已排除。
+
+**證據**：
+- AutoDrive 診斷上傳的 3 個片段（2 位玩家）：出事前一刻有 `area ahead`（前方 chunk 沒載入），接著一筆車速三項精確為 0 的取樣（`frozen`），下一筆座標落在另一個 chunk 的角落 ±0.0005。例：車在 chunk (a,b)，落點是 chunk (a−8,b+7) 的 `maxX − 0.0005`、`minY + 0.0005`，距離 77 格；另兩例跳 55、71 格。
+- 同時段伺服器反作弊記到 `Anti-cheat="Speed" … VehiclePhysicsUnreliablePacket: speed=198–833 > limit=150`。`AntiCheatSpeed` 用的 `NetworkCharacterAI.SpeedChecker` 算的是客戶端回報位置的位移 ÷ 約 1 秒，所以是瞬移的結果；反作弊只記錄，不拉車（`react` 是空的、`sync` 沒有覆寫）。
+- 伺服器 cmd.txt 另有兩次 755、891 格的大跳，落點 x 是 8 的倍數、y 是 8 的倍數減 1，與 chunk 的 (minX, maxY) 角落一致；落點都在該玩家 1–3 分鐘前開過的地方附近。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `BaseVehicle.update()`（offset 1538–1815）：`sq = getCell().getGridSquare(getX(), getY(), getZ())`；`sq == null && !this.chunk.refs.isEmpty()` 時，把 x、y 夾進 `this.chunk.wx*8` 到 `+8`（離邊 `5.0E-4f`），`setZ(0.2)`，用現在的旋轉組成 t1，`setWorldTransform(t1)`（客戶端呼叫 `Bullet.teleportVehicle`，速度歸零），再 `current = getGridSquare(…)`。offset 1818 起，`current` 有格子而且屬於別的 chunk 時才把 `this.chunk` 換過去。
+- 客戶端卸載 chunk（`IsoChunkMap.Up/Down/Left/Right` 移出邊界 → `refs.remove` → `removeFromWorld`）不會清掉車上的 `chunk`：`IsoChunk.removeFromWorld` 只處理格子上的 moving objects；`resetForStore()` 清空 `vehicles`、`refs`，`wx`、`wy` 歸零後放回 `chunkStore`。`IsoChunk` 與 `IsoChunkMap` 所有方法裡，只有 `IsoChunk.update` 寫 `vehicle.chunk`（指回自己）。
+- `IsoChunkMap.LoadChunk` 從 `chunkStore` 取回物件、設好新座標後，先 `refs.add(this)`（offset 123）才 `WorldStreamer.addJob`（offset 135）。車還指著這種物件時，原版條件就成立，車被夾到新座標的角落；`refs` 在載入完成前就非空，所以也可能夾進一塊還沒載入的 chunk，下一幀再夾一次。
+- 車的 `chunk` 只跟著 `current` 走。車開在沒有格子的地方時 `current` 是 null，`chunk` 停在最後一塊有格子的 chunk；那塊卸載、回收之後就成了過期物件（推論：黑邊越多、chunk map 變動越大越容易遇到）。
+
+**手術**：`update()V` 內唯一的 `invokevirtual BaseVehicle.setWorldTransform(Transform)V`（offset 1776，在夾回區塊內）1:1 改道 `invokestatic zombie/mdc/VehicleClampGuard.setWorldTransform(BaseVehicle, Transform)V`（3 bytes 換 3 bytes、堆疊形狀不變、frames 原樣），`expectedHits = 1`，加在 W54 已有的 client `BaseVehicle` ClassPatch 上。標準版與省記憶體版都含這刀，模組版本 `v3.4`。
+
+**判定**（呼叫時原版已經把 x、y 改成夾回值、z 設成 0.2，`jniTransform.origin` 仍是車真正的物理位置 P）：
+1. 原版要夾進的 `this.chunk` 已載入、車在它的 `vehicles` 清單裡、與 P 所在的 chunk 相距 ≤ 2 個 chunk：照原版。這是車剛離開的那一塊，也就是正常的往回拉。
+2. 否則在 P 所在 chunk 周圍 5×5 找已載入、而且 ChunkMap 位置與自身座標一致的 chunk，取離 P 最近的一塊，用原版同樣的夾法（離邊 0.0005）夾進去，改寫 x、y 與 t1 後放車。
+3. 周圍都沒有已載入的 chunk：x、y 改回 P，在原地放車（高度 0.2、速度歸零），等那一塊載入；不瞬移。
+
+接著原版從 offset 1789 起依新位置取 `current`；有格子時把 `this.chunk` 換成車真正所在的 chunk，過期參照就此修好。判定途中拋出例外時照原版（只記第一次）。
+
+**kill switch**：`-Dmdc.vehicleClampGuard=off`（或 `0`）一律照原版，需重啟。第一次走到夾回時在 console.txt 記一行 `[MinidoracatJavaPatch][VehicleClampGuard] active=true|false`；每次介入記一行（每次啟動最多 20 行）：
+
+```text
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <車型> at <x>,<y>: vanilla would clamp it into chunk <wx>,<wy> (loaded=<b>, listed=<b>, <n> chunks away) at <x>,<y>; clamped into loaded chunk <wx>,<wy> at <x>,<y> (#<n>)
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <車型> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk within 2, held in place (#<n>)
+```
+
+**不處理**：
+- 車開進沒載入的格子本身：黑邊的成因在 chunk 串流（見 [2o](#2o)、W4-1），本刀只讓「拉回」拉到對的地方。
+- `update()` 開頭同一類過期參照的另一條路徑：`this.chunk.vehicles` 不含這台車時，客戶端每幀送 `VehicleRequest(2)`；`this.chunk.refs` 為空（已卸載、尚未回收）時直接 `removeFromWorld()`。拖車只在客戶端消失可能走這條（推論，未實證）。
+- 掉穿地面：車所在的 chunk 有格子、但物理地面還沒建好時，這段不會觸發（z 一律用 0 查格子）。2026-10-14 換駕駛後掉到地圖下（z −33 以下）屬於這一類，另案處理。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：存在理由——`update()` 恰一個 `setWorldTransform`，在 `sq == null`（IFNONNULL）後緊接 `this.chunk.refs.isEmpty()`→IFNE 的夾回區塊內，夾法只讀 `wx`、`wy` 與 `5.0E-4f`，不讀 `loaded`、`vehicles`（TIS 補上任一檢查就轉紅＝重估撤刀），helper 的 `EDGE` 與原版常數連動；`resetForStore` 清空 `vehicles` 與 `refs`，`IsoChunk`／`IsoChunkMap` 只在 `IsoChunk.update` 把 `vehicle.chunk` 指回自己；`LoadChunk` 從 `chunkStore` 取物件、先 `refs.add` 再 `addJob`。手術後 `update()` 除了這個呼叫之外文字（含 frames）與原版相同；負對照：`setWorldTransform` 本體與另一個呼叫點 `flipUpright` 未改動。LoadCheck：helper 為 public static void。
+- `VehicleClampGuardBehaviorTest`（兩個變體各跑 on、off）：查表用真 `IsoCell.getChunk`→`IsoChunkMap.getChunk`，chunk 是真 `IsoChunk`，放車用真 `BaseVehicle.setWorldTransform`（`GameServer.server=true`，不呼叫原生 Bullet）；每個情境先照原版夾回區塊準備 x、y、z 與 t1。原版負對照：車指著被重用到別處的 chunk 時，夾回目標在那一塊的角落、離車 77 格，off 照原版把車放過去。on：過期而且遠——改夾進最近的已載入 chunk，只往回 1.6 格，x、y 與物理位置一致、高度 0.2；車剛離開的 chunk（已載入、在清單裡、在旁邊）——結果與原版相同；旁邊已載入但車不在清單裡——改夾進最近的那一塊；周圍 2 格內都沒有已載入的——留在原地、不瞬移。
+- 實機驗證：未做。要重現得在黑邊期間碰上 chunk 回收重用的時機，本機無法穩定造出；上線後看玩家 console.txt 的 `VehicleClampGuard` 行（每行附原版會把車放到哪裡）。
+
+**退場**：官方修好（夾回前檢查 chunk，或卸載時解除車的參照）時 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 
 ---
 

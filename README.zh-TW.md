@@ -6,7 +6,7 @@
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 68 個 patched class、181 個命中點、68 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫），從
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -153,6 +153,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W54 車輛靜止姿勢跳過（[2br](docs/patches.md#2br)） | 每台已載入的車每幀對每個蒙皮零件模型無條件 `AnimationPlayer.Update`，不分遠近、停著或看不看得到；窗與裝甲共用門的 player，同一副骨架一幀算 2–3 次。門窗會動的模組車（KI5、rSemiTruck）每台每幀 22–47 µs，原版車 3–5 µs。 | 沒有 track 在播放、姿勢輸入與上一次完整計算相同時跳過 Update，renderer 沿用上一次的矩陣；每 256 次跳過抽查一次完整重算，不一致就本次回原版。合成測試中每幀姿勢與原版逐位相同。 | 未回報 |
 | W55 `isBoneReparented` 快速路徑（[2bs](docs/patches.md#2bs)） | 骨架更新每根骨頭呼叫一次 `isBoneReparented`，每次都從池配置一個 lambda 再掃清單；車輛、殭屍與多數角色的清單是空的。 | 清單為空直接回 false，否則照原版；結果逐位相同，所有角色與車都受惠。 | 未回報 |
 | W57 自建房 chunk 載入斷線（[2bu](docs/patches.md#2bu)） | 42.21.0：chunk 的格子在 World Streamer 執行緒就綁好房間。主執行緒接手前，client 若重建這一帶的自建建築（同一個或相鄰 cell 有人蓋或拆東西），舊的 `IsoRoom` 被清空（`def = null`），`updateSquares` 又跳過排隊中的 chunk；接著 `IsoLightSwitch.chunkLoaded` 丟例外，client 被斷線送回主選單。 | chunk 有格子指向被清空的房間時，先對這個 chunk 補跑遊戲自己的 `updateSquares` 步驟（原版漏掉的重綁），否則照原版。 | [#102213](https://theindiestone.com/forums/topic/102213/) |
+| W61 開車被夾回過期 chunk 的瞬移（[2by](docs/patches.md#2by)） | 42.21.0：車開到客戶端還沒載入的格子（黑邊）時，`BaseVehicle.update` 把車夾回 `this.chunk`，條件只看那個 chunk 的 `refs` 非空。卸載不會清掉車上的 `chunk`，回收的 chunk 物件一排入別處的載入就又有 `refs`，車被丟到那一塊的角落，幾十到幾百格外。 | 那個 chunk 已載入、車在它的清單裡、就在車旁邊時照原版；否則夾進車周圍最近的已載入 chunk，周圍都沒載入就停在原地等載入。 | 未回報 |
 
 ### Native 防護（Linux dedicated server）
 
@@ -238,7 +239,7 @@ bash uninstall.sh  # 下次重啟回到原版
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速（32GB 以上 RAM） |
+| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速、開車瞬移修正（32GB 以上 RAM） |
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與標準版互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 

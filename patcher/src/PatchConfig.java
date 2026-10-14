@@ -1500,6 +1500,17 @@ public final class PatchConfig {
                 "zombie/core/skinnedmodel/animation/AnimationPlayer", "Update", "(F)V",
                 "zombie/mdc/VehicleAnimGate", "update"));
         vehicleAnim.expectedHits = 1;
+
+        // ---- W61 車輛被夾回過期 chunk 的瞬移（docs/patches.md 2by）----
+        // update() 在車的位置沒有格子時把車夾進 this.chunk 的範圍，條件只看 chunk.refs 非空。chunk 卸載不會清車上的
+        // 參照，resetForStore 回收後物件被重用到別處（LoadChunk 排入載入就 refs.add），車被夾到幾十到幾百格外。
+        // 夾回區塊內唯一的 setWorldTransform（javap offset 1776）1:1 改道 VehicleClampGuard：原版目標 chunk
+        // 已載入、車在它的清單裡、就在車旁邊時照原版；否則改夾進車周圍最近的已載入 chunk，都沒有就留在原地。
+        Patcher.MethodOps vehicleClamp = vehicle.method("update", "()V");
+        vehicleClamp.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/vehicles/BaseVehicle", "setWorldTransform", "(Lzombie/core/physics/Transform;)V",
+                "zombie/mdc/VehicleClampGuard", "setWorldTransform"));
+        vehicleClamp.expectedHits = 1;
         patches.add(vehicle);
 
         // ---- W55 isBoneReparented 快速路徑（docs/patches.md 2bs）----

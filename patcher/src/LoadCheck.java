@@ -124,6 +124,13 @@ public final class LoadCheck {
                     throw new NoSuchMethodException("StaleRoomGuard.chunkLoaded signature");
                 }
                 System.out.println("stale room guard OK StaleRoomGuard.chunkLoaded(IsoChunk) 簽名一致");
+                var vehicleClamp = Class.forName("zombie.mdc.VehicleClampGuard", false, cl).getDeclaredMethod(
+                        "setWorldTransform", Class.forName("zombie.vehicles.BaseVehicle", false, cl),
+                        Class.forName("zombie.core.physics.Transform", false, cl));
+                if (vehicleClamp.getReturnType() != void.class || (vehicleClamp.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("VehicleClampGuard.setWorldTransform signature");
+                }
+                System.out.println("vehicle clamp guard OK VehicleClampGuard.setWorldTransform(BaseVehicle,Transform) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

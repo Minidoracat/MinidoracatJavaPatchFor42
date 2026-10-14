@@ -3792,6 +3792,119 @@ public final class SmokeCheck {
         failed += check("W57 負對照：IsoChunk.recalcNeighboursNow（另一個 chunkLoaded 呼叫點）未改動",
                 methodText(method(distJava, chunkCls, "recalcNeighboursNow", "()V"))
                         .equals(methodText(methodFromJar(jar, chunkCls, "recalcNeighboursNow", "()V"))));
+
+        // ---- W61 車輛被夾回過期 chunk 的瞬移（docs/patches.md 2by）----
+        // 存在理由：update() 在 sq == null 時只看 this.chunk.refs 非空就夾回（不看 loaded、不看車在不在它的清單、不看距離）；
+        // chunk 卸載與 resetForStore 回收都不解除車上的 chunk，LoadChunk 從 chunkStore 取回物件後先 refs.add 才排入載入。
+        // TIS 補上任一檢查、或在卸載時解除車的參照＝轉紅、重估撤刀。helper 的 EDGE 與原版夾回常數連動。
+        String clampCls = "zombie/mdc/VehicleClampGuard";
+        String transformCls = "zombie/core/physics/Transform";
+        String stwDesc = "(L" + transformCls + ";)V";
+        MethodNode vVehUpdate = methodFromJar(jar, vehCls, "update", "()V");
+        List<AbstractInsnNode> vehUpdateReal = new ArrayList<>();
+        for (AbstractInsnNode in : vVehUpdate.instructions) {
+            if (in.getOpcode() >= 0) {
+                vehUpdateReal.add(in);
+            }
+        }
+        int clampFrom = -1;
+        int clampTo = -1;
+        for (int i = 0; i < vehUpdateReal.size() && clampTo < 0; i++) {
+            AbstractInsnNode in = vehUpdateReal.get(i);
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD && fi.owner.equals(chunkCls)
+                    && fi.name.equals("refs")) {
+                clampFrom = i;
+            } else if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL
+                    && mi.owner.equals(vehCls) && mi.name.equals("setWorldTransform") && mi.desc.equals(stwDesc)) {
+                clampTo = i;
+            }
+        }
+        boolean clampOnlyRefs = clampFrom >= 3 && clampTo > clampFrom + 2
+                && vehUpdateReal.get(clampFrom - 3).getOpcode() == Opcodes.IFNONNULL
+                && vehUpdateReal.get(clampFrom - 2) instanceof VarInsnNode self && self.getOpcode() == Opcodes.ALOAD && self.var == 0
+                && vehUpdateReal.get(clampFrom - 1) instanceof FieldInsnNode own && own.owner.equals(vehCls) && own.name.equals("chunk")
+                && vehUpdateReal.get(clampFrom + 1) instanceof MethodInsnNode empty && empty.owner.equals("java/util/ArrayList")
+                        && empty.name.equals("isEmpty")
+                && vehUpdateReal.get(clampFrom + 2).getOpcode() == Opcodes.IFNE;
+        int clampEdges = 0;
+        int clampChunkBounds = 0;
+        int clampExtraGuards = 0;
+        for (int i = clampFrom + 3; clampOnlyRefs && i < clampTo; i++) {
+            AbstractInsnNode in = vehUpdateReal.get(i);
+            if (in instanceof LdcInsnNode ldc && ldc.cst instanceof Float edge && edge == 5.0E-4F) {
+                clampEdges++;
+            } else if (in instanceof FieldInsnNode fi && fi.owner.equals(chunkCls)) {
+                if (fi.name.equals("wx") || fi.name.equals("wy")) {
+                    clampChunkBounds++;
+                } else {
+                    clampExtraGuards++;
+                }
+            } else if (in instanceof MethodInsnNode mi && mi.owner.equals("java/util/ArrayList")) {
+                clampExtraGuards++;
+            }
+        }
+        failed += check("W61 vanilla 前提：update 恰一個 setWorldTransform，在 sq==null 後只看 chunk.refs.isEmpty 的夾回區塊內，"
+                        + "夾法只讀 wx、wy 與 5.0E-4f（不讀 loaded、vehicles），且與 helper EDGE 連動",
+                countExactCalls(vVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setWorldTransform", stwDesc) == 1
+                && clampOnlyRefs && clampChunkBounds == 2 && clampExtraGuards == 0 && clampEdges >= 4
+                && classNode(distJava, clampCls).fields.stream().anyMatch(f -> f.name.equals("EDGE")
+                        && f.value instanceof Float v && v == 5.0E-4F));
+        boolean resetClearsVehicles = false;
+        boolean resetClearsRefs = false;
+        for (AbstractInsnNode in : methodFromJar(jar, chunkCls, "resetForStore", "()V").instructions) {
+            if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD && fi.owner.equals(chunkCls)
+                    && nextReal(in) instanceof MethodInsnNode clear && clear.owner.equals("java/util/ArrayList")
+                    && clear.name.equals("clear")) {
+                resetClearsVehicles |= fi.name.equals("vehicles");
+                resetClearsRefs |= fi.name.equals("refs");
+            }
+        }
+        int vehicleChunkWrites = 0;
+        boolean onlyRepointsToSelf = true;
+        for (String owner : List.of(chunkCls, "zombie/iso/IsoChunkMap")) {
+            for (MethodNode m : classNodeFromJar(jar, owner).methods) {
+                for (AbstractInsnNode in : m.instructions) {
+                    if (in instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.PUTFIELD && fi.owner.equals(vehCls)
+                            && fi.name.equals("chunk")) {
+                        vehicleChunkWrites++;
+                        onlyRepointsToSelf &= owner.equals(chunkCls) && m.name.equals("update")
+                                && prevReal(in) instanceof VarInsnNode value && value.getOpcode() == Opcodes.ALOAD && value.var == 0;
+                    }
+                }
+            }
+        }
+        MethodNode vLoadChunk = methodFromJar(jar, "zombie/iso/IsoChunkMap", "LoadChunk", "(IIII)V");
+        int loadAddJob = firstCallIndex(vLoadChunk, Opcodes.INVOKEVIRTUAL, "zombie/iso/WorldStreamer", "addJob",
+                "(L" + chunkCls + ";IIZ)V");
+        int loadLastRefsAdd = Integer.MAX_VALUE;
+        int loadIndex = 0;
+        for (AbstractInsnNode in : vLoadChunk.instructions) {
+            if (in.getOpcode() >= 0) {
+                loadIndex++;
+                if (in instanceof MethodInsnNode add && add.owner.equals("java/util/ArrayList") && add.name.equals("add")
+                        && prevReal(in) instanceof VarInsnNode && prevReal(prevReal(in)) instanceof FieldInsnNode refs
+                        && refs.owner.equals(chunkCls) && refs.name.equals("refs") && loadIndex < loadAddJob) {
+                    loadLastRefsAdd = loadIndex;
+                }
+            }
+        }
+        failed += check("W61 vanilla 前提：resetForStore 清空 vehicles 與 refs；IsoChunk／IsoChunkMap 只在 IsoChunk.update 把 vehicle.chunk "
+                        + "指回自己（卸載、回收都不解除）；LoadChunk 從 chunkStore 取物件、先 refs.add 再 WorldStreamer.addJob",
+                resetClearsVehicles && resetClearsRefs && vehicleChunkWrites == 1 && onlyRepointsToSelf
+                && countFieldTouches(vLoadChunk, "zombie/iso/IsoChunkMap", "chunkStore") >= 1
+                && loadAddJob != Integer.MAX_VALUE && loadLastRefsAdd < loadAddJob);
+        String clampDesc = "(L" + vehCls + ";L" + transformCls + ";)V";
+        MethodNode pVehUpdate = method(distJava, vehCls, "update", "()V");
+        failed += check("W61 update 唯一 setWorldTransform 同形改道 VehicleClampGuard.setWorldTransform，其餘指令與 frames 保留",
+                countExactCalls(pVehUpdate, Opcodes.INVOKEVIRTUAL, vehCls, "setWorldTransform", stwDesc) == 0
+                && countExactCalls(pVehUpdate, Opcodes.INVOKESTATIC, clampCls, "setWorldTransform", clampDesc) == 1
+                && methodText(vVehUpdate).replace("INVOKEVIRTUAL " + vehCls + ".setWorldTransform " + stwDesc,
+                        "INVOKESTATIC " + clampCls + ".setWorldTransform " + clampDesc).equals(methodText(pVehUpdate)));
+        failed += check("W61 負對照：setWorldTransform 本體與 flipUpright（另一個呼叫點）未改動",
+                methodText(method(distJava, vehCls, "setWorldTransform", stwDesc))
+                        .equals(methodText(methodFromJar(jar, vehCls, "setWorldTransform", stwDesc)))
+                && methodText(method(distJava, vehCls, "flipUpright", "()V"))
+                        .equals(methodText(methodFromJar(jar, vehCls, "flipUpright", "()V"))));
         return failed;
     }
 
