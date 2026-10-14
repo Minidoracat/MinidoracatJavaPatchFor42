@@ -3773,25 +3773,26 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 <a id="2by"></a>
 ## 2by. 開車被夾回過期 chunk 的瞬移（W61，client，預設 on；client 包 0.2.7）
 
-**症狀**（2026-10-14 正式服，同一時段多位玩家回報）：開車遇到黑邊（客戶端還沒載入的區域）時，車突然被丟到幾十到幾百格外（樹林、水裡），AutoDrive 交還並顯示「離路太遠停止」；有時跳過去幾十秒後又跳回來。同時段伺服器主迴圈 9.1–10.0 fps、chunk 供給沒有積壓，伺服器效能與當天新上線的 MOD 都已排除。
+**症狀**（2026-10-14 正式服，同一時段多位玩家回報）：開車時車周圍突然一片黑（客戶端的 chunk 一起消失），接著車被丟到幾十到幾百格外（樹林、水裡），AutoDrive 交還並顯示「離路太遠停止」；有時跳過去幾十秒後又跳回來。同時段伺服器主迴圈 9.1–10.0 fps、chunk 供給沒有積壓，伺服器效能與當天新上線的 MOD 都已排除。
 
 **證據**：
-- AutoDrive 診斷上傳的 3 個片段（2 位玩家）：出事前一刻有 `area ahead`（前方 chunk 沒載入），接著一筆車速三項精確為 0 的取樣（`frozen`），下一筆座標落在另一個 chunk 的角落 ±0.0005。例：車在 chunk (a,b)，落點是 chunk (a−8,b+7) 的 `maxX − 0.0005`、`minY + 0.0005`，距離 77 格；另兩例跳 55、71 格。
+- AutoDrive 診斷片段（10-07～10-14 共 16 件夾回，含 10-14 兩位玩家的 3 件）：前一筆取樣（約 0.2 秒前）已載入範圍的前緣離車心還有 40.8 m 以上（中位約 63 m，2 件前方全部已載入），下一筆只剩約 2 m，也就是車周圍的 chunk 一起從客戶端消失，不是車開進黑邊。接著一筆車速三項精確為 0（物理凍結，5 Hz 取樣看到 9 件），再下一筆座標落在另一個 chunk 的邊界 ±0.0005（14 件角落、2 件單軸）。例：車在 chunk (a,b)，落點是 chunk (a−8,b+7) 的 `maxX − 0.0005`、`minY + 0.0005`，距離 77 格；最多一件 3.5 秒內連跳 5 次。黑邊最嚴重的玩家（可視損失 20%、520 趟）0 次夾回，黑邊多寡與瞬移沒有正相關。
 - 同時段伺服器反作弊記到 `Anti-cheat="Speed" … VehiclePhysicsUnreliablePacket: speed=198–833 > limit=150`。`AntiCheatSpeed` 用的 `NetworkCharacterAI.SpeedChecker` 算的是客戶端回報位置的位移 ÷ 約 1 秒，所以是瞬移的結果；反作弊只記錄，不拉車（`react` 是空的、`sync` 沒有覆寫）。
-- 伺服器 cmd.txt 另有兩次 755、891 格的大跳，落點 x 是 8 的倍數、y 是 8 的倍數減 1，與 chunk 的 (minX, maxY) 角落一致；落點都在該玩家 1–3 分鐘前開過的地方附近。
+- 伺服器 cmd.txt 另有兩次 755、891 格的大跳，落點在該玩家 1–3 分鐘前開過的地方附近（x 是 8 的倍數、y 是 8 的倍數減 1）。這兩次比較像既有回報 [2026-10-01 車被留在已卸載的 chunk](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md) 的路徑：車停止送位置、伺服器留著舊位置，之後 `VehiclePacket.doRemove()` 把本機駕駛移到那個舊位置；落點的 chunk 邊界座標是之後夾回留下的（推論）。W61 不處理這條（見「不處理」）。
 
 **根因**（javap 對 42.21.0 jar `e1a69eb7`）：
 - `BaseVehicle.update()`（offset 1538–1815）：`sq = getCell().getGridSquare(getX(), getY(), getZ())`；`sq == null && !this.chunk.refs.isEmpty()` 時，把 x、y 夾進 `this.chunk.wx*8` 到 `+8`（離邊 `5.0E-4f`），`setZ(0.2)`，用現在的旋轉組成 t1，`setWorldTransform(t1)`（客戶端呼叫 `Bullet.teleportVehicle`，速度歸零），再 `current = getGridSquare(…)`。offset 1818 起，`current` 有格子而且屬於別的 chunk 時才把 `this.chunk` 換過去。
-- 客戶端卸載 chunk（`IsoChunkMap.Up/Down/Left/Right` 移出邊界 → `refs.remove` → `removeFromWorld`）不會清掉車上的 `chunk`：`IsoChunk.removeFromWorld` 只處理格子上的 moving objects；`resetForStore()` 清空 `vehicles`、`refs`，`wx`、`wy` 歸零後放回 `chunkStore`。`IsoChunk` 與 `IsoChunkMap` 所有方法裡，只有 `IsoChunk.update` 寫 `vehicle.chunk`（指回自己）。
+- 客戶端卸載 chunk（`IsoChunkMap.Up/Down/Left/Right` 移出邊界，或整張重建的 `Unload()` → `refs.remove` → `removeFromWorld`）不會清掉車上的 `chunk`：`IsoChunk.removeFromWorld` 只處理格子上的 moving objects；`resetForStore()` 清空 `vehicles`、`refs`，`wx`、`wy` 歸零後放回 `chunkStore`。`IsoChunk` 與 `IsoChunkMap` 所有方法裡，只有 `IsoChunk.update` 寫 `vehicle.chunk`（指回自己）。
 - `IsoChunkMap.LoadChunk` 從 `chunkStore` 取回物件、設好新座標後，先 `refs.add(this)`（offset 123）才 `WorldStreamer.addJob`（offset 135）。車還指著這種物件時，原版條件就成立，車被夾到新座標的角落；`refs` 在載入完成前就非空，所以也可能夾進一塊還沒載入的 chunk，下一幀再夾一次。
-- 車的 `chunk` 只跟著 `current` 走。車開在沒有格子的地方時 `current` 是 null，`chunk` 停在最後一塊有格子的 chunk；那塊卸載、回收之後就成了過期物件（推論：黑邊越多、chunk map 變動越大越容易遇到）。
+- 塌陷是整張 chunk map 重建：`IsoChunkMap.ProcessChunkPos` 以「玩家位置＋車速前視」為網格中心（駕駛前視 `km/h ÷ 5` 格、沒有上限；乘客上限 20 格），中心單幀跳動達到網格寬（約 720p 為 13、1080p 以上 19 個 chunk）時呼叫 `Unload()`，整張 map 的 `refs` 清掉、`removeFromWorld`、送去存檔回收，並 `WorldSimulation.deactivateChunkMap`。一般行駛一幀只平移一排，車底下那塊不會卸載。這次是什麼讓中心跳動未定，候選有兩個：駕駛的車速讀值尖峰一幀（網格 13 時要 ≥ 520 km/h）、`VehiclePacket.doRemove()` 把駕駛移到伺服器位置（推論，都沒有直接證據）。
+- 車的 `chunk` 怎麼變成過期：整張重建時，有本機乘客的車 `BaseVehicle.removeFromWorld()` 提早 return，車仍掛在已卸載的 chunk 上（同上回報）。之後依那個 chunk 物件的狀態分三段：(A) 尚未回收，`vehicles` 仍有這台車、`refs` 為空，`update()` 開頭每幀呼叫 `removeFromWorld()`（又提早 return）就 return，不送位置、乘客不擺位；(B) 已回收（`vehicles` 清空），開頭只送 `VehicleRequest(2)` 就往下跑，`refs` 為空所以不夾回；(C) 被 `LoadChunk` 重用到別處，`refs` 又非空，往下跑到夾回，車被夾到新座標的角落。另外，車開在沒有格子的地方時 `current` 是 null，`chunk` 停在最後一塊有格子的 chunk，也可能這樣落後（推論）。
 
 **手術**：`update()V` 內唯一的 `invokevirtual BaseVehicle.setWorldTransform(Transform)V`（offset 1776，在夾回區塊內）1:1 改道 `invokestatic zombie/mdc/VehicleClampGuard.setWorldTransform(BaseVehicle, Transform)V`（3 bytes 換 3 bytes、堆疊形狀不變、frames 原樣），`expectedHits = 1`，加在 W54 已有的 client `BaseVehicle` ClassPatch 上。標準版與省記憶體版都含這刀，模組版本 `v3.4`。
 
 **判定**（呼叫時原版已經把 x、y 改成夾回值、z 設成 0.2，`jniTransform.origin` 仍是車真正的物理位置 P）：
-1. 原版要夾進的 `this.chunk` 已載入、車在它的 `vehicles` 清單裡、與 P 所在的 chunk 相距 ≤ 2 個 chunk：照原版。這是車剛離開的那一塊，也就是正常的往回拉。
-2. 否則在 P 所在 chunk 周圍 5×5 找已載入、而且 ChunkMap 位置與自身座標一致的 chunk，取離 P 最近的一塊，用原版同樣的夾法（離邊 0.0005）夾進去，改寫 x、y 與 t1 後放車。
-3. 周圍都沒有已載入的 chunk：x、y 改回 P，在原地放車（高度 0.2、速度歸零），等那一塊載入；不瞬移。
+1. 原版要夾進的 `this.chunk` 已載入、車在它的 `vehicles` 清單裡、與 P 所在的 chunk 相鄰（相距 ≤ 1 個 chunk）：照原版。這是車剛離開的那一塊，也就是正常的往回拉。
+2. 否則在 P 所在 chunk 與相鄰的 8 塊裡找已載入、而且 ChunkMap 位置與自身座標一致的 chunk，取離 P 最近的一塊，用原版同樣的夾法（離邊 0.0005）夾進去，改寫 x、y 與 t1 後放車。往回拉最多約 8 格（斜角約 11 格）。
+3. 相鄰都沒有已載入的 chunk：不放車（不呼叫 `setWorldTransform`），只把 x、y 改回 P。這時 P 所在的 chunk 沒載入，原版 `checkSurroundingChunks`（`WorldSimulation.updateVehiclePhysics` 每個物理子步對每台車檢查周圍 3×3，有一塊沒載入就 `setPhysicsActive(false)`）已經停掉這台車的物理，車留在原處，高度與方向都不變，等那一塊載入。結果與原版 (B) 段相同（`refs` 為空、不夾回、`update()` 照常往下跑）：乘客擺回座位，`updatePhysicsNetwork()` 不看物理是否啟用，每 150–300 ms 照送 `Bullet.getOwnVehiclePhysics` 的位置（P），伺服器 `setX/Y` 跟上。所以即使是 `doRemove()` 把駕駛移到伺服器舊位置觸發的塌陷，伺服器也會收斂到 P，不會在兩處之間來回重建；代價是駕駛回到車上時 chunk map 可能再重建一次（推論）。不往回拉兩格以上，那本身就是玩家看得出來的瞬移。
 
 接著原版從 offset 1789 起依新位置取 `current`；有格子時把 `this.chunk` 換成車真正所在的 chunk，過期參照就此修好。判定途中拋出例外時照原版（只記第一次）。
 
@@ -3799,18 +3800,18 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 ```text
 [MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <車型> at <x>,<y>: vanilla would clamp it into chunk <wx>,<wy> (loaded=<b>, listed=<b>, <n> chunks away) at <x>,<y>; clamped into loaded chunk <wx>,<wy> at <x>,<y> (#<n>)
-[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <車型> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk within 2, held in place (#<n>)
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <車型> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk next to it, left where it is (not placed) (#<n>)
 ```
 
 **不處理**：
-- 車開進沒載入的格子本身：黑邊的成因在 chunk 串流（見 [2o](#2o)、W4-1），本刀只讓「拉回」拉到對的地方。
-- `update()` 開頭同一類過期參照的另一條路徑：`this.chunk.vehicles` 不含這台車時，客戶端每幀送 `VehicleRequest(2)`；`this.chunk.refs` 為空（已卸載、尚未回收）時直接 `removeFromWorld()`。拖車只在客戶端消失可能走這條（推論，未實證）。
-- 掉穿地面：車所在的 chunk 有格子、但物理地面還沒建好時，這段不會觸發（z 一律用 0 查格子）。2026-10-14 換駕駛後掉到地圖下（z −33 以下）屬於這一類，另案處理。
+- 觸發塌陷的整張重建本身（觸發點未定，見「根因」），以及一般黑邊（成因在 chunk 串流，見 [2o](#2o)、W4-1）：本刀只讓「拉回」不拉到別處。
+- 同一族的另外三條路徑（見 [2026-10-01 回報](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)，修法建議 2、3）：(a) 車掛在已卸載的 chunk 上時，`update()` 每幀提早 return，不送 VehiclePhysics、引擎聲停、乘客位置不更新，直到倒車把那塊 chunk 帶回來或物件被重用；(b) `VehiclePacket.doRemove()`：客戶端沒有伺服器位置的格子、車上有本機玩家時，把駕駛移到伺服器的舊位置（2026-10-01 的 175 格、2026-10-14 的 755／891 格大跳）；(c) 沒有本機乘客的車（例：拖車）在 `update()` 開頭 `refs` 為空時直接 `removeFromWorld()`，或 `VehicleManager.clientUpdateVehiclePos` 在伺服器位置沒載入時移除，可能就是拖車只在客戶端消失（推論，未實證）。
+- 掉穿地面：車所在的 chunk 有格子、但物理地面還沒建好時，這段不會觸發（z 一律用 0 查格子）。2026-10-14 換駕駛後掉到地圖下（z −33 以下）屬於這一類；坐在車上時鏡頭高度直接用車的物理高度，畫面全黑但 HUD 照常（同上回報第 4 點），另案處理。
 
 **守門與驗證**：
-- SmokeCheck（兩個變體）：存在理由——`update()` 恰一個 `setWorldTransform`，在 `sq == null`（IFNONNULL）後緊接 `this.chunk.refs.isEmpty()`→IFNE 的夾回區塊內，夾法只讀 `wx`、`wy` 與 `5.0E-4f`，不讀 `loaded`、`vehicles`（TIS 補上任一檢查就轉紅＝重估撤刀），helper 的 `EDGE` 與原版常數連動；`resetForStore` 清空 `vehicles` 與 `refs`，`IsoChunk`／`IsoChunkMap` 只在 `IsoChunk.update` 把 `vehicle.chunk` 指回自己；`LoadChunk` 從 `chunkStore` 取物件、先 `refs.add` 再 `addJob`。手術後 `update()` 除了這個呼叫之外文字（含 frames）與原版相同；負對照：`setWorldTransform` 本體與另一個呼叫點 `flipUpright` 未改動。LoadCheck：helper 為 public static void。
-- `VehicleClampGuardBehaviorTest`（兩個變體各跑 on、off）：查表用真 `IsoCell.getChunk`→`IsoChunkMap.getChunk`，chunk 是真 `IsoChunk`，放車用真 `BaseVehicle.setWorldTransform`（`GameServer.server=true`，不呼叫原生 Bullet）；每個情境先照原版夾回區塊準備 x、y、z 與 t1。原版負對照：車指著被重用到別處的 chunk 時，夾回目標在那一塊的角落、離車 77 格，off 照原版把車放過去。on：過期而且遠——改夾進最近的已載入 chunk，只往回 1.6 格，x、y 與物理位置一致、高度 0.2；車剛離開的 chunk（已載入、在清單裡、在旁邊）——結果與原版相同；旁邊已載入但車不在清單裡——改夾進最近的那一塊；周圍 2 格內都沒有已載入的——留在原地、不瞬移。
-- 實機驗證：未做。要重現得在黑邊期間碰上 chunk 回收重用的時機，本機無法穩定造出；上線後看玩家 console.txt 的 `VehicleClampGuard` 行（每行附原版會把車放到哪裡）。
+- SmokeCheck（兩個變體）：存在理由——`update()` 恰一個 `setWorldTransform`，在 `sq == null`（IFNONNULL）後緊接 `this.chunk.refs.isEmpty()`→IFNE 的夾回區塊內，夾法只讀 `wx`、`wy` 與 `5.0E-4f`，不讀 `loaded`、`vehicles`（TIS 補上任一檢查就轉紅＝重估撤刀），helper 的 `EDGE` 與原版常數連動；`resetForStore` 清空 `vehicles` 與 `refs`，`IsoChunk`／`IsoChunkMap` 只在 `IsoChunk.update` 把 `vehicle.chunk` 指回自己；`LoadChunk` 從 `chunkStore` 取物件、先 `refs.add` 再 `addJob`。規則 3 的依據：`WorldSimulation.updateVehiclePhysics` 每子步呼叫 `checkSurroundingChunks`，`hasChunksAllAround` 以 `IsoCell.getChunk`＋`loaded` 查周圍，不齊就設 `disableSimulationDueToLackOfSurroundingChunks` 並 `setPhysicsActive`，`setPhysicsActive(ZZ)` 讀這個旗標。手術後 `update()` 除了這個呼叫之外文字（含 frames）與原版相同；負對照：`setWorldTransform` 本體與另一個呼叫點 `flipUpright` 未改動。LoadCheck：helper 為 public static void。
+- `VehicleClampGuardBehaviorTest`（兩個變體各跑 on、off）：查表用真 `IsoCell.getChunk`→`IsoChunkMap.getChunk`，chunk 是真 `IsoChunk`，放車用真 `BaseVehicle.setWorldTransform`（`GameServer.server=true`，不呼叫原生 Bullet）；每個情境先照原版夾回區塊準備 x、y、z 與 t1。原版負對照：車指著被重用到別處的 chunk 時，夾回目標在那一塊的角落、離車 77 格，off 照原版把車放過去。on：過期而且遠——改夾進相鄰的已載入 chunk，只往回 1.6 格，x、y 與物理位置一致、高度 0.2；車剛離開的 chunk（已載入、在清單裡、相鄰）——結果與原版相同；在清單裡但隔了兩格——不照原版往回拉 10 格，改夾進相鄰的那一塊；相鄰已載入但車不在清單裡——改夾進最近的那一塊；周圍都沒有已載入的、或最近的隔了兩格——不放車，物理位置與高度都不變。
+- 實機驗證：未做。要重現得先造出整張重建（例如單幀把玩家位置拉遠 13 個 chunk 以上），再碰上車的 chunk 物件被重用的時機，本機還沒做出來；上線後看玩家 console.txt 的 `VehicleClampGuard` 行（每行附原版會把車放到哪裡）。
 
 **退場**：官方修好（夾回前檢查 chunk，或卸載時解除車的參照）時 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 

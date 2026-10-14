@@ -278,8 +278,9 @@ Modules
   when the model has no re-parented bones. Both also include the 42.21.0 vehicle teleport
   fix: when a vehicle reaches a square that has not loaded, the game pulls it back into the
   chunk it is listed in, but that chunk may already have been unloaded and reused somewhere
-  else; the vehicle is now pulled into the nearest loaded chunk around it instead, or held
-  in place until that area loads. JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
+  else; the vehicle is now pulled into the nearest adjacent loaded chunk instead, or, if no
+  neighbour is loaded, left where it is (the game has already stopped it) until that area
+  loads. JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
   -Dmdc.boneReparentFast=off and -Dmdc.vehicleClampGuard=off turn them off.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
@@ -359,7 +360,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   兩版也都含兩項車輛動畫加速，畫面與原版相同：零件姿勢沒變就不重算（不定期抽查一次完整重算，
   不一致就本次遊戲停用），以及模型沒有骨頭改掛時，每根骨頭的檢查不再配置物件。
   兩版都含 42.21.0 開車瞬移修補：車開到還沒載入的格子時，遊戲會把車拉回它登記的 chunk，
-  但那個 chunk 可能已經卸載並被重用到別處；改成拉進車周圍最近的已載入 chunk，周圍都沒載入就停在原地等載入。
+  但那個 chunk 可能已經卸載並被重用到別處；改成拉進相鄰最近的已載入 chunk，相鄰都沒載入就留在原地（遊戲已經讓車停住）等載入。
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
   -Dmdc.vehicleClampGuard=off 可分別關閉。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。

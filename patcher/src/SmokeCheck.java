@@ -3893,6 +3893,20 @@ public final class SmokeCheck {
                 resetClearsVehicles && resetClearsRefs && vehicleChunkWrites == 1 && onlyRepointsToSelf
                 && countFieldTouches(vLoadChunk, "zombie/iso/IsoChunkMap", "chunkStore") >= 1
                 && loadAddJob != Integer.MAX_VALUE && loadLastRefsAdd < loadAddJob);
+        // 規則 3（相鄰都沒載入就不放車）依賴原版自己停掉物理：每個物理子步對每台車 checkSurroundingChunks，
+        // hasChunksAllAround 以 IsoCell.getChunk＋loaded 查周圍 3×3，不齊就設旗標並 setPhysicsActive；setPhysicsActive 讀旗標強制 false。
+        String freezeFlag = "disableSimulationDueToLackOfSurroundingChunks";
+        MethodNode vSurround = methodFromJar(jar, vehCls, "checkSurroundingChunks", "()V");
+        MethodNode vAllAround = methodFromJar(jar, vehCls, "hasChunksAllAround", "()Z");
+        failed += check("W61 vanilla 前提：WorldSimulation.updateVehiclePhysics 每子步呼叫 checkSurroundingChunks；周圍 3×3 有未載入的 chunk 就停掉車的物理",
+                countExactCalls(methodFromJar(jar, "zombie/core/physics/WorldSimulation", "updateVehiclePhysics", "()V"),
+                        Opcodes.INVOKEVIRTUAL, vehCls, "checkSurroundingChunks", "()V") == 1
+                && countExactCalls(vAllAround, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getChunk", "(II)L" + chunkCls + ";") == 1
+                && countFieldTouches(vAllAround, chunkCls, "loaded") == 1
+                && countExactCalls(vSurround, Opcodes.INVOKEVIRTUAL, vehCls, "hasChunksAllAround", "()Z") == 1
+                && countFieldTouches(vSurround, vehCls, freezeFlag) >= 2
+                && countExactCalls(vSurround, Opcodes.INVOKEVIRTUAL, vehCls, "setPhysicsActive", "(Z)V") >= 1
+                && countFieldTouches(methodFromJar(jar, vehCls, "setPhysicsActive", "(ZZ)V"), vehCls, freezeFlag) == 1);
         String clampDesc = "(L" + vehCls + ";L" + transformCls + ";)V";
         MethodNode pVehUpdate = method(distJava, vehCls, "update", "()V");
         failed += check("W61 update 唯一 setWorldTransform 同形改道 VehicleClampGuard.setWorldTransform，其餘指令與 frames 保留",

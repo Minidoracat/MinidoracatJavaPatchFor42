@@ -19,8 +19,9 @@ import zombie.vehicles.BaseVehicle;
  *
  * <p>本方法取代夾回區塊內唯一的 {@code this.setWorldTransform(t1)}。呼叫時原版已經把 x、y 改成夾回值、
  * z 設成 0.2，{@code jniTransform.origin} 仍是車真正的物理位置。原版要夾進的 chunk 已載入、車在它的
- * vehicles 清單裡、離車所在的 chunk 不超過 {@link #NEAR_CHUNKS} 格時照原版；否則改夾進車周圍
- * {@link #SEARCH_CHUNKS} 格內最近的已載入 chunk；都沒有就把車留在原地（同樣高度 0.2、速度歸零），等那一塊載入。
+ * vehicles 清單裡、與車所在的 chunk 相鄰（{@link #NEAR_CHUNKS}）時照原版；否則改夾進車周圍
+ * {@link #SEARCH_CHUNKS} 格內最近的已載入 chunk；都沒有就不放車，只把 x、y 改回物理位置。這時車所在的 chunk
+ * 沒載入，原版 {@code checkSurroundingChunks} 已經停掉這台車的物理，車留在原處、高度與方向不變，等那一塊載入。
  * 之後原版依新的 current 把 {@code this.chunk} 換成車真正所在的 chunk。
  *
  * <p>{@code -Dmdc.vehicleClampGuard=off}（或 {@code 0}）一律照原版。
@@ -32,15 +33,15 @@ public final class VehicleClampGuard {
     /** 原版夾回的離邊距離（javap ldc 5.0E-4f；SmokeCheck 與原版連動）。 */
     static final float EDGE = 5.0E-4F;
     /** 原版要夾進的 chunk 與車所在 chunk 的距離上限（以 chunk 計的切比雪夫距離），超過就當成過期。 */
-    static final int NEAR_CHUNKS = 2;
-    /** 找替代 chunk 的半徑（chunk）。 */
-    static final int SEARCH_CHUNKS = 2;
+    static final int NEAR_CHUNKS = 1;
+    /** 找替代 chunk 的半徑（chunk）：只往回拉進相鄰的 chunk。 */
+    static final int SEARCH_CHUNKS = 1;
     /** 每次啟動最多逐筆記錄的介入次數，之後只計數。 */
     private static final int LOG_LIMIT = 20;
 
     /** 本次啟動改夾進附近 chunk 的次數（只在主執行緒更新）。 */
     static int rerouted;
-    /** 本次啟動附近沒有已載入 chunk、把車留在原地的次數。 */
+    /** 本次啟動附近沒有已載入 chunk、不放車（留在原地）的次數。 */
     static int held;
     private static boolean failureLogged;
 
@@ -60,9 +61,10 @@ public final class VehicleClampGuard {
 
     /** 取代 BaseVehicle.update 夾回區塊內的 {@code this.setWorldTransform(t1)}。 */
     public static void setWorldTransform(BaseVehicle vehicle, Transform target) {
+        boolean place = true;
         if (ENABLED) {
             try {
-                redirect(vehicle, target);
+                place = redirect(vehicle, target);
             } catch (RuntimeException e) {
                 if (!failureLogged) {
                     failureLogged = true;
@@ -70,11 +72,16 @@ public final class VehicleClampGuard {
                 }
             }
         }
-        vehicle.setWorldTransform(target);
+        if (place) {
+            vehicle.setWorldTransform(target);
+        }
     }
 
-    /** 原版要夾進的 chunk 不能用時，改寫 x、y 與 target：改放到附近已載入的 chunk，或留在原地。 */
-    static void redirect(BaseVehicle vehicle, Transform target) {
+    /**
+     * 原版要夾進的 chunk 能用時什麼都不改、回 true；不能用時改夾進相鄰的已載入 chunk（改寫 x、y 與 target，回 true），
+     * 或把 x、y 改回物理位置、回 false（不放車）。
+     */
+    static boolean redirect(BaseVehicle vehicle, Transform target) {
         IsoChunk stored = vehicle.chunk;
         float offsetX = WorldSimulation.instance.offsetX;
         float offsetY = WorldSimulation.instance.offsetY;
@@ -83,21 +90,27 @@ public final class VehicleClampGuard {
         int cwx = chunkIndex(px);
         int cwy = chunkIndex(py);
         if (usable(stored, vehicle, cwx, cwy)) {
-            return;
+            return true;
         }
         IsoChunk replacement = nearestLoaded(px, py, cwx, cwy);
-        float x = replacement == null ? px : clamp(px, replacement.wx);
-        float y = replacement == null ? py : clamp(py, replacement.wy);
+        float vanillaX = target.origin.x + offsetX;
+        float vanillaY = target.origin.z + offsetY;
         if (replacement == null) {
             held++;
-        } else {
-            rerouted++;
+            report(vehicle, stored, vanillaX, vanillaY, px, py, cwx, cwy, null, px, py);
+            vehicle.setX(px);
+            vehicle.setY(py);
+            return false;
         }
-        report(vehicle, stored, target.origin.x + offsetX, target.origin.z + offsetY, px, py, cwx, cwy, replacement, x, y);
+        float x = clamp(px, replacement.wx);
+        float y = clamp(py, replacement.wy);
+        rerouted++;
+        report(vehicle, stored, vanillaX, vanillaY, px, py, cwx, cwy, replacement, x, y);
         vehicle.setX(x);
         vehicle.setY(y);
         target.origin.x = x - offsetX;
         target.origin.z = y - offsetY;
+        return true;
     }
 
     /** 原版要夾進的 chunk 確實是車剛離開的那一塊：已載入、車在它的清單裡、就在車旁邊。 */
@@ -159,7 +172,7 @@ public final class VehicleClampGuard {
         log("vehicle " + vehicle.vehicleId + " " + vehicle.getScriptName() + " at " + px + "," + py
                 + ": vanilla would clamp it into chunk " + storedText + " at " + vanillaX + "," + vanillaY
                 + (replacement == null
-                        ? "; no loaded chunk within " + SEARCH_CHUNKS + ", held in place"
+                        ? "; no loaded chunk next to it, left where it is (not placed)"
                         : "; clamped into loaded chunk " + replacement.wx + "," + replacement.wy + " at " + x + "," + y)
                 + " (#" + n + (n == LOG_LIMIT ? ", further events are not logged" : "") + ")");
     }

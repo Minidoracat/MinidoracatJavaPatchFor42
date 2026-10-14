@@ -3502,35 +3502,54 @@ a save in progress before loading, and so on).
 <a id="2by"></a>
 ## 2by. Vehicle teleported by a clamp into a stale chunk (W61, client, default on; client package 0.2.7)
 
-**Symptom** (production server, 2026-10-14, several players at the same time): while driving into black edges (areas the client has not loaded yet), the
-vehicle was suddenly thrown tens or hundreds of tiles away, into woods or water, and AutoDrive handed control back with "too far from the route". Sometimes it
-jumped back a few dozen seconds later. Over the same window the server main loop ran at 9.1–10.0 fps with no chunk backlog, so server load and the mods added
-that day were ruled out.
+**Symptom** (production server, 2026-10-14, several players at the same time): while driving, everything around the vehicle suddenly went black (the
+client's chunks vanished together), then the vehicle was thrown tens or hundreds of tiles away, into woods or water, and AutoDrive handed control back with
+"too far from the route". Sometimes it jumped back a few dozen seconds later. Over the same window the server main loop ran at 9.1–10.0 fps with no chunk
+backlog, so server load and the mods added that day were ruled out.
 
 **Evidence**:
-- Three AutoDrive diagnostic clips from two players: just before the jump there is `area ahead` (the chunk ahead is not loaded), then one sample whose three
-  speed fields are exactly 0 (`frozen`), and the next sample lands on the corner of another chunk ±0.0005. Example: the car was in chunk (a,b) and landed on
-  `maxX − 0.0005`, `minY + 0.0005` of chunk (a−8,b+7), 77 tiles away; the other two jumped 55 and 71 tiles.
+- AutoDrive diagnostic clips (16 clamps from 2026-10-07 to 10-14, including 3 from two players on 10-14): in the previous sample (about 0.2 s earlier) the
+  loaded frontier was still at least 40.8 m from the vehicle (median about 63 m; in 2 cases nothing ahead was unloaded), and in the next sample it was
+  about 2 m. The chunks around the vehicle vanished from the client together; the vehicle did not drive into a black edge. Then one sample has its three
+  speed fields exactly 0 (frozen physics; the 5 Hz sampling caught 9 of them), and the next lands on the edge of another chunk ±0.0005 (14 corners, 2 on
+  one axis). Example: the car was in chunk (a,b) and landed on `maxX − 0.0005`, `minY + 0.0005` of chunk (a−8,b+7), 77 tiles away; one case jumped 5
+  times within 3.5 s. The player with the worst black edges (20% visibility loss over 520 trips) had no clamp at all, so black edges and these jumps are
+  not correlated.
 - The server's anti-cheat logged `Anti-cheat="Speed" … VehiclePhysicsUnreliablePacket: speed=198–833 > limit=150` at the same times.
   `NetworkCharacterAI.SpeedChecker`, which `AntiCheatSpeed` reads, divides the client's reported displacement by about one second, so these values are the
   result of the jump; the anti-cheat only logs and does not move the vehicle (`react` is empty, `sync` is not overridden).
-- The server's cmd.txt shows two more jumps of 755 and 891 tiles whose landing x is a multiple of 8 and y a multiple of 8 minus 1, the (minX, maxY) corner
-  of a chunk; both landed near places the same player had driven past 1–3 minutes earlier.
+- The server's cmd.txt shows two more jumps of 755 and 891 tiles that landed near places the same player had driven past 1–3 minutes earlier (x a
+  multiple of 8, y a multiple of 8 minus 1). These look more like the path in our earlier report,
+  [a driven vehicle left on an unloaded chunk](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md): the vehicle stops sending its position, the
+  server keeps the old one, and `VehiclePacket.doRemove()` later moves the local driver there; the chunk-edge coordinates come from a clamp afterwards
+  (inferred). W61 does not handle that path (see "Not handled").
 
 **Root cause** (javap of the 42.21.0 jar `e1a69eb7`):
 - `BaseVehicle.update()` (offset 1538–1815): `sq = getCell().getGridSquare(getX(), getY(), getZ())`; when `sq == null && !this.chunk.refs.isEmpty()`, it
   clamps x and y into `this.chunk.wx*8` … `+8` (0.0005 from the edge, `5.0E-4f`), calls `setZ(0.2)`, builds t1 with the current rotation and calls
   `setWorldTransform(t1)` (on the client this calls `Bullet.teleportVehicle`, which zeroes the velocity), then sets `current = getGridSquare(…)`. From offset
   1818 on, `this.chunk` only moves to `current`'s chunk when `current` has a square in another chunk.
-- Unloading a chunk on the client (`IsoChunkMap.Up/Down/Left/Right` drop it at the edge → `refs.remove` → `removeFromWorld`) does not clear the vehicle's
+- Unloading a chunk on the client (`IsoChunkMap.Up/Down/Left/Right` drop it at the edge, or the full rebuild in `Unload()` → `refs.remove` →
+  `removeFromWorld`) does not clear the vehicle's
   `chunk`: `IsoChunk.removeFromWorld` only handles the moving objects on its squares, and `resetForStore()` clears `vehicles` and `refs`, zeroes `wx`/`wy`
   and returns the object to `chunkStore`. Across every method of `IsoChunk` and `IsoChunkMap`, only `IsoChunk.update` writes `vehicle.chunk` (pointing it
   back at itself).
 - `IsoChunkMap.LoadChunk` takes an object from `chunkStore`, gives it the new coordinates, calls `refs.add(this)` (offset 123) and only then
   `WorldStreamer.addJob` (offset 135). A vehicle that still points at such an object passes vanilla's condition and is clamped onto a corner of the new
   location. `refs` is non-empty before loading finishes, so the target may itself be unloaded and the vehicle is clamped again on the next frame.
-- The vehicle's `chunk` only follows `current`. While the vehicle is on squares that do not exist, `current` is null and `chunk` stays on the last chunk
-  that had a square; once that chunk is unloaded and recycled, the reference is stale (inferred: more black edges and chunk-map churn make it more likely).
+- The collapse is a full chunk-map rebuild: `IsoChunkMap.ProcessChunkPos` centres the grid on the player's position plus a speed lookahead (`km/h ÷ 5`
+  tiles for the driver with no cap; passengers are capped at 20 tiles). When the centre moves by the grid width or more in one frame (13 chunks at about
+  720p, 19 at 1080p and above), it calls `Unload()`: every chunk in the map loses its `refs`, is removed from the world and sent off to be saved and
+  recycled, and `WorldSimulation.deactivateChunkMap` runs. Normal driving shifts one row per frame, which never unloads the chunk under the vehicle. What
+  moved the centre this time is open; the two candidates are a one-frame spike in the driver's speed reading (at least 520 km/h for grid width 13) and
+  `VehiclePacket.doRemove()` moving the driver to the server's position (inferred, no direct evidence for either).
+- How the vehicle's `chunk` goes stale: in a full rebuild, `BaseVehicle.removeFromWorld()` returns early for a vehicle with a local passenger, so the
+  vehicle stays assigned to the unloaded chunk (same report). What follows depends on that chunk object: (A) not recycled yet — `vehicles` still lists the
+  vehicle and `refs` is empty, so the top of `update()` calls `removeFromWorld()` (which returns early again) and returns every frame, sending no position
+  and not placing passengers; (B) recycled (`vehicles` cleared) — the top only sends `VehicleRequest(2)` and carries on, and `refs` is empty, so there is
+  no clamp; (C) reused elsewhere by `LoadChunk` — `refs` is non-empty again, `update()` reaches the clamp and throws the vehicle onto a corner of the new
+  location. A vehicle on squares that do not exist also keeps `chunk` on the last chunk that had a square, because `chunk` only follows `current`
+  (inferred).
 
 **Surgery**: the only `invokevirtual BaseVehicle.setWorldTransform(Transform)V` in `update()V` (offset 1776, inside the clamp block) is redirected 1:1 to
 `invokestatic zombie/mdc/VehicleClampGuard.setWorldTransform(BaseVehicle, Transform)V` (3 bytes for 3 bytes, same stack shape, frames unchanged),
@@ -3538,11 +3557,20 @@ that day were ruled out.
 
 **Decision** (when the helper is called, vanilla has already replaced x and y with the clamped values and set z to 0.2; `jniTransform.origin` is still the
 vehicle's real physics position P):
-1. If the `this.chunk` vanilla clamps into is loaded, lists the vehicle in `vehicles`, and is at most 2 chunks from P's chunk: vanilla. This is the chunk the
-   vehicle just left, the normal pull-back.
-2. Otherwise, among the chunks in the 5×5 around P's chunk that are loaded and sit in the ChunkMap slot matching their own coordinates, take the one
-   nearest to P, clamp into it the same way vanilla does (0.0005 from the edge), rewrite x, y and t1, and place the vehicle.
-3. If none is loaded: put x and y back to P and place the vehicle where it is (height 0.2, velocity zeroed) until that area loads; no teleport.
+1. If the `this.chunk` vanilla clamps into is loaded, lists the vehicle in `vehicles`, and is adjacent to P's chunk (at most 1 chunk away): vanilla. This is
+   the chunk the vehicle just left, the normal pull-back.
+2. Otherwise, among P's chunk and its 8 neighbours, take the loaded chunk that sits in the ChunkMap slot matching its own coordinates and is nearest to P,
+   clamp into it the same way vanilla does (0.0005 from the edge), rewrite x, y and t1, and place the vehicle. The pull-back is at most about 8 tiles
+   (about 11 diagonally).
+3. If no neighbour is loaded: do not place the vehicle (no `setWorldTransform`); only put x and y back to P. P's chunk is not loaded, so vanilla
+   `checkSurroundingChunks` (called by `WorldSimulation.updateVehiclePhysics` for every vehicle on every physics substep; it checks the 3×3 around the
+   vehicle and calls `setPhysicsActive(false)` if any chunk is missing) has already stopped this vehicle's physics. The vehicle stays where it is, with
+   its height and rotation unchanged, until that area loads. The result is vanilla's stage (B) (`refs` empty, no clamp, `update()` carries on):
+   passengers are put back in their seats, and `updatePhysicsNetwork()`, which does not check whether physics is active, keeps sending the position from
+   `Bullet.getOwnVehiclePhysics` (P) every 150–300 ms, which the server applies with `setX/Y`. So even when the collapse came from `doRemove()` moving the
+   driver to the server's stale position, the server converges on P and the client does not keep rebuilding at two places; the cost is that the chunk
+   map may rebuild once more when the driver is put back in the vehicle (inferred). Pulling it back two chunks or more would itself be a teleport players
+   can see.
 
 From offset 1789 vanilla then reads `current` at the new position; once it has a square, `this.chunk` moves to the chunk the vehicle is really in, which
 repairs the stale reference. If the decision throws, vanilla runs (logged once).
@@ -3552,33 +3580,43 @@ repairs the stale reference. If the decision throws, vanilla runs (logged once).
 
 ```text
 [MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <script> at <x>,<y>: vanilla would clamp it into chunk <wx>,<wy> (loaded=<b>, listed=<b>, <n> chunks away) at <x>,<y>; clamped into loaded chunk <wx>,<wy> at <x>,<y> (#<n>)
-[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <script> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk within 2, held in place (#<n>)
+[MinidoracatJavaPatch][VehicleClampGuard] vehicle <id> <script> at <x>,<y>: vanilla would clamp it into chunk … at …; no loaded chunk next to it, left where it is (not placed) (#<n>)
 ```
 
 **Not handled**:
-- Driving onto unloaded squares in the first place: black edges come from chunk streaming (see [2o](#2o) and W4-1); this patch only makes the pull-back
-  pull to the right place.
-- Another path with the same stale reference at the top of `update()`: when `this.chunk.vehicles` does not contain the vehicle, the client sends
-  `VehicleRequest(2)` every frame; when `this.chunk.refs` is empty (unloaded but not yet recycled), it calls `removeFromWorld()` directly. A trailer
-  vanishing only on the client may take this path (inferred, not shown).
+- The full rebuild that causes the collapse (trigger open, see "Root cause"), and ordinary black edges (chunk streaming, see [2o](#2o) and W4-1): this
+  patch only keeps the pull-back from landing somewhere else.
+- Three more paths of the same family (see the [2026-10-01 report](report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md), suggested fixes 2
+  and 3): (a) while the vehicle is assigned to an unloaded chunk, `update()` returns early every frame, so no VehiclePhysics is sent, the engine goes
+  silent and passengers are not placed, until reversing brings that chunk back or the object is reused; (b) `VehiclePacket.doRemove()`: when the client
+  has no square at the server's position and a local player is aboard, the driver is moved to the server's stale position (175 tiles on 2026-10-01,
+  755 and 891 tiles on 2026-10-14); (c) a vehicle without local passengers (a trailer, for example) is removed directly at the top of `update()` when
+  `refs` is empty, or by `VehicleManager.clientUpdateVehiclePos` when the server's position is not loaded, which may be how a trailer vanishes only on
+  the client (inferred, not shown).
 - Falling through the ground: when the vehicle's chunk has squares but its physics ground is not built yet, this block does not run (squares are always
-  looked up at z 0). The 2026-10-14 case of a vehicle falling below the map (z below −33) after a driver change belongs here and is handled separately.
+  looked up at z 0). The 2026-10-14 case of a vehicle falling below the map (z below −33) after a driver change belongs here; while seated, the camera
+  height is the vehicle's raw physics height, so the view goes black while the HUD keeps working (item 4 of the same report). Handled separately.
 
 **Checks and verification**:
 - SmokeCheck (both variants): reasons to exist — `update()` has exactly one `setWorldTransform`, inside the clamp block where `sq == null` (IFNONNULL) is
   followed directly by `this.chunk.refs.isEmpty()`→IFNE, and the clamp reads only `wx`, `wy` and `5.0E-4f`, never `loaded` or `vehicles` (red if TIS adds
   either check = reconsider the patch); the helper's `EDGE` is tied to the vanilla constant; `resetForStore` clears `vehicles` and `refs`, and in
   `IsoChunk`/`IsoChunkMap` only `IsoChunk.update` writes `vehicle.chunk` (back to itself); `LoadChunk` takes the object from `chunkStore` and calls
-  `refs.add` before `addJob`. After surgery, `update()` text (including frames) equals vanilla except for this call; negative controls: the body of
-  `setWorldTransform` and the other caller `flipUpright` are unchanged. LoadCheck: the helper is public static void.
+  `refs.add` before `addJob`. Basis of rule 3: `WorldSimulation.updateVehiclePhysics` calls `checkSurroundingChunks` on every substep,
+  `hasChunksAllAround` checks the neighbours with `IsoCell.getChunk` and `loaded`, and when one is missing sets
+  `disableSimulationDueToLackOfSurroundingChunks` and calls `setPhysicsActive`, which reads that flag in `setPhysicsActive(ZZ)`. After surgery, `update()`
+  text (including frames) equals vanilla except for this call; negative controls: the body of `setWorldTransform` and the other caller `flipUpright` are
+  unchanged. LoadCheck: the helper is public static void.
 - `VehicleClampGuardBehaviorTest` (both variants, on and off): lookups through the real `IsoCell.getChunk`→`IsoChunkMap.getChunk`, real `IsoChunk`, and the
   real `BaseVehicle.setWorldTransform` (`GameServer.server=true`, so the native Bullet call is skipped); each case first prepares x, y, z and t1 exactly as the
   vanilla clamp block does. Vanilla negative control: with the vehicle pointing at a chunk reused elsewhere, the clamp target is that chunk's corner, 77
-  tiles away, and off places the vehicle there. On: stale and far — clamped into the nearest loaded chunk, 1.6 tiles back, x and y consistent with the
-  physics position, height 0.2; the chunk just left (loaded, listed, adjacent) — same result as vanilla; loaded next door but not listing the vehicle —
-  clamped into the nearest chunk; nothing loaded within 2 chunks — held in place, no teleport.
-- In game: not done. Reproducing it needs a chunk to be recycled during a black edge, which cannot be produced on demand locally; after release, check
-  players' console.txt for `VehicleClampGuard` lines (each shows where vanilla would have put the vehicle).
+  tiles away, and off places the vehicle there. On: stale and far — clamped into the adjacent loaded chunk, 1.6 tiles back, x and y consistent with the
+  physics position, height 0.2; the chunk just left (loaded, listed, adjacent) — same result as vanilla; listed but two chunks away — not pulled back
+  10 tiles as vanilla would, clamped into the adjacent chunk instead; loaded next door but not listing the vehicle — clamped into the nearest chunk;
+  nothing loaded around it, or the nearest loaded chunk two away — not placed, physics position and height unchanged.
+- In game: not done. Reproducing it needs a full rebuild first (for example moving the player 13 chunks or more in one frame) and then the moment the
+  vehicle's chunk object is reused, which we have not produced locally yet; after release, check players' console.txt for `VehicleClampGuard` lines (each
+  shows where vanilla would have put the vehicle).
 
 **Retirement**: when TIS fixes it (checks the chunk before clamping, or unlinks vehicles when a chunk unloads), the SmokeCheck reasons to exist turn red;
 then remove this patch from `PatchConfig.client()` and delete the helper and its test.

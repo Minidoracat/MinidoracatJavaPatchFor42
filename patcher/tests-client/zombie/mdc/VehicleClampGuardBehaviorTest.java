@@ -40,7 +40,7 @@ public final class VehicleClampGuardBehaviorTest {
         int failed = 0;
         world();
         IsoChunk came = chunk(249, 375);
-        chunk(248, 375);
+        IsoChunk twoBack = chunk(248, 375);
         IsoChunk recycled = chunk(242, 382);
         IsoChunk ahead = chunk(251, 376);
         GameServer.server = true;
@@ -58,7 +58,7 @@ public final class VehicleClampGuardBehaviorTest {
                     !VehicleClampGuard.ENABLED && near(after, vanilla)
                     && VehicleClampGuard.rerouted + VehicleClampGuard.held == 0);
         } else {
-            failed += check("過期且遠：改夾進最近的已載入 chunk (249,375)，只往回 1.6 格；x、y 與物理位置一致，高度 0.2",
+            failed += check("過期且遠：改夾進相鄰的已載入 chunk (249,375)，只往回 1.6 格；x、y 與物理位置一致，高度 0.2",
                     VehicleClampGuard.ENABLED && near(after, 1999.9995F, PY) && consistent(car)
                     && VehicleClampGuard.rerouted == 1 && VehicleClampGuard.held == 0);
 
@@ -67,21 +67,32 @@ public final class VehicleClampGuardBehaviorTest {
             Transform listedTarget = vanillaClamp(listed);
             float[] listedVanilla = {listedTarget.origin.x + OFFSET_X, listedTarget.origin.z + OFFSET_Y};
             VehicleClampGuard.setWorldTransform(listed, listedTarget);
-            failed += check("剛離開的 chunk（已載入、在清單裡、就在旁邊）：照原版夾回，結果與原版相同",
+            failed += check("剛離開的 chunk（已載入、在清單裡、相鄰）：照原版夾回，結果與原版相同",
                     near(position(listed), listedVanilla) && near(position(listed), 1999.9995F, PY)
                     && VehicleClampGuard.rerouted == 1 && VehicleClampGuard.held == 0);
 
+            BaseVehicle farListed = vehicle(PX, PY, twoBack);
+            twoBack.vehicles.add(farListed);
+            VehicleClampGuard.setWorldTransform(farListed, vanillaClamp(farListed));
+            failed += check("登記的 chunk 在清單裡但隔了兩格：不照原版往回拉 10 格，改夾進相鄰的 (249,375)",
+                    near(position(farListed), 1999.9995F, PY) && consistent(farListed)
+                    && VehicleClampGuard.rerouted == 2 && VehicleClampGuard.held == 0);
+
             BaseVehicle unlisted = vehicle(PX, PY, ahead);
             VehicleClampGuard.setWorldTransform(unlisted, vanillaClamp(unlisted));
-            failed += check("旁邊已載入但車不在清單裡（回收物件重用在附近）：改夾進離車最近的 (249,375)",
+            failed += check("相鄰已載入但車不在清單裡（回收物件重用在附近）：改夾進離車最近的 (249,375)",
                     near(position(unlisted), 1999.9995F, PY) && consistent(unlisted)
-                    && VehicleClampGuard.rerouted == 2 && VehicleClampGuard.held == 0);
+                    && VehicleClampGuard.rerouted == 3 && VehicleClampGuard.held == 0);
 
             BaseVehicle stranded = vehicle(2101.0F, PY, recycled);
             VehicleClampGuard.setWorldTransform(stranded, vanillaClamp(stranded));
-            failed += check("周圍 2 格內都沒有已載入的 chunk：留在原地（物理位置不變、高度 0.2），不瞬移",
-                    near(position(stranded), 2101.0F, PY) && consistent(stranded)
-                    && VehicleClampGuard.rerouted == 2 && VehicleClampGuard.held == 1);
+            failed += check("周圍都沒有已載入的 chunk：不放車，物理位置與高度都不變，x、y 改回物理位置",
+                    untouched(stranded, 2101.0F, PY) && VehicleClampGuard.rerouted == 3 && VehicleClampGuard.held == 1);
+
+            BaseVehicle gap = vehicle(1972.0F, PY, recycled);
+            VehicleClampGuard.setWorldTransform(gap, vanillaClamp(gap));
+            failed += check("最近的已載入 chunk 隔了兩格：不往回拉，留在原地",
+                    untouched(gap, 1972.0F, PY) && VehicleClampGuard.rerouted == 3 && VehicleClampGuard.held == 2);
         }
 
         if (failed > 0) {
@@ -164,6 +175,11 @@ public final class VehicleClampGuardBehaviorTest {
     /** IsoMovingObject 的 x、y 與物理位置一致，高度是原版夾回的 0.2。 */
     static boolean consistent(BaseVehicle car) {
         return near(position(car), car.getX(), car.getY()) && car.getZ() == 0.2F && car.jniTransform.origin.y == 0.2F;
+    }
+
+    /** 沒有放車：物理位置與高度（vehicle() 給的 0.35）都沒變，IsoMovingObject 的 x、y 改回物理位置。 */
+    static boolean untouched(BaseVehicle car, float x, float y) {
+        return near(position(car), x, y) && car.jniTransform.origin.y == 0.35F && near(car.getX(), x) && near(car.getY(), y);
     }
 
     static float distance(float[] p, float x, float y) {
