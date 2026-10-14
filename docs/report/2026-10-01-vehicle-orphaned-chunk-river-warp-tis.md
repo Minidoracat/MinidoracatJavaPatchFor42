@@ -1,6 +1,6 @@
 # TIS 回報草稿：駕駛中的車被留在已卸載的 chunk 上，駕駛被拉回舊位置、車卡進河裡全黑（未送出）
 
-- 狀態：草稿，尚未回報。伺服器修補碰不到（整條路徑都在原版 client 端）；2026-10-14 起選裝的客戶端修補包 0.2.7 以 W61–W63 繞過建議 2、3 與夾回瞬移（docs/patches.md 2by、2bz），尚未發布。
+- 狀態：草稿，尚未回報。拉回與夾回的路徑都在原版 client 端，伺服器修補碰不到；伺服器 W64 只在車交回伺服器時把陷在地下的車抬回（docs/patches.md 2ca）。2026-10-15 發布的客戶端修補包 0.2.7（`client-v0.2.7`）以 W61–W63 繞過建議 2、3 與夾回瞬移，W65 把本機模擬、掉到地板下的車放回地面（docs/patches.md 2by、2bz、2ca）。
 - 事件：2026-10-01 約 19:33（伺服器時間），Player-L 在路易斯維爾往北開車，被拉回約 175 格外的舊位置，接著車落進俄亥俄河，畫面全黑、下不了車。之後重登幾次，車每次往岸邊移幾格，20:15 回到岸上恢復正常。
 - 資料來源：Player-L 提供的 client DebugLog（19:14 啟動那份）、三段遊戲錄影（逐格讀畫面上的玩家座標、儀表板與時鐘）、伺服器 user／cmd log 與 vehicles.db（唯讀查詢）、42.21.0 反編譯快照（下文只寫類別與方法名稱，不貼原始碼）。
 - 已確認：出事前約 35 秒，client log 連續三次記下同一台車 `vehicle wasn't removed from world`；錄影中駕駛先被拉到約 175 格外的舊位置 0.2 秒，之後落在河裡，座標剛好在 chunk 邊界；伺服器同時段穩定 10 FPS，沒有 AntiCheat、沒有 chunk 產生失敗的紀錄；我們的伺服器修補不在這條路徑上。
@@ -53,5 +53,5 @@ Suggested fixes
 3. In VehiclePacket.doRemove(), do not teleport the local driver of a vehicle this client is authoritative for (Local or LocalCollide). Request a full update instead.
 4. Clamp the seated camera height to the vehicle's floor level, so a vehicle below ground does not black out the view.
 
-Our server patches cannot reach this path, because it is all on the client. Our optional client patch package works around suggestions 2 and 3, and also stops the clamp from throwing the vehicle onto a chunk object that was recycled for another location. We can share the client log, the recording frames and the server-side positions.
+Our server patches cannot reach this path, because it is all on the client; they only lift a vehicle that is below the floor when it is handed back to the server. Our optional client patch package works around suggestions 2 and 3, stops the clamp from throwing the vehicle onto a chunk object that was recycled for another location, and puts a locally simulated vehicle that fell below the floor back on it. We can share the client log, the recording frames and the server-side positions.
 ```
