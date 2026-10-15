@@ -3854,7 +3854,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 **退場**：官方修好（卸載時把車移到已載入的 chunk、`update()` 不再對本機乘客的車提早 return，或 `doRemove` 不傳送本機模擬的車的駕駛）時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig.client()` 移除對應的改道，並刪除 helper 與測試。
 
 <a id="2ca"></a>
-## 2ca. 車被推到地板下（W64 server，預設 on；W65 client，預設 on，client 包 0.2.7）
+## 2ca. 車被推到地板下（W64 server，預設 on；W65 client，預設 on，client 包 0.2.7 起）
 
 **症狀**（2026-10-14 正式服）：一位玩家開 '82 Oshkosh M911（KI5）在大門口以 0–1 km/h 倒車，碰到後面停著的 W900（rSemiTruck），畫面立刻全黑，只剩 HUD 與小地圖；下車後車陷在地面裡，上不去，重登也一樣。玩家錄影：碰撞那一幀之後全黑約 37 秒，下車後車身一半在地面下。伺服器 cmd.txt 同一秒有這台車的 `vehicle.crash`（客戶端判定水平速度變化超過 1 m/s 才送）。
 
@@ -3873,25 +3873,25 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **判定**：
 - 物理原點比所在樓層的地板低 0.25 m 以上、那一格有地板（`hasFloor`）。判斷只看地板：原版 `load` 也把高度夾在地板以上，原點在地板下時坐進去就全黑。vehicles.db 7,574 台裡，除了這台 M911，原點最低的是 3 台車頭著地的半掛拖車（−0.07 至 −0.11 m），照原版。
-- 車要是正的（`getUpVectorDot()` 至少 `MINIMUM_DOT_UPRIGHT` 0.8）。例外只有 W64：翻覆而且原點比地板低一層（2.449 m）以上的車，先扶正再抬回；翻覆而低於地板不到一層的照原版，留給玩家自己翻正（車頂著地或翻在溝裡的車，原點本來就在地板上或只低一點）。W65 碰到翻覆的車一律照原版。
+- 車要是正的（`getUpVectorDot()` 至少 `MINIMUM_DOT_UPRIGHT` 0.8）。例外：翻覆而且原點比地板低一層（2.449 m）以上的車，先扶正再抬回（W64 2026-10-16 起；W65 client 包 0.2.8 起）；翻覆而低於地板不到一層的照原版，留給玩家自己翻正（車頂著地或翻在溝裡的車，原點本來就在地板上或只低一點）。
 - 扶正只改旋轉：保留車頭方向（前向量的水平分量決定繞 Y 軸的角度），俯仰與側傾歸零。伺服器改的 `jniTransform` 旋轉會進存檔（`save` 從 `getWorldTransform` 寫旋轉）與完整更新（`VehicleInterpolationData.set` 從 `getWorldTransform` 取旋轉；客戶端 `VehicleFullUpdatePacket.parse` 以 `setWorldTransform`、`Bullet.setOwnVehiclePhysics` 套用）。原版沒有任何地方會扶正車：`load` 照存檔旋轉放車，`flipUpright` 只在玩家翻車的動作裡用。
 - 放回的高度＝樓層地板＋停放高度。停放高度照原版 `CarController` 建構子生成車輛的算法：−min(模型偏移＋第一個輪子偏移－半徑, 重心偏移－車身高÷2)，至少 0.1。M911 是 0.5666。
 - W64：只在授權從別人交回 Server 時檢查一次（下車、換到乘客座、斷線、碰撞歸還；`authorizationServerOnSeat`、`authorizationServerCollide`、`GameServer.disconnectPlayer` 都走 `setNetPlayerAuthorization`）。抬回後速度歸零、`updateFlags |= Full`，下一輪 `sendVehicles` 對每個連線送 `VehicleFullUpdate`，客戶端照原版用伺服器的高度與旋轉放車。
-- W65：只處理本機模擬的車（`isLocalPhysicSim()`：Local、LocalCollide）；用原版 `setWorldTransform`（原生 `teleportVehicle`）放車，水平位置與方向不變、速度歸零，再照原版 `updateTransform`。本機下一則 VehiclePhysics 就把地面上的高度送給伺服器。在伺服器 JVM 裡不動（自建伺服器也會載入 client 包）。
+- W65：只處理本機模擬的車（`isLocalPhysicSim()`：Local、LocalCollide）；用原版 `setWorldTransform`（原生 `teleportVehicle`）放車，水平位置不變、方向不變（翻覆深陷的先扶正）、速度歸零，再照原版 `updateTransform`。本機下一則 VehiclePhysics 就把地面上的高度與姿勢送給伺服器。在伺服器 JVM 裡不動（自建伺服器也會載入 client 包）。
 
 **kill switch**：`-Dmdc.vehicleSinkRestore=off`（W64）、`-Dmdc.vehicleSinkGuard=off`（W65），或 `0`，一律照原版，需重啟。第一次用到時記一行 `active=true|false`；每次介入記一行（每次啟動 W64 最多 50 行、W65 最多 20 行）：
 
 ```text
 [MinidoracatJavaPatch][VehicleSinkRestore] vehicle <id> <車型> at <x>,<y> handed back to the server (<原授權> pid=<n>): physics height <y> is <m> m below the floor of level <z>; <結果> (#<n>)
-[MinidoracatJavaPatch][VehicleSinkGuard] vehicle <id> <車型> at <x>,<y> (<授權>): physics height <y> is below the floor of level <z>; lifted to <h> (#<n>)
+[MinidoracatJavaPatch][VehicleSinkGuard] vehicle <id> <車型> at <x>,<y> (<授權>): physics height <y> is below the floor of level <z>; [flipped (up <u>), set upright keeping its heading, ]lifted to <h> (#<n>)
 ```
 
 W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipped (up <u>), set upright keeping its heading, lifted to <h> and sent a full update`（扶正再抬回）、`flipped (up <u>), less than one level below the floor, left as is`（翻覆不到一層，照原版）、`no floor on that square, left as is`（沒有地板，照原版；翻覆的前面加 `flipped (up <u>), `）。
 
 **不處理**：
 - 原生物理為什麼在這次碰撞中把車推下去：在 libPZBullet 裡，Java 端看不到。
-- 原點在地板下、那一格卻沒有地板的車，以及翻覆而低於地板不到一層的車：照原版（W64 各記一行）。W65 碰到翻覆的車照原版。
-- 車為什麼掉進虛空（[2by](#2by) 那一族的瞬移）：客戶端修補包的 W61–W63 處理；沒裝修補包的玩家照樣會掉進去。W64 只在下車或下線、車交回伺服器時把它擺回地面，玩家重登就恢復。
+- 原點在地板下、那一格卻沒有地板的車，以及翻覆而低於地板不到一層的車：照原版（W64 各記一行）。
+- 車為什麼掉進虛空（[2by](#2by) 那一族的瞬移）：客戶端修補包的 W61–W63 處理；掉下去之後，裝了 client 包 0.2.8 的駕駛由 W65 在下一幀放回地面（翻覆的先扶正）。沒裝修補包的玩家照樣會掉進去，W64 在下車或下線、車交回伺服器時把它擺回地面，玩家重登就恢復。
 - 交回伺服器之後就沒有人再開、也沒人撞的地下車：W64 不會再檢查；部署本身要重啟，重啟時原版 `load` 會夾回。
 - 同一位玩家 20:57 那次被踢回主選單是另一個原版缺陷（`IsoMetaCell.isoRooms` 跨執行緒競態，[2026-09-05 回報](report/2026-09-05-client-metagrid-isorooms-race-tis.md)，TIS #101035），與陷車無關。
 
@@ -3899,8 +3899,9 @@ W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipp
 - SmokeCheck（伺服器）：W64 存在理由——`VehiclePhysicsPacket.processServer` 恰一個 `setZ`、沒有 `PZMath.clamp`；`BaseVehicle.load` 有 `PZMath.clamp`；`CarController` 建構子讀 `getModelOffset`、`getWheel`×2、`getCenterOfMassOffset`、`getExtents`；三條交回路徑都呼叫 `setNetPlayerAuthorization`；`shouldSend` 讀 `vehicle.updateFlags`。扶正的前提——`load` 恰一個 `Transform.setRotation`、沒有 `flipUpright`；`save` 與 `VehicleInterpolationData.set` 各恰一個 `getWorldTransform` 與 `getRotation`；`VehicleFullUpdatePacket.write` 恰一個 `save`。手術後頭部 `aload_0; aload_1; invokestatic` 全序、真指令恰 +3；helper 只寫 `updateFlags` 一處、不碰授權欄位。
 - SmokeCheck（client 兩個變體）：W65 存在理由——`update()` 恰一個 `updateTransform`，在最後一個 `setZ` 與夾回的 `setWorldTransform` 之後；`updateTransform` 是 protected。手術後 `update()` 除了 W61、W62、W65 的改道之外逐指令與原版相同。
 - `VehicleSinkRestoreTest`（`build.ps1` [9zj/10]，on、off）：真 `setNetPlayerAuthorization`＋真 `ServerVehicleState.shouldSend`，查格子走真 `IsoCell.getGridSquare`。M911 下車（Local→Server）與碰撞歸還（LocalCollide→Server）：抬回 0.5666、速度歸零、下一輪送完整更新、送一次後不再重送；掉到 −80 m 也抬回 0 樓；停放高度算出來是負的拖車抬到 0.1；四輪朝天、車頭 30° 掉到 −32 m：扶正（up 0.9999 以上）、車頭仍朝 30°、抬回停放高度並送完整更新；正常停放 0.506、地板下 0.109 與 0.24 m、交給駕駛、本來就是 Server、沒有地板、翻覆而在地板下 0.6 m 與 2.4 m（不到一層）、車頂著地都不動，翻覆深陷但沒有地板也不動。off：照原版留在 −0.599、翻覆的 −32 m 也不扶正，都不送完整更新（原版負對照）。
-- `MdcVehicleSinkGuardBehaviorTest`（`build-client.ps1`，兩個變體各 on、off）：Local、LocalCollide 的車拉回 0.5666；Remote、Server、正常行駛、地板下 0.109 與 0.24 m、翻覆、沒有地板、伺服器 JVM 都不動；放車只改高度，水平位置與方向不變、速度歸零。off：照原版留在地板下。
-- 實機 E2E（W64，2026-10-15，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是沒裝修補包的 Steam 本體；家族 E2E 情境 `vehicle-sink-mp`）：坐上 SUV、發動，在駕駛的客戶端把車轉成四輪朝天、車頭 30°、物理高度 −20，伺服器也記到 −20.011、up −1.000 後正常離線。修補版：離線那一刻伺服器記 `flipped (up -0.99999994), set upright keeping its heading, lifted to 0.382928 and sent a full update`；重開客戶端，角色照原版坐回駕駛座，12 秒內車在本機一直是 y 0.320、up 1.000、車頭 (0.500, 0.866)，伺服器同值，畫面正常。原版對照（`-Dmdc.vehicleSinkRestore=off`）：重登那一刻車已在 −16 m、四輪朝天，12 秒內在客戶端一路掉到 −636 m，畫面全黑只剩 HUD、車速表讀到 279 km/h，伺服器存成 −32.000——與症狀二的玩家截圖和正式服 vehicles.db 一致。W65 的實機驗證仍未做（原生物理把車推下去的碰撞無法穩定重現）；上線後看伺服器 console 的 `VehicleSinkRestore` 行與玩家 console.txt 的 `VehicleSinkGuard` 行。
+- `MdcVehicleSinkGuardBehaviorTest`（`build-client.ps1`，兩個變體各 on、off）：Local、LocalCollide 的車拉回 0.5666；四輪朝天、車頭 1.1 rad 掉到 −32 m 的車拉回並扶正（up 0.9999 以上、車頭不變、水平位置不變、速度歸零）；Remote、Server、正常行駛、地板下 0.109 與 0.24 m、翻覆而在地板下 0.6 m 與 2.4 m、車頂著地、沒有地板（含翻覆深陷）、伺服器 JVM 都不動；正的車放車只改高度，水平位置與方向不變、速度歸零。off：照原版留在地板下，翻覆的 −32 m 也不扶正。
+- 實機 E2E（W64，2026-10-15，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是沒裝修補包的 Steam 本體；家族 E2E 情境 `vehicle-sink-mp`）：坐上 SUV、發動，在駕駛的客戶端把車轉成四輪朝天、車頭 30°、物理高度 −20，伺服器也記到 −20.011、up −1.000 後正常離線。修補版：離線那一刻伺服器記 `flipped (up -0.99999994), set upright keeping its heading, lifted to 0.382928 and sent a full update`；重開客戶端，角色照原版坐回駕駛座，12 秒內車在本機一直是 y 0.320、up 1.000、車頭 (0.500, 0.866)，伺服器同值，畫面正常。原版對照（`-Dmdc.vehicleSinkRestore=off`）：重登那一刻車已在 −16 m、四輪朝天，12 秒內在客戶端一路掉到 −636 m，畫面全黑只剩 HUD、車速表讀到 279 km/h，伺服器存成 −32.000——與症狀二的玩家截圖和正式服 vehicles.db 一致。
+- 實機 E2E（W65，2026-10-16，同一情境的 `client=1`，客戶端從裝了 client 包 0.2.8 標準版的遊戲複本開）：同樣把車轉成四輪朝天、−20 之後，11 ms 內 client console 記 `flipped (up -0.99999994), set upright keeping its heading, lifted to 0.382928 (#1)`；之後 15 秒車在本機一直是 y 0.374–0.383、up 1.000、車頭 (0.500, 0.866)，伺服器同值，畫面正常（駕駛沒有離線）。沒裝包的原版對照就是上一條 W64 那輪的場次 1：車設在 −20 之後 5 秒都留在 −20、四輪朝天。碰撞把車推進地板下的那種情況仍無法穩定重現；上線後看伺服器 console 的 `VehicleSinkRestore` 行與玩家 console.txt 的 `VehicleSinkGuard` 行。
 
 **退場**：官方在伺服器收高度時夾樓層，或在 `update()` 把掉到地板下的車放回地面時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig` 移除對應的手術，並刪除 helper 與測試。
 

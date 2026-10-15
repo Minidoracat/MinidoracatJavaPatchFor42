@@ -1532,8 +1532,8 @@ public final class PatchConfig {
                 "zombie/mdc/VehicleOrphanGuard", "contains"));
         // ---- W65 本機模擬的車掉到地板下時拉回地面（docs/patches.md 2ca）----
         // update() 從物理回寫 x、y 並把 z 設成所在樓層後，唯一的 updateTransform()（javap offset 1951）1:1 改道
-        // MdcVehicleSinkGuard（放在 zombie.vehicles 才能呼叫 protected 的 updateTransform）：車由本機模擬、是正的、
-        // 原點在樓層地板下 0.25 m 以上且那一格有地板時，先用 setWorldTransform 放回停放高度，再照原版呼叫。
+        // MdcVehicleSinkGuard（放在 zombie.vehicles 才能呼叫 protected 的 updateTransform）：車由本機模擬、原點在樓層地板下
+        // 0.25 m 以上且那一格有地板時，先用 setWorldTransform 放回停放高度（翻覆的要低於地板一層以上，先扶正、保留車頭），再照原版呼叫。
         vehicleUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/vehicles/BaseVehicle", "updateTransform", "()V",
                 "zombie/vehicles/MdcVehicleSinkGuard", "updateTransform"));

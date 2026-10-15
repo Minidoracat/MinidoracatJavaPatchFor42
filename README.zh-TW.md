@@ -157,7 +157,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W61 開車被夾回過期 chunk 的瞬移（[2by](docs/patches.md#2by)） | 42.21.0：客戶端把行駛中的車周圍的 chunk 一起卸載（整張 chunk map 重建）時，車仍指著舊的 chunk 物件。這個物件被回收、排入別處的載入後，`BaseVehicle.update` 把車夾回它，條件只看 `refs` 非空，車被丟到那一塊的角落，幾十到幾百格外。 | 那個 chunk 已載入、車在它的清單裡、相鄰時照原版；否則夾進相鄰最近的已載入 chunk；相鄰都沒載入就留在原地（原版已經停掉它的物理）等那一塊載入。 | 未回報 |
 | W62 車被留在已卸載 chunk 上就不再更新（[2bz](docs/patches.md#2bz)） | 42.21.0：車上有本機乘客時，chunk 卸載的 `removeFromWorld` 移不掉這台車，車仍掛在那塊 chunk 上；之後 `BaseVehicle.update` 每幀再呼叫一次 `removeFromWorld` 就 return，車不再回報位置、引擎聲消失、乘客不擺位。 | 只在這個情況讓 `update` 改走原版「chunk 已回收」的分支（請求車輛更新後照常往下跑），車照常更新，等車底下的 chunk 載入後就換過去。 | 未回報 |
 | W63 駕駛被拉回伺服器的舊位置（[2bz](docs/patches.md#2bz)） | 42.21.0：伺服器位置的格子在 client 沒載入時，`VehiclePacket.doRemove` 把坐在車上的本機玩家移到那個位置；就算這台車由本機模擬、伺服器的位置只是本機送出去的舊值也一樣。 | 本機模擬的車（Local／LocalCollide）不移動駕駛，其餘照原版。 | 未回報 |
-| W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）是正的、原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。 | 未回報 |
+| W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。翻覆的車要低於地板一層以上才處理，先扶正（保留車頭方向，0.2.8 起）。 | 未回報 |
 
 ### Native 防護（Linux dedicated server）
 

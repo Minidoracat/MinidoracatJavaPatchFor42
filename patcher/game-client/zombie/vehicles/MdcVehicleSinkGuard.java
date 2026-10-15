@@ -2,6 +2,7 @@ package zombie.vehicles;
 
 import java.util.Locale;
 
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import zombie.core.math.PZMath;
 import zombie.core.physics.Transform;
@@ -20,10 +21,11 @@ import zombie.scripting.objects.VehicleScript;
  * 畫面全黑，下車後車也陷在地下。
  *
  * <p>本方法取代 {@code BaseVehicle.update} 內唯一的 {@code this.updateTransform()}（這時原版已經從物理回寫 x、y，
- * 並把 z 設成所在樓層）：車由本機模擬（Local／LocalCollide）、是正的、物理原點比樓層地板低
- * {@link #SINK_DEPTH} 以上、那一格有地板，就用原版 {@code setWorldTransform}（原生 {@code teleportVehicle}）把車放回
- * 停放高度、速度歸零，再照原版呼叫 {@code updateTransform}。本機回報給伺服器的高度也跟著回到地面。
- * 正的車的判斷與停放高度和伺服器 W64（{@code zombie.mdc.VehicleSinkRestore}）相同；W64 另外扶正翻覆深陷的車，這裡不做。
+ * 並把 z 設成所在樓層）：車由本機模擬（Local／LocalCollide）、物理原點比樓層地板低 {@link #SINK_DEPTH} 以上、那一格有地板，
+ * 就用原版 {@code setWorldTransform}（原生 {@code teleportVehicle}）把車放回停放高度、速度歸零，再照原版呼叫
+ * {@code updateTransform}。本機回報給伺服器的高度也跟著回到地面。翻覆的車（{@code getUpVectorDot} 低於
+ * {@code BaseVehicle.MINIMUM_DOT_UPRIGHT}）要低於地板一層以上才處理，放回時先扶正（保留車頭方向）：2026-10-15 翻覆掉進
+ * 虛空的車在駕駛的客戶端一路往下掉，畫面全黑。判斷、停放高度與扶正都和伺服器 W64（{@code zombie.mdc.VehicleSinkRestore}）相同。
  *
  * <p>{@code -Dmdc.vehicleSinkGuard=off}（或 {@code 0}）一律照原版。
  */
@@ -38,8 +40,10 @@ public final class MdcVehicleSinkGuard {
     /** 每次啟動最多逐筆記錄的次數，之後只計數。 */
     private static final int LOG_LIMIT = 20;
 
-    /** 本次啟動拉回地面的次數（只在主執行緒更新）。 */
+    /** 本次啟動拉回地面的次數（含先扶正的；只在主執行緒更新）。 */
     static int lifted;
+    /** 其中翻覆、先扶正再拉回的次數。 */
+    static int righted;
     private static boolean failureLogged;
 
     static {
@@ -74,15 +78,19 @@ public final class MdcVehicleSinkGuard {
         vehicle.updateTransform();
     }
 
-    /** 本機模擬、是正的、原點在地板下而且那一格有地板時回停放高度；其餘回 NaN（不動）。 */
+    /** 本機模擬、原點在地板下而且那一格有地板時回停放高度（翻覆的要低於一層以上）；其餘回 NaN（不動）。 */
     static float target(BaseVehicle vehicle) {
         VehicleScript script = vehicle.getScript();
-        if (script == null || !vehicle.isLocalPhysicSim() || vehicle.getUpVectorDot() < BaseVehicle.MINIMUM_DOT_UPRIGHT) {
+        if (script == null || !vehicle.isLocalPhysicSim()) {
             return Float.NaN;
         }
         int level = PZMath.fastfloor(vehicle.getZ());
         float floorY = level * LEVEL_HEIGHT;
-        if (!(vehicle.jniTransform.origin.y < floorY - SINK_DEPTH)) {
+        float physicsY = vehicle.jniTransform.origin.y;
+        if (!(physicsY < floorY - SINK_DEPTH)) {
+            return Float.NaN;
+        }
+        if (vehicle.getUpVectorDot() < BaseVehicle.MINIMUM_DOT_UPRIGHT && !(physicsY < floorY - LEVEL_HEIGHT)) {
             return Float.NaN;
         }
         IsoGridSquare square = IsoWorld.instance.currentCell.getGridSquare(
@@ -93,11 +101,17 @@ public final class MdcVehicleSinkGuard {
         return floorY + Math.max(restHeight(script), 0.1F);
     }
 
-    /** 用原版 setWorldTransform 把車放到 target 高度（x、y 與方向不變）、速度歸零。 */
+    /** 用原版 setWorldTransform 把車放到 target 高度（x、y 不變；翻覆的先扶正、車頭方向不變，其餘方向不變）、速度歸零。 */
     static void place(BaseVehicle vehicle, float target) {
         float physicsY = vehicle.jniTransform.origin.y;
+        float up = vehicle.getUpVectorDot();
+        boolean flipped = up < BaseVehicle.MINIMUM_DOT_UPRIGHT;
         Transform t = BaseVehicle.allocTransform();
         vehicle.getWorldTransform(t);
+        if (flipped) {
+            upright(t);
+            righted++;
+        }
         t.origin.y = target;
         vehicle.setWorldTransform(t);
         BaseVehicle.releaseTransform(t);
@@ -106,9 +120,17 @@ public final class MdcVehicleSinkGuard {
         if (lifted <= LOG_LIMIT) {
             log("vehicle " + vehicle.vehicleId + " " + vehicle.getScriptName() + " at " + vehicle.getX() + "," + vehicle.getY()
                     + " (" + vehicle.netPlayerAuthorization + "): physics height " + physicsY + " is below the floor of level "
-                    + PZMath.fastfloor(vehicle.getZ()) + "; lifted to " + target
+                    + PZMath.fastfloor(vehicle.getZ()) + "; "
+                    + (flipped ? "flipped (up " + up + "), set upright keeping its heading, " : "") + "lifted to " + target
                     + " (#" + lifted + (lifted == LOG_LIMIT ? ", further events are not logged" : "") + ")");
         }
+    }
+
+    /** 扶正並保留車頭方向：前向量（basis 第 2 欄）的水平分量決定繞 Y 軸的角度；前向量垂直時 atan2(0, 0) 得 0。 */
+    static void upright(Transform transform) {
+        Quaternionf rotation = BaseVehicle.allocQuaternionf();
+        transform.setRotation(rotation.rotationY((float) Math.atan2(transform.basis.m20(), transform.basis.m22())));
+        BaseVehicle.releaseQuaternionf(rotation);
     }
 
     /** 車停在樓層地板上時物理原點比地板高多少：與原版 CarController 建構子生成車輛時相同。 */

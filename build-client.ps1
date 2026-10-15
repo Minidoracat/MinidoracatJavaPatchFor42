@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.7'
+$PACKAGE_VERSION = '0.2.8'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -72,8 +72,8 @@ Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.4($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.4-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.5($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.5-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -184,7 +184,7 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleOrphanGuardBehaviorTest $run[0]
         Assert-Ok "VehicleOrphanGuardBehaviorTest $($run[0]) $id"
     }
-    # W65：on 與 off 各跑一次（off＝kill switch 實跑，車照原版留在地板下＝原版負對照）
+    # W65：on 與 off 各跑一次（off＝kill switch 實跑，車照原版留在地板下、翻覆的也不扶正＝原版負對照）
     foreach ($run in @(@('on', @()), @('off', @('-Dmdc.vehicleSinkGuard=off')))) {
         $jvmArgs = @($run[1])
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.vehicles.MdcVehicleSinkGuardBehaviorTest $run[0]

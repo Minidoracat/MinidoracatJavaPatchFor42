@@ -20,7 +20,8 @@ import zombie.vehicles.BaseVehicle.Authorization;
 /**
  * W65 本機模擬的車掉到地板下時拉回地面：行為驗證（裸 JVM）。
  *
- * <p>車的腳本照 2026-10-14 卡進地下的 '82 Oshkosh M911（停放高度 0.5666；卡住時原點 −0.599）。查格子走真
+ * <p>車的腳本照 2026-10-14 卡進地下的 '82 Oshkosh M911（停放高度 0.5666；卡住時原點 −0.599）；翻覆的情況照 2026-10-15
+ * 四輪朝天掉到 −32 m 的車。查格子走真
  * IsoCell.getGridSquare → IsoChunkMap，chunk 與格子是真物件，只有車所在那一格有地板。原生的 Bullet.teleportVehicle
  * 在測試裡不能呼叫：放車（place）那段以 GameServer.server＝true 執行，setWorldTransform 就只寫 jniTransform。
  *
@@ -32,6 +33,9 @@ public final class MdcVehicleSinkGuardBehaviorTest {
     static final float Y = 3003.5F;
     static final float REST = -(0.7667F - 0.7333F - 0.6F);
     static final float SUNK = -0.599F;
+    static final float DEEP = -32.0F;
+    /** 翻覆的車的車頭方向（繞 Y 軸，弧度）。 */
+    static final float YAW = 1.1F;
 
     private static int failed;
 
@@ -45,8 +49,11 @@ public final class MdcVehicleSinkGuardBehaviorTest {
         BaseVehicle sunk = vehicle(m911, SUNK, Authorization.Local);
         if (off) {
             MdcVehicleSinkGuard.updateTransform(sunk);
-            check("kill switch off：照原版只呼叫 updateTransform，車留在地板下 0.6 m（原版負對照）",
-                    sunk.jniTransform.origin.y == SUNK && MdcVehicleSinkGuard.lifted == 0);
+            BaseVehicle deepOff = flipped(m911, DEEP);
+            MdcVehicleSinkGuard.updateTransform(deepOff);
+            check("kill switch off：照原版只呼叫 updateTransform，車留在地板下 0.6 m、翻覆的 −32 m 也不動（原版負對照）",
+                    sunk.jniTransform.origin.y == SUNK && deepOff.jniTransform.origin.y == DEEP
+                            && deepOff.getUpVectorDot() < 0.0F && MdcVehicleSinkGuard.lifted == 0);
             finish(off);
             return;
         }
@@ -65,9 +72,15 @@ public final class MdcVehicleSinkGuardBehaviorTest {
                 Float.isNaN(MdcVehicleSinkGuard.target(vehicle(m911, -0.109F, Authorization.Local))));
         check("原點在地板下 0.24 m（門檻 0.25 m 內）：不動",
                 Float.isNaN(MdcVehicleSinkGuard.target(vehicle(m911, -0.24F, Authorization.Local))));
-        BaseVehicle flipped = vehicle(m911, SUNK, Authorization.Local);
-        flipped.jniTransform.basis.rotationZ((float) Math.PI);
-        check("翻覆的車：不動", Float.isNaN(MdcVehicleSinkGuard.target(flipped)));
+        check("翻覆、原點在地板下 0.6 m（不到一層）：不動，留給玩家翻正",
+                Float.isNaN(MdcVehicleSinkGuard.target(flipped(m911, SUNK))));
+        check("翻覆、原點在地板下 2.4 m（一層 2.449 m 以內）：不動",
+                Float.isNaN(MdcVehicleSinkGuard.target(flipped(m911, -2.4F))));
+        check("翻覆、車頂著地（原點在地板上）：不動", Float.isNaN(MdcVehicleSinkGuard.target(flipped(m911, 1.0F))));
+        check("翻覆掉到 −32 m（2026-10-15）：拉回停放高度", near(MdcVehicleSinkGuard.target(flipped(m911, DEEP)), REST));
+        BaseVehicle flippedNoFloor = flipped(m911, DEEP);
+        flippedNoFloor.setX(X + 2.0F);
+        check("翻覆掉很深但那一格沒有地板：不動", Float.isNaN(MdcVehicleSinkGuard.target(flippedNoFloor)));
         BaseVehicle noFloor = vehicle(m911, SUNK, Authorization.Local);
         noFloor.setX(X + 2.0F);
         check("那一格沒有地板：不動", Float.isNaN(MdcVehicleSinkGuard.target(noFloor)));
@@ -92,6 +105,17 @@ public final class MdcVehicleSinkGuardBehaviorTest {
                 near(turned.jniTransform.origin.y, REST) && turned.jniTransform.origin.x == 95.5F
                         && turned.jniTransform.origin.z == 103.5F && turned.jniTransform.basis.equals(before, 1.0E-6F)
                         && turned.jniLinearVelocity.length() == 0.0F && MdcVehicleSinkGuard.lifted == 1);
+        BaseVehicle upsideDown = flipped(m911, DEEP);
+        upsideDown.jniTransform.origin.x = 95.5F;
+        upsideDown.jniTransform.origin.z = 103.5F;
+        MdcVehicleSinkGuard.place(upsideDown, REST);
+        Vector3f forward = upsideDown.getForwardVector(new Vector3f());
+        check("放翻覆的車：扶正、車頭方向不變、高度改成停放高度，水平位置不變，速度歸零",
+                upsideDown.getUpVectorDot() > 0.9999F && Math.abs(forward.x - (float) Math.sin(YAW)) < 1.0E-4F
+                        && Math.abs(forward.y) < 1.0E-4F && Math.abs(forward.z - (float) Math.cos(YAW)) < 1.0E-4F
+                        && near(upsideDown.jniTransform.origin.y, REST) && upsideDown.jniTransform.origin.x == 95.5F
+                        && upsideDown.jniTransform.origin.z == 103.5F && upsideDown.jniLinearVelocity.length() == 0.0F
+                        && MdcVehicleSinkGuard.lifted == 2 && MdcVehicleSinkGuard.righted == 1);
         finish(off);
     }
 
@@ -114,6 +138,13 @@ public final class MdcVehicleSinkGuardBehaviorTest {
         car.setZ(0.0F);
         car.jniTransform.origin.set(0.0F, physicsY, 0.0F);
         car.netPlayerAuthorization = auth;
+        return car;
+    }
+
+    /** 四輪朝天、車頭朝 {@link #YAW}：basis＝繞 Y 轉 YAW，再繞自身 Z（車頭軸）轉 180°。 */
+    static BaseVehicle flipped(VehicleScript script, float physicsY) throws Exception {
+        BaseVehicle car = vehicle(script, physicsY, Authorization.Local);
+        car.jniTransform.basis.rotationY(YAW).rotateZ((float) Math.PI);
         return car;
     }
 
