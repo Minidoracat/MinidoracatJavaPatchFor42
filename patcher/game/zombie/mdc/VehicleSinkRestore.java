@@ -2,8 +2,10 @@ package zombie.mdc;
 
 import java.util.Locale;
 
+import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import zombie.core.math.PZMath;
+import zombie.core.physics.Transform;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
@@ -21,12 +23,13 @@ import zombie.vehicles.BaseVehicle;
  * （{@code BaseVehicle.load}）時才把高度夾回所在樓層。
  *
  * <p>本方法掛在 {@code BaseVehicle.setNetPlayerAuthorization} 頭部（slots 0、1），授權從別人交回伺服器
- * （駕駛下車、換到乘客座、斷線、碰撞歸還）時檢查一次：車是正的（{@code getUpVectorDot} 至少
- * {@code BaseVehicle.MINIMUM_DOT_UPRIGHT}）、物理原點比所在樓層的地板低 {@link #SINK_DEPTH} 以上、而且那一格有地板，
+ * （駕駛下車、換到乘客座、斷線、碰撞歸還）時檢查一次：物理原點比所在樓層的地板低 {@link #SINK_DEPTH} 以上、而且那一格有地板，
  * 就把高度設回停放高度、速度歸零，並要求下一輪送完整更新，讓所有客戶端把車移回地面。判斷只看地板：原版 load
  * 也把存檔高度夾在地板以上，原點在地板下的車坐進去畫面就全黑；車頭著地的拖車原點約在地板下 0.1 m，照原版。
- * 翻覆的車不動。停放高度的算法與原版生成車輛（{@code CarController} 建構子）相同，樓層判斷與原版
- * {@code BaseVehicle.update} 相同。
+ * 翻覆的車（{@code getUpVectorDot} 低於 {@code BaseVehicle.MINIMUM_DOT_UPRIGHT}）低於地板不到一層時照原版，留給玩家自己翻正；
+ * 低於一層以上就先扶正（保留車頭方向）再抬回。2026-10-15 一台車翻覆掉到地板下 32 m，原版重新載入只夾高度、不扶正，
+ * 重登後又回到 −32（推論：倒放貼地的車在駕駛的客戶端又掉下去）。停放高度的算法與原版生成車輛（{@code CarController}
+ * 建構子）相同，樓層判斷與原版 {@code BaseVehicle.update} 相同。
  *
  * <p>{@code -Dmdc.vehicleSinkRestore=off}（或 {@code 0}）一律照原版。只在主執行緒（封包處理）呼叫；
  * RuntimeException 只記一次，不擋原版。
@@ -42,10 +45,14 @@ public final class VehicleSinkRestore {
     /** 每次啟動最多逐筆記錄的次數，之後只計數。 */
     private static final int LOG_LIMIT = 50;
 
-    /** 本次啟動抬回地面的次數。 */
+    /** 本次啟動抬回地面的次數（含先扶正的）。 */
     static int restored;
+    /** 其中翻覆、先扶正再抬回的次數。 */
+    static int righted;
     /** 卡在地下但那一格沒有地板、照原版不動的次數。 */
     static int noFloor;
+    /** 翻覆、低於地板不到一層，照原版不動的次數。 */
+    static int flippedLeft;
     private static boolean failureLogged;
 
     static {
@@ -78,10 +85,13 @@ public final class VehicleSinkRestore {
         }
     }
 
-    /** 車是正的、原點在地板下而且那一格有地板時抬回停放高度、回 true；其餘什麼都不改、回 false。 */
+    /**
+     * 原點在地板下而且那一格有地板時抬回停放高度（翻覆而且低於一層以上的先扶正）、回 true；
+     * 其餘什麼都不改、回 false。
+     */
     static boolean restore(BaseVehicle vehicle) {
         VehicleScript script = vehicle.getScript();
-        if (script == null || vehicle.getUpVectorDot() < BaseVehicle.MINIMUM_DOT_UPRIGHT) {
+        if (script == null) {
             return false;
         }
         float physicsY = vehicle.jniTransform.origin.y;
@@ -91,19 +101,39 @@ public final class VehicleSinkRestore {
         if (!(physicsY < floorY - SINK_DEPTH)) {
             return false;
         }
+        float up = vehicle.getUpVectorDot();
+        boolean flipped = up < BaseVehicle.MINIMUM_DOT_UPRIGHT;
+        String pose = flipped ? "flipped (up " + up + "), " : "";
+        if (flipped && !(physicsY < floorY - LEVEL_HEIGHT)) {
+            flippedLeft++;
+            report(vehicle, physicsY, level, pose + "less than one level below the floor, left as is");
+            return false;
+        }
         IsoGridSquare square = cell.getGridSquare(PZMath.fastfloor(vehicle.getX()), PZMath.fastfloor(vehicle.getY()), level);
         if (square == null || !square.hasFloor()) {
             noFloor++;
-            report(vehicle, physicsY, level, Float.NaN);
+            report(vehicle, physicsY, level, pose + "no floor on that square, left as is");
             return false;
+        }
+        if (flipped) {
+            upright(vehicle.jniTransform);
+            righted++;
         }
         float lifted = floorY + Math.max(restHeight(script), 0.1F);
         vehicle.jniTransform.origin.y = lifted;
         vehicle.jniLinearVelocity.set(0.0F, 0.0F, 0.0F);
         vehicle.updateFlags = (short) (vehicle.updateFlags | BaseVehicle.UpdateFlags.Full);
         restored++;
-        report(vehicle, physicsY, level, lifted);
+        report(vehicle, physicsY, level, pose + (flipped ? "set upright keeping its heading, " : "")
+                + "lifted to " + lifted + " and sent a full update");
         return true;
+    }
+
+    /** 扶正並保留車頭方向：前向量（basis 第 2 欄）的水平分量決定繞 Y 軸的角度；前向量垂直時 atan2(0, 0) 得 0。 */
+    static void upright(Transform transform) {
+        Quaternionf rotation = BaseVehicle.allocQuaternionf();
+        transform.setRotation(rotation.rotationY((float) Math.atan2(transform.basis.m20(), transform.basis.m22())));
+        BaseVehicle.releaseQuaternionf(rotation);
     }
 
     /** 原版 BaseVehicle.update 的樓層判斷：zi＝floor(y / 2.44949 + 0.05)，那一格或下一格有地板才用 zi，否則 0。 */
@@ -129,18 +159,15 @@ public final class VehicleSinkRestore {
         return script.getWheelCount() == 0 ? Math.max(rest, 0.1F) : rest;
     }
 
-    private static void report(BaseVehicle vehicle, float physicsY, int level, float lifted) {
-        int n = restored + noFloor;
+    private static void report(BaseVehicle vehicle, float physicsY, int level, String outcome) {
+        int n = restored + noFloor + flippedLeft;
         if (n > LOG_LIMIT) {
             return;
         }
         log("vehicle " + vehicle.vehicleId + " " + vehicle.getScriptName() + " at " + vehicle.getX() + "," + vehicle.getY()
                 + " handed back to the server (" + vehicle.netPlayerAuthorization + " pid=" + vehicle.netPlayerId
                 + "): physics height " + physicsY + " is " + (level * LEVEL_HEIGHT - physicsY)
-                + " m below the floor of level " + level
-                + (Float.isNaN(lifted)
-                        ? "; no floor on that square, left as is"
-                        : "; lifted to " + lifted + " and sent a full update")
+                + " m below the floor of level " + level + "; " + outcome
                 + " (#" + n + (n == LOG_LIMIT ? ", further events are not logged" : "") + ")");
     }
 

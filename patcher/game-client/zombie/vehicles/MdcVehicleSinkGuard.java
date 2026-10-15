@@ -23,7 +23,7 @@ import zombie.scripting.objects.VehicleScript;
  * 並把 z 設成所在樓層）：車由本機模擬（Local／LocalCollide）、是正的、物理原點比樓層地板低
  * {@link #SINK_DEPTH} 以上、那一格有地板，就用原版 {@code setWorldTransform}（原生 {@code teleportVehicle}）把車放回
  * 停放高度、速度歸零，再照原版呼叫 {@code updateTransform}。本機回報給伺服器的高度也跟著回到地面。
- * 判斷與停放高度和伺服器 W64（{@code zombie.mdc.VehicleSinkRestore}）相同。
+ * 正的車的判斷與停放高度和伺服器 W64（{@code zombie.mdc.VehicleSinkRestore}）相同；W64 另外扶正翻覆深陷的車，這裡不做。
  *
  * <p>{@code -Dmdc.vehicleSinkGuard=off}（或 {@code 0}）一律照原版。
  */

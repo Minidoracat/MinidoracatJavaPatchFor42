@@ -1321,8 +1321,9 @@ public final class PatchConfig {
 
         // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。伺服器照單全收駕駛回報的物理高度
         // （VehiclePhysicsPacket.processServer），原版只在從資料庫重新載入時把高度夾回樓層，客戶端物理把車推到地板下後
-        // 重登也救不回來。setNetPlayerAuthorization 頭部收 (this, 新授權)，授權從別人交回 Server 時，比停放高度
-        // （原版 CarController 生成車輛的算法）低 0.5 m 以上而且那一格有地板就抬回、要求送完整更新。
+        // 重登也救不回來。setNetPlayerAuthorization 頭部收 (this, 新授權)，授權從別人交回 Server 時，物理原點比地板低 0.25 m 以上
+        // 而且那一格有地板，就抬到停放高度（原版 CarController 生成車輛的算法）、要求送完整更新；翻覆的車低於地板一層以上才處理，
+        // 先扶正（保留車頭方向）再抬回。
         // 掛在 W3-4 既有的 BaseVehicle ClassPatch 上（同一 class 只能有一個 ClassPatch）。-Dmdc.vehicleSinkRestore=off。
         Patcher.MethodOps vehAuth = baseVeh.method("setNetPlayerAuthorization",
                 "(Lzombie/vehicles/BaseVehicle$Authorization;I)V");

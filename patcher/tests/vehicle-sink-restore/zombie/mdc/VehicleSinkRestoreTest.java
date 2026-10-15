@@ -24,8 +24,9 @@ import zombie.vehicles.BaseVehicle.ServerVehicleState;
  * <p>用法：{@code VehicleSinkRestoreTest on|off}（off 須配 {@code -Dmdc.vehicleSinkRestore=off}）。
  * 車的腳本照 2026-10-14 卡進地下的 '82 Oshkosh M911：模型偏移 y 0.7667、輪子偏移 y −0.7333、半徑 0.6、
  * 重心偏移 y 0.3667、車身高 0.5778，停放高度＝0.5666（伺服器 vehicles.db 另外兩台 M911 存的是 0.506）；
- * 卡住那台存的是 −0.599。查格子走客戶端的 chunk map 路徑（GameServer.server＝false），與伺服器 ServerMap 是同一個
- * IsoCell.getGridSquare 呼叫。BaseVehicle、IsoWorld、IsoCell、IsoChunkMap 以 Unsafe 配置後補欄位。
+ * 卡住那台存的是 −0.599。翻覆的情況照 2026-10-15 四輪朝天掉到 −32 m 的車。查格子走客戶端的 chunk map 路徑
+ * （GameServer.server＝false），與伺服器 ServerMap 是同一個 IsoCell.getGridSquare 呼叫。BaseVehicle、IsoWorld、IsoCell、
+ * IsoChunkMap 以 Unsafe 配置後補欄位。
  */
 public final class VehicleSinkRestoreTest {
 
@@ -34,6 +35,10 @@ public final class VehicleSinkRestoreTest {
     /** M911 的輪底：模型偏移＋輪子偏移－半徑；停放高度＝−min(輪底, 車身底)＝0.5666。 */
     static final float WHEEL_BOTTOM = 0.7667F - 0.7333F - 0.6F;
     static final float SUNK = -0.599F;
+    /** 2026-10-15 翻覆的車在伺服器存的物理高度。 */
+    static final float DEEP = -32.0F;
+    /** 翻覆的車的車頭方向（繞 Y 軸）。 */
+    static final float YAW = (float) Math.toRadians(30.0);
 
     private static int failed;
     static IsoChunk chunk;
@@ -53,6 +58,10 @@ public final class VehicleSinkRestoreTest {
         if (!on) {
             check("off：交回伺服器時照原版，高度留在 −0.599、不送完整更新（原版負對照）",
                     sunk.height() == SUNK && !sunk.sendsFull() && VehicleSinkRestore.restored == 0);
+            Fixture deepOff = flipped(m911, DEEP);
+            deepOff.handTo(Authorization.Server, -1);
+            check("off：翻覆掉到 −32 m 也照原版，不扶正、不抬回（原版負對照）",
+                    deepOff.height() == DEEP && deepOff.vehicle.getUpVectorDot() < 0.0F && !deepOff.sendsFull());
             finish(args);
             return;
         }
@@ -107,11 +116,39 @@ public final class VehicleSinkRestoreTest {
                 noFloor.height() == SUNK && !noFloor.sendsFull() && VehicleSinkRestore.noFloor == 1
                         && VehicleSinkRestore.restored == restoredBefore);
 
-        Fixture flipped = new Fixture(m911, SUNK, Authorization.Local, 5);
-        flipped.vehicle.jniTransform.basis.rotationZ((float) Math.PI);   // 四輪朝天
-        flipped.handTo(Authorization.Server, -1);
-        check("翻覆的車（原點本來就可能低）：照原版不動", flipped.height() == SUNK && !flipped.sendsFull()
-                && VehicleSinkRestore.restored == restoredBefore);
+        Fixture flippedShallow = flipped(m911, SUNK);
+        flippedShallow.handTo(Authorization.Server, -1);
+        check("翻覆、原點在地板下 0.6 m（不到一層）：照原版不動，記一次 flippedLeft",
+                flippedShallow.height() == SUNK && flippedShallow.vehicle.getUpVectorDot() < 0.0F && !flippedShallow.sendsFull()
+                        && VehicleSinkRestore.flippedLeft == 1 && VehicleSinkRestore.restored == restoredBefore);
+
+        Fixture flippedEdge = flipped(m911, -2.4F);
+        flippedEdge.handTo(Authorization.Server, -1);
+        check("翻覆、原點在地板下 2.4 m（一層 2.449 m 以內）：照原版不動", flippedEdge.height() == -2.4F
+                && !flippedEdge.sendsFull() && VehicleSinkRestore.flippedLeft == 2);
+
+        Fixture roof = flipped(m911, 1.0F);
+        roof.handTo(Authorization.Server, -1);
+        check("翻覆、車頂著地（原點在地板上）：照原版不動、不記錄", roof.height() == 1.0F && !roof.sendsFull()
+                && VehicleSinkRestore.flippedLeft == 2);
+
+        Fixture flippedDeep = flipped(m911, DEEP);
+        flippedDeep.handTo(Authorization.Server, -1);
+        Vector3f forward = flippedDeep.vehicle.getForwardVector(new Vector3f());
+        check("翻覆掉到 −32 m（2026-10-15）：扶正、車頭仍朝 30°、抬回停放高度、速度歸零、下一輪送完整更新",
+                flippedDeep.vehicle.getUpVectorDot() > 0.9999F
+                        && Math.abs(forward.x - (float) Math.sin(YAW)) < 1.0E-4F && Math.abs(forward.y) < 1.0E-4F
+                        && Math.abs(forward.z - (float) Math.cos(YAW)) < 1.0E-4F
+                        && near(flippedDeep.height(), rest) && flippedDeep.vehicle.jniLinearVelocity.length() == 0.0F
+                        && flippedDeep.sendsFull() && VehicleSinkRestore.righted == 1
+                        && VehicleSinkRestore.restored == restoredBefore + 1);
+
+        Fixture flippedNoFloor = flipped(m911, DEEP);
+        flippedNoFloor.vehicle.setX(X + 2.0F);   // 這一格沒有地板
+        flippedNoFloor.handTo(Authorization.Server, -1);
+        check("翻覆掉很深但那一格沒有地板：照原版不動，記一次 noFloor",
+                flippedNoFloor.height() == DEEP && flippedNoFloor.vehicle.getUpVectorDot() < 0.0F
+                        && !flippedNoFloor.sendsFull() && VehicleSinkRestore.noFloor == 2 && VehicleSinkRestore.righted == 1);
 
         VehicleScript sled = script(0.0F, 0.0F, 0.0F, 0.2F, 0.2F, false);
         check("沒有輪子的車：停放高度照原版至少 0.1", Math.abs(VehicleSinkRestore.restHeight(sled) - 0.1F) < 1.0E-6F);
@@ -123,6 +160,13 @@ public final class VehicleSinkRestoreTest {
         String mode = args.length == 0 ? "on" : args[0];
         System.out.println(failed == 0 ? "VehicleSinkRestoreTest OK (" + mode + ")" : "VehicleSinkRestoreTest FAILED " + failed);
         System.exit(failed == 0 ? 0 : 1);
+    }
+
+    /** 四輪朝天、車頭朝 {@link #YAW}：basis＝繞 Y 轉 YAW，再繞自身 Z（車頭軸）轉 180°。 */
+    private static Fixture flipped(VehicleScript script, float physicsY) throws Exception {
+        Fixture fixture = new Fixture(script, physicsY, Authorization.Local, 5);
+        fixture.vehicle.jniTransform.basis.rotationY(YAW).rotateZ((float) Math.PI);
+        return fixture;
     }
 
     private static final class Fixture {

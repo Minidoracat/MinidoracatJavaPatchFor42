@@ -3713,6 +3713,13 @@ entered, even after relogging. In the player's recording the screen stays black 
 ground after the driver gets out. The server cmd.txt has `vehicle.crash` for this vehicle in the same second (the client only sends it when the
 horizontal velocity change exceeds 1 m/s).
 
+**Second symptom** (2026-10-15, production server): a player out for a drive was dropped into the void: the view went black with only the HUD and
+minimap left, nearby zombies could be heard but nothing was visible, and the speedometer read 346 km/h (neutral, engine at 0 rpm); logging out and back
+in did not help. Read-only query of the server's vehicles.db: in the 23:07 hourly backup the vehicle was about 360 tiles away, upright, physics
+height 0.220; two minutes later the player disconnected and the server stored a physics height of −32.000, upside down (up −0.993), the only one of
+7,535 vehicles more than 1 m under the floor. The player's client had no client package; this is inferred to be a teleport of the [2by](#2by) family,
+after which the vehicle kept falling where the client had no ground yet.
+
 **Root cause** (javap of the 42.21.0 jar `e1a69eb7`; read-only query of the server's vehicles.db):
 - Vehicle physics runs only on the driver's client (or on the client that collided with it, LocalCollide); here native physics pushed the M911 under
   the floor during the contact. `VehiclePhysicsPacket.processServer` stores whatever height the client reports (`setZ`, `jniTransform.origin.set`) and
@@ -3724,6 +3731,11 @@ horizontal velocity change exceeds 1 m/s).
 - Only `BaseVehicle.load` clamps a saved height to above the floor of its level with `PZMath.clamp`. On relog, `VehicleFullUpdatePacket.parse` first
   runs `load` (clamped), then `Bullet.setOwnVehiclePhysics` applies the height the server kept, so every client gets the same underground height. Only a
   server reload from the database (a restart) clamps it (inferred, not tested).
+- Flipped vehicles (the first W64): W64 left flipped vehicles alone without logging anything, so the second symptom's vehicle was not handled when the
+  disconnect handed it back to the server. Vanilla `load` only clamps the height to the floor and places the vehicle with its saved rotation; it never
+  rights it. When the player relogged two minutes later the server reloaded the vehicle (no other player within 150 tiles, so the cell is inferred to
+  have unloaded), and it came back to the driver's client upside down with its origin on the floor; at the disconnect 7 s later the server stored −32
+  again (inferred: the driver's client physics let it fall again).
 
 **Surgery**:
 - W64 (server): head call at `BaseVehicle.setNetPlayerAuthorization(Authorization, int)` (slots 0, 1) →
@@ -3735,17 +3747,24 @@ horizontal velocity change exceeds 1 m/s).
   low-memory variants; module version stays `v3.4`.
 - Neither changes the stack shape; frames are unchanged.
 
-**Decision** (the same for both):
-- The vehicle is upright (`getUpVectorDot()` at least `MINIMUM_DOT_UPRIGHT`, 0.8), its physics origin is 0.25 m or more below the floor of its level,
-  and that square has a floor (`hasFloor`). Only the floor is checked: vanilla `load` also clamps the height above the floor, and sitting in a vehicle
-  whose origin is below the floor blacks out the view. Of the 7,574 vehicles in vehicles.db, apart from this M911 the lowest origins are 3 nose-down
-  semi-trailers (−0.07 to −0.11 m), which stay vanilla.
+**Decision**:
+- The physics origin is 0.25 m or more below the floor of its level, and that square has a floor (`hasFloor`). Only the floor is checked: vanilla
+  `load` also clamps the height above the floor, and sitting in a vehicle whose origin is below the floor blacks out the view. Of the 7,574 vehicles in
+  vehicles.db, apart from this M911 the lowest origins are 3 nose-down semi-trailers (−0.07 to −0.11 m), which stay vanilla.
+- The vehicle must be upright (`getUpVectorDot()` at least `MINIMUM_DOT_UPRIGHT`, 0.8), with one exception in W64: a flipped vehicle whose origin is
+  one level (2.449 m) or more below the floor is set upright and then lifted. A flipped vehicle less than one level below the floor stays vanilla for
+  the player to flip back (a vehicle on its roof or in a ditch has its origin on the floor or just below it). W65 always leaves flipped vehicles alone.
+- Setting upright changes only the rotation: the heading is kept (the horizontal part of the forward vector gives the angle around Y), pitch and roll
+  become zero. The rotation the server writes into `jniTransform` reaches the save (`save` writes the rotation from `getWorldTransform`) and the full
+  update (`VehicleInterpolationData.set` takes the rotation from `getWorldTransform`; the client's `VehicleFullUpdatePacket.parse` applies it with
+  `setWorldTransform` and `Bullet.setOwnVehiclePhysics`). Nothing in vanilla rights a vehicle: `load` places it with the saved rotation, and
+  `flipUpright` is only used by the player's flip action.
 - The new height is the level's floor plus the resting height, computed like vanilla `CarController` does when it spawns a vehicle:
   −min(model offset + first wheel offset − radius, centre-of-mass offset − body height ÷ 2), at least 0.1. For the M911 it is 0.5666.
 - W64: checks once when authorization is handed back to Server from someone else (driver leaves, seat change, disconnect, collide release;
   `authorizationServerOnSeat`, `authorizationServerCollide` and `GameServer.disconnectPlayer` all go through `setNetPlayerAuthorization`). After lifting
   it zeroes the velocity and sets `updateFlags |= Full`, so the next `sendVehicles` sends `VehicleFullUpdate` to every connection and clients place the
-  vehicle at the server's height as in vanilla.
+  vehicle at the server's height and rotation as in vanilla.
 - W65: only for vehicles this client simulates (`isLocalPhysicSim()`: Local, LocalCollide); moves the vehicle with vanilla `setWorldTransform` (native
   `teleportVehicle`), keeping its horizontal position and rotation, zeroes the velocity, then runs vanilla `updateTransform`. The next VehiclePhysics from
   this client sends the height above ground to the server. Nothing happens inside a server JVM (a self-hosted server also loads the client package).
@@ -3754,13 +3773,20 @@ horizontal velocity change exceeds 1 m/s).
 use logs `active=true|false`; each intervention logs one line (at most 50 for W64 and 20 for W65 per start):
 
 ```text
-[MinidoracatJavaPatch][VehicleSinkRestore] vehicle <id> <script> at <x>,<y> handed back to the server (<old authorization> pid=<n>): physics height <y> is <m> m below the floor of level <z>; lifted to <h> and sent a full update (#<n>)
+[MinidoracatJavaPatch][VehicleSinkRestore] vehicle <id> <script> at <x>,<y> handed back to the server (<old authorization> pid=<n>): physics height <y> is <m> m below the floor of level <z>; <outcome> (#<n>)
 [MinidoracatJavaPatch][VehicleSinkGuard] vehicle <id> <script> at <x>,<y> (<authorization>): physics height <y> is below the floor of level <z>; lifted to <h> (#<n>)
 ```
 
+W64 `<outcome>`: `lifted to <h> and sent a full update` (lifted), `flipped (up <u>), set upright keeping its heading, lifted to <h> and sent a full
+update` (set upright, then lifted), `flipped (up <u>), less than one level below the floor, left as is` (flipped, less than one level: vanilla), `no floor
+on that square, left as is` (no floor: vanilla; prefixed with `flipped (up <u>), ` for a flipped vehicle).
+
 **Not handled**:
 - Why native physics pushed the vehicle down in this contact: that is inside libPZBullet and not visible from Java.
-- A vehicle whose origin is below the floor on a square without a floor, and a flipped vehicle: vanilla.
+- A vehicle whose origin is below the floor on a square without a floor, and a flipped vehicle less than one level below the floor: vanilla (W64 logs a
+  line for each). W65 leaves flipped vehicles alone.
+- Why the vehicle fell into the void (a teleport of the [2by](#2by) family): handled by W61–W63 in the client package; players without it still fall.
+  W64 only puts the vehicle back on the ground when it is handed back to the server (the driver gets out or disconnects), so relogging recovers.
 - A sunk vehicle that nobody drives or hits again after it was handed back: W64 does not check it again; deploying needs a restart anyway, and vanilla
   `load` clamps it then.
 - The same player's return to the main menu at 20:57 is a different vanilla defect (the `IsoMetaCell.isoRooms` cross-thread race,
@@ -3769,21 +3795,33 @@ use logs `active=true|false`; each intervention logs one line (at most 50 for W6
 **Checks and verification**:
 - SmokeCheck (server): W64 reasons to exist — `VehiclePhysicsPacket.processServer` has exactly one `setZ` and no `PZMath.clamp`; `BaseVehicle.load`
   has `PZMath.clamp`; the `CarController` constructor reads `getModelOffset`, `getWheel` ×2, `getCenterOfMassOffset` and `getExtents`; all three
-  hand-back paths call `setNetPlayerAuthorization`; `shouldSend` reads `vehicle.updateFlags`. After surgery the head is `aload_0; aload_1;
-  invokestatic` in order with exactly +3 real instructions; the helper writes `updateFlags` once and never touches the authorization fields.
+  hand-back paths call `setNetPlayerAuthorization`; `shouldSend` reads `vehicle.updateFlags`. Premises for setting upright — `load` has exactly one
+  `Transform.setRotation` and no `flipUpright`; `save` and `VehicleInterpolationData.set` each have exactly one `getWorldTransform` and one
+  `getRotation`; `VehicleFullUpdatePacket.write` has exactly one `save`. After surgery the head is `aload_0; aload_1; invokestatic` in order with
+  exactly +3 real instructions; the helper writes `updateFlags` once and never touches the authorization fields.
 - SmokeCheck (client, both variants): W65 reasons to exist — `update()` has exactly one `updateTransform`, after the last `setZ` and after the clamp's
   `setWorldTransform`; `updateTransform` is protected. After surgery `update()` equals vanilla instruction by instruction apart from the W61, W62 and W65
   redirects.
 - `VehicleSinkRestoreTest` (`build.ps1` [9zj/10], on and off): real `setNetPlayerAuthorization` plus real `ServerVehicleState.shouldSend`, squares
   looked up through the real `IsoCell.getGridSquare`. M911 driver leaving (Local→Server) and collide release (LocalCollide→Server): lifted to 0.5666,
   velocity zeroed, a full update on the next round and not again after it is sent; −80 m is also lifted onto level 0; a trailer with a negative computed
-  resting height goes to 0.1; normal parking at 0.506, 0.109 and 0.24 m below the floor, handing to a driver, already Server, no floor and flipped are
-  all left alone. off: stays at −0.599 with no full update (vanilla negative control).
+  resting height goes to 0.1; upside down with a 30° heading at −32 m: set upright (up above 0.9999), heading still 30°, lifted to the resting height
+  with a full update; normal parking at 0.506, 0.109 and 0.24 m below the floor, handing to a driver, already Server, no floor, flipped at 0.6 m and
+  2.4 m below the floor (less than one level), on its roof, and flipped deep on a square without a floor are all left alone. off: stays at −0.599 and the
+  flipped vehicle at −32 m is not set upright, neither gets a full update (vanilla negative control).
 - `MdcVehicleSinkGuardBehaviorTest` (`build-client.ps1`, both variants, on and off): Local and LocalCollide vehicles are lifted to 0.5666; Remote,
   Server, normal driving, 0.109 and 0.24 m below the floor, flipped, no floor and a server JVM are left alone; placing changes only the height, keeping
   the horizontal position and rotation and zeroing the velocity. off: stays under the floor as in vanilla.
-- In game: not done (the contact in which native physics pushes the vehicle down cannot be reproduced reliably). After release, check the server
-  console for `VehicleSinkRestore` lines and players' console.txt for `VehicleSinkGuard` lines.
+- In game (W64, 2026-10-15, local no-Steam dedicated server with dist first on the classpath, client from the plain Steam install without the client
+  package; family E2E scenario `vehicle-sink-mp`): in an SUV with the engine running, the driver's client turned the vehicle upside down with a 30°
+  heading at physics height −20; once the server also had −20.011 and up −1.000, the client logged out normally. Patched: at that moment the server
+  logged `flipped (up -0.99999994), set upright keeping its heading, lifted to 0.382928 and sent a full update`; after restarting the client the
+  character was seated again as in vanilla, and for 12 s the vehicle stayed at y 0.320, up 1.000, heading (0.500, 0.866) on the client and on the
+  server, with a normal view. Vanilla control (`-Dmdc.vehicleSinkRestore=off`): at relog the vehicle was already at −16 m upside down and fell to
+  −636 m on the client within 12 s, the view black apart from the HUD and the speedometer reading 279 km/h, while the server stored −32.000 — matching
+  the second symptom's screenshot and the production vehicles.db. W65 is still not verified in game (the contact in which native physics pushes the
+  vehicle down cannot be reproduced reliably); after release, check the server console for `VehicleSinkRestore` lines and players' console.txt for
+  `VehicleSinkGuard` lines.
 
 **Retirement**: when TIS clamps the height the server receives to the level, or puts a vehicle that fell under the floor back on it in `update()`, the
 SmokeCheck reasons to exist turn red; then remove the matching surgery from `PatchConfig` and delete the helpers and tests.

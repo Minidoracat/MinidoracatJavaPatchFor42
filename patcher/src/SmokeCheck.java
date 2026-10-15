@@ -3059,6 +3059,7 @@ public final class SmokeCheck {
         // VehiclePhysicsPacket.processServer 把客戶端回報的高度直接寫進 setZ／jniTransform，不夾樓層；
         // 原版只有 BaseVehicle.load 以 PZMath.clamp 把存檔高度夾回樓層；伺服器授權交回 Server 都經 setNetPlayerAuthorization；
         // shouldSend 併入 vehicle.updateFlags（helper 以 Full 要求完整更新）。helper 的停放高度照 CarController 建構子。
+        // 翻覆而且低於地板一層以上的車另外扶正：原版 load 照存檔旋轉放車，save 與完整更新從 jniTransform 取旋轉。
         String w64Veh = "zombie/vehicles/BaseVehicle";
         String w64AuthDesc = "(Lzombie/vehicles/BaseVehicle$Authorization;I)V";
         String w64Helper = "zombie/mdc/VehicleSinkRestore";
@@ -3097,6 +3098,22 @@ public final class SmokeCheck {
                         w64Veh, "updateFlags", "S") == 1
                 && countFieldTouches(method(distJava, w64Helper, "restore", "(L" + w64Veh + ";)Z"), w64Veh,
                         "netPlayerAuthorization") == 0);
+        String w64Xfrm = "zombie/core/physics/Transform";
+        String w64GetWt = "(L" + w64Xfrm + ";)L" + w64Xfrm + ";";
+        String w64GetRot = "(Lorg/joml/Quaternionf;)Lorg/joml/Quaternionf;";
+        MethodNode w64Save = methodFromJar(jar, w64Veh, "save", "(Ljava/nio/ByteBuffer;Z)V");
+        MethodNode w64Interp = methodFromJar(jar, "zombie/vehicles/VehicleInterpolationData", "set", "(L" + w64Veh + ";)V");
+        MethodNode w64FullWrite = methodFromJar(jar, "zombie/network/packets/vehicle/VehicleFullUpdatePacket", "write",
+                "(Lzombie/core/network/ByteBufferWriter;)V");
+        failed += check("W64 vanilla 前提（扶正翻覆深陷的車）：load 照存檔旋轉放車、不呼叫 flipUpright；save 與 VehicleInterpolationData.set "
+                        + "都從 getWorldTransform 取旋轉，VehicleFullUpdatePacket.write 經 save 送出（伺服器改 jniTransform 的旋轉會進存檔與完整更新）",
+                countExactCalls(w64Load, Opcodes.INVOKEVIRTUAL, w64Xfrm, "setRotation", "(Lorg/joml/Quaternionf;)V") == 1
+                && countExactCalls(w64Load, Opcodes.INVOKEVIRTUAL, w64Veh, "flipUpright", "()V") == 0
+                && countExactCalls(w64Save, Opcodes.INVOKEVIRTUAL, w64Veh, "getWorldTransform", w64GetWt) == 1
+                && countExactCalls(w64Save, Opcodes.INVOKEVIRTUAL, w64Xfrm, "getRotation", w64GetRot) == 1
+                && countExactCalls(w64Interp, Opcodes.INVOKEVIRTUAL, w64Veh, "getWorldTransform", w64GetWt) == 1
+                && countExactCalls(w64Interp, Opcodes.INVOKEVIRTUAL, w64Xfrm, "getRotation", w64GetRot) == 1
+                && countExactCalls(w64FullWrite, Opcodes.INVOKEVIRTUAL, w64Veh, "save", "(Ljava/nio/ByteBuffer;)V") == 1);
 
         // W52：分割畫面與重生的名稱冒用守衛（docs/patches.md 2bp）。存在理由（TIS 修好即紅＝撤刀）：stage 1 唯一 getUTF
         // 的名稱存進 slot 4，兩個 setUserName 都直接拿它；parse 不比對連線登入名、不查帳號；receivePlayerConnect 把名稱參數
