@@ -3834,6 +3834,120 @@ on that square, left as is` (no floor: vanilla; prefixed with `flipped (up <u>),
 **Retirement**: when TIS clamps the height the server receives to the level, or puts a vehicle that fell under the floor back on it in `update()`, the
 SmokeCheck reasons to exist turn red; then remove the matching surgery from `PatchConfig` and delete the helpers and tests.
 
+<a id="2cb"></a>
+## 2cb. Livestock zone sync fixes (W66, server, default on)
+
+**Symptom** (2026-10-17, production server): several players reported on the same day that their livestock zones were gone: one player's zone
+disappeared while they were offline, another saw a duplicate zone that came back after deleting it and relogging, and a group of connected zones
+vanished together. Nothing on the server could tell who deleted a zone or when.
+
+**Investigation** (read-only; 42 backups from 10-14 to 10-18 plus the live save, parsing the zones in `map_meta.bin` one by one): 46 zones were deleted
+and 47 created in that period, the total stayed between 659 and 666, and no restart lost a batch; most deletions were zones redrawn in the same place
+shortly after. The server only deletes a zone when a client sends a `SyncZone` delete; neither JavaPatch nor the server mods add or remove zones.
+
+**Vanilla mechanism** (42.21.0 decompile and javap):
+- **No permission check and no record on delete**: `SyncZonePacket.processServer` finds the zone by id, relays the packet to everyone else and calls
+  `DesignationZoneAnimal.removeZone`, whose `getAllDZones` deletes every connected zone with it (on the evening of 10-17, 192 of 666 zones belonged to
+  a group of connected zones). The vanilla zone panel lists every loaded zone, all with the default name "Livestock Zone #N", so deleting someone
+  else's is easy.
+- **Stale fields in the cached packet**: each end of a connection keeps one `SyncZonePacket` instance (`PacketsCache`); the server parses this player's
+  zone adds, renames and deletes into it. When an animal grazes (`IsoGridSquare.removeGrass`) and updates the timestamp of an existing grass-regrowth
+  zone, `INetworkPacket.sendToRelative(SyncZone, …)` notifies nearby players through that same per-connection instance: `setData(Zone)` only sets
+  x/y/z/type/timestamp and does not clear `designationZone`, and `write` checks `designationZone` first, so what goes out is that player's last zone add,
+  rename or delete. A zone they created or renamed keeps coming back on their screen after someone else deletes it (the server does not have it, animals
+  ignore it, relogging clears it), and their client never gets the grass timestamps. A client that never sent a zone keeps the zone fields of the last
+  packet it received, so a genuine grass `SyncZone` makes `processClient` replay the last delete it received, which also deletes any zone redrawn next to
+  it (on screen only; relogging restores it). `removeGrass` is the only place in the jar that sends non-zone data as `SyncZone`.
+- **Temporary id collision on startup**: `DesignationZone.load` builds a zone with the constructor, which first draws a random temporary id
+  (`Rand.Next(9999999) + 100000`) and skips `allZones` when that id belongs to a zone already loaded; the `DesignationZoneAnimal` constructor still adds
+  it to the zone list, and `load` sets the real id afterwards. The zone still holds animals for that session but is not saved (`IsoMetaGrid.savePart`
+  walks `allZones`) or sent to players who connect later (`MetaDataPacket`), and is gone after the next restart. With 664 zones each startup has about a
+  2.2% chance of losing one; the restart on the morning of 10-16 lost one while the zones connected to it stayed.
+
+**Surgery**: five calls, each redirected 1:1 with the same stack shape, frames untouched; javap context in `docs/specs/zombie_zone_sync.json`.
+- Log: the only `sendToClients` in `SyncZonePacket.processServer` (offset 12, before `removeDesignationZone`) → `zombie/network/packets/MdcSyncZoneLog
+  .sendToClients(SyncZonePacket, PacketType, UdpConnection)`; the only `DesignationZone.load` in `SyncZonePacket.parse` (offset 32) →
+  `MdcSyncZoneLog.load`. New ClassPatch, `expectedHits` 1 for each method. The helper lives in `zombie.network.packets` to read the packet's
+  package-private fields.
+- Grass notice: the two `INetworkPacket.sendToRelative` calls in `IsoGridSquare.removeGrass()` (offset 240 sends RegisterZone, 290 sends SyncZone) →
+  `zombie/mdc/ZoneSyncGuard.sendToRelative`, `expectedHits = 2`, on the IsoGridSquare ClassPatch of W60 (one ClassPatch per class). The original call is
+  an interface static method; the redirect is a plain class `invokestatic`.
+- Load repair: the only `DesignationZone.load` in `IsoMetaGrid.load(ByteBuffer)` (offset 706) → `ZoneSyncGuard.load`, new ClassPatch,
+  `expectedHits = 1`. The packet path goes through the same repair via `MdcSyncZoneLog.load`.
+
+**Behavior**:
+- Log: one line for every zone add, rename and delete, with the sender's account and position; a delete lists every zone it takes with it. Add and
+  rename are told apart by whether the packet's id already exists before loading; a rename keeps the old name and size that vanilla overwrites.
+  Relaying and deleting stay vanilla. At most 30 lines per minute; the rest are only counted and reported on the next line.
+- Grass notice: `SyncZone` becomes vanilla `RegisterZone`, with the same recipients and content. `FishSchoolManager` already updates zone timestamps
+  with `RegisterZone` through `GameServer.sendZone`; the client finds the grass zone by type and updates its name and timestamp, or registers it. Grass
+  regrows as before without carrying stale zone data, and neither end sees a non-zone `SyncZone` any more. A new grass zone was already sent as
+  `RegisterZone` and is unchanged.
+- Load repair: after the vanilla load, a zone missing from `allZones` is added and logged. A zone already missed this way is also put back the next
+  time someone renames or resends it.
+
+```text
+[MinidoracatJavaPatch][ZoneSync] 新增 zone=<id> "<name>" <x>,<y>,<z> <w>x<h> by=<account>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 改名 zone=<id> "<old name>"→"<new name>"[ <old w>x<old h>→<new w>x<new h>] <x>,<y>,<z> by=<account>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 移除 zone=<id> "<name>" <x>,<y>,<z> <w>x<h> 連帶 <n> 塊[ [zone=<id> "<name>" <x>,<y>,<z> <w>x<h>; …]] by=<account>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 載入時暫時 id 撞號，補回存檔清單：zone=<id> "<name>" <x>,<y>,<z> <w>x<h>
+[MinidoracatJavaPatch][ZoneSync] 首次生效：草地再生改送 RegisterZone（-Dmdc.zoneGrassSync=0|off 回原版）
+```
+
+The lines are in Chinese for the server's admins: 新增 add, 改名 rename, 移除 delete, 連帶 n 塊 n connected zones deleted with it, 撞號 id collision
+repaired. The first line after the per-minute limit ends with `（之前另有 <n> 筆超過每分鐘上限未印）` (n lines over the limit were not printed).
+
+**Kill switches**: `-Dmdc.zoneSyncLog` (log), `-Dmdc.zoneGrassSync` (grass notice), `-Dmdc.zoneLoadRepair` (load repair); `0` or `off` restores
+vanilla, restart required.
+
+**Deployment**: the manifest gains `zombie/mdc/ZoneSyncGuard.class`, `zombie/network/packets/MdcSyncZoneLog.class` and two new patched classes
+(`SyncZonePacket`, `IsoMetaGrid`), and `IsoGridSquare.class` is replaced by a version with two more sites (137 → 141 classes). The manifest only
+grows, so no uninstall is needed first: stage and arm with the deferred flow and switch at the next scheduled restart. After release, check that the
+banner shows the new fingerprint and `[mdc-javagate] OK: 141`; the first-use line appears the first time an animal grazes in a grass zone, and
+`[ZoneSync]` lines appear when someone adds, renames or deletes a zone.
+
+**Reading the log**: when a player reports a missing zone, search the console for `[ZoneSync] 移除` and find that zone or its connected group: `by=` is
+who deleted it and where they stood. With no delete and the zone gone after a restart, search for `撞號`.
+
+**Not handled**:
+- Who may delete zones: in vanilla any player can delete any zone, together with every zone connected to it. Whether to restrict that (for example,
+  people outside a safehouse cannot delete zones inside it) is a gameplay decision, pending.
+- Ghost zones already on players' screens: relogging clears them; the grass notice no longer creates new ones.
+- Collisions on the client: clients also load zones with `DesignationZone.load` (`MetaDataPacket.parse`, and the relay of someone else's add). A
+  colliding zone is missing from the client's `allZones` but still listed by the vanilla panel (`DesignationZoneAnimal.getAllZones()`). Renaming it
+  calls `setName`, whose `sync()` decides by `allZones.contains` and sends a delete, so the server deletes it and its connected group (inferred from the
+  code, not reproduced). Fixing it needs a client change (client package); the log records it as that player's delete.
+
+**Checks and verification**:
+- SmokeCheck: reasons to exist — both `designationZone` writes in `SyncZonePacket.parse` come before the Zone branch, `setData` writes `designationZone`
+  once, only in the zone branch, and the first field `write` reads is `designationZone`; `removeGrass` has exactly 2 `sendToRelative` calls, sending
+  RegisterZone then SyncZone; the only readers of `PacketType.SyncZone` in the jar are `removeGrass`×1, `DesignationZone.sync`×2 and
+  `SyncZonePacket.processServer`×1; the `DesignationZone` constructor calls `Rand.Next` before `getZoneById` and skips `allZones` when it is not null,
+  and the `DesignationZoneAnimal` constructor has no branch; the jar has exactly 3 `DesignationZone.load` calls; `sendToClients` comes before
+  `removeDesignationZone` in `processServer`. After surgery the four methods (frames included) differ only in these five calls; each helper calls its
+  original method exactly once, and the packet load does not bypass the repair.
+- `ZoneSyncTest` (`build.ps1` [9zk/10], on and off in two JVMs, checking all three switches): real `parse`/`processServer`, real
+  `INetworkPacket.sendToRelative` and real `DesignationZone.load`, with the receiving side decoded by a real `ByteBufferReader`. Grass: after the creator
+  adds a zone and the server deletes it, the vanilla grass notice still sends the creator that zone's add (vanilla control); on, both players get a
+  `RegisterZone` for the same grass zone and no `SyncZone`; off is byte-identical to vanilla; a new grass zone's `RegisterZone` is vanilla. Client replay
+  (vanilla control): after a delete, a genuine grass `SyncZone` deletes the zone redrawn next to it. Load: a scripted random makes the temporary id hit a
+  loaded id; vanilla leaves that zone in the zone list but out of `allZones` (control); on adds it to `allZones` exactly once, puts back a zone already
+  missed when it is resent, never adds a zone twice when there is no collision, and returns null for a non-zone type as vanilla does. Log: one line each
+  for add, rename (old → new name, width change) and delete; the ids on the delete line are exactly the group actually deleted, with the deleter's account
+  and position; an unknown id is neither relayed nor logged; relay counts are the same on and off; the 30-lines-per-minute limit and the follow-up count.
+  Off: no log line in the whole JVM.
+- In game (2026-10-18, local no-Steam dedicated server with dist first on the classpath, client from the Steam install; family E2E scenario
+  `zone-sync-mp`): the client creates three zones (two connected) with the vanilla API, renames one, deletes one of the connected pair, then creates a
+  fourth; the server deletes the fourth from Lua (as another player would), and once the client sees it gone, the server makes 8 grass squares next to
+  the player get eaten (7 update an existing grass zone, the path where vanilla sends `SyncZone`). Patched: the server console logs 3 adds, 1 rename (old
+  → new name), 1 delete (`連帶 1 塊`, the connected zone), 1 add and the first-use line; the fourth zone does not come back on the client, and the client's
+  grass zone has the server's timestamp. Vanilla control (all three switches off): the fourth zone comes back on the client (the server does not have
+  it), the client's grass zone timestamp stays 0, and the console has no `[ZoneSync]` line. A startup collision cannot be reproduced reliably in game and
+  is covered by `ZoneSyncTest` only; both runs loaded the world normally.
+
+**Retirement**: when TIS clears the zone fields in `setData(Zone)` or `parse`, sends grass updates with another packet, or stops checking the temporary id
+in the constructor, the SmokeCheck reasons to exist turn red; then remove the matching surgery. The log can stay.
+
 ---
 
 <a id="3"></a>

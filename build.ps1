@@ -124,6 +124,8 @@ $helperEntries = @(
     'zombie/mdc/WorldMapChangeCount.class',
     'zombie/mdc/AnimalLossProbe.class',
     'zombie/mdc/AnimalLossProbe$Saving.class',
+    'zombie/mdc/ZoneSyncGuard.class',
+    'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -598,6 +600,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "VehicleSinkRestoreTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.vehicleSinkRestore=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleSinkRestoreTest off
 Assert-Ok "VehicleSinkRestoreTest（off，原版負對照）"
+
+Write-Host "[9zk/10] 畜牧區同步修補（W66）：真 parse／processServer 記錄新增、改名、刪除與實際連帶組，草地通知改送 RegisterZone（原版送出殘留畜牧區新增、客戶端重播刪除負對照），載入撞號補回（原版漏存負對照），off 逐位元同原版..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest on
+Assert-Ok "ZoneSyncTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.zoneSyncLog=off" "-Dmdc.zoneGrassSync=0" "-Dmdc.zoneLoadRepair=OFF" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest off
+Assert-Ok "ZoneSyncTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -1369,6 +1369,45 @@ public final class PatchConfig {
         vehKeep.expectedHits = 1;
         patches.add(vehRequest);
 
+        // W66：畜牧區同步修補（docs/patches.md 2cb）。原版任何玩家都能刪任何畜牧區（連同相連的一起刪），伺服器不留紀錄；
+        // 每條連線兩端各一個 SyncZonePacket 快取實例，草地再生通知沿用它卻不清畜牧區欄位，玩家畫面與伺服器不一致；
+        // 開服讀檔時暫時 id 撞號的畜牧區不進 allZones，下次重啟就消失。
+        // 之一（紀錄）：SyncZonePacket.processServer 唯一 sendToClients（javap offset 12，在 removeDesignationZone 之前）
+        //   改道 MdcSyncZoneLog：記下誰新增、改名、刪除了哪一塊，刪除時列出接著會連帶刪掉的整組，再照原版轉發。
+        //   parse 唯一 DesignationZone.load（offset 32）改道 MdcSyncZoneLog.load 分辨新增或改名。-Dmdc.zoneSyncLog=0|off。
+        // 之二（草地再生改送 RegisterZone）：IsoGridSquare.removeGrass 兩個 INetworkPacket.sendToRelative（offset 240
+        //   RegisterZone、290 SyncZone）改道 ZoneSyncGuard.sendToRelative，SyncZone 換成 RegisterZone。掛在 W60 的
+        //   IsoGridSquare ClassPatch（同一 class 只能有一個 ClassPatch）。-Dmdc.zoneGrassSync=0|off。
+        // 之三（載入撞號補回）：IsoMetaGrid.load(ByteBuffer) 唯一 DesignationZone.load（offset 706）改道
+        //   ZoneSyncGuard.load，封包路徑經 MdcSyncZoneLog.load 同樣補回。-Dmdc.zoneLoadRepair=0|off。
+        String zoneLog = "zombie/network/packets/MdcSyncZoneLog";
+        String zoneGuard = "zombie/mdc/ZoneSyncGuard";
+        String zoneLoadDesc = "(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;";
+        Patcher.ClassPatch syncZone = new Patcher.ClassPatch("zombie/network/packets/SyncZonePacket");
+        Patcher.MethodOps syncZoneParse = syncZone.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        syncZoneParse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/areas/DesignationZone",
+                "load", zoneLoadDesc, zoneLog, "load"));
+        syncZoneParse.expectedHits = 1;
+        Patcher.MethodOps syncZoneProcess = syncZone.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        syncZoneProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/network/packets/SyncZonePacket",
+                "sendToClients", "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                zoneLog, "sendToClients"));
+        syncZoneProcess.expectedHits = 1;
+        patches.add(syncZone);
+        Patcher.MethodOps grassSync = dropSquare.method("removeGrass", "()Z");
+        grassSync.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/packets/INetworkPacket",
+                "sendToRelative", "(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V",
+                zoneGuard, "sendToRelative"));
+        grassSync.expectedHits = 2;
+        Patcher.ClassPatch metaGrid = new Patcher.ClassPatch("zombie/iso/IsoMetaGrid");
+        Patcher.MethodOps metaGridLoad = metaGrid.method("load", "(Ljava/nio/ByteBuffer;)V");
+        metaGridLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/areas/DesignationZone",
+                "load", zoneLoadDesc, zoneGuard, "load"));
+        metaGridLoad.expectedHits = 1;
+        patches.add(metaGrid);
+
         return patches;
     }
 

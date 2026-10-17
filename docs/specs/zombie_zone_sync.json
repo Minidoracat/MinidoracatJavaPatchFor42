@@ -1,0 +1,98 @@
+{
+  "classNames": [
+    "zombie/network/packets/SyncZonePacket",
+    "zombie/iso/IsoGridSquare",
+    "zombie/iso/IsoMetaGrid"
+  ],
+  "kind": "fix+observability",
+  "buildBaseline": "42.21.0 / jar SHA-256 e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33",
+  "note": "W66 畜牧區同步修補（docs/patches.md 2cb）。五個呼叫各自 1:1 同形改道：SyncZonePacket.parse／processServer → zombie/network/packets/MdcSyncZoneLog（記錄新增、改名、刪除與連帶組），IsoGridSquare.removeGrass 兩個 sendToRelative → zombie/mdc/ZoneSyncGuard（SyncZone 換成 RegisterZone），IsoMetaGrid.load 的 DesignationZone.load → ZoneSyncGuard.load（撞號補回 allZones）。kill switch -Dmdc.zoneSyncLog、-Dmdc.zoneGrassSync、-Dmdc.zoneLoadRepair（0|off）。",
+  "patches": [
+    {
+      "id": "W66-log",
+      "op": "redirect",
+      "class": "zombie/network/packets/SyncZonePacket",
+      "method": {
+        "name": "parse",
+        "desc": "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKESTATIC",
+          "owner": "zombie/iso/areas/DesignationZone",
+          "name": "load",
+          "desc": "(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;",
+          "expectedCount": 1,
+          "helper": "zombie/network/packets/MdcSyncZoneLog.load(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;"
+        }
+      ],
+      "rationale": "玩家送來的畜牧區新增與改名都走這一個 load（zoneAdded=true）；載入前偷看封包裡的 id 是否已存在，就分得出新增或改名，並在原版覆寫前記下舊名稱與寬高。helper 接著委派 ZoneSyncGuard.load（W66 之三的補回也套用在封包路徑）。",
+      "evidence": "javap -c -p 對 42.21.0 jar（SyncZonePacket.parse）：\n         0: aload_1\n         1: invokevirtual #72  // ByteBufferReader.getBoolean:()Z\n         4: istore_3\n         5: iload_3\n         6: ifeq 62\n         9: aload_0\n        10: aload_1\n        11: invokevirtual #72  // ByteBufferReader.getBoolean:()Z\n        14: putfield #19  // zoneAdded:Z\n        17: aload_0\n        18: getfield #19  // zoneAdded:Z\n        21: ifeq 41\n        24: aload_0\n        25: aload_1\n        26: getfield #78  // ByteBufferReader.bb:Ljava/nio/ByteBuffer;\n        29: invokestatic #79  // IsoWorld.getWorldVersion:()I\n        32: invokestatic #85  // DesignationZone.load:(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;\n        35: putfield #7  // designationZone\n        38: goto 102\n        41: aload_1\n        42: invokevirtual #89  // ByteBufferReader.getDouble:()D\n        ...\n        53: invokestatic #96  // DesignationZone.getZoneById:(Ljava/lang/Double;)\n        56: putfield #7  // designationZone\n        59: goto 102\n        62: （非畜牧區分支：只寫 x、y、z、type、lastActionTimestamp，不清 designationZone／zoneAdded）"
+    },
+    {
+      "id": "W66-log",
+      "op": "redirect",
+      "class": "zombie/network/packets/SyncZonePacket",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKEVIRTUAL",
+          "owner": "zombie/network/packets/SyncZonePacket",
+          "name": "sendToClients",
+          "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+          "expectedCount": 1,
+          "helper": "zombie/network/packets/MdcSyncZoneLog.sendToClients(Lzombie/network/packets/SyncZonePacket;Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+        }
+      ],
+      "rationale": "只有找到畜牧區（designationZone != null）才轉發並處理；轉發在 removeDesignationZone 之前，所以 helper 拿得到送封包的連線，也能在刪除前用同一個 DesignationZoneAnimal.getAllDZones 列出接著會被連帶刪掉的整組。記錄後照原版轉發，刪除仍由原版執行。原版沒有權限檢查、不留紀錄。",
+      "evidence": "javap -c -p 對 42.21.0 jar（SyncZonePacket.processServer）：\n         0: aload_0\n         1: getfield #7  // designationZone\n         4: ifnull 26\n         7: aload_0\n         8: getstatic #160  // PacketTypes$PacketType.SyncZone\n        11: aload_2\n        12: invokevirtual #166  // sendToClients:(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V\n        15: aload_0\n        16: getfield #19  // zoneAdded:Z\n        19: ifne 26\n        22: aload_0\n        23: invokevirtual #107  // removeDesignationZone:()V\n        26: return"
+    },
+    {
+      "id": "W66-grass",
+      "op": "redirect",
+      "class": "zombie/iso/IsoGridSquare",
+      "method": {
+        "name": "removeGrass",
+        "desc": "()Z"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKESTATIC",
+          "owner": "zombie/network/packets/INetworkPacket",
+          "name": "sendToRelative",
+          "desc": "(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V",
+          "expectedCount": 2,
+          "helper": "zombie/mdc/ZoneSyncGuard.sendToRelative(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V"
+        }
+      ],
+      "rationale": "動物吃草時新建草地再生區送 RegisterZone（offset 240），更新既有草地區的時間戳送 SyncZone（offset 290）。INetworkPacket.send 取每條連線快取的 SyncZonePacket，setData(Zone) 只設 x／y／z／type／時間戳、不清 designationZone，write 又先看 designationZone，所以送出的是這位玩家上次送來的畜牧區新增／改名／刪除；客戶端快取實例同樣留著上一次收到的畜牧區欄位，收到真的草地 SyncZone 時 processClient 重播上一次的刪除。全 jar 只有這裡用 SyncZone 送非畜牧區資料（DesignationZone.sync 用新建實例、processServer 是轉發）。helper 把 SyncZone 換成原版的 RegisterZone（FishSchoolManager 經 GameServer.sendZone 已用它更新時間戳；客戶端照型別找到同一塊區域更新名稱與時間戳，沒有就登記），RegisterZone 照原樣。介面靜態方法改道成一般 INVOKESTATIC（itf=false 的 helper）。掛在 W60 的 IsoGridSquare ClassPatch。",
+      "evidence": "javap -c -p 對 42.21.0 jar（IsoGridSquare.removeGrass）：\n       192: invokevirtual #5157  // IsoMetaGrid.registerZone:(…)Lzombie/iso/zones/Zone;\n       195: astore_2\n       ...\n       216: invokevirtual #5176  // Zone.setLastActionTimestamp:(I)V\n       219: getstatic #5179  // PacketTypes$PacketType.RegisterZone\n       222: aload_0\n       223: getfield #9  // x:I\n       ...\n       238: aload_2\n       239: aastore\n       240: invokestatic #1968  // InterfaceMethod INetworkPacket.sendToRelative:(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V\n       243: goto 293\n       246: aload_2\n       ...\n       266: invokevirtual #5176  // Zone.setLastActionTimestamp:(I)V\n       269: getstatic #5182  // PacketTypes$PacketType.SyncZone\n       272: aload_0\n       ...\n       288: aload_2\n       289: aastore\n       290: invokestatic #1968  // InterfaceMethod INetworkPacket.sendToRelative:(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V\n       293: iload_1\n       294: ireturn"
+    },
+    {
+      "id": "W66-load",
+      "op": "redirect",
+      "class": "zombie/iso/IsoMetaGrid",
+      "method": {
+        "name": "load",
+        "desc": "(Ljava/nio/ByteBuffer;)V"
+      },
+      "sites": [
+        {
+          "opcode": "INVOKESTATIC",
+          "owner": "zombie/iso/areas/DesignationZone",
+          "name": "load",
+          "desc": "(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;",
+          "expectedCount": 1,
+          "helper": "zombie/mdc/ZoneSyncGuard.load(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;"
+        }
+      ],
+      "rationale": "開服讀 map_meta.bin 的畜牧區迴圈。DesignationZone.load 對新的畜牧區走建構子，建構子先抽暫時 id（Rand.Next(9999999)+100000），getZoneById 不為 null（撞到已載入的 id）就不加入 allZones；DesignationZoneAnimal 建構子照樣加進 designationAnimalZoneList，load 之後才設回真 id。這塊這一場仍圈住動物，但不存檔（IsoMetaGrid.savePart 走 allZones）、不送給新連線的玩家（MetaDataPacket），下次重啟就不見。664 塊時每次開服約 2.2%。helper 照原版載入，不在 allZones 就補進去。全 jar 另一個呼叫點是 client 的 MetaDataPacket.parse，不改。",
+      "evidence": "javap -c -p 對 42.21.0 jar（IsoMetaGrid.load(ByteBuffer)）：\n       694: iconst_0\n       695: istore 19\n       697: iload 19\n       699: iload 18\n       701: if_icmpge 716\n       704: aload_1\n       705: iload_2\n       706: invokestatic #1197  // DesignationZone.load:(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;\n       709: pop\n       710: iinc 19, 1\n       713: goto 697\nDesignationZone.<init>(String,String,int,int,int,int,int,boolean)：\n        55: invokestatic #27  // Rand.Next:(I)I\n        58: i2d\n        59: ldc2_w #33  // double 100000.0d\n        62: dadd\n        ...\n        66: putfield #18  // id:Ljava/lang/Double;\n        ...\n       124: getfield #18  // id\n       127: invokestatic #66  // getZoneById:(Ljava/lang/Double;)Lzombie/iso/areas/DesignationZone;\n       130: ifnonnull 150\n       133: getstatic #70  // allZones"
+    }
+  ],
+  "behaviorNotes": "紀錄只多寫 log，不改轉發與刪除；每分鐘最多 30 行，超過只計數、下一行補報。草地通知只換封包型別（SyncZone → RegisterZone），送給同一批連線、內容是同一塊草地區。載入補回只在結果不在 allZones 時加入一次。parse 與 processServer 在主執行緒的同一次封包處理內，helper 的「最近一次載入」狀態不跨執行緒。",
+  "verification": "建置：SmokeCheck 釘原版 SyncZonePacket 的 Zone 分支不清畜牧區欄位、write 先讀 designationZone；removeGrass 恰 2 個 sendToRelative（RegisterZone、SyncZone）；全 jar 用 SyncZone 的只有 removeGrass×1、DesignationZone.sync×2、processServer×1；DesignationZone 建構子以暫時 id 查重、DesignationZoneAnimal 建構子無條件加清單；全 jar 恰 3 個 DesignationZone.load；processServer 的 sendToClients 在 removeDesignationZone 之前。手術後四個方法文字（含 frames）只差這五個呼叫；helper 內每個原方法恰呼叫一次。ZoneSyncTest on／off。部署後：玩家第一次讓動物吃草時 console 出現 '[MinidoracatJavaPatch][ZoneSync] 首次生效：草地再生改送 RegisterZone'；有人新增、改名或刪除畜牧區時各一行。"
+}

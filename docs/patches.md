@@ -3905,6 +3905,56 @@ W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipp
 
 **退場**：官方在伺服器收高度時夾樓層，或在 `update()` 把掉到地板下的車放回地面時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig` 移除對應的手術，並刪除 helper 與測試。
 
+<a id="2cb"></a>
+## 2cb. 畜牧區同步修補（W66，server，預設 on）
+
+**症狀**（2026-10-17 正式服）：多位玩家同一天回報「畜牧區不見了」：有人的畜牧區在他離線時消失，有人看到重複的畜牧區、刪掉後重登又出現，也有相連的幾塊一起不見。伺服器沒有任何紀錄能查出是誰、在什麼時候刪的。
+
+**調查**（唯讀；10-14 至 10-18 的 42 份備份與當下存檔，逐份解析 `map_meta.bin` 的畜牧區）：這段期間刪除 46 塊、新增 47 塊，總數一直在 659–666 塊，重啟前後沒有整批消失；多數是同一時段在同一位置刪掉又重畫。伺服器只有收到客戶端送來的 `SyncZone` 刪除封包才會刪畜牧區，JavaPatch 與伺服器 MOD 都不增刪畜牧區。
+
+**原版機制**（42.21.0 反編譯＋javap）：
+- **刪除沒有權限檢查，也不留紀錄**：`SyncZonePacket.processServer` 照 id 找到畜牧區就轉發給其他人，再 `DesignationZoneAnimal.removeZone`；`getAllDZones` 把所有相連的畜牧區一起刪（10-17 晚上 666 塊中有 192 塊屬於多塊相連的組）。原版畜牧區面板列出所有已載入的畜牧區，預設名稱都是「畜牧區 #N」，很容易刪到別人的。
+- **快取封包的欄位殘留**：每條連線兩端各只有一個 `SyncZonePacket` 實例（`PacketsCache`），伺服器解析這位玩家送來的畜牧區新增、改名、刪除用它。動物吃草（`IsoGridSquare.removeGrass`）更新既有草地再生區的時間戳時，用 `INetworkPacket.sendToRelative(SyncZone, …)` 通知附近玩家，也是拿每條連線的這個實例：`setData(Zone)` 只設 x／y／z／type／時間戳，不清 `designationZone`，`write` 又先看 `designationZone`，所以送出的是這位玩家上次送來的畜牧區新增、改名或刪除。他建立或改名過的畜牧區被別人刪掉後，會在他畫面上一直被加回來（伺服器沒有、動物不認，重登才消失），他的客戶端也收不到草地區的時間戳。沒送過畜牧區的玩家收到真的草地 `SyncZone` 時，客戶端的實例同樣留著上一次收到的畜牧區欄位，`processClient` 會重播上一次收到的刪除，連帶刪掉之後在旁邊重畫的畜牧區（只在畫面上，重登恢復）。全 jar 只有 `removeGrass` 用 `SyncZone` 送非畜牧區資料。
+- **開服載入時暫時 id 撞號**：`DesignationZone.load` 用建構子建立畜牧區，建構子先抽隨機暫時 id（`Rand.Next(9999999) + 100000`），撞到已載入的 id 就不加入 `allZones`；`DesignationZoneAnimal` 建構子照樣把它加進畜牧區清單，`load` 接著才設回真 id。這塊這一場還能圈住動物，但不存檔（`IsoMetaGrid.savePart` 走 `allZones`）、不送給之後連線的玩家（`MetaDataPacket`），下次重啟就消失。664 塊時每次開服約 2.2% 機率掉一塊；10-16 早上的重啟就掉了一塊，與它相連的其他塊都還在。
+
+**手術**：五個呼叫各自 1:1 同形改道，堆疊形狀不變、frames 原樣；javap 語境見 `docs/specs/zombie_zone_sync.json`。
+- 紀錄：`SyncZonePacket.processServer` 唯一的 `sendToClients`（offset 12，在 `removeDesignationZone` 之前）→ `zombie/network/packets/MdcSyncZoneLog.sendToClients(SyncZonePacket, PacketType, UdpConnection)`；`SyncZonePacket.parse` 唯一的 `DesignationZone.load`（offset 32）→ `MdcSyncZoneLog.load`。新的 ClassPatch，兩個方法 `expectedHits` 各 1。helper 放在 `zombie.network.packets` 才讀得到封包的 package-private 欄位。
+- 草地通知：`IsoGridSquare.removeGrass()` 兩個 `INetworkPacket.sendToRelative`（offset 240 送 RegisterZone、290 送 SyncZone）→ `zombie/mdc/ZoneSyncGuard.sendToRelative`，`expectedHits = 2`，掛在 W60 的 IsoGridSquare ClassPatch（同一 class 只能有一個 ClassPatch）。原呼叫是介面靜態方法，改道後是一般類別的 `invokestatic`。
+- 載入補回：`IsoMetaGrid.load(ByteBuffer)` 唯一的 `DesignationZone.load`（offset 706）→ `ZoneSyncGuard.load`，新的 ClassPatch，`expectedHits = 1`。封包路徑經 `MdcSyncZoneLog.load` 也走同一個補回。
+
+**行為**：
+- 紀錄：每次有人新增、改名、刪除畜牧區記一行，帶送封包的帳號與他當時的位置；刪除時列出接著會被連帶刪掉的每一塊。新增與改名靠載入前看封包裡的 id 是否已存在來分辨，改名記下原版覆寫前的舊名稱與寬高。轉發與刪除照原版。每分鐘最多 30 行，超過的只計數，下一行補報筆數。
+- 草地通知：`SyncZone` 換成原版的 `RegisterZone`，收件人與內容不變。`FishSchoolManager` 經 `GameServer.sendZone` 已用 `RegisterZone` 更新區域時間戳；客戶端照型別找到同一塊草地區就更新名稱與時間戳，找不到就登記。草地照常再生，不會再帶出殘留的畜牧區；兩端都不再出現非畜牧區的 `SyncZone`。新建草地區本來就送 `RegisterZone`，照原樣。
+- 載入補回：照原版載入後，結果不在 `allZones` 就補進去並記一行。已經漏掉的那塊在下次有人改名或重送時也會補回。
+
+```text
+[MinidoracatJavaPatch][ZoneSync] 新增 zone=<id> "<名稱>" <x>,<y>,<z> <寬>x<高> by=<帳號>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 改名 zone=<id> "<舊名>"→"<新名>"[ <舊寬>x<舊高>→<新寬>x<新高>] <x>,<y>,<z> by=<帳號>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 移除 zone=<id> "<名稱>" <x>,<y>,<z> <寬>x<高> 連帶 <n> 塊[ [zone=<id> "<名稱>" <x>,<y>,<z> <寬>x<高>; …]] by=<帳號>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 載入時暫時 id 撞號，補回存檔清單：zone=<id> "<名稱>" <x>,<y>,<z> <寬>x<高>
+[MinidoracatJavaPatch][ZoneSync] 首次生效：草地再生改送 RegisterZone（-Dmdc.zoneGrassSync=0|off 回原版）
+```
+
+超過每分鐘上限之後的第一行，行尾加 `（之前另有 <n> 筆超過每分鐘上限未印）`。
+
+**kill switch**：`-Dmdc.zoneSyncLog`（紀錄）、`-Dmdc.zoneGrassSync`（草地通知）、`-Dmdc.zoneLoadRepair`（載入補回），設成 `0` 或 `off` 就照原版，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/ZoneSyncGuard.class`、`zombie/network/packets/MdcSyncZoneLog.class` 與兩個新 patched class（`SyncZonePacket`、`IsoMetaGrid`），`IsoGridSquare.class` 換成多兩個命中點的版本（137 → 141 個 class）。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm，下一次排程重啟時切換。上線後確認橫幅指紋是新版、`[mdc-javagate] OK: 141`；第一次有動物在草地區吃草時出現首次生效行，有人新增、改名、刪除畜牧區時出現對應的 `[ZoneSync]` 行。
+
+**判讀**：玩家回報畜牧區不見時，在 console 搜 `[ZoneSync] 移除`，找同一塊或它所在的相連組：`by=` 是誰刪的、他當時在哪裡。找不到刪除紀錄、重啟後才不見，再搜 `撞號`。
+
+**不處理**：
+- 誰可以刪畜牧區：原版任何玩家都能刪任何一塊，連同相連的一起刪。要不要限制（例如安全屋外的人不能刪屋內的畜牧區）是玩法決定，待裁定。
+- 已經出現在玩家畫面上的幽靈畜牧區：重登就消失；部署後不會再產生（草地通知這條路）。
+- 客戶端連線時的撞號：客戶端收到畜牧區也走 `DesignationZone.load`（`MetaDataPacket.parse`，與收到別人新增的轉發），撞號的那塊在客戶端不在 `allZones`，但原版面板（`DesignationZoneAnimal.getAllZones()`）照樣列出。玩家替它改名時，`setName` 的 `sync()` 依 `allZones.contains` 判斷，送出的是刪除，伺服器會刪掉它和相連的整組（讀碼推論，未重現）。要修得改客戶端（client 包）；部署後紀錄會把這種情況記成這位玩家的「移除」。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`SyncZonePacket.parse` 兩個 `designationZone` 寫入都在 Zone 分支之前、`setData` 只在畜牧區分支寫一次 `designationZone`，`write` 第一個讀的欄位是 `designationZone`；`removeGrass` 恰 2 個 `sendToRelative`，依序送 RegisterZone、SyncZone；全 jar 讀 `PacketType.SyncZone` 的只有 `removeGrass`×1、`DesignationZone.sync`×2、`SyncZonePacket.processServer`×1；`DesignationZone` 建構子先 `Rand.Next` 再 `getZoneById`，不為 null 就跳過 `allZones`，`DesignationZoneAnimal` 建構子沒有分支；全 jar 恰 3 個 `DesignationZone.load`；`processServer` 的 `sendToClients` 在 `removeDesignationZone` 之前。手術後四個方法文字（含 frames）只差這五個呼叫；helper 內每個原方法恰呼叫一次，封包載入不繞過補回。
+- `ZoneSyncTest`（`build.ps1` [9zk/10]，on、off 兩個 JVM，自驗三個開關）：走真的 `parse`／`processServer`、真的 `INetworkPacket.sendToRelative` 與真的 `DesignationZone.load`，收件端用真 `ByteBufferReader` 解回。草地：建立者新增畜牧區、伺服器刪掉後，原版草地通知送給建立者的仍是那塊畜牧區的新增（原版負對照）；on 兩人都收到同一塊草地區的 `RegisterZone`、沒有 `SyncZone`，off 逐位元同原版；新建草地區的 `RegisterZone` 照原版。客戶端重播（原版負對照）：收到刪除後再收到真的草地 `SyncZone`，旁邊重畫的畜牧區被刪掉。載入：腳本化亂數讓暫時 id 撞到已載入的 id，原版那塊在畜牧區清單、不在 `allZones`（負對照）；on 補進 `allZones` 恰一次、已漏掉的那塊下次重送時補回，沒撞號不重複加入，非畜牧區型別照原版回 null。紀錄：新增、改名（舊名→新名、寬度變化）、刪除各一行，刪除行列出的 id 恰好是實際被刪掉的整組，帶刪除者帳號與位置；不存在的 id 不轉發也不記；轉發筆數 on／off 相同；每分鐘 30 行上限與補報。off：整個 JVM 零紀錄行。
+- 實機 E2E（2026-10-18，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是 Steam 本體；家族 E2E 情境 `zone-sync-mp`）：客戶端用原版 API 建三塊畜牧區（兩塊相連）、改名一塊、刪掉相連組的一塊，再建第四塊；伺服器用 Lua 刪掉第四塊（像別的玩家刪的），客戶端看到它消失後，伺服器在玩家旁邊讓 8 格草被吃掉（7 格更新既有草地區＝原版送 `SyncZone` 的那條路）。修補版：伺服器 console 依序記 3 行新增、1 行改名（舊名→新名）、1 行移除（`連帶 1 塊`＝相連的那塊）、1 行新增與首次生效行；第四塊沒有在客戶端復活，客戶端草地區的時間戳與伺服器相同。原版對照（三個 kill switch 全關）：第四塊在客戶端被加回來（伺服器上沒有），客戶端草地區的時間戳一直是 0，console 沒有 `[ZoneSync]`。開服載入撞號無法在實機穩定重現，只由 `ZoneSyncTest` 驗；兩輪開服讀檔都正常。
+
+**退場**：官方在 `setData(Zone)` 或 `parse` 清掉畜牧區欄位、草地改用別的封包、建構子不再以暫時 id 查重時，SmokeCheck 的存在理由轉紅，屆時移除對應的手術；紀錄可以留著。
+
 ---
 
 <a id="3"></a>

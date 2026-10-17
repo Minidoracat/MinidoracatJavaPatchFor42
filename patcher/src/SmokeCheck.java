@@ -3492,6 +3492,110 @@ public final class SmokeCheck {
         failed += check("W60 手術後：六個呼叫同形改道 AnimalLossProbe，其餘指令與 frames 保留", w60Patched);
         failed += check("W60 helper 契約：每個原方法在 helper 內恰呼叫 1 次", w60Helper);
 
+        // ---- W66 畜牧區同步修補（docs/patches.md 2cb）----
+        // 存在理由：SyncZonePacket 的 Zone 分支（setData／parse 非畜牧區）不清畜牧區欄位、write 先看 designationZone；
+        // 全 jar 只有 removeGrass 用 SyncZone 送草地再生；DesignationZone 建構子以暫時 id 查重。TIS 修掉任一條時紅＝重估撤刀。
+        String w66Packet = "zombie/network/packets/SyncZonePacket";
+        String w66Zone = "zombie/iso/areas/DesignationZone";
+        String w66ZoneDesc = "L" + w66Zone + ";";
+        String w66Net = "zombie/network/packets/INetworkPacket";
+        String w66PacketType = "zombie/network/PacketTypes$PacketType";
+        String w66RelDesc = "(L" + w66PacketType + ";FF[Ljava/lang/Object;)V";
+        String w66LoadDesc = "(Ljava/nio/ByteBuffer;I)" + w66ZoneDesc;
+        String w66SendDesc = "(L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V";
+        String w66Guard = "zombie/mdc/ZoneSyncGuard";
+        String w66Log = "zombie/network/packets/MdcSyncZoneLog";
+        MethodNode w66SetData = methodFromJar(jar, w66Packet, "setData", "([Ljava/lang/Object;)V");
+        MethodNode w66Parse = methodFromJar(jar, w66Packet, "parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        MethodNode w66Write = methodFromJar(jar, w66Packet, "write", "(Lzombie/core/network/ByteBufferWriter;)V");
+        int w66LastZonePut = -1, w66FirstXPut = Integer.MAX_VALUE, w66ZonePuts = 0, w66I = 0;
+        for (AbstractInsnNode in : w66Parse.instructions) {
+            if (in.getOpcode() < 0) continue;
+            w66I++;
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD && f.owner.equals(w66Packet)) {
+                if (f.name.equals("designationZone")) { w66ZonePuts++; w66LastZonePut = w66I; }
+                if (f.name.equals("x")) w66FirstXPut = Math.min(w66FirstXPut, w66I);
+            }
+        }
+        int w66SetDataZonePuts = 0;
+        for (AbstractInsnNode in : w66SetData.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD && f.owner.equals(w66Packet)
+                    && f.name.equals("designationZone")) w66SetDataZonePuts++;
+        }
+        AbstractInsnNode w66WriteFirstGet = null;
+        for (AbstractInsnNode in : w66Write.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETFIELD) { w66WriteFirstGet = in; break; }
+        }
+        failed += check("W66 vanilla 前提：SyncZonePacket 的 Zone 分支不清畜牧區欄位（parse 兩個 designationZone 寫入都在 x 之前、setData 只在畜牧區分支寫一次），write 先讀 designationZone",
+                w66ZonePuts == 2 && w66LastZonePut < w66FirstXPut && w66SetDataZonePuts == 1
+                        && w66WriteFirstGet instanceof FieldInsnNode w66F && w66F.name.equals("designationZone"));
+        MethodNode w66Grass = methodFromJar(jar, "zombie/iso/IsoGridSquare", "removeGrass", "()Z");
+        java.util.List<String> w66GrassTypes = new java.util.ArrayList<>();
+        String w66LastType = null;
+        for (AbstractInsnNode in : w66Grass.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETSTATIC && f.owner.equals(w66PacketType)) w66LastType = f.name;
+            if (isCall(in, Opcodes.INVOKESTATIC, w66Net, "sendToRelative", w66RelDesc)) w66GrassTypes.add(w66LastType);
+        }
+        java.util.Map<String, Integer> w66SyncZoneRefs = jarWideFieldRefs(jar, Opcodes.GETSTATIC, w66PacketType, "SyncZone");
+        w66SyncZoneRefs.keySet().removeIf(w66Key -> w66Key.startsWith(w66PacketType + "."));
+        failed += check("W66 vanilla 前提：removeGrass 恰 2 個 sendToRelative，依序 RegisterZone、SyncZone；全 jar 用 SyncZone 的只有 removeGrass×1、DesignationZone.sync×2、SyncZonePacket.processServer×1（實際 "
+                        + w66SyncZoneRefs + "）",
+                w66GrassTypes.equals(java.util.List.of("RegisterZone", "SyncZone"))
+                        && w66SyncZoneRefs.equals(java.util.Map.of("zombie/iso/IsoGridSquare.removeGrass", 1,
+                                w66Zone + ".sync", 2, w66Packet + ".processServer", 1)));
+        MethodNode w66Ctor = methodFromJar(jar, w66Zone, "<init>", "(Ljava/lang/String;Ljava/lang/String;IIIIIZ)V");
+        MethodInsnNode w66ById = findExactCall(w66Ctor, Opcodes.INVOKESTATIC, w66Zone, "getZoneById", "(Ljava/lang/Double;)" + w66ZoneDesc);
+        boolean w66AnimalCtorStraight = true;
+        for (AbstractInsnNode in : methodFromJar(jar, "zombie/iso/areas/DesignationZoneAnimal", "<init>",
+                "(Ljava/lang/String;IIIIIZ)V").instructions) {
+            if (in instanceof JumpInsnNode) w66AnimalCtorStraight = false;
+        }
+        failed += check("W66 vanilla 前提：DesignationZone 建構子先 Rand.Next 抽暫時 id、getZoneById 不為 null 就跳過 allZones；DesignationZoneAnimal 建構子無條件加進 designationAnimalZoneList",
+                countExactCalls(w66Ctor, Opcodes.INVOKESTATIC, "zombie/core/random/Rand", "Next", "(I)I") == 1
+                        && firstCallIndex(w66Ctor, Opcodes.INVOKESTATIC, "zombie/core/random/Rand", "Next", "(I)I")
+                                < firstCallIndex(w66Ctor, Opcodes.INVOKESTATIC, w66Zone, "getZoneById", "(Ljava/lang/Double;)" + w66ZoneDesc)
+                        && w66ById != null && nextReal(w66ById).getOpcode() == Opcodes.IFNONNULL
+                        && w66AnimalCtorStraight);
+        MethodNode w66Process = methodFromJar(jar, w66Packet, "processServer", "(L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V");
+        failed += check("W66 vanilla 前提：全 jar 恰 3 個 DesignationZone.load（IsoMetaGrid.load、SyncZonePacket.parse、client 的 MetaDataPacket.parse）；processServer 恰 1 個 sendToClients 且在 removeDesignationZone 之前",
+                jarWideCallsiteCensus(jar, w66Zone, "load", w66LoadDesc) == 3
+                        && countExactCalls(methodFromJar(jar, "zombie/iso/IsoMetaGrid", "load", "(Ljava/nio/ByteBuffer;)V"),
+                                Opcodes.INVOKESTATIC, w66Zone, "load", w66LoadDesc) == 1
+                        && countExactCalls(w66Parse, Opcodes.INVOKESTATIC, w66Zone, "load", w66LoadDesc) == 1
+                        && countExactCalls(methodFromJar(jar, "zombie/network/packets/connection/MetaDataPacket", "parse",
+                                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V"),
+                                Opcodes.INVOKESTATIC, w66Zone, "load", w66LoadDesc) == 1
+                        && countExactCalls(w66Process, Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc) == 1
+                        && firstCallIndex(w66Process, Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc)
+                                < firstCallIndex(w66Process, Opcodes.INVOKEVIRTUAL, w66Packet, "removeDesignationZone", "()V"));
+        // {class, method, desc, 原呼叫, 改道後}
+        String[][] w66Sites = {
+                {w66Packet, "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                        "INVOKESTATIC " + w66Zone + ".load " + w66LoadDesc, "INVOKESTATIC " + w66Log + ".load " + w66LoadDesc},
+                {w66Packet, "processServer", "(L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V",
+                        "INVOKEVIRTUAL " + w66Packet + ".sendToClients " + w66SendDesc,
+                        "INVOKESTATIC " + w66Log + ".sendToClients (L" + w66Packet + ";L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V"},
+                {"zombie/iso/IsoGridSquare", "removeGrass", "()Z",
+                        // 原呼叫是介面靜態方法（Textifier 標 (itf)），改道後是一般類別的 INVOKESTATIC
+                        "INVOKESTATIC " + w66Net + ".sendToRelative " + w66RelDesc + " (itf)", "INVOKESTATIC " + w66Guard + ".sendToRelative " + w66RelDesc},
+                {"zombie/iso/IsoMetaGrid", "load", "(Ljava/nio/ByteBuffer;)V",
+                        "INVOKESTATIC " + w66Zone + ".load " + w66LoadDesc, "INVOKESTATIC " + w66Guard + ".load " + w66LoadDesc}};
+        boolean w66Patched = true;
+        for (String[] s : w66Sites) {
+            w66Patched &= methodText(methodFromJar(jar, s[0], s[1], s[2])).replace(s[3], s[4])
+                    .equals(methodText(method(distJava, s[0], s[1], s[2])));
+        }
+        failed += check("W66 手術後：parse、processServer、removeGrass×2、IsoMetaGrid.load 同形改道，其餘指令與 frames 保留", w66Patched);
+        failed += check("W66 helper 契約：每個原方法在 helper 內恰呼叫 1 次；封包載入經 ZoneSyncGuard.load、不直接呼叫原 load",
+                countExactCalls(method(distJava, w66Guard, "sendToRelative", w66RelDesc), Opcodes.INVOKESTATIC, w66Net, "sendToRelative", w66RelDesc) == 1
+                        && countExactCalls(method(distJava, w66Guard, "load", w66LoadDesc), Opcodes.INVOKESTATIC, w66Zone, "load", w66LoadDesc) == 1
+                        && countExactCalls(method(distJava, w66Log, "load", w66LoadDesc), Opcodes.INVOKESTATIC, w66Guard, "load", w66LoadDesc) == 1
+                        && countExactCalls(method(distJava, w66Log, "load", w66LoadDesc), Opcodes.INVOKESTATIC, w66Zone, "load", w66LoadDesc) == 0
+                        && countExactCalls(method(distJava, w66Log, "sendToClients",
+                                "(L" + w66Packet + ";L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V"),
+                                Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
@@ -5383,6 +5487,31 @@ public final class SmokeCheck {
             }
         }
         return count;
+    }
+
+    /** 同上，但逐方法計數（鍵＝「class.method」），新增或消失的使用者都看得出來。 */
+    static Map<String, Integer> jarWideFieldRefs(Path jar, int opcode, String owner, String name) throws Exception {
+        Map<String, Integer> refs = new java.util.TreeMap<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                for (MethodNode m : cn.methods) {
+                    for (AbstractInsnNode in : m.instructions) {
+                        if (in instanceof FieldInsnNode fi && fi.getOpcode() == opcode
+                                && fi.owner.equals(owner) && fi.name.equals(name)) {
+                            refs.merge(cn.name + "." + m.name, 1, Integer::sum);
+                        }
+                    }
+                }
+            }
+        }
+        return refs;
     }
 
     /** W17 load callsite 全序：ALOAD0, ALOAD7, ICONST0, 精確 call（恰 1）, POP。 */
