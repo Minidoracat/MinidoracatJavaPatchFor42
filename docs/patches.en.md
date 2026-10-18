@@ -3910,8 +3910,8 @@ banner shows the new fingerprint and `[mdc-javagate] OK: 141`; the first-use lin
 who deleted it and where they stood. With no delete and the zone gone after a restart, search for `撞號`.
 
 **Not handled**:
-- Who may delete zones: in vanilla any player can delete any zone, together with every zone connected to it. Whether to restrict that (for example,
-  people outside a safehouse cannot delete zones inside it) is a gameplay decision, pending.
+- Who may delete zones: in vanilla any player can delete any zone, together with every zone connected to it. From 2026-10-18, W67 limits zones that
+  overlap a safehouse to its members ([2cc](#2cc)); zones outside safehouses stay vanilla.
 - Ghost zones already on players' screens: relogging clears them; the grass notice no longer creates new ones.
 - Collisions on the client: clients also load zones with `DesignationZone.load` (`MetaDataPacket.parse`, and the relay of someone else's add). A
   colliding zone is missing from the client's `allZones` but still listed by the vanilla panel (`DesignationZoneAnimal.getAllZones()`). Renaming it
@@ -3947,6 +3947,87 @@ who deleted it and where they stood. With no delete and the zone gone after a re
 
 **Retirement**: when TIS clears the zone fields in `setData(Zone)` or `parse`, sends grass updates with another packet, or stops checking the temporary id
 in the constructor, the SmokeCheck reasons to exist turn red; then remove the matching surgery. The log can stay.
+
+<a id="2cc"></a>
+## 2cc. Only members may delete livestock zones in a safehouse (W67, server, default on)
+
+**Why**: in both 10-17 cases found in [2cb](#2cb), the deleted zone was inside the victim's own safehouse and the person who deleted it was not a member.
+In vanilla any player can delete any zone, together with every zone connected to it (2cb "Vanilla mechanism"). On 2026-10-18 the server owner decided
+that a zone overlapping a safehouse may only be deleted by that safehouse's owner, its members and admins.
+
+**Decision**: before relaying, the `SyncZonePacket.processServer` redirect of W66 (`MdcSyncZoneLog.sendToClients`) asks
+`zombie/mdc/ZoneDeleteGuard.denial`:
+- Only livestock zone deletes count (`zoneAdded` is false).
+- A connection with `Capability.CanSetupSafehouses` passes. That is an admin; vanilla safehouse anticheat and the Safehouse mod use the same check.
+- Anyone else: the server's `getAllDZones` gives the group the delete would remove. If any zone in it (on any level, basements included) overlaps a
+  safehouse, the connection's account or one of its players must be that safehouse's owner or member (vanilla `SafeHouse.playerAllowed(String)`: the
+  member list or the owner). For safehouses managed by the Safehouse mod, the owner field holds the mod's marker; the real owner and everyone the house
+  is shared with are in the vanilla member list.
+- One zone failing the check rejects the whole group: in vanilla, deleting one zone deletes the whole group, so it cannot be deleted in part.
+
+**On rejection**: the delete is not relayed to other players, and the packet's `zoneAdded` is set to true. Vanilla `processServer` reads it only after
+relaying (javap offset 16), and with true it never calls `removeDesignationZone`. The deleting client has already removed the whole group before
+sending (the vanilla panel calls `DesignationZoneAnimal.removeZone(zone, true)`), so `ZoneDeleteGuard.reject` sends every zone of the server's group
+back to that player as an add in a new `SyncZonePacket`, then a server chat line in Chinese and English:
+
+```text
+這塊畜牧區（或和它相連的畜牧區）在別人的安全屋裡，只有那間安全屋的成員能刪除。 / This livestock zone, or one connected to it, is inside someone else's safehouse. Only its members can remove it.
+```
+
+The console gets one line (independent of `-Dmdc.zoneSyncLog`, under the same 30-lines-per-minute limit):
+
+```text
+[MinidoracatJavaPatch][ZoneSync] 拒絕移除 zone=<id> "<name>" <x>,<y>,<z> <w>x<h> 連帶 <n> 塊[ […]] 安全屋 <x>,<y> <w>x<h> owner=<owner field> by=<account>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 首次生效：安全屋內的畜牧區只有成員能刪（-Dmdc.zoneDeleteGuard=0|off 回原版）
+```
+
+(拒絕移除 = delete rejected, 安全屋 = safehouse, 首次生效 = first use.) Allowed deletes stay vanilla and get the W66 移除 line. An exception during the
+check falls back to the vanilla delete and logs one line with the reason.
+
+**Scope** (read-only count of the 10-18 07:30 save, safehouses from the vanilla list in `map_meta.bin`): 663 zones in 546 groups; 110 zones overlap
+372 safehouses, and the 86 groups containing them are protected, 70 of them entirely inside one safehouse. 6 groups also have 11 zones outside the
+safehouse: if such an outside zone belongs to a non-member, they cannot delete it while it stays connected and need the owner or an admin. 11 groups
+span two or more safehouses, and every one of them has a common member, so no group can only be deleted by admins.
+
+**Surgery**: no new redirect; it uses the same call W66 already redirects (a call can only be redirected once), plus a new helper
+`zombie/mdc/ZoneDeleteGuard`.
+
+**Kill switch**: `-Dmdc.zoneDeleteGuard=0|off`, restart required; independent of the three W66 switches.
+
+**Deployment**: the manifest gains `zombie/mdc/ZoneDeleteGuard.class`, and `MdcSyncZoneLog.class` and `PatchInfo.class` are replaced (141 → 142
+classes). After release, check the banner fingerprint and `[mdc-javagate] OK: 142`; the first-use line appears the first time someone deletes a zone.
+
+**Not handled**:
+- Renames and adds stay vanilla: anyone can rename someone else's zone or draw a zone inside someone else's safehouse. The vanilla panel cannot resize
+  zones; a modified client could resize one through a rename packet, which is not handled.
+- Zones outside safehouses stay vanilla; W66's log shows who deleted them.
+- A client-side collision that turns a rename into a delete (2cb "Not handled"): inside someone else's safehouse this patch rejects it and sends the
+  zones back; for your own zones it is deleted as in vanilla.
+
+**Checks and verification**:
+- SmokeCheck: reasons to exist — `processServer` reads `zoneAdded` exactly once, after `sendToClients` and before `removeDesignationZone`, followed by
+  `ifne`; `SafeHouse.playerAllowed(String)` only looks at the member list and the owner; `setData` sets `zoneAdded` from `values[1]` and `write` sends
+  the whole record with `DesignationZone.save`; `ChatServer.sendMessageToServerChat(connection, text)` exists. Helper contract — one `denial` before
+  relaying, and on rejection exactly one `zoneAdded` write and one `reject`; `reject` does `setData` + `sendToClient` per zone and one chat line;
+  membership only goes through `playerAllowed`, and admins are `CanSetupSafehouses`.
+- `ZoneSyncTest` (`build.ps1` [9zk/10], on, guardoff (W67 off only) and off in three JVMs): three safehouses, six zones and four connections (owner,
+  outsider, member, an admin with `CanSetupSafehouses`), through real `parse`/`processServer`. On: the outsider deleting the zone inside, the outside
+  part of a connected group, or the basement under the house, and the owner deleting a group that reaches into someone else's safehouse are all
+  rejected — the server keeps the whole group, the other three get no relay, and the deleting connection gets one add per zone (the decoded ids are
+  exactly the group), with one 拒絕移除 line naming the safehouse and the deleter. The outsider deleting the zone outside any safehouse, the member
+  deleting the zone inside, the admin deleting the group across two safehouses and the owner deleting the basement are deleted as in vanilla and
+  relayed to the other three. Guardoff and off: all eight cases are deleted as in vanilla (vanilla control).
+- In game (2026-10-18, local no-Steam dedicated server with dist first on the classpath, client from the Steam install; family E2E scenario
+  `zone-guard-mp`, test on a regular account): the server opens a safehouse owned by someone else next to the player, and the client draws three zones
+  with the vanilla API (one inside, one connected to it and reaching outside the house, one outside) and deletes the one inside the way the vanilla
+  panel does. Patched: the server logs `拒絕移除 … 連帶 1 塊 … 安全屋 … by=test` and keeps both zones; the client had removed both before sending,
+  and 4 s later both are back, with the Chinese and English hint in the chat box. Deleting the outside zone works as in vanilla; after the server adds
+  test as a member, deleting the inside zone removes it together with the connected one as in vanilla. Vanilla control
+  (`-Dmdc.zoneDeleteGuard=off`): the outsider's delete removes both zones on the server and the client, and the chat box only has the vanilla welcome
+  message.
+
+**Retirement**: reassess when TIS adds ownership or safehouse checks for livestock zones; rewrite if the read order in `processServer` changes
+(SmokeCheck turns red).
 
 ---
 

@@ -6,7 +6,7 @@
   ],
   "kind": "fix+observability",
   "buildBaseline": "42.21.0 / jar SHA-256 e1a69eb743ede60b213a0fe7f8b83d4fcab773036d256cc4543a336f3b058a33",
-  "note": "W66 畜牧區同步修補（docs/patches.md 2cb）。五個呼叫各自 1:1 同形改道：SyncZonePacket.parse／processServer → zombie/network/packets/MdcSyncZoneLog（記錄新增、改名、刪除與連帶組），IsoGridSquare.removeGrass 兩個 sendToRelative → zombie/mdc/ZoneSyncGuard（SyncZone 換成 RegisterZone），IsoMetaGrid.load 的 DesignationZone.load → ZoneSyncGuard.load（撞號補回 allZones）。kill switch -Dmdc.zoneSyncLog、-Dmdc.zoneGrassSync、-Dmdc.zoneLoadRepair（0|off）。",
+  "note": "W66 畜牧區同步修補（docs/patches.md 2cb）。五個呼叫各自 1:1 同形改道：SyncZonePacket.parse／processServer → zombie/network/packets/MdcSyncZoneLog（記錄新增、改名、刪除與連帶組），IsoGridSquare.removeGrass 兩個 sendToRelative → zombie/mdc/ZoneSyncGuard（SyncZone 換成 RegisterZone），IsoMetaGrid.load 的 DesignationZone.load → ZoneSyncGuard.load（撞號補回 allZones）。kill switch -Dmdc.zoneSyncLog、-Dmdc.zoneGrassSync、-Dmdc.zoneLoadRepair（0|off）。 W67（docs/patches.md 2cc）沒有新的改道：同一個 MdcSyncZoneLog.sendToClients 在轉發前呼叫 zombie/mdc/ZoneDeleteGuard，壓到安全屋的整組只准屋主、成員（SafeHouse.playerAllowed）或 CanSetupSafehouses 刪，否則不轉發、把 zoneAdded 設成 true（原版接著不刪）並補送回刪除者。kill switch -Dmdc.zoneDeleteGuard（0|off）。",
   "patches": [
     {
       "id": "W66-log",
@@ -91,8 +91,20 @@
       ],
       "rationale": "開服讀 map_meta.bin 的畜牧區迴圈。DesignationZone.load 對新的畜牧區走建構子，建構子先抽暫時 id（Rand.Next(9999999)+100000），getZoneById 不為 null（撞到已載入的 id）就不加入 allZones；DesignationZoneAnimal 建構子照樣加進 designationAnimalZoneList，load 之後才設回真 id。這塊這一場仍圈住動物，但不存檔（IsoMetaGrid.savePart 走 allZones）、不送給新連線的玩家（MetaDataPacket），下次重啟就不見。664 塊時每次開服約 2.2%。helper 照原版載入，不在 allZones 就補進去。全 jar 另一個呼叫點是 client 的 MetaDataPacket.parse，不改。",
       "evidence": "javap -c -p 對 42.21.0 jar（IsoMetaGrid.load(ByteBuffer)）：\n       694: iconst_0\n       695: istore 19\n       697: iload 19\n       699: iload 18\n       701: if_icmpge 716\n       704: aload_1\n       705: iload_2\n       706: invokestatic #1197  // DesignationZone.load:(Ljava/nio/ByteBuffer;I)Lzombie/iso/areas/DesignationZone;\n       709: pop\n       710: iinc 19, 1\n       713: goto 697\nDesignationZone.<init>(String,String,int,int,int,int,int,boolean)：\n        55: invokestatic #27  // Rand.Next:(I)I\n        58: i2d\n        59: ldc2_w #33  // double 100000.0d\n        62: dadd\n        ...\n        66: putfield #18  // id:Ljava/lang/Double;\n        ...\n       124: getfield #18  // id\n       127: invokestatic #66  // getZoneById:(Ljava/lang/Double;)Lzombie/iso/areas/DesignationZone;\n       130: ifnonnull 150\n       133: getstatic #70  // allZones"
+    },
+    {
+      "id": "W67-guard",
+      "op": "helper-on-existing-redirect",
+      "class": "zombie/network/packets/SyncZonePacket",
+      "method": {
+        "name": "processServer",
+        "desc": "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"
+      },
+      "sites": [],
+      "rationale": "沿用 W66-log 的 sendToClients 改道（同一個呼叫只能改道一次）。拒絕時 helper 不轉發，並把封包的 zoneAdded 設成 true：原版在轉發之後才讀 zoneAdded（offset 16），讀到 true 就跳過 removeDesignationZone（offset 23）。補送用新的 SyncZonePacket（setData(zone, true)＋sendToClient），不動連線的快取實例。",
+      "evidence": "javap -c -p 對 42.21.0 jar（SyncZonePacket.processServer）：\n        12: invokevirtual #166  // sendToClients（W66 改道點）\n        15: aload_0\n        16: getfield #19  // zoneAdded:Z\n        19: ifne 26\n        22: aload_0\n        23: invokevirtual #107  // removeDesignationZone:()V\n        26: return\nSafeHouse.playerAllowed(String)：players.contains(name) || owner.equals(name)。"
     }
   ],
-  "behaviorNotes": "紀錄只多寫 log，不改轉發與刪除；每分鐘最多 30 行，超過只計數、下一行補報。草地通知只換封包型別（SyncZone → RegisterZone），送給同一批連線、內容是同一塊草地區。載入補回只在結果不在 allZones 時加入一次。parse 與 processServer 在主執行緒的同一次封包處理內，helper 的「最近一次載入」狀態不跨執行緒。",
-  "verification": "建置：SmokeCheck 釘原版 SyncZonePacket 的 Zone 分支不清畜牧區欄位、write 先讀 designationZone；removeGrass 恰 2 個 sendToRelative（RegisterZone、SyncZone）；全 jar 用 SyncZone 的只有 removeGrass×1、DesignationZone.sync×2、processServer×1；DesignationZone 建構子以暫時 id 查重、DesignationZoneAnimal 建構子無條件加清單；全 jar 恰 3 個 DesignationZone.load；processServer 的 sendToClients 在 removeDesignationZone 之前。手術後四個方法文字（含 frames）只差這五個呼叫；helper 內每個原方法恰呼叫一次。ZoneSyncTest on／off。部署後：玩家第一次讓動物吃草時 console 出現 '[MinidoracatJavaPatch][ZoneSync] 首次生效：草地再生改送 RegisterZone'；有人新增、改名或刪除畜牧區時各一行。"
+  "behaviorNotes": "紀錄只多寫 log，不改轉發與刪除；每分鐘最多 30 行，超過只計數、下一行補報。草地通知只換封包型別（SyncZone → RegisterZone），送給同一批連線、內容是同一塊草地區。載入補回只在結果不在 allZones 時加入一次。parse 與 processServer 在主執行緒的同一次封包處理內，helper 的「最近一次載入」狀態不跨執行緒。 W67 只看畜牧區刪除；管理員以 Capability.CanSetupSafehouses 判斷（原版安全屋反作弊、Safehouse MOD 同一個）；整組任一塊與安全屋範圍重疊（任何樓層）就要求那間的屋主或成員；判定出例外就照原版刪除。",
+  "verification": "建置：SmokeCheck 釘原版 SyncZonePacket 的 Zone 分支不清畜牧區欄位、write 先讀 designationZone；removeGrass 恰 2 個 sendToRelative（RegisterZone、SyncZone）；全 jar 用 SyncZone 的只有 removeGrass×1、DesignationZone.sync×2、processServer×1；DesignationZone 建構子以暫時 id 查重、DesignationZoneAnimal 建構子無條件加清單；全 jar 恰 3 個 DesignationZone.load；processServer 的 sendToClients 在 removeDesignationZone 之前。手術後四個方法文字（含 frames）只差這五個呼叫；helper 內每個原方法恰呼叫一次。ZoneSyncTest on／off。部署後：玩家第一次讓動物吃草時 console 出現 '[MinidoracatJavaPatch][ZoneSync] 首次生效：草地再生改送 RegisterZone'；有人新增、改名或刪除畜牧區時各一行。 W67：SmokeCheck 釘 processServer 恰一個 zoneAdded 讀取在 sendToClients 之後、removeDesignationZone 之前並接 ifne；playerAllowed 只看成員與屋主；setData／write 的補送路徑；helper 契約。ZoneSyncTest on／guardoff／off 八個案例。"
 }

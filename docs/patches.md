@@ -3944,7 +3944,7 @@ W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipp
 **判讀**：玩家回報畜牧區不見時，在 console 搜 `[ZoneSync] 移除`，找同一塊或它所在的相連組：`by=` 是誰刪的、他當時在哪裡。找不到刪除紀錄、重啟後才不見，再搜 `撞號`。
 
 **不處理**：
-- 誰可以刪畜牧區：原版任何玩家都能刪任何一塊，連同相連的一起刪。要不要限制（例如安全屋外的人不能刪屋內的畜牧區）是玩法決定，待裁定。
+- 誰可以刪畜牧區：原版任何玩家都能刪任何一塊，連同相連的一起刪。2026-10-18 起，壓到安全屋的由 W67 限制成員才能刪（[2cc](#2cc)）；不在安全屋的照原版。
 - 已經出現在玩家畫面上的幽靈畜牧區：重登就消失；部署後不會再產生（草地通知這條路）。
 - 客戶端連線時的撞號：客戶端收到畜牧區也走 `DesignationZone.load`（`MetaDataPacket.parse`，與收到別人新增的轉發），撞號的那塊在客戶端不在 `allZones`，但原版面板（`DesignationZoneAnimal.getAllZones()`）照樣列出。玩家替它改名時，`setName` 的 `sync()` 依 `allZones.contains` 判斷，送出的是刪除，伺服器會刪掉它和相連的整組（讀碼推論，未重現）。要修得改客戶端（client 包）；部署後紀錄會把這種情況記成這位玩家的「移除」。
 
@@ -3954,6 +3954,52 @@ W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipp
 - 實機 E2E（2026-10-18，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是 Steam 本體；家族 E2E 情境 `zone-sync-mp`）：客戶端用原版 API 建三塊畜牧區（兩塊相連）、改名一塊、刪掉相連組的一塊，再建第四塊；伺服器用 Lua 刪掉第四塊（像別的玩家刪的），客戶端看到它消失後，伺服器在玩家旁邊讓 8 格草被吃掉（7 格更新既有草地區＝原版送 `SyncZone` 的那條路）。修補版：伺服器 console 依序記 3 行新增、1 行改名（舊名→新名）、1 行移除（`連帶 1 塊`＝相連的那塊）、1 行新增與首次生效行；第四塊沒有在客戶端復活，客戶端草地區的時間戳與伺服器相同。原版對照（三個 kill switch 全關）：第四塊在客戶端被加回來（伺服器上沒有），客戶端草地區的時間戳一直是 0，console 沒有 `[ZoneSync]`。開服載入撞號無法在實機穩定重現，只由 `ZoneSyncTest` 驗；兩輪開服讀檔都正常。
 
 **退場**：官方在 `setData(Zone)` 或 `parse` 清掉畜牧區欄位、草地改用別的封包、建構子不再以暫時 id 查重時，SmokeCheck 的存在理由轉紅，屆時移除對應的手術；紀錄可以留著。
+
+<a id="2cc"></a>
+## 2cc. 安全屋內的畜牧區只有成員能刪（W67，server，預設 on）
+
+**起因**：[2cb](#2cb) 調查到的 10-17 兩件，被刪的畜牧區都在受害者自己的安全屋內，刪的人不是那間的成員。原版任何玩家都能刪任何一塊畜牧區，連同相連的一起刪（2cb「原版機制」）。2026-10-18 服主裁定：壓到安全屋的畜牧區，只准那間的屋主、成員與管理員刪。
+
+**判定**：W66 改道的 `SyncZonePacket.processServer` 在轉發前（`MdcSyncZoneLog.sendToClients`）先問 `zombie/mdc/ZoneDeleteGuard.denial`：
+- 只看畜牧區的刪除（`zoneAdded` 是 false）。
+- 送封包的連線具 `Capability.CanSetupSafehouses` 就放行。這是管理員，原版安全屋反作弊與 Safehouse MOD 用同一個判斷。
+- 其他人：用伺服器的 `getAllDZones` 算出接著會被刪的整組，只要其中一塊（任何樓層，地下室也算）和某間安全屋的範圍重疊，連線的帳號或連線上任一位玩家就必須是那間的屋主或成員（原版 `SafeHouse.playerAllowed(String)`：成員名單或屋主）。Safehouse MOD 管理的安全屋，屋主欄是 MOD 的標記，真正的屋主與所有分享對象都在原生成員名單裡。
+- 整組有一塊不符就整組拒絕：原版刪一塊就是刪整組，不能只刪一部分。
+
+**拒絕時**：不轉發給其他玩家，並把封包的 `zoneAdded` 設成 true。原版 `processServer` 在轉發之後才讀它（javap offset 16），讀到 true 就不呼叫 `removeDesignationZone`。刪除者的客戶端送出前已經先刪掉整組（原版面板呼叫 `DesignationZoneAnimal.removeZone(zone, true)`），所以 `ZoneDeleteGuard.reject` 把伺服器上的整組逐塊用新的 `SyncZonePacket` 當成新增送給他，再用伺服器聊天送一行中英提示：
+
+```text
+這塊畜牧區（或和它相連的畜牧區）在別人的安全屋裡，只有那間安全屋的成員能刪除。 / This livestock zone, or one connected to it, is inside someone else's safehouse. Only its members can remove it.
+```
+
+console 記一行（不受 `-Dmdc.zoneSyncLog` 影響，同樣每分鐘最多 30 行）：
+
+```text
+[MinidoracatJavaPatch][ZoneSync] 拒絕移除 zone=<id> "<名稱>" <x>,<y>,<z> <寬>x<高> 連帶 <n> 塊[ […]] 安全屋 <x>,<y> <寬>x<高> owner=<屋主欄> by=<帳號>@<x>,<y>,<z>
+[MinidoracatJavaPatch][ZoneSync] 首次生效：安全屋內的畜牧區只有成員能刪（-Dmdc.zoneDeleteGuard=0|off 回原版）
+```
+
+允許的刪除照原版，並照 W66 記一行「移除」。判定時出例外就照原版刪除，並記一行原因。
+
+**影響面**（10-18 07:30 存檔唯讀統計，安全屋取自 `map_meta.bin` 的原生清單）：663 塊畜牧區分成 546 組；110 塊壓到 372 間安全屋，含這些塊的 86 組會受保護，其中 70 組全在同一間內。6 組另含安全屋外的 11 塊：外面那塊若屬非成員，還連著時他刪不掉自己的那塊，要請屋主或管理員處理。11 組跨兩間以上安全屋，每組都有共同成員，沒有一組只剩管理員刪得掉。
+
+**手術**：沒有新的改道，掛在 W66 改道的同一個呼叫上（同一個呼叫只能改道一次）；新增 helper `zombie/mdc/ZoneDeleteGuard`。
+
+**kill switch**：`-Dmdc.zoneDeleteGuard=0|off`，需重啟；與 W66 的三個開關各自獨立。
+
+**部署**：manifest 新增 `zombie/mdc/ZoneDeleteGuard.class`，`MdcSyncZoneLog.class` 與 `PatchInfo.class` 換新（141 → 142 個 class）。上線後確認橫幅指紋、`[mdc-javagate] OK: 142`；第一次有人刪畜牧區時出現首次生效行。
+
+**不處理**：
+- 改名與新增：照原版，誰都能改別人畜牧區的名字，也能在別人的安全屋裡畫畜牧區。原版面板不能改大小；改過的客戶端可以用改名封包改寬高，未處理。
+- 不在安全屋的畜牧區：照原版，靠 W66 的紀錄查是誰刪的。
+- 客戶端撞號讓改名變成刪除（2cb「不處理」）：在別人的安全屋內會被這刀擋下並補回；自己的照原版刪。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`processServer` 恰一個 `zoneAdded` 讀取，在 `sendToClients` 之後、`removeDesignationZone` 之前，緊接 `ifne`；`SafeHouse.playerAllowed(String)` 只看成員名單與屋主；`setData` 以 `values[1]` 設 `zoneAdded`、`write` 用 `DesignationZone.save` 送整筆；`ChatServer.sendMessageToServerChat(連線, 文字)` 存在。helper 契約——轉發前恰一次 `denial`，拒絕時恰一次寫 `zoneAdded` 與一次 `reject`；`reject` 逐塊 `setData`＋`sendToClient`、一次聊天提示；成員判斷只走 `playerAllowed`，管理員看 `CanSetupSafehouses`。
+- `ZoneSyncTest`（`build.ps1` [9zk/10]，on、guardoff（只關 W67）、off 三個 JVM）：三間安全屋、六塊畜牧區、四條連線（屋主、外人、成員、具 `CanSetupSafehouses` 的管理員），走真的 `parse`／`processServer`。on：外人刪屋內那塊、刪相連組在屋外的那塊、刪屋子底下地下室那塊，以及屋主刪跨到別人安全屋的那組，全部拒絕——伺服器整組都在、其他三人收不到轉發、刪除者收到整組逐塊的新增（解回的 id 恰好是整組），記一行「拒絕移除」帶安全屋與刪除者；外人刪不在安全屋的那塊、成員刪屋內那塊、管理員刪跨兩間的那組、屋主刪地下室那塊，照原版刪整組並轉發給其他三人。guardoff、off：八個案例全部照原版刪整組（原版負對照）。
+- 實機 E2E（2026-10-18，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是 Steam 本體；家族 E2E 情境 `zone-guard-mp`，test 用一般帳號）：伺服器在玩家旁邊開一間屬於別人的安全屋，客戶端用原版 API 畫三塊畜牧區（屋內一塊、和它相連而跨出屋外一塊、屋外一塊），照原版面板的做法刪屋內那塊。修補版：伺服器記 `拒絕移除 … 連帶 1 塊 … 安全屋 … by=test`，兩塊都還在伺服器上；客戶端送出前已先刪掉兩塊，4 秒後兩塊都被補回，聊天框收到中英提示。刪屋外那塊照原版刪掉；伺服器把 test 加成成員後再刪屋內那塊，照原版連同相連的一起刪掉。原版對照（`-Dmdc.zoneDeleteGuard=off`）：外人刪屋內那塊，伺服器連同相連的一起刪掉，客戶端也沒有了，聊天框只有原版的歡迎訊息。
+
+**退場**：官方加上畜牧區的擁有者或安全屋檢查時重估；`processServer` 的讀取順序變了（SmokeCheck 轉紅）就要改寫。
 
 ---
 

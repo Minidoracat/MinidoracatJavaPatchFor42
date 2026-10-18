@@ -16,7 +16,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import zombie.GameWindow;
+import zombie.characters.Capability;
 import zombie.characters.IsoPlayer;
+import zombie.characters.Role;
 import zombie.core.network.ByteBufferReader;
 import zombie.core.network.ByteBufferWriter;
 import zombie.core.raknet.UdpConnection;
@@ -29,6 +31,7 @@ import zombie.debug.LogSeverity;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.areas.DesignationZone;
 import zombie.iso.areas.DesignationZoneAnimal;
+import zombie.iso.areas.SafeHouse;
 import zombie.iso.zones.Zone;
 import zombie.mdc.ZoneSyncGuard;
 import zombie.network.GameServer;
@@ -36,11 +39,12 @@ import zombie.network.PacketTypes;
 import zombie.network.PacketsCache;
 
 /**
- * W66 畜牧區同步修補的行為驗證（docs/patches.md 2cb）。argv：on＝出貨組態；off＝三個 kill switch 全關（原版）。
+ * W66 畜牧區同步修補與 W67 安全屋刪除權限的行為驗證（docs/patches.md 2cb、2cc）。argv：on＝出貨組態；
+ * off＝四個 kill switch 全關（原版）；guardoff＝只關 W67（-Dmdc.zoneDeleteGuard=off），W66 照開。
  *
  * <p>走真的 {@code SyncZonePacket.parse／processServer}（已手術的 class）、真的 {@code INetworkPacket.sendToRelative}
  * 與真的 {@code DesignationZone.load}；連線是只覆寫 buffer 三端點的 {@link UdpConnection} 子類，封包內容由真 writer 寫出，
- * 收件端用真 {@link ByteBufferReader} 解回。原版負對照直接呼叫未改道的原方法，兩種模式都要成立。
+ * 收件端用真 {@link ByteBufferReader} 解回。原版負對照直接呼叫未改道的原方法，或在 off 那輪看原版結果。
  */
 public final class ZoneSyncTest {
     private static final String TAG = "[MinidoracatJavaPatch][ZoneSync] ";
@@ -48,12 +52,14 @@ public final class ZoneSyncTest {
 
     private static int failed;
     private static boolean on;
+    private static boolean guard;
     private static ByteArrayOutputStream logBuf;
     private static List<UdpConnection> connections;
 
     public static void main(String[] args) throws Exception {
         String mode = args.length == 0 ? "on" : args[0];
-        on = "on".equals(mode);
+        on = !"off".equals(mode);
+        guard = "on".equals(mode);
         RandStandard.INSTANCE.init();
         GameServer.server = true;
         logBuf = new ByteArrayOutputStream();
@@ -64,13 +70,15 @@ public final class ZoneSyncTest {
         setDeclared(UdpEngine.class, engine, "connections", connections);
         GameServer.udpEngine = engine;
 
-        expect("自驗：三個開關與 argv 相符（" + mode + "）", flag(ZoneSyncGuard.class, "GRASS") == on
-                && flag(ZoneSyncGuard.class, "REPAIR") == on && MdcSyncZoneLog.ENABLED == on);
+        expect("自驗：四個開關與 argv 相符（" + mode + "）", flag(ZoneSyncGuard.class, "GRASS") == on
+                && flag(ZoneSyncGuard.class, "REPAIR") == on && MdcSyncZoneLog.ENABLED == on
+                && flag(zombie.mdc.ZoneDeleteGuard.class, "ENABLED") == guard);
 
         grassSync();
         clientReplay();
         loadRepair();
         changeLog();
+        deleteGuard();
         if (on) {
             rateCap();
         } else {
@@ -211,7 +219,8 @@ public final class ZoneSyncTest {
         expect("轉發照原版：bob 收到 alice 的 5 筆、alice 收到 bob 的 1 筆刪除（不存在的 id 不轉發）",
                 bob.wire.size() == 5 && alice.wire.size() == 1 && designationRemove(alice.wire.get(0)) == 900002.0);
 
-        List<String> rows = rows().subList(mark, rows().size());
+        // W67 的首次生效行出現在第一次刪除判定，不屬於 W66 的紀錄
+        List<String> rows = rows().subList(mark, rows().size()).stream().filter(r -> !r.contains("首次生效")).toList();
         if (!on) {
             expect("off：沒有任何紀錄", rows.isEmpty());
             return;
@@ -236,6 +245,95 @@ public final class ZoneSyncTest {
         for (String row : rows) {
             System.out.println("log  " + row.substring(row.indexOf(TAG)));
         }
+    }
+
+    /**
+     * W67：要刪的整組裡有一塊壓到安全屋，就只准那間的屋主、成員或管理員刪；其餘拒絕、不轉發、伺服器不刪，
+     * 整組逐塊補送回刪除者。off／guardoff 那兩輪就是原版結果（任何人都刪得掉、整組刪、轉發給其他人）。
+     */
+    private static void deleteGuard() throws Exception {
+        Role admin = new Role("e2e-admin");
+        admin.addCapability(Capability.CanSetupSafehouses);
+        String[] who = {"Player-A", "Player-B", "Player-C", "Player-D"};
+        // {案例, 刪除者, 要刪的 id, 守門開時應拒絕}
+        Object[][] cases = {
+                {"外人刪安全屋內那塊", 1, 950001.0, true},
+                {"外人刪相連組在安全屋外的那塊", 1, 950002.0, true},
+                {"外人刪安全屋底下地下室那塊", 1, 950003.0, true},
+                {"外人刪不在安全屋的那塊", 1, 950004.0, false},
+                {"成員刪安全屋內那塊", 2, 950001.0, false},
+                {"屋主刪跨到別人安全屋的那組", 0, 950005.0, true},
+                {"管理員刪跨兩間安全屋的那組", 3, 950005.0, false},
+                {"屋主刪地下室那塊", 0, 950003.0, false}};
+        for (Object[] c : cases) {
+            reset();
+            SafeHouse.getSafehouseList().clear();
+            house(5000, 5000, 6, 6, "Player-A", "Player-C");
+            house(7000, 7000, 6, 6, "Player-A");
+            house(7006, 7000, 6, 6, "Player-E");
+            // 950001 在安全屋內、950002 在屋外但和它相連；950003 是同一間底下的地下室；950004 不在任何安全屋；
+            // 950005／950006 相連、各在一間安全屋（7000 那間屬 Player-A，7006 那間屬 Player-E）
+            DesignationZone.load(record(950001, "AnimalZone", "home", 5002, 5002, 0, 4, 4), 249);
+            DesignationZone.load(record(950002, "AnimalZone", "pasture", 5006, 5002, 0, 4, 4), 249);
+            DesignationZone.load(record(950003, "AnimalZone", "basement", 5001, 5001, -1, 2, 2), 249);
+            DesignationZone.load(record(950004, "AnimalZone", "field", 6000, 6000, 0, 4, 4), 249);
+            DesignationZone.load(record(950005, "AnimalZone", "west", 7002, 7002, 0, 4, 4), 249);
+            DesignationZone.load(record(950006, "AnimalZone", "east", 7006, 7002, 0, 4, 4), 249);
+            CaptureConnection[] conns = new CaptureConnection[who.length];
+            for (int i = 0; i < who.length; i++) {
+                conns[i] = conn(who[i], 40L + i, 5003.5f, 5003.5f);
+                connections.add(conns[i]);
+            }
+            conns[3].setRole(admin);
+            int sender = (Integer) c[1];
+            double id = (Double) c[2];
+            Set<Double> group = groupOf(id);
+            Set<Double> before = ids();
+            int mark = rows().size();
+            serverReceive(conns[sender], remove(id));
+            boolean rejected = guard && (Boolean) c[3];
+            Set<Double> gone = new HashSet<>(before);
+            gone.removeAll(ids());
+            int relayed = 0;
+            for (int i = 0; i < conns.length; i++) {
+                if (i != sender) {
+                    relayed += conns[i].wire.size();
+                }
+            }
+            Set<Double> restored = new HashSet<>();
+            for (byte[] packet : conns[sender].wire) {
+                restored.add(designationAdd(packet));
+            }
+            List<String> lines = rows().subList(mark, rows().size());
+            String label = c[0] + "（" + who[sender] + "）";
+            if (rejected) {
+                expect("W67 " + label + "：拒絕，伺服器整組都在、不轉發，整組補送回刪除者", gone.isEmpty() && relayed == 0
+                        && restored.equals(group) && conns[sender].wire.size() == group.size());
+                expect("W67 " + label + "：記一行拒絕移除，帶擋下它的安全屋與刪除者",
+                        lines.stream().anyMatch(l -> l.contains("拒絕移除 zone=" + (long) id) && l.contains(" 安全屋 ")
+                                && l.contains("by=" + who[sender])));
+            } else {
+                expect((guard ? "W67 " : "原版 ") + label + "：照原版刪整組並轉發給其他三人", gone.equals(group)
+                        && relayed == conns.length - 1 && conns[sender].wire.isEmpty());
+                expect((guard ? "W67 " : "原版 ") + label + "：沒有拒絕紀錄", lines.stream().noneMatch(l -> l.contains("拒絕")));
+            }
+        }
+        SafeHouse.getSafehouseList().clear();
+    }
+
+    private static SafeHouse house(int x, int y, int w, int h, String owner, String... members) {
+        SafeHouse house = new SafeHouse(x, y, w, h, owner);
+        house.getPlayers().addAll(Arrays.asList(members));
+        SafeHouse.getSafehouseList().add(house);
+        return house;
+    }
+
+    private static Set<Double> groupOf(double id) {
+        Set<Double> out = new HashSet<>();
+        for (DesignationZoneAnimal zone : DesignationZoneAnimal.getAllDZones(null, DesignationZoneAnimal.getZoneById(id), null)) {
+            out.add(zone.getId());
+        }
+        return out;
     }
 
     /** 每分鐘最多 30 行，超過只計數，下一個時間窗的第一行補上筆數。 */
@@ -282,8 +380,12 @@ public final class ZoneSyncTest {
 
     /** {@code DesignationZone.save} 的格式。 */
     private static ByteBuffer record(double id, String type, String name, int x, int y, int w, int h) {
+        return record(id, type, name, x, y, 0, w, h);
+    }
+
+    private static ByteBuffer record(double id, String type, String name, int x, int y, int z, int w, int h) {
         ByteBuffer bb = ByteBuffer.allocate(512);
-        bb.putDouble(id).putInt(x).putInt(y).putInt(0).putInt(h).putInt(w);
+        bb.putDouble(id).putInt(x).putInt(y).putInt(z).putInt(h).putInt(w);
         GameWindow.WriteString(bb, type);
         GameWindow.WriteString(bb, name);
         bb.putInt(0);

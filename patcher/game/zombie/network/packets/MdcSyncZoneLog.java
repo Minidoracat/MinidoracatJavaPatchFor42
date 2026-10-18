@@ -8,6 +8,7 @@ import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
 import zombie.iso.areas.DesignationZone;
 import zombie.iso.areas.DesignationZoneAnimal;
+import zombie.mdc.ZoneDeleteGuard;
 import zombie.mdc.ZoneSyncGuard;
 import zombie.network.GameServer;
 import zombie.network.PacketTypes;
@@ -21,6 +22,9 @@ import zombie.network.PacketTypes;
  * {@code DesignationZoneAnimal.removeZone} 連帶刪掉的整組（同一個 {@code getAllDZones}）。新增與改名靠
  * {@code parse} 內唯一 {@code DesignationZone.load} 改道到 {@link #load} 分辨：載入前先看這個 id 是否已存在，存在就是改名
  * （原版會覆寫名稱與寬高，這裡先記下舊值）。轉發與刪除照原版，本類只多寫一行 log。
+ *
+ * <p>W67（docs/patches.md 2cc）掛在同一個改道上：刪除轉發前先問 {@code zombie.mdc.ZoneDeleteGuard}，要拒絕時不轉發，
+ * 把封包的 {@code zoneAdded} 設成 true（原版 {@code processServer} 在轉發之後才讀它，true 就不刪），記一行「拒絕移除」。
  *
  * <p>每分鐘最多 {@value #LINES_PER_MINUTE} 行，超過的只計數，下一行補上筆數。kill switch {@code -Dmdc.zoneSyncLog=0|off}
  * （載入補回另由 {@code -Dmdc.zoneLoadRepair} 控制）。
@@ -72,9 +76,27 @@ public final class MdcSyncZoneLog {
 
     /** 取代 {@code SyncZonePacket.processServer} 內唯一的 {@code this.sendToClients(type, connection)}：先記錄，再照原版轉發。 */
     public static void sendToClients(SyncZonePacket packet, PacketTypes.PacketType type, UdpConnection connection) {
+        DesignationZone zone = packet.designationZone;
+        if (zone != null && !packet.zoneAdded) {
+            String blocked = ZoneDeleteGuard.denial(zone, connection);
+            if (blocked != null) {
+                String line = null;
+                try {
+                    line = describe(packet, connection, " 安全屋 " + blocked);
+                } catch (RuntimeException ignored) {
+                    // 紀錄失敗不影響拒絕
+                }
+                packet.zoneAdded = true;
+                ZoneDeleteGuard.reject(zone, connection);
+                if (line != null) {
+                    emit("拒絕" + line, System.currentTimeMillis());
+                }
+                return;
+            }
+        }
         if (ENABLED) {
             try {
-                String line = describe(packet, connection);
+                String line = describe(packet, connection, "");
                 if (line != null) {
                     emit(line, System.currentTimeMillis());
                 }
@@ -85,7 +107,7 @@ public final class MdcSyncZoneLog {
         packet.sendToClients(type, connection);
     }
 
-    static String describe(SyncZonePacket packet, UdpConnection connection) {
+    static String describe(SyncZonePacket packet, UdpConnection connection, String extra) {
         DesignationZone zone = packet.designationZone;
         if (zone == null) {
             return null;
@@ -124,7 +146,7 @@ public final class MdcSyncZoneLog {
                 }
             }
         }
-        s.append(" by=").append(who(connection));
+        s.append(extra).append(" by=").append(who(connection));
         return s.toString();
     }
 

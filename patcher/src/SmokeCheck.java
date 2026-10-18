@@ -3596,6 +3596,74 @@ public final class SmokeCheck {
                                 "(L" + w66Packet + ";L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V"),
                                 Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc) == 1);
 
+        // ---- W67 安全屋內的畜牧區只有成員能刪（docs/patches.md 2cc；掛在 W66 改道的 processServer.sendToClients 上）----
+        // 拒絕靠的是原版 processServer 在轉發之後才讀 zoneAdded：helper 設成 true，原版就不呼叫 removeDesignationZone。
+        String w67Guard = "zombie/mdc/ZoneDeleteGuard";
+        String w67House = "zombie/iso/areas/SafeHouse";
+        int w67ZoneAddedGets = 0, w67GetAt = -1, w67I = 0;
+        boolean w67Ifne = false;
+        for (AbstractInsnNode in : w66Process.instructions) {
+            if (in.getOpcode() < 0) continue;
+            w67I++;
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETFIELD && f.owner.equals(w66Packet) && f.name.equals("zoneAdded")) {
+                w67ZoneAddedGets++;
+                w67GetAt = w67I;
+                w67Ifne = nextReal(in) != null && nextReal(in).getOpcode() == Opcodes.IFNE;
+            }
+        }
+        failed += check("W67 vanilla 前提：processServer 恰一個 zoneAdded 讀取，在 sendToClients 之後、removeDesignationZone 之前，緊接 ifne",
+                w67ZoneAddedGets == 1 && w67Ifne
+                        && firstCallIndex(w66Process, Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc) < w67GetAt
+                        && w67GetAt < firstCallIndex(w66Process, Opcodes.INVOKEVIRTUAL, w66Packet, "removeDesignationZone", "()V"));
+        boolean w67Vanilla;
+        try {
+            MethodNode w67Allowed = methodFromJar(jar, w67House, "playerAllowed", "(Ljava/lang/String;)Z");
+            MethodNode w67SetData = methodFromJar(jar, w66Packet, "setData", "([Ljava/lang/Object;)V");
+            int w67AddedPuts = 0;
+            boolean w67BoolCast = false;
+            for (AbstractInsnNode in : w67SetData.instructions) {
+                if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD && f.name.equals("zoneAdded")) w67AddedPuts++;
+                if (in instanceof TypeInsnNode t && t.getOpcode() == Opcodes.CHECKCAST && t.desc.equals("java/lang/Boolean")) w67BoolCast = true;
+            }
+            methodFromJar(jar, "zombie/network/chat/ChatServer", "sendMessageToServerChat", "(Lzombie/core/raknet/UdpConnection;Ljava/lang/String;)V");
+            w67Vanilla = countExactCalls(w67Allowed, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "contains", "(Ljava/lang/Object;)Z") == 1
+                    && countExactCalls(w67Allowed, Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z") == 1
+                    && w67AddedPuts == 1 && w67BoolCast
+                    && countExactCalls(w66Write, Opcodes.INVOKEVIRTUAL, w66Zone, "save", "(Ljava/nio/ByteBuffer;)V") == 1;
+        } catch (java.util.NoSuchElementException | NullPointerException e) {
+            w67Vanilla = false;
+        }
+        failed += check("W67 vanilla 前提：SafeHouse.playerAllowed(String) 只看成員名單與屋主；setData 以 values[1] 設 zoneAdded、write 用 DesignationZone.save 送整筆；ChatServer.sendMessageToServerChat(連線, 文字) 存在",
+                w67Vanilla);
+        MethodNode w67Send = method(distJava, w66Log, "sendToClients",
+                "(L" + w66Packet + ";L" + w66PacketType + ";Lzombie/core/raknet/UdpConnection;)V");
+        int w67AddedWrites = 0;
+        for (AbstractInsnNode in : w67Send.instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD && f.owner.equals(w66Packet) && f.name.equals("zoneAdded")) w67AddedWrites++;
+        }
+        String w67DenialDesc = "(L" + w66Zone + ";Lzombie/core/raknet/UdpConnection;)Ljava/lang/String;";
+        String w67RejectDesc = "(L" + w66Zone + ";Lzombie/core/raknet/UdpConnection;)V";
+        ClassNode w67GuardClass = classNode(distJava, w67Guard);
+        MethodNode w67Reject = method(distJava, w67Guard, "reject", w67RejectDesc);
+        int w67Caps = 0;
+        for (AbstractInsnNode in : method(distJava, w67Guard, "denial", w67DenialDesc).instructions) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETSTATIC && f.owner.equals("zombie/characters/Capability")
+                    && f.name.equals("CanSetupSafehouses")) w67Caps++;
+        }
+        failed += check("W67 helper 契約：轉發前恰一次 denial、拒絕時恰一次寫 zoneAdded 與一次 reject；reject 逐塊 setData＋sendToClient 補送、一次聊天提示；成員判斷只走 playerAllowed、管理員看 CanSetupSafehouses",
+                countExactCalls(w67Send, Opcodes.INVOKESTATIC, w67Guard, "denial", w67DenialDesc) == 1
+                        && countExactCalls(w67Send, Opcodes.INVOKESTATIC, w67Guard, "reject", w67RejectDesc) == 1
+                        && w67AddedWrites == 1
+                        && firstCallIndex(w67Send, Opcodes.INVOKESTATIC, w67Guard, "denial", w67DenialDesc)
+                                < firstCallIndex(w67Send, Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClients", w66SendDesc)
+                        && countExactCalls(w67Reject, Opcodes.INVOKEVIRTUAL, w66Packet, "setData", "([Ljava/lang/Object;)V") == 1
+                        && countExactCalls(w67Reject, Opcodes.INVOKEVIRTUAL, w66Packet, "sendToClient",
+                                "(L" + w66PacketType + ";Lzombie/network/IConnection;)V") == 1
+                        && countExactCalls(w67Reject, Opcodes.INVOKEVIRTUAL, "zombie/network/chat/ChatServer", "sendMessageToServerChat",
+                                "(Lzombie/core/raknet/UdpConnection;Ljava/lang/String;)V") == 1
+                        && classWideCalls(w67GuardClass, Opcodes.INVOKEVIRTUAL, w67House, "playerAllowed", "(Ljava/lang/String;)Z") == 1
+                        && w67Caps == 1);
+
         if (failed > 0) {
             System.exit(1);
         }
