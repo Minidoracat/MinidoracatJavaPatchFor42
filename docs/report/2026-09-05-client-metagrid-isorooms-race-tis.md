@@ -2,7 +2,7 @@
 
 **狀態**：**已回報 2026-09-05** → https://theindiestone.com/forums/topic/101035-42204-mp-client-kicked-to-main-menu-isometacellisorooms-hashmap-raced-between-main-loop-and-world-streamer-thread-aioobe-in-recalculatebuildingandroomids/ 。本檔與 `forum-html/D-R1.html` 為公開去識別化版本，不宣稱與歷史貼文逐字一致。回報前核對（2026-09-05）`docs/report/` 全部既有草稿與 `patches.md`：`WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs`／`IsoMetaGrid.getRoomByID`／`isoRooms` 零命中；唯一沾邊的 `lambda$updateSquares$0` 是 PSR toxic 案，不同方法不同問題。與 A 組 R3（`tempVector2_2`）、R6（CRC32）同家族：main loop 與 World Streamer 對同一個非執行緒安全物件無鎖存取。這次是 **client** 端。
 
-**後續（2026-10-19）**：42.21.0 仍會發生，玩家 log 的症狀變成同一個方法的 `NullPointerException: Cannot read field "def" because "isoRoom" is null`（`recalculateBuildingAndRoomIDs` line 468，經 `removeFromMetaGrid`）：複製出來的陣列少一筆時尾端是 null，與 AIOOBE 是同一個競態的兩面。client 包 0.2.9 起以 W68 處理（[patches.md 2cd](../patches.md#2cd)）。
+**後續（2026-10-19）**：42.21.0 仍會發生，玩家 log 的症狀變成同一個方法的 `NullPointerException: Cannot read field "def" because "isoRoom" is null`（`recalculateBuildingAndRoomIDs` line 468，經 `removeFromMetaGrid`）：複製出來的陣列少一筆時尾端是 null，與 AIOOBE 是同一個競態的兩面。client 包 0.2.9 起以 W68 處理（[patches.md 2cd](../patches.md#2cd)）。同日已在討論串補充這個症狀、重現數據與 workaround（官方仍未回覆）。
 
 ## R1. client 端 `IsoMetaCell.isoRooms` 跨執行緒競態 → 玩家被踢回主選單
 
