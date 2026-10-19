@@ -309,7 +309,8 @@ Not patches, but part of the same work on a busy server:
 ## Optional tools
 
 - **Main-loop health check** (`scripts/pz-health-watch.py`, Linux/LinuxGSM): asks the local RCON for
-  `players` to prove the main loop responds, and restarts only after three consecutive failures. Test:
+  `players` to prove the main loop responds, and restarts only after three consecutive failures: stop,
+  wait until the old JVM has exited (SIGKILL after 300 s), then start. Test:
   `python3 scripts/test_pz_health_watch.py`.
 - **Native snapshot** (`scripts/native_snapshot.py`): hashes and symbol-diffs the server's native libraries
   after each game update, since TIS updates them independently of the jar.

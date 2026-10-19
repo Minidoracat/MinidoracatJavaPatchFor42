@@ -12,11 +12,18 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import struct
 import subprocess
 import tempfile
 import time
+
+# LinuxGSM stop reports Stopped as soon as tmux is gone while the JVM may still be in its
+# shutdown hook. Starting then runs two pre-touched 40 GB heaps and the container OOM killer
+# kills the old one mid-save (2026-10-20 03:54). Start only after the old process has exited.
+EXIT_WAIT_S = 300
+KILL_WAIT_S = 30
 
 
 class ProbeConfigError(Exception):
@@ -99,6 +106,29 @@ def identity(root):
     return matches[0] if matches else None
 
 
+def alive(expected):
+    """Same pid and start ticks, not yet exited (zombies count as exited)."""
+    try:
+        fields = (Path("/proc") / str(expected[0]) / "stat").read_text().rsplit(")", 1)[1].split()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return fields[19] == expected[1] and fields[0] not in ("Z", "X")
+
+
+def wait_exit(expected, seconds):
+    for _ in range(seconds):
+        if not alive(expected):
+            return True
+        time.sleep(1)
+    return not alive(expected)
+
+
+def linuxgsm(root, command, limit):
+    return subprocess.run(
+        ["timeout", "--kill-after=15s", limit, "runuser", "-u", "pzserver", "--",
+         str(root / "pzserver"), command], cwd=root, check=False).returncode
+
+
 def eligible(root, expected):
     locks = root / "lgsm/lock"
     if identity(root) != expected or expected is None:
@@ -170,13 +200,21 @@ def run(args):
             with contextlib.suppress(OSError):
                 os.unlink(name)
             raise
-        log(f"RECOVER: pid={expected[0]} failed three main-thread probes; LinuxGSM restart")
-        result = subprocess.run(
-            ["timeout", "--kill-after=15s", "600s", "runuser", "-u", "pzserver", "--",
-             str(root / "pzserver"), "restart"], cwd=root, check=False)
-        if result.returncode:
-            log(f"RECOVERY_FAILED: LinuxGSM exit={result.returncode}")
-            raise RuntimeError(f"LinuxGSM recovery failed: exit={result.returncode}; inspect before retry")
+        log(f"RECOVER: pid={expected[0]} failed three main-thread probes; LinuxGSM stop, wait for exit, start")
+        code = linuxgsm(root, "stop", "300s")
+        if code:
+            log(f"STOP_EXIT: LinuxGSM exit={code}; waiting for pid={expected[0]} anyway")
+        if not wait_exit(expected, EXIT_WAIT_S):
+            if alive(expected):
+                os.kill(expected[0], signal.SIGKILL)
+                log(f"KILLED: pid={expected[0]} still running {EXIT_WAIT_S}s after stop")
+            if not wait_exit(expected, KILL_WAIT_S):
+                log(f"RECOVERY_FAILED: pid={expected[0]} still running after SIGKILL; not starting")
+                raise RuntimeError("old game process still alive; refusing start")
+        code = linuxgsm(root, "start", "600s")
+        if code:
+            log(f"RECOVERY_FAILED: LinuxGSM start exit={code}")
+            raise RuntimeError(f"LinuxGSM start failed: exit={code}; inspect before retry")
         log("RESTART_DISPATCHED: game readiness is not yet confirmed")
 
 

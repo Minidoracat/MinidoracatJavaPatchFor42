@@ -94,7 +94,8 @@ class HealthTests(unittest.TestCase):
             args = argparse.Namespace(root=root, update_lock=root / "update", flow_lock=root / "flow", check_only=False)
             current = (123, "456")
             with patch.object(health, "identity", return_value=current), patch.object(health, "probe") as probe, \
-                 patch.object(health.time, "sleep") as sleep, patch.object(health.subprocess, "run") as restart:
+                 patch.object(health.time, "sleep") as sleep, patch.object(health.subprocess, "run") as restart, \
+                 patch.object(health, "alive", return_value=False):
                 restart.return_value.returncode = 0
                 health.run(args)
                 restart.assert_not_called()
@@ -128,11 +129,59 @@ class HealthTests(unittest.TestCase):
                     health.run(args)
                 restart.assert_not_called()
                 health.run(args)
-                self.assertEqual(restart.call_count, 1)
-                self.assertEqual(restart.call_args.args[0][-1], "restart")
+                self.assertEqual([call.args[0][-1] for call in restart.call_args_list], ["stop", "start"])
                 health.run(args)
-                self.assertEqual(restart.call_count, 1, "cooldown must prevent repeated recovery")
+                self.assertEqual(restart.call_count, 2, "cooldown must prevent repeated recovery")
                 self.assertTrue((locks / "pz-health-recovery.json").is_file())
+
+    def test_start_runs_only_after_the_old_process_exits(self):
+        # 2026-10-20 03:54: LinuxGSM stop reported Stopped once tmux was gone while the old JVM was still in
+        # its shutdown hook; restart started a second pre-touched 40 GB heap and the container OOM killer
+        # killed the old JVM mid-save.
+        cases = {"exits during the wait": (5, False, ["stop", "start"]),
+                 "exits only after SIGKILL": (None, True, ["stop", "kill", "start"]),
+                 "survives SIGKILL": (None, False, ["stop", "kill"])}
+        for name, (exits_after, dies_on_kill, expected) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                locks = root / "lgsm/lock"
+                locks.mkdir(parents=True)
+                (locks / "pzserver-started.lock").write_text(str(int(time.time()) - 1200))
+                args = argparse.Namespace(root=root, update_lock=root / "update", flow_lock=root / "flow", check_only=False)
+                events, proc = [], {"polls": 0, "killed": False}
+
+                def is_alive(expected_id):
+                    self.assertEqual(expected_id, (123, "456"))
+                    if proc["killed"] and dies_on_kill:
+                        return False
+                    if exits_after is not None and proc["polls"] >= exits_after:
+                        return False
+                    proc["polls"] += 1
+                    return True
+
+                def linuxgsm(argv, **kwargs):
+                    if argv[-1] == "start":
+                        self.assertFalse(is_alive((123, "456")), "start while the old JVM is still alive")
+                    events.append(argv[-1])
+                    return argparse.Namespace(returncode=0)
+
+                def kill(pid, sig):
+                    self.assertEqual((pid, sig), (123, health.signal.SIGKILL))
+                    events.append("kill")
+                    proc["killed"] = True
+
+                with patch.object(health, "identity", return_value=(123, "456")), \
+                     patch.object(health, "probe", side_effect=TimeoutError()), \
+                     patch.object(health.time, "sleep"), \
+                     patch.object(health, "alive", side_effect=is_alive), \
+                     patch.object(health.subprocess, "run", side_effect=linuxgsm), \
+                     patch.object(health.os, "kill", side_effect=kill):
+                    if "start" in expected:
+                        health.run(args)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            health.run(args)
+                self.assertEqual(events, expected)
 
     def test_planted_symlink_on_the_old_temp_name_cannot_redirect_the_state_write(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -149,10 +198,11 @@ class HealthTests(unittest.TestCase):
             with patch.object(health, "identity", return_value=(123, "456")), \
                  patch.object(health, "probe", side_effect=TimeoutError()), \
                  patch.object(health.time, "sleep"), \
+                 patch.object(health, "alive", return_value=False), \
                  patch.object(health.subprocess, "run") as restart:
                 restart.return_value.returncode = 0
                 health.run(args)
-                self.assertEqual(restart.call_count, 1)
+                self.assertEqual(restart.call_count, 2)
             self.assertEqual(victim.read_text(), "untouched")
             after = victim.stat()
             self.assertEqual((after.st_mode, after.st_uid, after.st_gid),
@@ -183,9 +233,10 @@ class HealthTests(unittest.TestCase):
             with patch.object(health, "identity", return_value=(123, "456")), \
                  patch.object(health, "probe", side_effect=TimeoutError()), \
                  patch.object(health.time, "sleep"), \
+                 patch.object(health, "alive", return_value=False), \
                  patch.object(health.subprocess, "run", side_effect=linuxgsm_permission_gate) as restart:
                 health.run(args)
-                self.assertEqual(restart.call_count, 1)
+                self.assertEqual(restart.call_count, 2)
 
 
 if __name__ == "__main__":

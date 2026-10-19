@@ -265,7 +265,7 @@ bash uninstall.sh  # 下次重啟回到原版
 
 ## 選用工具
 
-- **主迴圈健康檢查**（`scripts/pz-health-watch.py`，Linux／LinuxGSM）：透過本機 RCON 的 `players` 確認主迴圈確實回應，連續三次失敗才重啟。測試：`python3 scripts/test_pz_health_watch.py`。
+- **主迴圈健康檢查**（`scripts/pz-health-watch.py`，Linux／LinuxGSM）：透過本機 RCON 的 `players` 確認主迴圈確實回應，連續三次失敗才重啟：先停服，等舊 JVM 真的結束（300 秒還在就 SIGKILL）才開服。測試：`python3 scripts/test_pz_health_watch.py`。
 - **Native 快照**（`scripts/native_snapshot.py`）：每次遊戲更新後對伺服器的 native 函式庫做雜湊與符號差異比對；官方會單獨更新這些函式庫，jar 不變不代表它們沒變。
 
 ## 專案結構
