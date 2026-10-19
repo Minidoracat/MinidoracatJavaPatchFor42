@@ -3664,6 +3664,44 @@ public final class SmokeCheck {
                         && classWideCalls(w67GuardClass, Opcodes.INVOKEVIRTUAL, w67House, "playerAllowed", "(Ljava/lang/String;)Z") == 1
                         && w67Caps == 1);
 
+        // ---- W69 實體 ID 撞號時照常移除（docs/patches.md 2ce；掛在 W35 的 GameEntity ClassPatch）----
+        // 存在理由：getEntityNetID 地板一律算序號 0；伺服器 UnregisterEntity 拿到別的實體就丟 Stored entity mismatch、
+        // ID 表沒有它就直接 return（不離開 engine）。TIS 修掉任一條時紅＝重估撤刀。
+        String w69Mgr = "zombie/entity/GameEntityManager";
+        String w69Ge = "zombie/entity/GameEntity";
+        String w69Guard = "zombie/entity/MdcEntityIdGuard";
+        String w69Desc = "(L" + w69Ge + ";Z)V";
+        MethodNode w69Unreg = methodFromJar(jar, w69Mgr, "UnregisterEntity", w69Desc);
+        int w69Mismatch = 0;
+        boolean w69Throws = false;
+        for (AbstractInsnNode in : w69Unreg.instructions) {
+            if (in instanceof LdcInsnNode l && "Stored entity mismatch".equals(l.cst)) {
+                w69Mismatch++;
+                AbstractInsnNode w69Next = nextReal(nextReal(in));
+                w69Throws = isCall(nextReal(in), Opcodes.INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V")
+                        && w69Next != null && w69Next.getOpcode() == Opcodes.ATHROW;
+            }
+        }
+        failed += check("W69 vanilla 前提：UnregisterEntity(GameEntity,Z) 恰一處 new RuntimeException(\"Stored entity mismatch\") 並 athrow，兩條分支各一次 LongMap.remove",
+                w69Mismatch == 1 && w69Throws
+                        && countExactCalls(w69Unreg, Opcodes.INVOKEVIRTUAL, "zombie/entity/util/LongMap", "remove", "(J)Ljava/lang/Object;") == 2);
+        MethodNode w69NetId = methodFromJar(jar, "zombie/iso/IsoObject", "getEntityNetID", "()J");
+        failed += check("W69 vanilla 前提：IsoObject.getEntityNetID 以 isFloor 決定序號（地板一律 0）並經 checkEntityIDChange 換號",
+                countExactCalls(w69NetId, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "isFloor", "()Z") == 1
+                        && countExactCalls(w69NetId, Opcodes.INVOKESTATIC, w69Mgr, "checkEntityIDChange", "(L" + w69Ge + ";JJ)V") == 1);
+        List<String> w69Callers = jarWideCallers(jar, Opcodes.INVOKESTATIC, w69Mgr, "UnregisterEntity", w69Desc);
+        failed += check("W69 呼叫點清冊：全 jar 對 UnregisterEntity(GameEntity,Z) 只有 GameEntity.removeFromWorld(Z) 與單參數多載各 1（實際 " + w69Callers + "）",
+                w69Callers.equals(List.of(w69Ge + ".removeFromWorld(Z)V", w69Mgr + ".UnregisterEntity(L" + w69Ge + ";)V")));
+        failed += check("W69 手術後：removeFromWorld(Z) 的 UnregisterEntity 同形改道 MdcEntityIdGuard.unregister，其餘指令與 frames 保留",
+                methodText(methodFromJar(jar, w69Ge, "removeFromWorld", "(Z)V"))
+                        .replace("INVOKESTATIC " + w69Mgr + ".UnregisterEntity " + w69Desc, "INVOKESTATIC " + w69Guard + ".unregister " + w69Desc)
+                        .equals(methodText(method(distJava, w69Ge, "removeFromWorld", "(Z)V"))));
+        MethodNode w69Helper = method(distJava, w69Guard, "unregister", w69Desc);
+        failed += check("W69 helper 契約：unregister 內呼叫原版 UnregisterEntity(GameEntity,Z)（直通與修補兩條路），不呼叫單參數多載、不自己丟例外",
+                countExactCalls(w69Helper, Opcodes.INVOKESTATIC, w69Mgr, "UnregisterEntity", w69Desc) == 3
+                        && countExactCalls(w69Helper, Opcodes.INVOKESTATIC, w69Mgr, "UnregisterEntity", "(L" + w69Ge + ";)V") == 0
+                        && countNew(w69Helper, "java/lang/RuntimeException") == 0);
+
         if (failed > 0) {
             System.exit(1);
         }

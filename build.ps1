@@ -127,6 +127,7 @@ $helperEntries = @(
     'zombie/mdc/ZoneSyncGuard.class',
     'zombie/mdc/ZoneDeleteGuard.class',
     'zombie/network/packets/MdcSyncZoneLog.class',
+    'zombie/entity/MdcEntityIdGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -609,6 +610,12 @@ java -Xverify:all "-Dmdc.zoneDeleteGuard=off" -cp "$R\work\out;$R\dist\java;$R\w
 Assert-Ok "ZoneSyncTest（guardoff，只關 W67：任何人都刪得掉）"
 java -Xverify:all "-Dmdc.zoneSyncLog=off" "-Dmdc.zoneGrassSync=0" "-Dmdc.zoneLoadRepair=OFF" "-Dmdc.zoneDeleteGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest off
 Assert-Ok "ZoneSyncTest（off，原版負對照）"
+
+Write-Host "[9zl/10] 實體 ID 撞號時照常移除（W69）：真 removeFromWorld(Z)＋真 UnregisterEntity＋真 Engine，殘件排第 0 個、後蓋地板同 ID 時不丟例外、殘件離開 engine、地板仍在 ID 表（原版丟 Stored entity mismatch、殘件留在 engine 負對照），ID 未登記也離開 engine，正常移除兩邊相同..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcEntityIdGuardTest on
+Assert-Ok "MdcEntityIdGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.entityIdGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcEntityIdGuardTest off
+Assert-Ok "MdcEntityIdGuardTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

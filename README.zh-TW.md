@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、187 個命中點、72 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、188 個命中點、73 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -84,6 +84,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W56 補算等畜牧區就緒（[2bt](docs/patches.md#2bt)） | chunk 載入時就補算離線時間，這時槽還沒登記回畜牧區（卸載時移除，只有整區載入的 `check()` 放回），補算吃不到槽；原版靠畜牧區整區載入時再補一次（重複補算）才餵到，W42 拿掉重複後，玩家回來時家畜就像離線期間沒吃沒喝。 | 載入時先凍結、不補，等相連畜牧區的 chunk 都載入、重建槽與地上食物後再補（通常同一幀，最多等 10 秒）；槽一進世界就登記回畜牧區；延後中被卸載、抱起或換成新物件都照常接手。 | 未回報 |
 | W33 分娩品種守衛（[2av](docs/patches.md#2av)） | 查不到品種或幼崽定義的分娩仍會呼叫 `IsoAnimal` 建構子。 | 略過那一胎並記錄。 | 未回報 |
 | W43／W44 地面物品過期與交易失敗（[2bg](docs/patches.md#2bg)） | client 每次載入 chunk 都會清掉過期的地面物品，伺服器在 chunk 常駐期間卻從不清；兩邊的物品序號錯位，出現撿不起來的幽靈物品，而撿取失敗又不回報，讀條要空等時長再加 10 秒。 | 伺服器送出 chunk 前以相同規則清掉過期地面物品；交易失敗立即回報拒絕。 | 未回報 |
+| W69 實體 ID 撞號時的移除（[2ce](docs/patches.md#2ce)） | `IsoObject.getEntityNetID` 以座標加上物件在格子清單的序號當 ID，但地板一律算序號 0。玩家後蓋的地板排在牆或家具後面時，排第 0 個的物件就跟地板同 ID。伺服器移除它時 `UnregisterEntity` 丟 `Stored entity mismatch`：移除封包已經送給 client，伺服器卻留著物件，重登後變成拆不掉、擋住放置的殘件（多格家具只剩一格時，撿起、拆解、大錘都拆不掉）；chunk 卸載時整個 cell 的卸載中斷。本服 8 天 248 次，其中 19 次在移除時。 | ID 表那一格存的是別的實體時，先放進要移除的實體，讓原版照常移除，再把原本的實體放回；ID 表沒有它的實體也會離開 engine。ID 算法不動（client 也用同一套）。 | 未回報 |
 
 ### 效能：主執行緒耗時
 

@@ -4141,6 +4141,93 @@ most 20 lines per start; in vanilla, these are the moments when both threads tou
 **Retirement**: once TIS fixes it (the SmokeCheck reasons to exist turn red), remove this patch from `PatchConfig.client()` and delete the helper
 and its test.
 
+<a id="2ce"></a>
+## 2ce. Entity ID collision on removal (W69, server, default on)
+
+**Symptom** (player report 2026-10-19): after picking up a Large Drying Rack, one tile of it stayed behind. It could be seen and selected,
+but picking it up, disassembling it or using a sledgehammer did nothing, nothing else could be placed on that tile, and it was still there after
+a relog. At the moment of the pickup the server console had:
+
+```text
+ERROR: Entity ... GameEntityManager.checkEntityIDChange> idToEntityMap(<id>)=WoodFloorLvl3:floors_interior_tilesandwood_01_45:..., expected null for null:crafted_05_84:...
+java.lang.RuntimeException: Stored entity mismatch
+    GameEntityManager.UnregisterEntity ← GameEntity.removeFromWorld ← IsoObject.removeFromWorld ← IsoThumpable.removeFromWorld
+    ← RemoveItemFromSquarePacket.removeItemFromMap ← GameServer.RemoveItemFromMap ← IsoGridSquare.transmitRemoveItemFromSquare ← Lua pickUpMoveableInternal
+```
+
+**Root cause** (javap against the 42.21.0 jar `e1a69eb7`):
+- `IsoObject.getEntityNetID` builds the ID from x, y, z and the object's index in the square's object list (`x + y<<16 + z<<32 + index<<40`),
+  but uses index 0 whenever `isFloor()` is true. A player-built floor (`WoodFloorLvl3` and other build entities) added to a square that already
+  holds a wall or furniture goes to the end of the list, so the entity at index 0 computes the same ID as the floor.
+- Whichever registers first owns that slot of `GameEntityManager.idToEntityMap`: `RegisterEntity` skips an occupied slot, and when an object's
+  index changes, `checkEntityIDChange` removes the old ID and, if the new one is taken, only logs `expected null for` without storing the entity.
+  `addedToEntityManager` stays true.
+- When the server removes that entity, `UnregisterEntity(GameEntity, boolean)` first does `remove(ID)` (taking out the floor) and throws
+  `Stored entity mismatch` because it is not the same entity; if the slot is empty it just returns. Neither path takes the entity out of the
+  engine or clears `addedToEntityManager`.
+- The caller `RemoveItemFromSquarePacket.removeItemFromMap` calls `removeFromSquare` only after `removeFromWorld`, and
+  `GameServer.RemoveItemFromMap` has already sent the removal packet to nearby clients. Clients drop the object, the server keeps it, and it
+  reappears when the player relogs and the square loads again. When this interrupts the multi-tile loop in `transmitRemoveItemFromSquare`
+  and leaves one tile of a piece of furniture, picking up, disassembling and sledgehammering all require the whole set
+  (`IsoObjectUtils.getSpriteGridMultiTileObjects`), so the tile can never be removed and blocks placement on its square.
+- On chunk unload (`ServerMap$ServerCell.Unload` → `IsoChunk.removeFromWorld`) the same exception aborts the whole cell unload; `ServerMap.postupdate`
+  catches it and the unload is retried on the next tick. The floor's slot in the ID table is already gone, so the floor stays in the engine when
+  it is removed later (inferred).
+- Production console 10-11 to 10-19: 248 `Stored entity mismatch`, 19 of them on removals (pickup, disassembly, sledgehammer, removing the
+  previous stage when a build is upgraded) and the rest on chunk unload. Most collisions are `WoodFloorLvl3` or `GravelFloor` with walls, wall
+  frames and fences.
+
+**Surgery**: the only `GameEntityManager.UnregisterEntity(GameEntity, boolean)` in `GameEntity.removeFromWorld(Z)` (javap offset 13) is redirected
+to `zombie/entity/MdcEntityIdGuard.unregister`, on W35's `GameEntity` ClassPatch (one ClassPatch per class). The helper lives in the same package so
+it can call the package-private `UnregisterEntity` and read `addedToEntityManager`; the ID table is private and is read once by reflection at
+startup (if that fails it counts an anomaly and always calls vanilla). It only acts on the server, for registered entities:
+- The slot holds this entity: calls vanilla directly.
+- The slot holds another entity (collision) or nothing (unregistered): puts this entity in the slot, calls vanilla to remove it as usual (it
+  leaves the engine and is moved to a MetaEntity when needed), then puts the previous entity back. It is put back only if the slot is still
+  empty; an offloaded MetaEntity keeps the same ID, and when it holds the slot it wins and the log shows `holderBack=0`.
+- The ID scheme is unchanged: clients compute IDs the same way, and changing only the server would make the two sides disagree. The vanilla client
+  path never throws.
+
+Console (at most 20 lines a minute; the rest are only counted and a line with the count is written before the next minute's first line;
+a heartbeat every 30 minutes):
+
+```text
+[MinidoracatJavaPatch][EntityIdGuard] 撞號仍照常移除 id=<id> at=<x>,<y>,<z>#<index> entity=<name:sprite> holder=<name:sprite> holderBack=1 offload=0
+[MinidoracatJavaPatch][EntityIdGuard] ID 未登記仍照常移除 id=<id> at=<x>,<y>,<z>#<index> entity=<name:sprite> offload=1
+[MinidoracatJavaPatch][EntityIdGuard] 首次生效（-Dmdc.entityIdGuard=0|off 回原版）calls=… collisions=… missing=… notRestored=… anomalies=…
+```
+
+(`撞號仍照常移除` = removed despite an ID collision; `ID 未登記仍照常移除` = removed although missing from the ID table; `首次生效` = first activation.)
+
+**Kill switch**: `-Dmdc.entityIdGuard=0|off`, restart required.
+
+**Deployment**: the manifest adds `zombie/entity/MdcEntityIdGuard.class` and replaces `GameEntity.class` and `PatchInfo.class` (142 → 143 classes).
+After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 143`; the first-activation line appears at the first object removal.
+
+**Not handled**:
+- The ID collision itself: the two entities still share one network ID, and entity packets addressed by that ID only reach the one in the ID
+  table. Fixing that means changing the ID scheme on clients too.
+- Leftovers already on the server: this patch only lets later removals complete. A single tile left from multi-tile furniture cannot be removed
+  in normal play; an admin can remove it with the debug menu Brush Tool → Destroy tile (`SledgehammerDestroyPacket` deletes by index and does
+  not check the whole set) or it can be removed on the server.
+- The single-argument `UnregisterEntity` called from `GameEntity.reset()` and `onUnEquip()`: none of the production exceptions came through
+  these paths, so they are unchanged.
+
+**Checks**:
+- SmokeCheck: reasons to exist — `UnregisterEntity(GameEntity,Z)` has exactly one `new RuntimeException("Stored entity mismatch")` followed by
+  `athrow` and one `LongMap.remove` on each branch; `IsoObject.getEntityNetID` picks the index with `isFloor` and changes IDs through
+  `checkEntityIDChange` (either turning red means TIS changed it; reassess the patch). Call-site census — the only callers of
+  `UnregisterEntity(GameEntity,Z)` in the jar are `GameEntity.removeFromWorld(Z)` and the single-argument overload. After surgery,
+  `removeFromWorld(Z)` is identical to vanilla (frames included) except the redirected call. The helper calls vanilla
+  `UnregisterEntity(GameEntity,Z)` in three places (two pass-through, one fix), never the single-argument overload, and throws nothing itself.
+- `MdcEntityIdGuardTest` (`build.ps1` [9zl/10], one JVM each for on and off): runs the patched `removeFromWorld(Z)` from dist with the real
+  `UnregisterEntity`, `Engine` and `getEntityNetID`. Collision (leftover at index 0, player-built floor at index 1, the ID table holds the floor):
+  on does not throw, the leftover leaves the engine and is unregistered, the ID table still holds the floor, and removing the floor afterwards
+  works; off (vanilla control) throws `Stored entity mismatch`, the leftover stays in the engine, the floor's slot is gone, and a second removal
+  still leaves the leftover in the engine. Unregistered: on leaves the engine, vanilla stays. Normal removal is the same on both.
+
+**Retirement**: reassess when TIS fixes the ID scheme or how `UnregisterEntity` handles a mismatch (the SmokeCheck reasons to exist turn red).
+
 ---
 
 <a id="3"></a>

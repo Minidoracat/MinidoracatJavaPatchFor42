@@ -4047,6 +4047,54 @@ helper 照原版呼叫原方法一次，回傳值與例外不變。重建期間�
 
 **退場**：官方修好後（SmokeCheck 的存在理由轉紅）從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 
+<a id="2ce"></a>
+## 2ce. 實體 ID 撞號時照常移除（W69，server，預設 on）
+
+**症狀**（2026-10-19 玩家回報）：撿起大型晾曬架後，原地留下一格看得到、選得到，但撿起、拆解、大錘都沒反應的殘件，那一格也放不了別的東西，重登後還在。伺服器 console 在撿起那一刻有：
+
+```text
+ERROR: Entity ... GameEntityManager.checkEntityIDChange> idToEntityMap(<id>)=WoodFloorLvl3:floors_interior_tilesandwood_01_45:..., expected null for null:crafted_05_84:...
+java.lang.RuntimeException: Stored entity mismatch
+    GameEntityManager.UnregisterEntity ← GameEntity.removeFromWorld ← IsoObject.removeFromWorld ← IsoThumpable.removeFromWorld
+    ← RemoveItemFromSquarePacket.removeItemFromMap ← GameServer.RemoveItemFromMap ← IsoGridSquare.transmitRemoveItemFromSquare ← Lua pickUpMoveableInternal
+```
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `IsoObject.getEntityNetID` 以 x、y、z 與物件在格子清單的序號組成 ID（`x + y<<16 + z<<32 + 序號<<40`），但 `isFloor()` 為真時序號一律算 0。玩家後蓋的地板（`WoodFloorLvl3` 等建造實體）在格子裡已有牆或家具時會加在清單後面，這時排第 0 個的實體算出來的 ID 與地板相同。
+- 先登記的那個佔住 `GameEntityManager.idToEntityMap` 的這一格：`RegisterEntity` 遇到已有就不登記；物件換序號時 `checkEntityIDChange` 拿掉舊 ID，新 ID 被佔就只記一行 `expected null for`、不放進去，`addedToEntityManager` 仍是 true。
+- 伺服器移除它時，`UnregisterEntity(GameEntity, boolean)` 先 `remove(ID)`（拿走的是地板），發現不是自己就丟 `Stored entity mismatch`；ID 表沒有它就直接 return。兩條路都沒有把它移出 engine，`addedToEntityManager` 也不清。
+- 呼叫端 `RemoveItemFromSquarePacket.removeItemFromMap` 在 `removeFromWorld` 之後才 `removeFromSquare`，而 `GameServer.RemoveItemFromMap` 在這之前就把移除封包送給附近客戶端：客戶端刪了，伺服器留著，玩家重登、重新載入那一格時物件又出現。多格家具在 `transmitRemoveItemFromSquare` 的整組迴圈中斷而只剩一格時，撿起、拆解、大錘都要求整組都在（`IsoObjectUtils.getSpriteGridMultiTileObjects`），永遠拆不掉，也擋住那一格的放置。
+- chunk 卸載時（`ServerMap$ServerCell.Unload` → `IsoChunk.removeFromWorld`）同一個例外中斷整個 cell 的卸載，由 `ServerMap.postupdate` 接住，下一個 tick 重試；地板在 ID 表的登記已被拿掉，之後它移除時同樣留在 engine（推論）。
+- 正式服 10-11～10-19 的 console：`Stored entity mismatch` 248 次，19 次在移除時（撿起、拆解、大錘、建造升級時移除前一階段），其餘在 chunk 卸載。撞號的多是 `WoodFloorLvl3`、`GravelFloor` 與牆、牆框、圍欄。
+
+**手術**：`GameEntity.removeFromWorld(Z)` 唯一的 `GameEntityManager.UnregisterEntity(GameEntity, boolean)`（javap offset 13）改道 `zombie/entity/MdcEntityIdGuard.unregister`，掛在 W35 的 `GameEntity` ClassPatch（同一 class 只能有一個 ClassPatch）。helper 放在同一個 package，讀得到 package-private 的 `UnregisterEntity` 與 `addedToEntityManager`；ID 表是 private，開機時以反射取一次，取不到就記 anomaly、一律直通原版。只在伺服器、實體已登記時介入：
+- ID 表那一格就是自己：直接呼叫原版。
+- 存的是別的實體（撞號）或空的（未登記）：先把自己放進那一格，呼叫原版照常移除（離開 engine，需要時轉存 MetaEntity），再把原本的實體放回。那一格仍空著才放回；轉存的 MetaEntity 沿用同一個 ID，它佔著時以它為準，記 `holderBack=0`。
+- ID 算法不動：客戶端用同一套算法算 ID，只改伺服器兩邊會對不上。原版客戶端那條路本來就不丟例外。
+
+console（每分鐘最多 20 行，超過的只計數，下一分鐘第一次記錄前補一行筆數；心跳每 30 分鐘一行）：
+
+```text
+[MinidoracatJavaPatch][EntityIdGuard] 撞號仍照常移除 id=<id> at=<x>,<y>,<z>#<序號> entity=<名稱:sprite> holder=<名稱:sprite> holderBack=1 offload=0
+[MinidoracatJavaPatch][EntityIdGuard] ID 未登記仍照常移除 id=<id> at=<x>,<y>,<z>#<序號> entity=<名稱:sprite> offload=1
+[MinidoracatJavaPatch][EntityIdGuard] 首次生效（-Dmdc.entityIdGuard=0|off 回原版）calls=… collisions=… missing=… notRestored=… anomalies=…
+```
+
+**kill switch**：`-Dmdc.entityIdGuard=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/entity/MdcEntityIdGuard.class`，`GameEntity.class` 與 `PatchInfo.class` 換新（142 → 143 個 class）。上線後確認橫幅指紋、`[mdc-javagate] OK: 143`，第一次有物件移除時出現首次生效行。
+
+**不處理**：
+- ID 撞號本身：兩個實體仍共用一個網路 ID，以這個 ID 定址的實體封包只找得到 ID 表裡的那個。要根治得改 ID 算法，客戶端也要一起改。
+- 已經留在伺服器上的殘件：本刀只讓之後的移除照常完成。多格家具只剩一格的，原版玩法拆不掉，要由管理員用除錯選單 Brush Tool → Destroy tile（`SledgehammerDestroyPacket` 按序號直接刪，不檢查整組）或在伺服器端清除。
+- `GameEntity.reset()` 與 `onUnEquip()` 呼叫的單參數 `UnregisterEntity`：正式服的例外都不在這兩條路上，不改。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`UnregisterEntity(GameEntity,Z)` 恰一處 `new RuntimeException("Stored entity mismatch")` 並 `athrow`，兩條分支各一次 `LongMap.remove`；`IsoObject.getEntityNetID` 以 `isFloor` 決定序號並經 `checkEntityIDChange` 換號（TIS 修掉任一條就轉紅，重估撤刀）。呼叫點清冊——全 jar 對 `UnregisterEntity(GameEntity,Z)` 只有 `GameEntity.removeFromWorld(Z)` 與單參數多載各一。手術後 `removeFromWorld(Z)` 除了被改道的呼叫，文字（含 frames）與原版相同。helper 呼叫原版 `UnregisterEntity(GameEntity,Z)` 三處（兩條直通、一條修補），不呼叫單參數多載、不自己丟例外。
+- `MdcEntityIdGuardTest`（`build.ps1` [9zl/10]，on、off 兩個 JVM）：走 dist 內已 patch 的 `removeFromWorld(Z)` 與真的 `UnregisterEntity`、`Engine`、`getEntityNetID`。撞號（殘件排第 0 個、後蓋的地板排第 1 個，ID 表存的是地板）：on 不丟例外，殘件離開 engine 並取消登記，ID 表仍是地板，之後移除地板照常；off（原版負對照）丟 `Stored entity mismatch`，殘件仍在 engine，地板的登記被拿掉，再移除一次殘件也留在 engine。ID 未登記：on 離開 engine，原版留在 engine。正常移除兩邊相同。
+
+**退場**：官方修好 ID 算法或 `UnregisterEntity` 的處理（SmokeCheck 存在理由轉紅）時重估。
+
 ---
 
 <a id="3"></a>

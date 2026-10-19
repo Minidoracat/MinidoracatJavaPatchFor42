@@ -1262,6 +1262,15 @@ public final class PatchConfig {
         Patcher.MethodOps recvSync = gameEntity.method("receiveSyncEntity", recvDesc);
         recvSync.tailCall = new Patcher.TailCall(upi, "afterReceive", "(Lzombie/entity/GameEntity;)V");
         recvSync.expectedHits = 2;    // 兩個 RETURN
+        // W69：實體 ID 撞號時照常移除（docs/patches.md 2ce）。原版 IsoObject.getEntityNetID 地板一律算序號 0，
+        // 地板不在清單第 0 個時，第 0 個的實體與地板同 ID；伺服器移除它時 UnregisterEntity 丟 Stored entity mismatch，
+        // 物件留在伺服器（客戶端已收到移除封包）、chunk 卸載中斷。removeFromWorld(Z) 唯一 UnregisterEntity(GameEntity,Z)
+        // （javap offset 13）改道 MdcEntityIdGuard.unregister：該 ID 存的不是自己時先放回自己、原版照常移除、再歸還原持有者。
+        // 掛在 W35 的 GameEntity ClassPatch（同一 class 只能有一個 ClassPatch）。-Dmdc.entityIdGuard=0|off。
+        Patcher.MethodOps geRemove = gameEntity.method("removeFromWorld", "(Z)V");
+        geRemove.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/entity/GameEntityManager",
+                "UnregisterEntity", "(Lzombie/entity/GameEntity;Z)V", "zombie/entity/MdcEntityIdGuard", "unregister"));
+        geRemove.expectedHits = 1;
         patches.add(gameEntity);
         Patcher.ClassPatch usingSystem = new Patcher.ClassPatch("zombie/entity/UsingPlayerUpdateSystem");
         Patcher.MethodOps usingUpdate = usingSystem.method("update", "()V");
