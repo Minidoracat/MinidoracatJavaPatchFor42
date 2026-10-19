@@ -491,7 +491,7 @@ public final class PatchConfig {
         // 9/26 20:06 session 3,002 行（678 個不同 id）、佔 log 5.7%。方法內唯一 DebugLog.log(String)。
         Patcher.MethodOps chunkUnload = isoChunk.method("removeFromWorld", "()V");
         chunkUnload.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, DL, "log", LOG_STR, "log"));
-        chunkUnload.expectedHits = 1;
+        chunkUnload.expectedHits = 1;   // W37 段另加兩個 IsoMovingObject.removeFromWorld
         patches.add(isoChunk);
 
         // ---- W7 朝向暫存執行緒隔離（2026-08-13 Player-A 雞舍實案；docs/patches.md 2s）----
@@ -1108,6 +1108,19 @@ public final class PatchConfig {
                 "zombie/characters/animals/AnimalCell", "save", "()V", cellSave, "save"));
         workerSave.expectedHits = 1;
         patches.add(animalWorker);
+        // (4) 放下動物（2026-10-20）：AddWorldInventoryItem 動物分支在放下的格子建新動物，水格上建構失敗後原版照樣
+        //     setMovingSquareNow（offset 240）把它放回格子、sendToRelative（offset 418，DropAnimal）告訴附近客戶端；
+        //     cell 卸載時 removeFromWorld 對它 NPE、整個 cell 卸不掉。兩個呼叫改道 dropPlace／dropSend（掛在 W60 的
+        //     IsoGridSquare ClassPatch）。IsoChunk.removeFromWorld 的兩個 removeFromWorld（offset 332 movingObjects、
+        //     506 staticMovingObjects）改道 chunkRemove 當保底：只對 adef 為 null 的動物吞例外（掛在抑噪 #10 的 ClassPatch）。
+        dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/IsoAnimal", "setMovingSquareNow", "()V", spawnGuard, "dropPlace"));
+        dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/packets/INetworkPacket",
+                "sendToRelative", "(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V", spawnGuard, "dropSend"));
+        dropOps.expectedHits += 2;
+        chunkUnload.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoMovingObject", "removeFromWorld", "()V", spawnGuard, "chunkRemove"));
+        chunkUnload.expectedHits += 2;
 
         // W38：doMeta 補算快照（docs/patches.md 2ba）。updateStatsAway→checkZone→setDZone 會把動物
         // 移到 zone.animals 尾端，原版索引迴圈因而重複補算／漏算。頭部 begin、RETURN 前 end，方法內

@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、188 個命中點、73 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、192 個命中點、73 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -63,7 +63,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W5 容器環守衛（[2q](docs/patches.md#2q)） | 多人搬移可以把容器放進自己的子孫容器裡，`ItemContainer.getCharacter()` 因此無限遞迴，`StackOverflowError` 讓主迴圈死掉（無聲凍結 13 分鐘）。 | 在找擁有者的路徑上偵測環（identity 路徑＋深度保險絲），切斷並記錄環的位置。2026-08-13 以來未再發生。 | [#100891](https://theindiestone.com/forums/topic/100891/) |
 | W6 地圖格載入捕手（[2r](docs/patches.md#2r)） | `IsoChunk.doLoadGridsquare` 裡的 `IsoObject.addToWorld` 丟出 "Entity is already registered"，該格一直留在待載入佇列，每 0.1 秒重撞一次：活鎖 114 分鐘。 | 在兩處 `addToWorld` 攔截，記下座標與 sprite 後跳過該物件。殘留的重複登記每天仍有幾次，但不會再讓伺服器凍結。 | [#100893](https://theindiestone.com/forums/topic/100893/) |
 | W11 動物聲音排序（[2y](docs/patches.md#2y)） | `BaseAnimalSoundManager` 排序用的比較器會即時重算距離，遇到 NaN 就違反比較契約；TimSort 丟例外、`clear()` 被跳過，陳舊清單每幀都失敗：全服卡讀條、時間停止。 | 攔下例外，該幀跳過排序讓 `clear()` 照常執行，並記錄 NaN 來源。 | [#100897](https://theindiestone.com/forums/topic/100897/) |
-| W37 動物半建構物件（[2az](docs/patches.md#2az)） | `IsoAnimal` 建構子的檢查失敗時，物件已經放進 cell，`adef`／`data` 為 null，之後每個 tick 都丟例外（遊戲時間凍結約 65 分鐘）。存檔先開 `apop_*.bin` 才序列化，一失敗就留下 0 bytes 檔、動物全失。 | 建構子返回前撤出失敗的物件；先序列化，成功才寫檔。 | 草稿 |
+| W37 動物半建構物件（[2az](docs/patches.md#2az)） | `IsoAnimal` 建構子的檢查失敗時，物件已經放進 cell，`adef`／`data` 為 null，之後每個 tick 都丟例外（遊戲時間凍結約 65 分鐘）。存檔先開 `apop_*.bin` 才序列化，一失敗就留下 0 bytes 檔、動物全失。把動物放到水格時，原版又把建構失敗的物件放回格子；那個 cell 卸載時每個 tick 都丟例外，之後的 cell 全部卸不掉，約 1 小時 heap 用盡。 | 建構子返回前撤出失敗的物件；先序列化，成功才寫檔。放下時建構失敗的動物移出世界、不送給客戶端；chunk 卸載只吞這種動物的例外。 | 草稿 |
 | W40／W41 `processItems`（[2bc](docs/patches.md#2bc)、[2bd](docs/patches.md#2bd)） | 載車的背景執行緒直接寫 `IsoCell.processItems`，混進 null 後 `ProcessItems` 每 5 秒丟例外、清單不再縮減，chunk 載入時的線性 `contains` 讓伺服器凍結 5–16 秒（FPS 9.8 → 2–3）。 | W40 同一幀略過並移除 null；W41 把非主執行緒的登記排入佇列，由主執行緒補登記。 | 草稿 |
 | hit 封包 null 守衛（[2c](docs/patches.md#2c)） | `hit/Zombie.process` 與 `hit/Fall.process` 會解參考損壞封包留下的 null 欄位。 | 在呼叫 super 之前加 null 守衛。 | 未回報 |
 | W15 主迴圈看門狗（[2ac](docs/patches.md#2ac)） | 凍結當下沒有任何 stack 可查。 | 純觀測：超過 5 秒沒有新的一幀就對主執行緒拍 stack。結果顯示剩下的凍結都來自同步的 `QueuedSaveAll`。 | 建議 [#100925](https://theindiestone.com/forums/topic/100925/) |

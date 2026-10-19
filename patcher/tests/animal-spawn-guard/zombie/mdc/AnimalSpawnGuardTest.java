@@ -6,19 +6,23 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 
+import zombie.characters.animals.AnimalDefinitions;
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.IsoObject;
+import zombie.network.PacketTypes;
+import zombie.popman.animal.AnimalInstanceManager;
 import zombie.util.list.PZArrayList;
 
 /**
  * W37 AnimalSpawnGuard 行為驗證（無參數＝啟用、{@code off}＝kill switch）。
  * 鎖：建構失敗（data null、帶座標）從 addList／objectList（依 isSafeToAdd）撤出，並撤出格子的
  * movingObjects（IsoGameCharacter 建構子的 setMovingSquareNow；留著會被 getAnimals 看到）；(IsoCell) 載入用
- * 0,0,0 與正常建構不碰；grow／addBaby 只吞「本次呼叫有建構失敗」的 NPE，其餘例外穿透；off 全直通。
+ * 0,0,0 與正常建構不碰；grow／addBaby 只吞「本次呼叫有建構失敗」的 NPE，其餘例外穿透；水格放下的動物（adef null）
+ * 不放回格子、註銷 AnimalInstanceManager、不送 DropAnimal；chunk 卸載只吞 adef null 動物的例外；off 全直通。
  */
 public final class AnimalSpawnGuardTest {
 
@@ -121,6 +125,47 @@ public final class AnimalSpawnGuardTest {
         mother.result = marker;
         expect("正常 addBaby 回傳原版結果", AnimalSpawnGuard.addBaby(mother) == marker);
 
+        // 放下動物（2026-10-20）：AddWorldInventoryItem 在放下的格子建新動物，水格上建構失敗（adef null），
+        // 原版已 copyFrom、登記 AnimalInstanceManager、setSquare／setCurrent，這一步把它放回格子。
+        AnimalInstanceManager aim = AnimalInstanceManager.getInstance();
+        Fake dropped = fake(cell, 201, 201);
+        dropped.removeNpe = true;   // 原版 removeFromWorld 在 releaseRagdollController 讀 getDef(null) NPE
+        IsoGridSquare dropSq = square();
+        set(dropped, "current", dropSq);
+        set(dropped, "square", dropSq);
+        aim.add(dropped, (short) 77);
+        AnimalSpawnGuard.dropPlace(dropped);
+        expect(off ? "off：水格放下的動物被放回格子 movingObjects（原版）" : "水格放下的動物不放回格子、current 清空",
+                dropSq.getMovingObjects().contains(dropped) == off && (dropped.getCurrentSquare() == dropSq) == off);
+        expect(off ? "off：AnimalInstanceManager 仍指著它" : "AnimalInstanceManager 註銷它",
+                (aim.get((short) 77) == dropped) == off);
+        Object[] dropArgs = {null, dropped, dropSq};
+        AnimalSpawnGuard.dropSend(PacketTypes.PacketType.AnimalCommand, 201f, 201f, dropArgs);
+        expect(off ? "off：DropAnimal 照送" : "不送 DropAnimal", AnimalSpawnGuard.unsentForTest() == (off ? 0 : 1));
+
+        Fake placed = fake(cell, 202, 202);
+        set(placed, "adef", raw(AnimalDefinitions.class));
+        IsoGridSquare placeSq = square();
+        set(placed, "current", placeSq);
+        AnimalSpawnGuard.dropPlace(placed);
+        AnimalSpawnGuard.dropSend(PacketTypes.PacketType.AnimalCommand, 202f, 202f, new Object[]{null, placed, placeSq});
+        expect("建構完成的動物照原版放上格子、照送", placeSq.getMovingObjects().contains(placed)
+                && AnimalSpawnGuard.unsentForTest() == (off ? 0 : 1));
+
+        // chunk 卸載：格子上沒建構完成的動物 removeFromWorld 丟例外時，原版中斷整個 cell 卸載。
+        Fake stuck = fake(cell, 203, 203);
+        stuck.removeNpe = true;
+        expect(off ? "off：卸載時 removeFromWorld 的 NPE 穿透（原版中斷 cell 卸載）" : "卸載時吞掉沒建構完成動物的例外",
+                throwsNpe(() -> AnimalSpawnGuard.chunkRemove(stuck)) == off && stuck.removes == 1);
+        Fake healthyThrows = fake(cell, 204, 204);
+        set(healthyThrows, "adef", raw(AnimalDefinitions.class));
+        healthyThrows.removeNpe = true;
+        expect("建構完成的動物丟的例外照原版穿透", throwsNpe(() -> AnimalSpawnGuard.chunkRemove(healthyThrows)));
+        if (!off) {
+            expect("dropDiscarded=1 unloadBroken=1", AnimalSpawnGuard.dropDiscardedForTest() == 1
+                    && AnimalSpawnGuard.unloadBrokenForTest() == 1);
+        }
+
         if (!off) {
             expect("swallowed=2 anomalies=0", AnimalSpawnGuard.swallowedForTest() == 2
                     && AnimalSpawnGuard.anomaliesForTest() == 0);
@@ -136,6 +181,8 @@ public final class AnimalSpawnGuardTest {
         float fx, fy;
         Runnable baby;
         IsoAnimal result;
+        boolean removeNpe;
+        int removes;
 
         Fake() {
             super((IsoCell) null);
@@ -147,6 +194,14 @@ public final class AnimalSpawnGuardTest {
         @Override public float getZ() { return 0f; }
         @Override public String getAnimalType() { return "chick"; }
         @Override public int getAnimalID() { return 7; }
+
+        @Override
+        public void removeFromWorld() {
+            removes++;
+            if (removeNpe) {
+                throw new NullPointerException("Cannot read field \"textureSkinned\"");
+            }
+        }
 
         @Override
         public IsoAnimal addBaby() {

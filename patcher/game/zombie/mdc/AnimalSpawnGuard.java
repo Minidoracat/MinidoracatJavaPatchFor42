@@ -5,6 +5,10 @@ import zombie.characters.animals.datas.AnimalData;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
+import zombie.iso.IsoMovingObject;
+import zombie.network.PacketTypes;
+import zombie.network.packets.INetworkPacket;
+import zombie.popman.animal.AnimalInstanceManager;
 
 /**
  * W37 動物半建構物件守衛（2026-09-26；docs/patches.md 2az）。
@@ -27,7 +31,15 @@ import zombie.iso.IsoGridSquare;
  * chickenpocalypse 分支原版 {@code delete()} 已含 removeFromSquare，不重做。
  * (2) {@code checkStages} 的 grow 與 W33 的 addBaby 委派包在 {@link #grow}／{@link #addBaby}：
  * 呼叫期間有建構失敗且拋 NPE 時吞掉這次（小雞維持原狀，下次 update 由原版重試），
- * 其餘例外原樣穿透。成功路徑行為不變。kill switch {@code -Dmdc.animalSpawnGuard=0}。
+ * 其餘例外原樣穿透。成功路徑行為不變。
+ * (3) 放下動物（2026-10-20 正式服 OOM）：{@code IsoGridSquare.AddWorldInventoryItem} 在放下的格子建新動物，
+ * 水格上建構失敗、(1) 撤出之後，原版照樣 copyFrom、登記 AnimalInstanceManager、setSquare／setCurrent，
+ * {@code setMovingSquareNow} 再把它放回格子，並送 DropAnimal 給附近客戶端。cell 卸載時 {@code removeFromWorld}
+ * 在 releaseRagdollController 讀 {@code AnimalDefinitions.getDef(null)} NPE，整個 cell 卸不掉，
+ * {@code ServerMap.postupdate} 的迴圈每 tick 在這裡中斷，排在後面的 cell 不再卸載也不再更新，heap 約 1 小時用盡。
+ * {@link #dropPlace} 把 adef 為 null 的動物移出世界、{@link #dropSend} 不送；{@link #chunkRemove} 是其他路徑
+ * 放回格子時的保底：只對 adef 為 null 的動物吞 removeFromWorld 的例外。物品照原版被收走，那隻動物不保留。
+ * kill switch {@code -Dmdc.animalSpawnGuard=0}（(1)–(3) 一起）。
  */
 public final class AnimalSpawnGuard {
 
@@ -35,8 +47,8 @@ public final class AnimalSpawnGuard {
     private static final String TAG = "[MinidoracatJavaPatch][AnimalSpawnGuard] ";
     private static final long DETAIL_LIMIT = 64L;
 
-    // 帶座標的動物建構與 grow／addBaby 都在主執行緒。
-    private static long ctorFailures, removed, squareRemoved, swallowed, anomalies;
+    // 帶座標的動物建構、grow／addBaby、放下動物與 chunk 卸載都在主執行緒。
+    private static long ctorFailures, removed, squareRemoved, swallowed, dropDiscarded, unsent, unloadBroken, anomalies;
 
     /** IsoAnimal 帶座標建構子每個 RETURN 前。 */
     public static void afterCtor(IsoAnimal animal) {
@@ -133,12 +145,108 @@ public final class AnimalSpawnGuard {
         return true;
     }
 
+    /** {@code IsoGridSquare.AddWorldInventoryItem} 動物分支唯一 {@code setMovingSquareNow}（放下的格子）。 */
+    public static void dropPlace(IsoAnimal animal) {
+        if (!ENABLED || animal.adef != null) {
+            animal.setMovingSquareNow();
+            return;
+        }
+        dropDiscarded++;
+        removeBroken(animal);
+        try {
+            animal.removeFromSquare();
+            animal.setSquare(null);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+        if (dropDiscarded <= DETAIL_LIMIT || dropDiscarded % 1000 == 0) {
+            log("drop discarded " + describe(animal) + " dropDiscarded=" + dropDiscarded
+                    + "（放下的格子建不出動物；原版會把牠放回格子，cell 卸載時每 tick NPE、整個 cell 卸不掉。"
+                    + "物品已被收走，這隻動物沒有保留，也不送 DropAnimal）");
+        }
+    }
+
+    /** 同一分支唯一 {@code INetworkPacket.sendToRelative}（DropAnimal；args[1] 是新建的動物）。 */
+    public static void dropSend(PacketTypes.PacketType type, float x, float y, Object[] args) {
+        if (ENABLED && args.length > 1 && args[1] instanceof IsoAnimal animal && animal.adef == null) {
+            unsent++;   // 伺服器已丟棄這隻；送出去，認得這隻動物的客戶端會照原版在同一個水格再建一次
+            return;
+        }
+        INetworkPacket.sendToRelative(type, x, y, args);
+    }
+
+    /** {@code IsoChunk.removeFromWorld} 兩個 {@code IsoMovingObject.removeFromWorld}（格子的 movingObjects、staticMovingObjects）。 */
+    public static void chunkRemove(IsoMovingObject obj) {
+        if (!ENABLED || !(obj instanceof IsoAnimal animal) || animal.adef != null) {
+            obj.removeFromWorld();
+            return;
+        }
+        unloadBroken++;
+        boolean threw = removeBroken(animal);
+        if (unloadBroken <= DETAIL_LIMIT || unloadBroken % 1000 == 0) {
+            log("unload broken " + describe(animal) + " threw=" + threw + " unloadBroken=" + unloadBroken
+                    + "（格子上有沒建構完成的動物；原版 removeFromWorld 的例外會中斷整個 cell 卸載）");
+        }
+    }
+
+    /**
+     * 沒建構完成的動物移出世界。原版 removeFromWorld 的 cell 名單、更新排程、entity 等段落在 IsoGameCharacter 的
+     * releaseRagdollController 之前做完，之後讀 {@code AnimalDefinitions.getDef(null)} NPE；吞掉後補做 IsoAnimal 後段的
+     * objectList 移除，並在 AnimalInstanceManager 仍指著牠時註銷。後段的 AnimalManagerWorker 交接不補，半成品不進 apop。
+     */
+    private static boolean removeBroken(IsoAnimal animal) {
+        boolean threw = false;
+        try {
+            animal.removeFromWorld();
+        } catch (RuntimeException e) {
+            threw = true;
+        }
+        try {
+            if (threw && animal.getCell() != null) {
+                animal.getCell().getObjectList().remove(animal);
+            }
+            AnimalInstanceManager aim = AnimalInstanceManager.getInstance();
+            if (aim.get(animal.getOnlineID()) == animal) {
+                aim.remove(animal);
+            }
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+        return threw;
+    }
+
+    private static String describe(IsoAnimal animal) {
+        String breed = "?";
+        try {
+            AnimalData data = animal.getData();
+            if (data != null && data.getBreed() != null) {
+                breed = data.getBreed().getName();
+            }
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+        return "pos=" + (int) animal.getX() + "," + (int) animal.getY() + "," + (int) animal.getZ()
+                + " animalId=" + animal.getAnimalID() + " onlineId=" + animal.getOnlineID()
+                + " breed=" + breed + " name=" + animal.getCustomName();
+    }
+
+    private static void log(String message) {
+        try {
+            DebugLog.log(TAG + message);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+    }
+
     static boolean enabledForTest() { return ENABLED; }
     static long ctorFailuresForTest() { return ctorFailures; }
     static long removedForTest() { return removed; }
     static long squareRemovedForTest() { return squareRemoved; }
     static long swallowedForTest() { return swallowed; }
     static long anomaliesForTest() { return anomalies; }
+    static long dropDiscardedForTest() { return dropDiscarded; }
+    static long unsentForTest() { return unsent; }
+    static long unloadBrokenForTest() { return unloadBroken; }
 
     private AnimalSpawnGuard() {}
 }

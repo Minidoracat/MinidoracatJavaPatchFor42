@@ -2994,6 +2994,20 @@ SmokeCheck 釘三條存在理由（`IsoGameCharacter` 建構子內 `getAddList`�
   恰 1；`IsoCell.addMovingObject` 本體只有 isSafeToAdd／objectList／addList／兩次 `Set.add`（共 3 個呼叫，官方日後在裡面加其他登記時會紅＝逆操作要跟著補）；四個建構子改數 `checkForChickenpocalypse(IsoAnimal)Z`。TailCall 命中數不變（RETURN 數 3/3/2/2）。
 - `AnimalSpawnGuardTest` 兩個失敗建構案例掛上格子，新增「自格子 movingObjects 撤出」斷言與 `squareRemoved=2`；舊 helper 在這兩條與計數上失敗、新 helper 通過；off 組態確認原版殘留。
 
+### 2026-10-20 放下動物到水格
+
+**事故**：約 1 小時內兩次，動物經 `IsoGridSquare.AddWorldInventoryItem` 被放到水格；兩次都在同一位玩家離線的同一秒，位置就是他離線時所在的格子（第一次所在的 5 分鐘窗口，W60 的 drops 計數只加 1）。建構子的 water 檢查失敗、本刀撤出之後，原版照樣 `copyFrom`（把手上那隻的 `AnimalData` 接過來）、登記 `AnimalInstanceManager`、`setSquare`／`setCurrent`，`setMovingSquareNow` 再把它放回格子，並送 `DropAnimal` 給附近客戶端。玩家離開後那個 cell 要卸載：`IsoChunk.removeFromWorld` 對格子的 movingObjects 逐一呼叫 `removeFromWorld`，在 `IsoGameCharacter.releaseRagdollController` → `AnimalVisual.getModelTest` 讀 `AnimalDefinitions.getDef(null).textureSkinned` NPE。`ServerMap.postupdate` 的 try 包住整個 loadedCells 迴圈，每 tick 在這個 cell 中斷，排在它後面的 cell 不再卸載、也不再 `update`。60 分鐘 33,701 次 NPE，major GC 後的存活量從 15.9 GB 漲到 40.5 GB（heap 上限 40 GB），接著 heap OOM、主迴圈停住，健康檢查重啟。
+
+**手術**（追加）：
+4. `AddWorldInventoryItem(InventoryItem,FFFZZ)` 動物分支唯一的 `IsoAnimal.setMovingSquareNow`（javap offset 240）與唯一的 `INetworkPacket.sendToRelative`（offset 418，DropAnimal）改道 `AnimalSpawnGuard.dropPlace`／`dropSend`，掛在 W60 的 `IsoGridSquare` ClassPatch。`adef` 為 null 時 `dropPlace` 把它移出世界：`removeFromWorld`（吞例外）、`removeFromSquare`、`setSquare(null)`，`AnimalInstanceManager` 還指著它就註銷；`dropSend` 不送。物品照原版被收走，那隻動物不保留：原版同樣保不住它。
+5. `IsoChunk.removeFromWorld` 的兩個 `IsoMovingObject.removeFromWorld`（offset 332 movingObjects、506 staticMovingObjects）改道 `chunkRemove`，掛在抑噪 #10 的 `IsoChunk` ClassPatch，給其他路徑放回格子的半成品當保底。只有 `adef` 為 null 的動物會被吞例外，之後補做 objectList 移除與 `AnimalInstanceManager` 註銷；不交給 `AnimalManagerWorker`，半成品不會存進 apop。其他物件與建構完成的動物照原版，例外照樣外拋。
+
+判定半成品用 `adef == null`：`copyFrom` 會把手上那隻的 data 接過來，放下之後 `getData()` 已經不是 null。kill switch 同 `-Dmdc.animalSpawnGuard=0`。
+
+**守門與驗證**：SmokeCheck 釘三條存在理由：放下動物先 `new IsoAnimal`，再 `setMovingSquareNow`、`sendToRelative` 各恰 1；`IsoGameCharacter.removeFromWorld` 呼叫 `releaseRagdollController`；`IsoChunk.removeFromWorld` 恰 2 個 `removeFromWorld`。抑噪 #10 與 W60 的手術後全文比對加進這四個改道。`AnimalSpawnGuardTest` on／off：水格放下的動物不回格子、註銷、不送；建構完成的照放、照送；卸載只吞 `adef` 為 null 的例外，建構完成的照樣外拋。
+
+實機 E2E（JavaPatch E2E 技能 `animal-water-drop-mp`）：伺服器在陸地生一隻母雞、包成動物物品，對真的水格呼叫原版 `AddWorldInventoryItem`；玩家傳送到遠處 25 秒後，再問伺服器那一格還在不在。修補前的包：水格上留一隻半成品，那一格仍在記憶體裡，console 有 277 次 `textureSkinned` NPE。修補後：`[AnimalSpawnGuard] drop discarded`，水格上沒有半成品，那一格已卸載，零 NPE。這是 W37 第一次用真的建構子走完建構失敗。
+
 <a id="2ba"></a>
 ## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
 
