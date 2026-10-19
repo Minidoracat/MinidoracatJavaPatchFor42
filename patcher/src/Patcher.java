@@ -469,7 +469,7 @@ public final class Patcher {
 
     public static void main(String[] args) throws Exception {
         if (args.length != 3 && args.length != 4) {
-            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest> [client|client-lowmem|client-core|client-profiler]");
+            System.err.println("用法: Patcher <projectzomboid.jar> <輸出目錄> <manifest> [client|client-lowmem|client-compat|client-core|client-profiler]");
             System.exit(2);
         }
         Path jarPath = Path.of(args[0]);
@@ -480,6 +480,7 @@ public final class Patcher {
             case "server" -> PatchConfig.all();
             case "client" -> PatchConfig.client(false);
             case "client-lowmem" -> PatchConfig.client(true);
+            case "client-compat" -> PatchConfig.clientCompat();
             case "client-core" -> PatchConfig.clientCore();
             case "client-profiler" -> PatchConfig.clientProfiler();
             default -> throw new IllegalArgumentException("未知 patch 集合: " + args[3]);

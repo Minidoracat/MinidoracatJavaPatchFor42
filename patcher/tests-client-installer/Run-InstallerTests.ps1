@@ -110,11 +110,13 @@ function Test-ModuleSet([string[]]$expected) {
 
 # ---------------------------------------------------------------- 執行安裝器
 # 預設 -Lang zh：中文斷言不受 Windows 顯示語言影響；英文案例明確傳 'en'。
-function Invoke-Installer([string[]]$Arguments, [string]$Lang = 'zh') {
+# InputLines：互動案例依序餵給 Read-Host 的回答（stdin 讀完後 Read-Host 回 null，安裝器會以錯誤結束，不會卡住）。
+function Invoke-Installer([string[]]$Arguments, [string]$Lang = 'zh', [string[]]$InputLines) {
     # 參數驗證失敗會寫 stderr；Windows PowerShell 在 Stop 下會把 2>&1 的 stderr 當終止錯誤
     $ErrorActionPreference = 'Continue'
     $full = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Installer) + $Arguments + @('-Lang', $Lang)
-    $out = (& powershell.exe @full 2>&1 | Out-String)
+    if ($InputLines) { $out = ($InputLines | & powershell.exe @full 2>&1 | Out-String) }
+    else { $out = (& powershell.exe @full 2>&1 | Out-String) }
     $code = $LASTEXITCODE
     $script:LastOut = $out
     Write-Host "  > Manage-Patches.ps1 $($Arguments -join ' ') -Lang $Lang  => exit $code" -ForegroundColor DarkGray
@@ -209,6 +211,14 @@ $P_LEGACY_GUARD = 'zombie/mdc/TexturePipelineGuard.class'
 # runtime（Java org.json）要求 modules／files 維持 JSONArray，這裡驗證序列化契約。
 $C_SOLO = 'single-file-module-v1'
 $P_SOLO = 'zombie/ui/MdcSoloFixture.class'
+# 相容版安裝包：compat 只帶 standard／lowmem 共有、PZ_Optimization 不替換的檔案（含內部類別）
+$P_VEH = 'zombie/vehicles/BaseVehicle.class'
+$P_VEH_INNER = 'zombie/vehicles/BaseVehicle$MdcHelper.class'
+$P_TREE = 'zombie/iso/objects/IsoTree.class'
+$C_VEH = 'fixes-basevehicle-v1'
+$C_VEH_INNER = 'fixes-basevehicle-helper-v1'
+$C_TREE = 'fixes-isotree-v1'
+$JSON_AOT = '{"mainClass":"zombie/gameStates/MainScreenState","classpath":["pzopt/aot/pzopt.jar","projectzomboid.jar"]}'
 
 function Get-ModuleSpecs([string]$coreRt, [string]$corePi) {
     return @(
@@ -316,6 +326,31 @@ $SameLegacy = @(
 )
 $PkgSame = New-TestPackage -Dir (Join-Path $TempRoot 'pkg-same') -PackageVersion 'v4.0-same' -JarSha $JarSha `
     -ModuleSpecs $SameSpecs -LegacySpecs $SameLegacy
+$CompatShared = @(
+    @{ p = $P_VEH; c = $C_VEH }
+    @{ p = $P_VEH_INNER; c = $C_VEH_INNER }
+    @{ p = $P_TREE; c = $C_TREE }
+)
+$CompatSpecs = @(
+    @{ id = 'core'; name = '共用核心'; version = '0.1.0'; requires = @(); files = @(
+            @{ p = $P_CORE_RT; c = $C_CORE_RT_V1 }
+            @{ p = $P_CORE_PI; c = $C_CORE_PI_V1 }
+        )
+    }
+    @{ id = 'client-fixes-standard'; name = '客戶端修復（標準）'; version = '3.0'; requires = @('core'); group = 'client-fixes'
+        files = @(@{ p = $P_FIX_TIDAM; c = $C_FIX_STD_TIDAM }) + $CompatShared
+    }
+    @{ id = 'client-fixes-lowmem'; name = '客戶端修復（低記憶體）'; version = '3.0'; requires = @('core'); group = 'client-fixes'
+        files = @(@{ p = $P_FIX_TIDAM; c = $C_FIX_LOW_TIDAM }) + $CompatShared
+    }
+    @{ id = 'client-fixes-compat'; name = '客戶端修復・相容版'; version = '3.0'; requires = @('core'); group = 'client-fixes'
+        files = $CompatShared
+    }
+)
+$PkgCompat = New-TestPackage -Dir (Join-Path $TempRoot 'pkg-compat') -PackageVersion 'v4.0-compat' -JarSha $JarSha `
+    -ModuleSpecs $CompatSpecs
+$PkgCompatLegacy = New-TestPackage -Dir (Join-Path $TempRoot 'pkg-compat-legacy') -PackageVersion 'v4.0-compat' -JarSha $JarSha `
+    -ModuleSpecs $CompatSpecs -LegacySpecs $LegacySpecs
 
 try {
     # ------------------------------------------------------------ 1
@@ -976,6 +1011,138 @@ try {
     Check ($r.Code -ne 0) '非法語言代碼 => 非 0'
     Check ($r.Out -match 'ParameterArgumentValidationError') '由參數驗證擋下'
     Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何東西'
+
+    # ------------------------------------------------------------ 52-56：和替換遊戲 class 的其他 MOD 共存
+    Start-Case '52. 別的 MOD 佔了完整版獨有的檔案：拒裝並指向相容版，相容版裝得上'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = Invoke-Install @('client-fixes-standard') $PkgCompat
+    Check ($r.Code -eq 7) '完整版結束代碼 7'
+    Check ($r.Out -match 'client-fixes-compat') '訊息指向 client-fixes-compat'
+    Check ($r.Out -match '不要只刪除上面列出的檔案') '提醒不要只刪列出的檔案'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '外來檔案原封不動'
+    Check (-not (Test-GameFile $P_CORE_RT) -and -not (Test-GameFile $P_VEH)) '沒有寫入任何檔案'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有建立狀態檔'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgCompat, '-Modules', 'client-fixes-standard') 'en'
+    Check ($r.Code -eq 7 -and $r.Out -match 'install the compatible version instead') '英文訊息同樣指向相容版'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompat
+    Check ($r.Code -eq 0) '相容版結束代碼 0'
+    Check (Test-ModuleSet @('core', 'client-fixes-compat')) 'state.json 記錄 core + compat'
+    Check ((Test-GameFileIs $P_VEH $C_VEH) -and (Test-GameFileIs $P_VEH_INNER $C_VEH_INNER) -and (Test-GameFileIs $P_TREE $C_TREE)) '相容版檔案（含自己的內部類別）已寫入'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '別的 MOD 的檔案沒被動'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_VEH) 'pzopt-vehicle'
+    $r = Invoke-Install @('client-fixes-standard') $PkgCompat
+    Check ($r.Code -eq 7) '相容版也會撞到的檔案：結束代碼 7'
+    Check ($r.Out -notmatch 'client-fixes-compat') '不建議裝不上的相容版'
+    Check ($r.Out -match '自己的卸載器把它完整移除後再安裝') '給一般的移除指引'
+    Check (Test-GameFileIs $P_VEH 'pzopt-vehicle') '外來檔案原封不動'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and -not (Test-GameFile $P_CORE_RT)) '沒有寫入任何檔案'
+
+    Start-Case '53. 互動選單：完整版裝不上時預設推薦相容版'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = Invoke-Installer @('-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgCompat) 'zh' @('1', '', 'Y')
+    Check ($r.Code -eq 0) '直接按 Enter 安裝成功'
+    Check ($r.Out -match '相容版：只含車輛與樹的修補') '選單列出相容版'
+    Check ($r.Out -match '建議選 \[3\] 相容版') '推薦相容版並說明原因'
+    Check (Test-ModuleSet @('core', 'client-fixes-compat')) '預設選到相容版'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '別的 MOD 的檔案沒被動'
+    Reset-GameDir
+    $r = Invoke-Installer @('-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgCompat) 'zh' @('1', '2', 'Y')
+    Check ($r.Code -eq 0) '乾淨目錄的選單照常運作'
+    Check ($r.Out -notmatch '完整版裝不上') '乾淨目錄不推薦相容版'
+    Check (Test-ModuleSet @('core', 'client-fixes-lowmem')) '照選擇安裝省記憶體版'
+
+    Start-Case '54. 同一個 class 的外來內部類別：外層檔不在也拒裝'
+    Reset-GameDir
+    $foreignInner = 'zombie/iso/objects/IsoTree$Foreign.class'
+    Write-TextFile (GameFile $foreignInner) 'pzopt-inner'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompat
+    Check ($r.Code -eq 7) '結束代碼 7'
+    Check ($r.Out.Contains($foreignInner)) '訊息指出那個內部類別檔'
+    Check (Test-GameFileIs $foreignInner 'pzopt-inner') '外來檔案原封不動'
+    Check (-not (Test-GameFile $P_TREE) -and -not (Test-GameFile $P_CORE_RT)) '沒有寫入任何檔案'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有建立狀態檔'
+    Reset-GameDir
+    Write-TextFile (GameFile 'zombie/iso/objects/isotree$lower.class') 'pzopt-inner'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompat
+    Check ($r.Code -eq 7) '檔名大小寫不同也算同一個 class'
+    Reset-GameDir
+    Write-TextFile (GameFile 'zombie/iso/objects/IsoTreeHelper.class') 'other-class'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompat
+    Check ($r.Code -eq 0) '自己同時帶 X.class 與 X$Y.class 可以安裝；名字相近的別的 class 不算衝突'
+    Check ((Test-GameFileIs $P_VEH $C_VEH) -and (Test-GameFileIs $P_VEH_INNER $C_VEH_INNER)) '外層與內部類別都已寫入'
+    Check (Test-GameFileIs 'zombie/iso/objects/IsoTreeHelper.class' 'other-class') '別的 class 原封不動'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompat
+    Check ($r.Code -eq 0 -and $r.Out -match '不需要任何變更') '重裝時自己的內部類別不算外來檔'
+
+    Start-Case '55. 啟動設定不從遊戲資料夾載入 class：拒絕安裝與卸載'
+    Reset-GameDir
+    Write-TextFile (GameFile 'ProjectZomboid64.json') $JSON_AOT
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 7) 'AOT 快取開著：安裝結束代碼 7'
+    Check ($r.Out -match 'aotCache') '告訴使用者怎麼關 AOT 快取'
+    Check (-not (Test-GameFile $P_CORE_RT) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何檔案'
+    Check ((Get-GameText 'ProjectZomboid64.json') -eq $JSON_AOT) '啟動設定沒被改'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'status', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
+    Check ($r.Code -eq 0 -and $r.Out -match 'aotCache') 'status 只警告不失敗'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-All')
+    Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '沒東西可卸時不擋'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 0) '前置安裝成功'
+    Write-TextFile (GameFile 'ProjectZomboid64.json') $JSON_AOT
+    $r = Invoke-Uninstall @('profiler')
+    Check ($r.Code -eq 7) 'AOT 快取開著：卸載結束代碼 7'
+    Check ((Test-GameFileIs $P_PROF_MAIN $C_PROF_MAIN) -and (Test-GameFileIs $P_CORE_RT $C_CORE_RT_V1)) '檔案都還在'
+    Check (Test-ModuleSet @('core', 'profiler')) 'state.json 沒變'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
+    Write-TextFile (GameFile $P_FIX_TIDAM) $C_LEGACY_TIDAM_STD
+    Write-TextFile (GameFile 'ProjectZomboid64.json') $JSON_AOT
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-All')
+    Check ($r.Code -eq 7) '舊版包卸載同樣被擋'
+    Check ((Test-GameFileIs $P_LEGACY_GUARD $C_LEGACY_GUARD) -and (Test-GameFileIs $P_FIX_TIDAM $C_LEGACY_TIDAM_STD)) '舊版包檔案都還在'
+
+    Start-Case '56. 啟動設定的其他 classpath 形狀'
+    Reset-GameDir
+    Write-TextFile (GameFile 'ProjectZomboid64.json') '{"classpath":["projectzomboid.jar","."]}'
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 7) '. 排在 jar 後面：結束代碼 7'
+    Check ($r.Out -match '驗證遊戲檔案的完整性' -and $r.Out -notmatch 'aotCache') '給還原啟動設定的一般指引'
+    Check (-not (Test-GameFile $P_CORE_RT) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何檔案'
+    Reset-GameDir
+    Write-TextFile (GameFile 'ProjectZomboid64.json') '{"classpath":[".","projectzomboid.jar"]}'
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 0) '原版 classpath 可以安裝'
+    Check (Test-ModuleSet @('core', 'profiler')) '安裝完成'
+    Reset-GameDir
+    Write-TextFile (GameFile 'ProjectZomboid64.json') '{not json'
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 7) '無法解析：結束代碼 7'
+    Check ($r.Out -match 'ProjectZomboid64.json 無法解析') '指出啟動設定無法解析'
+    Check (-not (Test-GameFile $P_CORE_RT) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何檔案'
+
+    Start-Case '57. 舊版包登記的原版 class 路徑上是別的 MOD 的檔案：不當成認不出的舊版包'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompatLegacy
+    Check ($r.Code -eq 0) '相容版結束代碼 0'
+    Check ($r.Out -notmatch '舊版 patch') '沒有誤報成舊版包'
+    Check (Test-ModuleSet @('core', 'client-fixes-compat')) 'state.json 記錄 core + compat'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '別的 MOD 的檔案沒被動'
+    $r = Invoke-Install @('client-fixes-standard') $PkgCompatLegacy
+    Check ($r.Code -eq 7 -and $r.Out -notmatch '舊版 patch' -and $r.Out -match 'client-fixes-compat') '完整版以一般衝突拒裝並指向相容版，不說是舊版包'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-PackageDir', $PkgCompatLegacy, '-All')
+    Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '沒裝過本包時卸載回報沒東西可卸，不誤報舊版包'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '卸載沒碰別的 MOD 的檔案'
+    Write-TextFile (GameFile $P_LEGACY_GUARD) 'unknown-old-guard'
+    $r = Invoke-Install @('client-fixes-compat') $PkgCompatLegacy
+    Check ($r.Code -eq 7 -and $r.Out -match '舊版 patch') '舊版包自己的 helper 還在時照樣當成認不出的舊版包擋下'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有寫入任何檔案'
 }
 finally {
     Write-Host ''

@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.9'
+$PACKAGE_VERSION = '0.2.10'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -73,7 +73,11 @@ $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
     @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.6($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.6-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.6-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
+    # 相容版：只裝 PZ_Optimization 這類 MOD 不替換的 class（PatchConfig.clientCompat），helper 只帶這幾刀用到的
+    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛與樹的修補）'; nameEn='Client fixes - compatible (vehicle and tree fixes only)'; version="v3.6-compat($sourceRef)"; requires=@('core'); group='client-fixes';
+       helpers=@('zombie/mdc/PatchInfo.class', 'zombie/mdc/TreeRoomGuard.class', 'zombie/mdc/VehicleAnimGate.class', 'zombie/mdc/VehicleAnimGate$PoseState.class',
+                 'zombie/mdc/VehicleClampGuard.class', 'zombie/mdc/VehicleOrphanGuard.class', 'zombie/vehicles/MdcVehicleSinkGuard.class') }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -93,6 +97,13 @@ foreach ($recipe in $recipes) {
         $fixSources += "$variantGen\zombie\mdc\PatchInfo.java"
         & $JAVAC -encoding UTF-8 -cp "$JAR;$coreHelpers" -d $payload @fixSources
         Assert-Ok "javac $id"
+        if ($recipe.helpers) {
+            foreach ($entry in @(Get-ClassEntries $payload)) {
+                if ($recipe.helpers -notcontains $entry.path) { Remove-Item -LiteralPath (Join-Path $payload $entry.path) -Force }
+            }
+            Get-ChildItem -LiteralPath $payload -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending |
+                Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Force) } | Remove-Item -Force
+        }
         $helperEntries = @(Get-ClassEntries $payload)
     }
     $manifestPath = Join-Path $DIST "manifests/$id.txt"
@@ -140,9 +151,12 @@ if (Test-Path "$R\patcher\tests-client-common") {
 }
 & $JAVAC -encoding UTF-8 -cp "$OUT;$ASM_CP;$DIST\checks\client-fixes-standard;$JAR" -d $OUT @testSources
 Assert-Ok 'javac client behavior tests'
-foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
+foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-compat')) {
     $cp = "$OUT;$DIST\checks\$id;$JAR"
-    foreach ($test in @('zombie.mdc.TexturePipelineGuardBehaviorTest', 'zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest', 'zombie.mdc.ChunkStreamObserverBehaviorTest', 'zombie.mdc.TreeRoomGuardBehaviorTest')) {
+    # 相容版只有樹與車輛的修補；貼圖、串流、W55、W57、W68 的 class 不在它的 view 裡，只在完整版測
+    $full = $id -ne 'client-fixes-compat'
+    $simpleTests = if ($full) { @('zombie.mdc.TexturePipelineGuardBehaviorTest', 'zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest', 'zombie.mdc.ChunkStreamObserverBehaviorTest', 'zombie.mdc.TreeRoomGuardBehaviorTest') } else { @('zombie.mdc.TreeRoomGuardBehaviorTest') }
+    foreach ($test in $simpleTests) {
         & $JAVA --enable-native-access=ALL-UNNAMED -cp $cp $test
         Assert-Ok "$test $id"
     }
@@ -152,25 +166,27 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleAnimGateBehaviorTest $run[0]
         Assert-Ok "VehicleAnimGateBehaviorTest $($run[0]) $id"
     }
-    # W55：on 與 off 各跑一次，60 幀真動畫的姿勢摘要必須逐位相同
-    $digests = @{}
-    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.boneReparentFast=off')))) {
-        $jvmArgs = @($run[1])
-        $runOutput = & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.BoneReparentFastPathBehaviorTest $run[0]
-        $code = $LASTEXITCODE
-        $runOutput | ForEach-Object { Write-Host $_ }
-        if ($code -ne 0) { throw "BoneReparentFastPathBehaviorTest $($run[0]) $id 失敗 (exit=$code)" }
-        $digests[$run[0]] = @($runOutput | Where-Object { $_ -like 'pose-digest=*' })
-    }
-    if ($digests['on'].Count -ne 1 -or $digests['on'][0] -ne $digests['off'][0]) {
-        throw "W55 姿勢摘要 on／off 不一致 $id：$($digests['on']) vs $($digests['off'])"
-    }
-    Write-Host "  W55 on／off 姿勢摘要相同（$id）"
-    # W57：on 與 off 各跑一次（off＝kill switch 實跑，結果必須與原版相同）
-    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.staleRoomHeal=off')))) {
-        $jvmArgs = @($run[1])
-        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.StaleRoomGuardBehaviorTest $run[0]
-        Assert-Ok "StaleRoomGuardBehaviorTest $($run[0]) $id"
+    if ($full) {
+        # W55：on 與 off 各跑一次，60 幀真動畫的姿勢摘要必須逐位相同
+        $digests = @{}
+        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.boneReparentFast=off')))) {
+            $jvmArgs = @($run[1])
+            $runOutput = & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.BoneReparentFastPathBehaviorTest $run[0]
+            $code = $LASTEXITCODE
+            $runOutput | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) { throw "BoneReparentFastPathBehaviorTest $($run[0]) $id 失敗 (exit=$code)" }
+            $digests[$run[0]] = @($runOutput | Where-Object { $_ -like 'pose-digest=*' })
+        }
+        if ($digests['on'].Count -ne 1 -or $digests['on'][0] -ne $digests['off'][0]) {
+            throw "W55 姿勢摘要 on／off 不一致 $id：$($digests['on']) vs $($digests['off'])"
+        }
+        Write-Host "  W55 on／off 姿勢摘要相同（$id）"
+        # W57：on 與 off 各跑一次（off＝kill switch 實跑，結果必須與原版相同）
+        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.staleRoomHeal=off')))) {
+            $jvmArgs = @($run[1])
+            & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.StaleRoomGuardBehaviorTest $run[0]
+            Assert-Ok "StaleRoomGuardBehaviorTest $($run[0]) $id"
+        }
     }
     # W61：on 與 off 各跑一次（off＝kill switch 實跑，車照原版被夾到過期 chunk 的角落＝原版負對照）
     foreach ($run in @(@('on', @()), @('off', @('-Dmdc.vehicleClampGuard=off')))) {
@@ -190,11 +206,13 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.vehicles.MdcVehicleSinkGuardBehaviorTest $run[0]
         Assert-Ok "MdcVehicleSinkGuardBehaviorTest $($run[0]) $id"
     }
-    # W68：on 與 off 各跑一次（off＝kill switch 實跑，重建與查房間照原版不互斥＝原版負對照）
-    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.metaGridLock=off')))) {
-        $jvmArgs = @($run[1])
-        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
-        Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
+    if ($full) {
+        # W68：on 與 off 各跑一次（off＝kill switch 實跑，重建與查房間照原版不互斥＝原版負對照）
+        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.metaGridLock=off')))) {
+            $jvmArgs = @($run[1])
+            & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
+            Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
+        }
     }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
@@ -254,7 +272,7 @@ INSTALL
 4. Type 1 and press Enter (install or update patches).
 5. Type 1 and press Enter (client fixes).
 6. When asked for the version, just press Enter: the recommended one is picked
-   from your PC's memory.
+   for your PC (its memory, and whether another mod already replaces game classes).
 7. When asked to confirm, type Y and press Enter.
 8. When it says it is done, press Enter, then type 0 and Enter to exit.
 The menus follow your Windows display language (Chinese or English). Press L in
@@ -270,6 +288,23 @@ Updating without removing the patches first can stop you from joining servers
 or cause errors right after connecting. If you forgot and the game now fails to
 start or errors out, close it, run Uninstall-Patches.bat and type A.
 
+OTHER MODS THAT REPLACE GAME CLASSES
+Some mods, such as PZ_Optimization, also put .class files into the game folder. When
+one of them already replaces a class this package patches, the installer stops with
+code 7 and changes nothing: only one copy of a class can run.
+- Do not delete just the files it lists. That mod's other files still need them, and the
+  game closes when you join a server.
+- To keep that mod, install the compatible version (vehicle and tree fixes only). The
+  installer recommends it when another mod is in the way.
+- For the full version, remove that mod with its own uninstaller first
+  (PZ_Optimization: Uninstall-PZ-Optimization.cmd in the game folder), then install.
+  That uninstaller deletes by file name, so if these patches were already installed,
+  run this installer again afterwards.
+- With PZ_Optimization, turn off its "Warm-start cache (Java AOT)" option, then start the
+  game once and close it before you install or remove these patches. While the option is
+  on, the game loads classes from PZ_Optimization's cache instead of the game folder, and
+  the installer refuses and tells you why.
+
 SAFETY
 - The installer only works on the exact game version it was built for: it checks the
   SHA-256 of your projectzomboid.jar and of every file before writing it.
@@ -284,7 +319,8 @@ Advanced
 
 Modules
 - Client fixes: the standard variant raises the texture wait limit to 4 GiB (use it with
-  32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one.
+  32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one
+  of these two or the compatible version below.
   Both include the texture leak fixes, a chunk-streaming log for black-edge reports
   (logging only), the 42.21.0 player-built room fix (XL trees are simply not faded
   inside such rooms), the 42.21.0 player-built room disconnect fix (a chunk whose
@@ -307,6 +343,11 @@ Modules
   JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
   -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
   -Dmdc.driverRecallGuard=off and -Dmdc.metaGridLock=off turn them off.
+- Client fixes, compatible version: only the fixes in classes that mods such as
+  PZ_Optimization leave alone: the XL tree fix in player-built rooms and the vehicle fixes
+  (unchanged pose skip, teleport, vehicle left on an unloaded chunk, vehicle under the
+  floor). The texture, room-disconnect, room-table and chunk-streaming fixes are not in
+  it. Choose it only when you use such a mod.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
   this game session actually reached the hook.
@@ -314,7 +355,8 @@ Modules
 Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
   never removes other authors' tools.
-- Does not change the game jar, the JVM launch JSON or any Java agent.
+- Does not change the game jar, the JVM launch JSON or any Java agent. It reads
+  ProjectZomboid64.json only to check that the game loads class files from the game folder.
 - Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
   matches, even after a game update: installing replaces them, removing deletes them.
   Anything else must be removed with its own uninstaller first.
@@ -361,6 +403,18 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 沒先移除就更新，可能會進不了伺服器，或一連線就出錯。忘了先移除、遊戲已經開不起來或出錯時，
 關閉遊戲後執行 Uninstall-Patches.bat，輸入 A 全部移除即可。
 
+【和其他替換遊戲 class 的 MOD 一起用】
+有些 MOD（例如 PZ_Optimization）也會把 .class 檔放進遊戲資料夾。它已經替換本包要修補的 class 時，
+安裝器會以 code 7 停止，不改任何檔案：同一個 class 只能載入一份。
+- 不要只刪除它列出的檔案。那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉。
+- 要保留那個 MOD，就裝相容版（只含車輛與樹的修補）；有別的 MOD 擋著時，安裝器會建議你選它。
+- 要完整版，先用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的
+  Uninstall-PZ-Optimization.cmd），再安裝本包。那個卸載器照檔名刪檔，之前已經裝過本包的話，
+  之後要再執行一次本安裝器。
+- 用 PZ_Optimization 時，安裝或移除本包前先關掉它的「Warm-start cache (Java AOT)」選項，
+  再開關遊戲一次。這個選項開著時，遊戲從 PZ_Optimization 的快取載入 class，不讀遊戲資料夾，
+  安裝器會說明原因並拒絕。
+
 【以前裝過舊版】
 - 裝過有 Uninstall-Patches.bat 的版本：直接照上面安裝即可，會自動換成新版。
 - 裝過只有 uninstall.bat 的 TexPipeline v3.0（42.20.3／42.20.4）：一樣直接安裝，會自動換成新版；
@@ -378,7 +432,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
 模組說明
 - 客戶端修復：標準版把貼圖等待門檻放寬到 4 GiB（建議 32GB 以上 RAM）；
-  省記憶體版保留原版 50 MiB 門檻。兩者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
+  省記憶體版保留原版 50 MiB 門檻。這兩版和下面的相容版三者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
   兩版都含 42.21.0 自建房間 XL 樹例外修補：這種房間裡的 XL 樹不做室內淡化，其餘同原版。
   兩版都含 42.21.0 自建房斷線修補：chunk 載入途中自建房被重建時，照遊戲更新已載入 chunk 的方式
   把格子重新綁到新房間，不再斷線。
@@ -393,12 +447,15 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
   -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
   -Dmdc.metaGridLock=off 可分別關閉。
+- 客戶端修復・相容版：只含 PZ_Optimization 這類 MOD 不替換的 class 裡的修補：自建房間 XL 樹修補與車輛修補
+  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表與串流紀錄這幾項。
+  只在和這類 MOD 一起用時選它。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
-- 不改遊戲 JAR、JVM 啟動 JSON 或其他 Java agent。
+- 不改遊戲 JAR、JVM 啟動 JSON 或其他 Java agent；只讀 ProjectZomboid64.json，確認遊戲會載入遊戲資料夾裡的 class。
 - 不明或變造的 loose class 不會被自動覆蓋或刪除。
 - 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - 遊戲更新前先卸載。安裝時的 SHA 閘無法阻止 Steam 日後更新 JAR 卻殘留舊 class。

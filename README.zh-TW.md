@@ -240,7 +240,7 @@ bash uninstall.sh  # 下次重啟回到原版
 1. 關閉遊戲，把整個 zip 解壓縮到任何資料夾（桌面、下載都可以，不必放進遊戲目錄）。安裝程式會自己透過 Steam
    找到遊戲目錄，遊戲裝在別的硬碟也找得到；找不到時才會請你貼上路徑（也可以用 `-GameDir "<路徑>"` 指定）。
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
-3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版），再輸入 `Y` 確認。
+3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），再輸入 `Y` 確認。
 
 安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。忘了先移除、遊戲更新後開不起來時，關閉遊戲再執行 `Uninstall-Patches.bat`（選 `A`）即可；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得，直接安裝新版或移除都會清乾淨。
 
@@ -248,8 +248,11 @@ bash uninstall.sh  # 下次重啟回到原版
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
 | `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速、開車瞬移修正（三項，32GB 以上 RAM） |
-| `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與標準版互斥 |
+| `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與其他版本互斥 |
+| `client-fixes-compat` | 只含 XL 樹房間修正與車輛修正，給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
+
+**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）也會把 `.class` 檔放進遊戲資料夾。它已經替換本包要修補的 class 時，安裝器會以 code 7 停止、不改任何檔案，因為同一個 class 只能載入一份。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。那個卸載器照路徑刪檔，之前已經裝過本包的話，之後要再執行一次本安裝器。用 PZ_Optimization 時，安裝或移除前先關掉它的「Warm-start cache (Java AOT)」選項並開關遊戲一次：這個選項開著時，遊戲從它的快取載入 class，不讀遊戲資料夾，安裝器會拒絕。
 
 也可以用 `build-client.ps1` 自行建置。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 

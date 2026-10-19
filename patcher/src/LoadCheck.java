@@ -59,45 +59,49 @@ public final class LoadCheck {
             }
 
 
+            // client-compat 只含 IsoTree、BaseVehicle、VehiclePacket 的修補（PatchConfig.clientCompat），只驗它們的 helper
+            boolean compat = args.length == 4 && args[3].equals("client-compat");
             boolean clientMode = args.length == 4
-                    && (args[3].equals("client") || args[3].equals("client-lowmem"));
+                    && (args[3].equals("client") || args[3].equals("client-lowmem") || compat);
             if (clientMode) {
                 // client 模式：只驗 client helper 簽名（server helpers 不在 dist-client）。
                 // 兩個改道入口（標準 4GB／lowmem 50MB effective 門檻）簽名都必須在——
                 // 出包 variant 由 PatchConfig 選 site 目標，helper 恆備兩入口。
-                Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", false, cl);
-                var observed = guard.getDeclaredMethod(args[3].equals("client-lowmem")
-                        ? "bytesAllocatedObservedLowMem" : "bytesAllocatedObserved");
-                int guardModifiers = java.lang.reflect.Modifier.PUBLIC
-                        | java.lang.reflect.Modifier.STATIC;
-                if (observed.getReturnType() != long.class
-                        || (observed.getModifiers() & guardModifiers) != guardModifiers
-                        || observed.getExceptionTypes().length != 0) {
-                    throw new NoSuchMethodException("TexturePipelineGuard.bytesAllocatedObserved signature");
-                }
-                // 門檻常數與 PatchConfig.client() 的手術值連動（clinit 僅設 long，無遊戲副作用）
-                if (guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) != 52428800L
-                        || guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) != 4294967296L) {
-                    throw new IllegalStateException("TexturePipelineGuard 門檻常數與手術值不一致");
-                }
-                System.out.println("client helper OK bytesAllocatedObserved 簽名與門檻常數一致");
-
-                // v2.0 洩漏根治 helper：改道/head-call 簽名逐一比對（缺了只會在執行期 NoSuchMethodError）
-                Class<?> leak = Class.forName("zombie.core.textures.MinidoracatTextureLeakGuard", false, cl);
-                Class<?> imgData = Class.forName("zombie.core.textures.ImageData", false, cl);
-                Class<?> texId = Class.forName("zombie.core.textures.TextureID", false, cl);
                 int psf = java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC;
-                for (var sig : new Object[][]{
-                        { "disposeFrames", new Class<?>[]{ imgData }, void.class },
-                        { "ensureData", new Class<?>[]{ imgData }, void.class },
-                        { "onFreeMemory", new Class<?>[]{ texId }, void.class },
-                        { "createSteamAvatarFixed", new Class<?>[]{ long.class }, imgData } }) {
-                    var m = leak.getDeclaredMethod((String)sig[0], (Class<?>[])sig[1]);
-                    if (m.getReturnType() != sig[2] || (m.getModifiers() & psf) != psf) {
-                        throw new NoSuchMethodException("MinidoracatTextureLeakGuard." + sig[0] + " signature");
+                if (!compat) {
+                    Class<?> guard = Class.forName("zombie.mdc.TexturePipelineGuard", false, cl);
+                    var observed = guard.getDeclaredMethod(args[3].equals("client-lowmem")
+                            ? "bytesAllocatedObservedLowMem" : "bytesAllocatedObserved");
+                    int guardModifiers = java.lang.reflect.Modifier.PUBLIC
+                            | java.lang.reflect.Modifier.STATIC;
+                    if (observed.getReturnType() != long.class
+                            || (observed.getModifiers() & guardModifiers) != guardModifiers
+                            || observed.getExceptionTypes().length != 0) {
+                        throw new NoSuchMethodException("TexturePipelineGuard.bytesAllocatedObserved signature");
                     }
+                    // 門檻常數與 PatchConfig.client() 的手術值連動（clinit 僅設 long，無遊戲副作用）
+                    if (guard.getDeclaredField("VANILLA_LIMIT_BYTES").getLong(null) != 52428800L
+                            || guard.getDeclaredField("PATCHED_LIMIT_BYTES").getLong(null) != 4294967296L) {
+                        throw new IllegalStateException("TexturePipelineGuard 門檻常數與手術值不一致");
+                    }
+                    System.out.println("client helper OK bytesAllocatedObserved 簽名與門檻常數一致");
+
+                    // v2.0 洩漏根治 helper：改道/head-call 簽名逐一比對（缺了只會在執行期 NoSuchMethodError）
+                    Class<?> leak = Class.forName("zombie.core.textures.MinidoracatTextureLeakGuard", false, cl);
+                    Class<?> imgData = Class.forName("zombie.core.textures.ImageData", false, cl);
+                    Class<?> texId = Class.forName("zombie.core.textures.TextureID", false, cl);
+                    for (var sig : new Object[][]{
+                            { "disposeFrames", new Class<?>[]{ imgData }, void.class },
+                            { "ensureData", new Class<?>[]{ imgData }, void.class },
+                            { "onFreeMemory", new Class<?>[]{ texId }, void.class },
+                            { "createSteamAvatarFixed", new Class<?>[]{ long.class }, imgData } }) {
+                        var m = leak.getDeclaredMethod((String)sig[0], (Class<?>[])sig[1]);
+                        if (m.getReturnType() != sig[2] || (m.getModifiers() & psf) != psf) {
+                            throw new NoSuchMethodException("MinidoracatTextureLeakGuard." + sig[0] + " signature");
+                        }
+                    }
+                    System.out.println("leak guard OK 四個手術簽名一致");
                 }
-                System.out.println("leak guard OK 四個手術簽名一致");
                 Class<?> treeGuard = Class.forName("zombie.mdc.TreeRoomGuard", false, cl);
                 Class<?> player = Class.forName("zombie.characters.IsoPlayer", false, cl);
                 var inRoom = treeGuard.getDeclaredMethod("isInARoom", player);
@@ -111,19 +115,21 @@ public final class LoadCheck {
                 if (vehUpdate.getReturnType() != void.class || (vehUpdate.getModifiers() & psf) != psf) {
                     throw new NoSuchMethodException("VehicleAnimGate.update signature");
                 }
-                var reparent = Class.forName("zombie.mdc.BoneReparentFastPath", false, cl)
-                        .getDeclaredMethod("isBoneReparented", animPlayer, int.class);
-                if (reparent.getReturnType() != boolean.class || (reparent.getModifiers() & psf) != psf) {
-                    throw new NoSuchMethodException("BoneReparentFastPath.isBoneReparented signature");
+                System.out.println("vehicle anim OK VehicleAnimGate.update(AnimationPlayer,float) 簽名一致");
+                if (!compat) {
+                    var reparent = Class.forName("zombie.mdc.BoneReparentFastPath", false, cl)
+                            .getDeclaredMethod("isBoneReparented", animPlayer, int.class);
+                    if (reparent.getReturnType() != boolean.class || (reparent.getModifiers() & psf) != psf) {
+                        throw new NoSuchMethodException("BoneReparentFastPath.isBoneReparented signature");
+                    }
+                    System.out.println("bone reparent OK BoneReparentFastPath.isBoneReparented(AnimationPlayer,int) 簽名一致");
+                    var staleRoom = Class.forName("zombie.mdc.StaleRoomGuard", false, cl).getDeclaredMethod(
+                            "chunkLoaded", Class.forName("zombie.iso.IsoChunk", false, cl));
+                    if (staleRoom.getReturnType() != void.class || (staleRoom.getModifiers() & psf) != psf) {
+                        throw new NoSuchMethodException("StaleRoomGuard.chunkLoaded signature");
+                    }
+                    System.out.println("stale room guard OK StaleRoomGuard.chunkLoaded(IsoChunk) 簽名一致");
                 }
-                System.out.println("vehicle anim OK VehicleAnimGate.update(AnimationPlayer,float)、"
-                        + "BoneReparentFastPath.isBoneReparented(AnimationPlayer,int) 簽名一致");
-                var staleRoom = Class.forName("zombie.mdc.StaleRoomGuard", false, cl).getDeclaredMethod(
-                        "chunkLoaded", Class.forName("zombie.iso.IsoChunk", false, cl));
-                if (staleRoom.getReturnType() != void.class || (staleRoom.getModifiers() & psf) != psf) {
-                    throw new NoSuchMethodException("StaleRoomGuard.chunkLoaded signature");
-                }
-                System.out.println("stale room guard OK StaleRoomGuard.chunkLoaded(IsoChunk) 簽名一致");
                 var vehicleClamp = Class.forName("zombie.mdc.VehicleClampGuard", false, cl).getDeclaredMethod(
                         "setWorldTransform", Class.forName("zombie.vehicles.BaseVehicle", false, cl),
                         Class.forName("zombie.core.physics.Transform", false, cl));
@@ -141,19 +147,21 @@ public final class LoadCheck {
                 }
                 System.out.println("vehicle orphan guard OK VehicleOrphanGuard.contains(ArrayList,Object)、"
                         + "setPosition(IsoPlayer,float,float,float) 簽名一致");
-                Class<?> gridLock = Class.forName("zombie.mdc.MetaGridLock", false, cl);
-                var lockedRoom = gridLock.getDeclaredMethod("getRoomByID",
-                        Class.forName("zombie.iso.IsoMetaGrid", false, cl), long.class);
-                var lockedRebuild = gridLock.getDeclaredMethod("clientProcessBuildings",
-                        Class.forName("zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid", false, cl),
-                        java.util.ArrayList.class);
-                if (lockedRoom.getReturnType() != Class.forName("zombie.iso.areas.IsoRoom", false, cl)
-                        || (lockedRoom.getModifiers() & psf) != psf
-                        || lockedRebuild.getReturnType() != void.class || (lockedRebuild.getModifiers() & psf) != psf) {
-                    throw new NoSuchMethodException("MetaGridLock signature");
+                if (!compat) {
+                    Class<?> gridLock = Class.forName("zombie.mdc.MetaGridLock", false, cl);
+                    var lockedRoom = gridLock.getDeclaredMethod("getRoomByID",
+                            Class.forName("zombie.iso.IsoMetaGrid", false, cl), long.class);
+                    var lockedRebuild = gridLock.getDeclaredMethod("clientProcessBuildings",
+                            Class.forName("zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid", false, cl),
+                            java.util.ArrayList.class);
+                    if (lockedRoom.getReturnType() != Class.forName("zombie.iso.areas.IsoRoom", false, cl)
+                            || (lockedRoom.getModifiers() & psf) != psf
+                            || lockedRebuild.getReturnType() != void.class || (lockedRebuild.getModifiers() & psf) != psf) {
+                        throw new NoSuchMethodException("MetaGridLock signature");
+                    }
+                    System.out.println("metagrid lock OK MetaGridLock.getRoomByID(IsoMetaGrid,long)、"
+                            + "clientProcessBuildings(WorldRegionToMetaGrid,ArrayList) 簽名一致");
                 }
-                System.out.println("metagrid lock OK MetaGridLock.getRoomByID(IsoMetaGrid,long)、"
-                        + "clientProcessBuildings(WorldRegionToMetaGrid,ArrayList) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

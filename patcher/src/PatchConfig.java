@@ -1681,6 +1681,18 @@ public final class PatchConfig {
         return patches;
     }
 
+    /**
+     * client-fixes-compat：client() 裡不碰 PZ_Optimization 這類替換遊戲 class 的 MOD 所換 class 的幾刀——IsoTree（自建房間
+     * XL 樹）、BaseVehicle（W54、W61、W62、W65）、VehiclePacket（W63）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
+     * IsoChunk、RoomDef、FBORenderCutaways（W57、W68）不裝；W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket
+     * 也不裝。ClassPatch 直接取自 client(false)，手術與完整版逐位相同。
+     */
+    public static List<Patcher.ClassPatch> clientCompat() {
+        List<String> compat = List.of("zombie/iso/objects/IsoTree", "zombie/vehicles/BaseVehicle",
+                "zombie/network/packets/vehicle/VehiclePacket");
+        return client(false).stream().filter(p -> compat.contains(p.internalName)).toList();
+    }
+
     /** 所有自家 client 模組共用的 Lua bridge、重置與啟動狀態顯示。 */
     public static List<Patcher.ClassPatch> clientCore() {
         List<Patcher.ClassPatch> patches = new ArrayList<>();

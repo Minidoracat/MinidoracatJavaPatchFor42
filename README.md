@@ -273,8 +273,8 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
    to be in the game folder. The installer finds the game through Steam by itself, even on another drive, and
    asks you to paste the path only if it cannot (`-GameDir "<path>"` also works).
 2. Run `Install-Patches.bat`, choose `1` (install or update), then `1` (client fixes).
-3. Press Enter to accept the recommended variant (standard for 32 GB RAM or more, low-memory otherwise), then
-   `Y` to confirm.
+3. Press Enter to accept the recommended variant (standard for 32 GB RAM or more, low-memory otherwise, compatible
+   when another mod already replaces the game classes the full variants patch), then `Y` to confirm.
 
 The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
 or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for: it
@@ -289,8 +289,20 @@ cleans it up.
 |---|---|
 | `core` | Shared Lua bridge, installation fingerprint check and startup status; installed automatically |
 | `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, XL tree room fix, player-built room disconnect fix, vehicle animation speed-ups, vehicle teleport fixes (32 GB RAM or more) |
-| `client-fixes-lowmem` | The same fixes with the vanilla 50 MiB texture limit; excludes the standard variant |
+| `client-fixes-lowmem` | The same fixes with the vanilla 50 MiB texture limit; excludes the other variants |
+| `client-fixes-compat` | Only the XL tree room fix and the vehicle fixes, for use next to mods that replace the other classes (for example PZ_Optimization); excludes the other variants |
 | `profiler` | DevProfiler for mod developers (Java → Lua call timing, CSV/JFR export); its UI is the separate mod `MinidoracatDevProfilerFor42` |
+
+**Mods that replace game classes.** Some mods, such as PZ_Optimization, also put `.class` files into the game
+folder. If one of them already replaces a class this package patches, the installer stops with code 7 and changes
+nothing, because only one copy of a class can load. Do not delete just the files it lists: the rest of that mod
+still needs them, and the game closes when you join a server
+([issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)). Either keep that mod and install
+`client-fixes-compat` (the installer recommends it), or remove that mod with its own uninstaller (PZ_Optimization:
+`Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. That uninstaller deletes by path, so
+run this installer again afterwards if these patches were already installed. With PZ_Optimization, turn off its
+"Warm-start cache (Java AOT)" option and start the game once before installing or removing: while it is on, the game
+loads classes from that cache instead of the game folder, and the installer refuses.
 
 Build the package yourself with `build-client.ps1`; installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`

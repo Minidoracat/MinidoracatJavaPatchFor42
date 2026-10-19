@@ -28,7 +28,7 @@ import zombie.ui.UIFont;
 /** 共用 patch 的啟動驗證與可見狀態；不載入第三方 Java MOD。 */
 public final class MdcPatchRuntime {
     private static final Set<String> MODULE_IDS = Set.of(
-            "core", "profiler", "client-fixes-standard", "client-fixes-lowmem");
+            "core", "profiler", "client-fixes-standard", "client-fixes-lowmem", "client-fixes-compat");
     private static final long MAX_STATE_BYTES = 262_144;
     private static final int MAX_FILES = 256;
     private static final MdcLuaBridge BRIDGE = new MdcLuaBridge();
@@ -58,9 +58,9 @@ public final class MdcPatchRuntime {
             return;
         }
         try {
-            Path root = Path.of(MdcPatchRuntime.class.getProtectionDomain()
+            Path location = Path.of(MdcPatchRuntime.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI()).toAbsolutePath().normalize();
-            installedModules = readInstallation(root);
+            installedModules = readInstallation(gameRoot(location));
             compatible = true;
             stateError = "";
         } catch (Exception e) {
@@ -79,6 +79,19 @@ public final class MdcPatchRuntime {
             System.out.println("[MinidoracatPatches] installed=" + module.get("id")
                     + " version=" + module.get("version") + " (hook activity reported separately)");
         }
+    }
+
+    /**
+     * 遊戲資料夾。loose class 從 classpath 的 "." 載入時，位置就是遊戲資料夾；別的工具把 loose class 打包進自己的 jar 時
+     * （PZ_Optimization 的 AOT 快取 pzopt/aot/pzopt.jar），位置是那個 jar，往上找第一個有 projectzomboid.jar 的資料夾。
+     */
+    static Path gameRoot(Path location) {
+        for (Path dir = Files.isDirectory(location) ? location : location.getParent(); dir != null; dir = dir.getParent()) {
+            if (Files.isRegularFile(dir.resolve("projectzomboid.jar"), LinkOption.NOFOLLOW_LINKS)) {
+                return dir;
+            }
+        }
+        return location;
     }
 
     /** 只在啟動時讀取、驗證安裝記錄；任何不一致都不能宣稱 compatible。 */
@@ -135,7 +148,8 @@ public final class MdcPatchRuntime {
             row.put("installed", true);
             result.add(row);
         }
-        if (!seen.contains("core") || (seen.contains("client-fixes-standard") && seen.contains("client-fixes-lowmem"))) {
+        long variants = seen.stream().filter(id -> id.startsWith("client-fixes-")).count();
+        if (!seen.contains("core") || variants > 1) {
             throw new IOException("invalid module dependencies or variants");
         }
         return List.copyOf(result);

@@ -400,10 +400,10 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.21.0-0.2.7.zip`) and never touches the server manifest; the
+(currently `MinidoracatClientPatches-42.21.0-0.2.10.zip`) and never touches the server manifest; the
 client classpath `[".", "projectzomboid.jar"]` is unchanged and loose classes override.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
-`client-fixes-standard`/`client-fixes-lowmem`) after jar/payload SHA and ownership checks;
+`client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after jar/payload SHA and ownership checks;
 `Uninstall-Patches.bat` removes per module and refuses unknown or modified classes. Old TexPipeline
 v3.0 packages (the 42.20.3 and 42.20.4 builds, `deploy-client/legacy-packages.json`) are identified
 by their full set of file fingerprints only, not by the current jar: if one is left behind after a game
@@ -412,6 +412,34 @@ tied the match to the old jar, so a game update made it unrecognizable and playe
 `uninstall.bat`). Unrecognized leftovers are still refused. Steam file
 verification does not remove loose classes: uninstall before a game update, **never while the JVM is
 running**. Binaries are for local use by legal game owners only and are not committed or redistributed.
+
+**Coexisting with other mods that replace game classes (client package 0.2.10)**: PZ_Optimization
+(Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,
+`WorldStreamer`, `IsoChunk`, `RoomDef` and `FBORenderCutaways`, and only one copy of a class can load. A third
+mutually exclusive variant, `client-fixes-compat` (`PatchConfig.clientCompat()`; the Patcher/LoadCheck/SmokeCheck
+mode is `client-compat`), carries only the IsoTree, BaseVehicle and VehiclePacket surgery (XL tree room fix, W54,
+W61–W63, W65). Its ClassPatches are taken from `client(false)`, so the surgery is byte-identical to the full
+variants. The texture, streaming, W55 and W57 patches are not in it, and because W68 must lock every call site,
+IsoBuilding, DataRoot and MetaGridPacket are left out too. The installer adds three checks. (1) When a full variant
+conflicts with someone else's classes in the game folder and the compatible one does not, the interactive menu
+recommends the compatible variant and the code 7 message points to it, telling the player not to delete just the
+listed files. The player in [issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) deleted
+only the outer classes; PZ_Optimization's leftover `AnimationPlayer$L_*` classes hold per-instance scratch fields
+that the vanilla (and our) `AnimationPlayer` still reads with `getstatic`, so the first character animation threw
+`IncompatibleClassChangeError`, the main thread ended and the game closed. (2) A class about to be written whose
+class family (`X.class` or `X$*.class`) already has files in the game folder that are not ours is refused with
+code 7. (3) `ProjectZomboid64.json` is read, never written: if its classpath does not list `.` before
+`projectzomboid.jar`, install and uninstall are refused with instructions. PZ_Optimization's AOT cache (on by
+default) replaces the classpath with `pzopt/aot/pzopt.jar` and packs every loose class into it; when it later
+rebuilds that jar, Windows refuses to replace the jar in use (`AccessDeniedException`), so our installs and
+uninstalls would not take effect. When `MdcPatchRuntime` is loaded from someone else's jar, it walks up to the
+folder that holds `projectzomboid.jar` to read the install record, so it no longer reports `compatible=false`.
+
+Four of the paths the old v3.0 packages registered are vanilla classes (`TextureIDAssetManager`, `ImageData`,
+`TextureID`, `WorldStreamer`), and PZ_Optimization replaces them too. Files at those paths count as an
+unrecognized old package only when one of our own helpers (`zombie/mdc/…`, `Minidoracat…`) is still there or the
+content equals the old package's copy; otherwise the regular conflict checks handle them, or the compatible
+variant would be blocked too (installer test 57).
 
 **Verification**: hit count exactly 2; SmokeCheck client mode — vanilla precondition pins (exactly
 one `getBytesAllocated` and one `52428800L` in `waitFileTask`, so a PZ rewrite fails the build),

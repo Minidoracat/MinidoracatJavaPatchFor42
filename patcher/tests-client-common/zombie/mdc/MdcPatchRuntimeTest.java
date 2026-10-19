@@ -76,9 +76,32 @@ public final class MdcPatchRuntimeTest {
 
             JSONObject oversized = new JSONObject(good.toString()).put("extra", "x".repeat(270_000));
             reject(root, oversized, "oversized installation state");
+
+            Path fixA = root.resolve("zombie/mdc/CompatFixA.class");
+            Path fixB = root.resolve("zombie/mdc/CompatFixB.class");
+            Files.write(fixA, payload);
+            Files.write(fixB, payload);
+            JSONObject withCompat = new JSONObject(good.toString());
+            withCompat.getJSONArray("modules").put(variant("client-fixes-compat", "zombie/mdc/CompatFixA.class", hash(payload)));
+            save(root, withCompat);
+            if (MdcPatchRuntime.readInstallation(root).size() != 2) throw new AssertionError("core + compat variant rejected");
+            JSONObject twoVariants = new JSONObject(withCompat.toString());
+            twoVariants.getJSONArray("modules").put(variant("client-fixes-standard", "zombie/mdc/CompatFixB.class", hash(payload)));
+            reject(root, twoVariants, "two client-fixes variants");
+            Files.delete(fixA);
+            Files.delete(fixB);
+
+            // PZ_Optimization 的 AOT 快取把 loose class 打包進 pzopt/aot/pzopt.jar：從 jar 載入時仍要找到遊戲資料夾的安裝紀錄
+            Path packed = root.resolve("pzopt/aot/pzopt.jar");
+            Files.createDirectories(packed.getParent());
+            Files.write(packed, new byte[]{0});
+            if (!MdcPatchRuntime.gameRoot(packed).equals(root) || !MdcPatchRuntime.gameRoot(root).equals(root)) {
+                throw new AssertionError("game folder not found from a jar inside it");
+            }
+
             save(root, good);
             if (MdcPatchRuntime.readInstallation(root).size() != 1) throw new AssertionError("restored package rejected");
-            System.out.println("PASS runtime installation: valid/restored package; 10 fail-closed boundaries");
+            System.out.println("PASS runtime installation: valid/restored package, core+compat, game folder from a packed jar; 11 fail-closed boundaries");
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
@@ -93,6 +116,11 @@ public final class MdcPatchRuntimeTest {
                 .put("files", new JSONArray().put(file));
         return new JSONObject().put("schemaVersion", 1).put("jarSha256", MdcPatchBuildInfo.JAR_SHA256)
                 .put("packageVersion", "test").put("modules", new JSONArray().put(module));
+    }
+
+    private static JSONObject variant(String id, String path, String sha) {
+        return new JSONObject().put("id", id).put("name", id).put("version", "test")
+                .put("files", new JSONArray().put(new JSONObject().put("path", path).put("sha256", sha)));
     }
 
     private static void save(Path root, JSONObject state) throws IOException {
