@@ -4050,7 +4050,7 @@ helper 照原版呼叫原方法一次，回傳值與例外不變。重建期間�
 <a id="2ce"></a>
 ## 2ce. 實體 ID 撞號時照常移除（W69，server，預設 on）
 
-**症狀**（2026-10-19 玩家回報）：撿起大型晾曬架後，原地留下一格看得到、選得到，但撿起、拆解、大錘都沒反應的殘件，那一格也放不了別的東西，重登後還在。伺服器 console 在撿起那一刻有：
+**症狀**（2026-10-19 玩家回報）：撿起大型晾曬架後，原地留下看得到、選得到，但撿起、拆解、大錘都沒反應的殘件，那裡也放不了別的東西，重登後還在。伺服器 console 在撿起那一刻有：
 
 ```text
 ERROR: Entity ... GameEntityManager.checkEntityIDChange> idToEntityMap(<id>)=WoodFloorLvl3:floors_interior_tilesandwood_01_45:..., expected null for null:crafted_05_84:...
@@ -4063,7 +4063,7 @@ java.lang.RuntimeException: Stored entity mismatch
 - `IsoObject.getEntityNetID` 以 x、y、z 與物件在格子清單的序號組成 ID（`x + y<<16 + z<<32 + 序號<<40`），但 `isFloor()` 為真時序號一律算 0。玩家後蓋的地板（`WoodFloorLvl3` 等建造實體）在格子裡已有牆或家具時會加在清單後面，這時排第 0 個的實體算出來的 ID 與地板相同。
 - 先登記的那個佔住 `GameEntityManager.idToEntityMap` 的這一格：`RegisterEntity` 遇到已有就不登記；物件換序號時 `checkEntityIDChange` 拿掉舊 ID，新 ID 被佔就只記一行 `expected null for`、不放進去，`addedToEntityManager` 仍是 true。
 - 伺服器移除它時，`UnregisterEntity(GameEntity, boolean)` 先 `remove(ID)`（拿走的是地板），發現不是自己就丟 `Stored entity mismatch`；ID 表沒有它就直接 return。兩條路都沒有把它移出 engine，`addedToEntityManager` 也不清。
-- 呼叫端 `RemoveItemFromSquarePacket.removeItemFromMap` 在 `removeFromWorld` 之後才 `removeFromSquare`，而 `GameServer.RemoveItemFromMap` 在這之前就把移除封包送給附近客戶端：客戶端刪了，伺服器留著，玩家重登、重新載入那一格時物件又出現。多格家具在 `transmitRemoveItemFromSquare` 的整組迴圈中斷而只剩一格時，撿起、拆解、大錘都要求整組都在（`IsoObjectUtils.getSpriteGridMultiTileObjects`），永遠拆不掉，也擋住那一格的放置。
+- 呼叫端 `RemoveItemFromSquarePacket.removeItemFromMap` 在 `removeFromWorld` 之後才 `removeFromSquare`，而 `GameServer.RemoveItemFromMap` 在這之前就把移除封包送給附近客戶端：客戶端刪了，伺服器留著，玩家重登、重新載入那一格時物件又出現。多格家具的整組迴圈（`transmitRemoveItemFromSquare`）在某一格丟例外就中斷，那一格和排在它後面的格子都留在伺服器上（這次 2×2 的晾曬架留下 3 格，客戶端只刪了前 2 格）。整組缺了一格之後，撿起、拆解、大錘都要求整組都在（`IsoObjectUtils.getSpriteGridMultiTileObjects`），永遠拆不掉，也擋住那幾格的放置。
 - chunk 卸載時（`ServerMap$ServerCell.Unload` → `IsoChunk.removeFromWorld`）同一個例外中斷整個 cell 的卸載，由 `ServerMap.postupdate` 接住，下一個 tick 重試；地板在 ID 表的登記已被拿掉，之後它移除時同樣留在 engine（推論）。
 - 正式服 10-11～10-19 的 console：`Stored entity mismatch` 248 次，19 次在移除時（撿起、拆解、大錘、建造升級時移除前一階段），其餘在 chunk 卸載。撞號的多是 `WoodFloorLvl3`、`GravelFloor` 與牆、牆框、圍欄。
 
@@ -4086,7 +4086,7 @@ console（每分鐘最多 20 行，超過的只計數，下一分鐘第一次記
 
 **不處理**：
 - ID 撞號本身：兩個實體仍共用一個網路 ID，以這個 ID 定址的實體封包只找得到 ID 表裡的那個。要根治得改 ID 算法，客戶端也要一起改。
-- 已經留在伺服器上的殘件：本刀只讓之後的移除照常完成。多格家具只剩一格的，原版玩法拆不掉，要由管理員用除錯選單 Brush Tool → Destroy tile（`SledgehammerDestroyPacket` 按序號直接刪，不檢查整組）或在伺服器端清除。
+- 已經留在伺服器上的殘件：本刀只讓之後的移除照常完成。缺了幾格的多格家具，原版玩法拆不掉，要由管理員用除錯選單 Brush Tool → Destroy tile 逐格刪（`SledgehammerDestroyPacket` 按序號直接刪，不檢查整組），或在伺服器端清除。
 - `GameEntity.reset()` 與 `onUnEquip()` 呼叫的單參數 `UnregisterEntity`：正式服的例外都不在這兩條路上，不改。
 
 **守門與驗證**：

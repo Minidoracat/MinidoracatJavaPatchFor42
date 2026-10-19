@@ -4144,9 +4144,9 @@ and its test.
 <a id="2ce"></a>
 ## 2ce. Entity ID collision on removal (W69, server, default on)
 
-**Symptom** (player report 2026-10-19): after picking up a Large Drying Rack, one tile of it stayed behind. It could be seen and selected,
-but picking it up, disassembling it or using a sledgehammer did nothing, nothing else could be placed on that tile, and it was still there after
-a relog. At the moment of the pickup the server console had:
+**Symptom** (player report 2026-10-19): after picking up a Large Drying Rack, a leftover stayed behind. It could be seen and selected, but
+picking it up, disassembling it or using a sledgehammer did nothing, nothing else could be placed there, and it was still there after a relog.
+At the moment of the pickup the server console had:
 
 ```text
 ERROR: Entity ... GameEntityManager.checkEntityIDChange> idToEntityMap(<id>)=WoodFloorLvl3:floors_interior_tilesandwood_01_45:..., expected null for null:crafted_05_84:...
@@ -4167,9 +4167,10 @@ java.lang.RuntimeException: Stored entity mismatch
   engine or clears `addedToEntityManager`.
 - The caller `RemoveItemFromSquarePacket.removeItemFromMap` calls `removeFromSquare` only after `removeFromWorld`, and
   `GameServer.RemoveItemFromMap` has already sent the removal packet to nearby clients. Clients drop the object, the server keeps it, and it
-  reappears when the player relogs and the square loads again. When this interrupts the multi-tile loop in `transmitRemoveItemFromSquare`
-  and leaves one tile of a piece of furniture, picking up, disassembling and sledgehammering all require the whole set
-  (`IsoObjectUtils.getSpriteGridMultiTileObjects`), so the tile can never be removed and blocks placement on its square.
+  reappears when the player relogs and the square loads again. The multi-tile loop in `transmitRemoveItemFromSquare` stops at the tile that
+  throws, so that tile and every tile after it stay on the server (this time 3 of the rack's 4 tiles; clients only dropped the first 2). With a
+  tile of the set missing, picking up, disassembling and sledgehammering all require the whole set (`IsoObjectUtils.getSpriteGridMultiTileObjects`),
+  so the leftover can never be removed and blocks placement on its squares.
 - On chunk unload (`ServerMap$ServerCell.Unload` → `IsoChunk.removeFromWorld`) the same exception aborts the whole cell unload; `ServerMap.postupdate`
   catches it and the unload is retried on the next tick. The floor's slot in the ID table is already gone, so the floor stays in the engine when
   it is removed later (inferred).
@@ -4207,9 +4208,9 @@ After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 143`; t
 **Not handled**:
 - The ID collision itself: the two entities still share one network ID, and entity packets addressed by that ID only reach the one in the ID
   table. Fixing that means changing the ID scheme on clients too.
-- Leftovers already on the server: this patch only lets later removals complete. A single tile left from multi-tile furniture cannot be removed
-  in normal play; an admin can remove it with the debug menu Brush Tool → Destroy tile (`SledgehammerDestroyPacket` deletes by index and does
-  not check the whole set) or it can be removed on the server.
+- Leftovers already on the server: this patch only lets later removals complete. Multi-tile furniture with a tile missing cannot be removed
+  in normal play; an admin can remove it tile by tile with the debug menu Brush Tool → Destroy tile (`SledgehammerDestroyPacket` deletes by
+  index and does not check the whole set), or it can be removed on the server.
 - The single-argument `UnregisterEntity` called from `GameEntity.reset()` and `onUnEquip()`: none of the production exceptions came through
   these paths, so they are unchanged.
 
