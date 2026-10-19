@@ -4319,7 +4319,365 @@ public final class SmokeCheck {
                         .equals(methodText(methodFromJar(jar, vehiclePacketCls, "doRequest", doRemoveDesc)))
                 && methodText(method(distJava, vehiclePacketCls, "parse", vehiclePacketParseDesc))
                         .equals(methodText(methodFromJar(jar, vehiclePacketCls, "parse", vehiclePacketParseDesc))));
+        failed += metaGridLockChecks(distJava, jar);
         return failed;
+    }
+
+    /**
+     * W68 metagrid 房間表鎖（docs/patches.md 2cd）。
+     * 存在理由：IsoMetaCell.isoRooms／isoBuildings 是一般 HashMap；getRoomByID（streamer 反序列化 chunk 時經 IsoChunk.getRoom）
+     * 沒有鎖就補房間，recalculateBuildingAndRoomIDs 複製兩張表的 values 後清空重填。TIS 換成並行安全的表或自己加鎖＝轉紅、重估撤刀。
+     * 不死結的依據也鎖進建置期：getRoomByID 的遞移呼叫不拿 jar 內的鎖、不呼叫 JDK 阻塞 API；streamer 走到 getRoom 的每一層都不持鎖；
+     * 重建（DataRoot、WorldRegionToMetaGrid）不碰 WorldStreamer。
+     */
+    static int metaGridLockChecks(Path distJava, Path jar) throws Exception {
+        int failed = 0;
+        String lockCls = "zombie/mdc/MetaGridLock";
+        String gridCls = "zombie/iso/IsoMetaGrid";
+        String cellCls = "zombie/iso/IsoMetaCell";
+        String rebuildCls = "zombie/iso/areas/isoregion/metagrid/WorldRegionToMetaGrid";
+        String dataRootCls = "zombie/iso/areas/isoregion/data/DataRoot";
+        String roomDesc = "(J)Lzombie/iso/areas/IsoRoom;";
+        String rebuildDesc = "(Ljava/util/ArrayList;)V";
+        String hashPut = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        MethodNode vGetRoom = methodFromJar(jar, gridCls, "getRoomByID", roomDesc);
+        MethodNode vRecalc = methodFromJar(jar, rebuildCls, "recalculateBuildingAndRoomIDs", "(L" + cellCls + ";)V");
+        ClassNode vCell = classNodeFromJar(jar, cellCls);
+        failed += check("W68 vanilla 前提：isoRooms／isoBuildings 是 HashMap；getRoomByID 沒有鎖、put 兩張表；"
+                        + "recalculateBuildingAndRoomIDs 複製兩張表的 values 後清空重填",
+                hasField(vCell, "isoRooms", "Ljava/util/HashMap;") && hasField(vCell, "isoBuildings", "Ljava/util/HashMap;")
+                && (vGetRoom.access & Opcodes.ACC_SYNCHRONIZED) == 0 && countOpcode(vGetRoom, Opcodes.MONITORENTER) == 0
+                && countExactCalls(vGetRoom, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "put", hashPut) == 2
+                && countExactCalls(vRecalc, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "values", "()Ljava/util/Collection;") == 2
+                && countExactCalls(vRecalc, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "clear", "()V") == 3
+                && countExactCalls(vRecalc, Opcodes.INVOKEVIRTUAL, "java/util/HashMap", "put", hashPut) == 3
+                && countOpcode(vRecalc, Opcodes.MONITORENTER) == 0);
+        failed += check("W68 vanilla 前提：streamer 反序列化 chunk 時 setRoomID 經 IsoChunk.getRoom 呼叫 getRoomByID",
+                countExactCalls(methodFromJar(jar, "zombie/iso/IsoGridSquare", "setRoomID", "(J)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "getRoom", roomDesc) == 1);
+
+        // jar 內每一個 getRoomByID 都要經過鎖：呼叫點清冊釘死，新增或搬走都轉紅。
+        List<String> roomCallers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, gridCls, "getRoomByID", roomDesc);
+        List<String[]> roomSites = List.of(
+                new String[]{"zombie/iso/IsoChunk", "getRoom", roomDesc},
+                new String[]{"zombie/iso/RoomDef", "getIsoRoom", "()Lzombie/iso/areas/IsoRoom;"},
+                new String[]{"zombie/iso/areas/IsoBuilding", "CreateFrom", "(Lzombie/iso/BuildingDef;L" + cellCls + ";)V"},
+                new String[]{"zombie/iso/fboRenderChunk/FBORenderCutaways", "CalculateBuildingsToCollapse", "()Z"},
+                new String[]{"zombie/network/packets/MetaGridPacket", "processClient", "(Lzombie/core/raknet/UdpConnection;)V"});
+        List<String> expectedCallers = new ArrayList<>();
+        for (String[] site : roomSites) {
+            expectedCallers.add(site[0] + "." + site[1] + site[2]);
+        }
+        java.util.Collections.sort(expectedCallers);
+        failed += check("W68 vanilla 前提：jar 內 getRoomByID 恰 5 個呼叫點（IsoChunk.getRoom、RoomDef.getIsoRoom、IsoBuilding.CreateFrom、"
+                        + "FBORenderCutaways.CalculateBuildingsToCollapse、MetaGridPacket.processClient），各 1 個",
+                roomCallers.equals(expectedCallers));
+        String vRoomCall = "INVOKEVIRTUAL " + gridCls + ".getRoomByID " + roomDesc;
+        String pRoomCall = "INVOKESTATIC " + lockCls + ".getRoomByID (L" + gridCls + ";J)Lzombie/iso/areas/IsoRoom;";
+        boolean roomSitesLocked = true;
+        for (String[] site : roomSites) {
+            MethodNode vSite = methodFromJar(jar, site[0], site[1], site[2]);
+            MethodNode pSite = method(distJava, site[0], site[1], site[2]);
+            if (!methodText(vSite).replace(vRoomCall, pRoomCall).equals(methodText(pSite))
+                    || countExactCalls(pSite, Opcodes.INVOKEVIRTUAL, gridCls, "getRoomByID", roomDesc) != 0) {
+                System.out.println("  !! 未同形改道: " + site[0] + "." + site[1]);
+                roomSitesLocked = false;
+            }
+        }
+        failed += check("W68 五個 getRoomByID 呼叫點同形改道 MetaGridLock.getRoomByID，其餘指令與 frames 保留", roomSitesLocked);
+        MethodNode vDataRoot = methodFromJar(jar, dataRootCls, "clientProcessBuildings", "()V");
+        MethodNode pDataRoot = method(distJava, dataRootCls, "clientProcessBuildings", "()V");
+        failed += check("W68 clientProcessBuildings 唯一呼叫點（DataRoot.clientProcessBuildings）同形改道 MetaGridLock，其餘指令與 frames 保留",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, rebuildCls, "clientProcessBuildings", rebuildDesc)
+                        .equals(List.of(dataRootCls + ".clientProcessBuildings()V"))
+                && methodText(vDataRoot).replace("INVOKEVIRTUAL " + rebuildCls + ".clientProcessBuildings " + rebuildDesc,
+                        "INVOKESTATIC " + lockCls + ".clientProcessBuildings (L" + rebuildCls + ";" + rebuildDesc.substring(1))
+                        .equals(methodText(pDataRoot)));
+
+        // 不死結的依據（docs/patches.md 2cd）。等鎖的執行緒只會停在上面 6 個改道點；死結要有「拿著鎖的執行緒在等一個等鎖的執行緒」。
+        JarIndex index = JarIndex.load(jar);
+        List<String> roomWaits = new ArrayList<>();
+        Map<String, MethodNode> roomClosure = index.closure(gridCls, "getRoomByID", roomDesc, true, 200);
+        if (roomClosure == null) {
+            roomWaits.add("閉包超過 200 個方法");
+        } else {
+            roomClosure.forEach((key, m) -> {
+                if ((m.access & (Opcodes.ACC_SYNCHRONIZED | Opcodes.ACC_NATIVE)) != 0) {
+                    roomWaits.add(key + " synchronized/native");
+                }
+                if (countOpcode(m, Opcodes.MONITORENTER) != 0) {
+                    roomWaits.add(key + " monitorenter");
+                }
+                roomWaits.addAll(index.jdkWaits(key, m));
+            });
+        }
+        roomWaits.forEach(v -> System.out.println("  !! " + v));
+        failed += check("W68 依據：getRoomByID 的遞移呼叫（虛擬呼叫含 jar 內所有覆寫）不進 monitor／synchronized／native，不呼叫 JDK 等待 API",
+                roomWaits.isEmpty());
+        Map<String, List<String>> streamerFrames = Map.of(
+                "zombie/iso/WorldStreamer", List.of("threadLoop", "loadReceivedChunks", "DoChunk", "DoChunkAlways"),
+                "zombie/iso/IsoChunk", List.of("LoadChunk", "LoadOrCreate", "LoadFromDisk", "LoadFromBuffer", "LoadFromDiskOrBuffer",
+                        "LoadFromDiskOrBufferInternal", "assignRoom", "ensureNotNull", "EnsureSurroundNotNull", "getRoom"),
+                "zombie/iso/IsoGridSquare", List.of("setRoomID"),
+                "zombie/iso/IsoCell", List.of("PlaceLot"));
+        List<String> frameHolds = new ArrayList<>();
+        for (var frame : streamerFrames.entrySet()) {
+            for (MethodNode m : index.classes().get(frame.getKey()).methods) {
+                if (frame.getValue().contains(m.name)) {
+                    frameHolds.addAll(frameLocks(frame.getKey() + "." + m.name + m.desc, m));
+                }
+            }
+        }
+        for (MethodNode m : index.classes().get("zombie/iso/CellLoader").methods) {
+            frameHolds.addAll(frameLocks("zombie/iso/CellLoader." + m.name + m.desc, m));
+        }
+        frameHolds.forEach(v -> System.out.println("  !! " + v));
+        failed += check("W68 依據：streamer 從 threadLoop 到 IsoChunk.getRoom（含 CellLoader／PlaceLot 新 chunk 路徑）每一層都不拿著鎖往下呼叫",
+                frameHolds.isEmpty());
+        // 重建拿著鎖時可以進別的 monitor（等鎖的 streamer 手上沒有），但不能等 streamer：遞移呼叫（只走宣告的實作）不碰 WorldStreamer；
+        // 會等待的 JDK 呼叫釘死成已審過的清單——全在 Lua 除錯器的巢狀畫面迴圈或伺服器送封包，客戶端重建走不到。清單一變就轉紅，重新稽核。
+        Map<String, MethodNode> rebuildClosure = index.closure(rebuildCls, "clientProcessBuildings", rebuildDesc, false, 20000);
+        Set<String> rebuildWaits = new java.util.TreeSet<>();
+        List<String> streamerTouches = new ArrayList<>();
+        if (rebuildClosure != null) {
+            rebuildClosure.forEach((key, m) -> {
+                rebuildWaits.addAll(index.jdkWaits(key, m));
+                if (countCallsToOwner(m, "zombie/iso/WorldStreamer") + countFieldTouchesOfOwner(m, "zombie/iso/WorldStreamer") != 0) {
+                    streamerTouches.add(key);
+                }
+            });
+        }
+        Set<String> reviewedRebuildWaits = Set.of(
+                "zombie/core/SpriteRenderer.waitForReadySlotToOpen()V -> java/lang/Object.wait",
+                "zombie/core/SpriteRenderer.waitForReadyState(Ljava/util/function/BooleanSupplier;)Z -> java/lang/Object.wait",
+                "zombie/core/opengl/RenderContextQueueItem.waitUntilFinished(Ljava/util/function/BooleanSupplier;)V -> java/lang/Object.wait",
+                "zombie/core/textures/TextureDraw.GetFutureResultNoThrow()V -> java/util/concurrent/Future.get",
+                "zombie/core/textures/TextureDraw.GetFutureResultThrow()V -> java/util/concurrent/Future.get",
+                "zombie/core/raknet/UdpConnection.startPacket()Lzombie/core/network/ByteBufferWriter; -> java/util/concurrent/locks/Lock.lock",
+                "zombie/ui/UIManager$Sync.endFrame()V -> java/lang/Thread.sleep",
+                "zombie/iso/sprite/IsoSpriteInstance.get(Lzombie/iso/sprite/IsoSprite;)Lzombie/iso/sprite/IsoSpriteInstance; -> java/lang/Thread.onSpinWait");
+        if (!rebuildWaits.equals(reviewedRebuildWaits)) {
+            rebuildWaits.stream().filter(w -> !reviewedRebuildWaits.contains(w)).forEach(w -> System.out.println("  !! 新的等待: " + w));
+            reviewedRebuildWaits.stream().filter(w -> !rebuildWaits.contains(w)).forEach(w -> System.out.println("  !! 消失的等待: " + w));
+        }
+        streamerTouches.forEach(t -> System.out.println("  !! 碰 WorldStreamer: " + t));
+        failed += check("W68 依據：重建（clientProcessBuildings 的遞移呼叫）不碰 WorldStreamer，會等待的 JDK 呼叫與已審清單相同（"
+                        + (rebuildClosure == null ? "閉包過大" : rebuildClosure.size() + " 個方法") + "）",
+                rebuildClosure != null && streamerTouches.isEmpty() && rebuildWaits.equals(reviewedRebuildWaits));
+
+        MethodNode gRoom = method(distJava, lockCls, "getRoomByID", "(L" + gridCls + ";J)Lzombie/iso/areas/IsoRoom;");
+        MethodNode gRebuild = method(distJava, lockCls, "clientProcessBuildings", "(L" + rebuildCls + ";" + rebuildDesc.substring(1));
+        failed += check("W68 helper：開與關各呼叫原方法一次（共 2 個呼叫點），鎖是公平的 ReentrantLock",
+                countExactCalls(gRoom, Opcodes.INVOKEVIRTUAL, gridCls, "getRoomByID", roomDesc) == 2
+                && countExactCalls(gRebuild, Opcodes.INVOKEVIRTUAL, rebuildCls, "clientProcessBuildings", rebuildDesc) == 2
+                && countExactCalls(method(distJava, lockCls, "<clinit>", "()V"), Opcodes.INVOKESPECIAL,
+                        "java/util/concurrent/locks/ReentrantLock", "<init>", "(Z)V") == 1);
+        return failed;
+    }
+
+    /** 全 jar 對 owner.name desc 的呼叫點清冊（「class.method desc」，每個呼叫點一筆，排序）。 */
+    static List<String> jarWideCallers(Path jar, int opcode, String owner, String name, String desc) throws Exception {
+        List<String> callers = new ArrayList<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (!e.getName().endsWith(".class")) {
+                    continue;
+                }
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                for (MethodNode m : cn.methods) {
+                    for (int i = countExactCalls(m, opcode, owner, name, desc); i > 0; i--) {
+                        callers.add(cn.name + "." + m.name + m.desc);
+                    }
+                }
+            }
+        }
+        java.util.Collections.sort(callers);
+        return callers;
+    }
+
+    /** 方法內對某個類別任何欄位的存取次數。 */
+    static int countFieldTouchesOfOwner(MethodNode m, String owner) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof FieldInsnNode fi && fi.owner.equals(owner)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 整個 jar 的類別索引（W68 呼叫閉包用）。 */
+    record JarIndex(Map<String, ClassNode> classes, Map<String, List<String>> subtypes) {
+
+        static JarIndex load(Path jar) throws Exception {
+            Map<String, ClassNode> classes = new HashMap<>();
+            Map<String, List<String>> subtypes = new HashMap<>();
+            try (ZipFile zf = new ZipFile(jar.toFile())) {
+                Enumeration<? extends ZipEntry> en = zf.entries();
+                while (en.hasMoreElements()) {
+                    ZipEntry e = en.nextElement();
+                    if (e.getName().endsWith(".class")) {
+                        ClassNode cn = new ClassNode();
+                        new ClassReader(zf.getInputStream(e)).accept(cn, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                        classes.put(cn.name, cn);
+                    }
+                }
+            }
+            for (ClassNode cn : classes.values()) {
+                if (cn.superName != null) {
+                    subtypes.computeIfAbsent(cn.superName, k -> new ArrayList<>()).add(cn.name);
+                }
+                for (String itf : cn.interfaces) {
+                    subtypes.computeIfAbsent(itf, k -> new ArrayList<>()).add(cn.name);
+                }
+            }
+            return new JarIndex(classes, subtypes);
+        }
+
+        /**
+         * owner.name desc 在 jar 內的遞移呼叫閉包（鍵＝「class.method desc」）。cha＝虛擬／介面呼叫再加上 jar 內子型別的覆寫，
+         * 否則只走宣告的實作；lambda 本體也算。走到超過 limit 個方法回 null（閉包變大＝要重新稽核）。
+         */
+        Map<String, MethodNode> closure(String owner, String name, String desc, boolean cha, int limit) {
+            Map<String, MethodNode> seen = new java.util.LinkedHashMap<>();
+            java.util.ArrayDeque<String[]> todo = new java.util.ArrayDeque<>();
+            todo.add(new String[]{owner, name, desc});
+            while (!todo.isEmpty()) {
+                String[] k = todo.poll();
+                String key = k[0] + "." + k[1] + k[2];
+                MethodNode m = declaredMethod(classes.get(k[0]), k[1], k[2]);
+                if (m == null || seen.containsKey(key)) {
+                    continue;
+                }
+                seen.put(key, m);
+                if (seen.size() > limit) {
+                    return null;
+                }
+                for (AbstractInsnNode in : m.instructions) {
+                    if (in instanceof MethodInsnNode mi && classes.containsKey(mi.owner)) {
+                        String impl = declaringClass(mi.owner, mi.name, mi.desc);
+                        if (impl != null) {
+                            todo.add(new String[]{impl, mi.name, mi.desc});
+                        }
+                        if (cha && (mi.getOpcode() == Opcodes.INVOKEVIRTUAL || mi.getOpcode() == Opcodes.INVOKEINTERFACE)) {
+                            java.util.ArrayDeque<String> subs = new java.util.ArrayDeque<>(subtypes.getOrDefault(mi.owner, List.of()));
+                            Set<String> visited = new HashSet<>();
+                            while (!subs.isEmpty()) {
+                                String sub = subs.poll();
+                                if (visited.add(sub)) {
+                                    if (declaredMethod(classes.get(sub), mi.name, mi.desc) != null) {
+                                        todo.add(new String[]{sub, mi.name, mi.desc});
+                                    }
+                                    subs.addAll(subtypes.getOrDefault(sub, List.of()));
+                                }
+                            }
+                        }
+                    } else if (in instanceof InvokeDynamicInsnNode indy) {
+                        for (Object arg : indy.bsmArgs) {
+                            if (arg instanceof Handle h && classes.containsKey(h.getOwner())) {
+                                String impl = declaringClass(h.getOwner(), h.getName(), h.getDesc());
+                                if (impl != null) {
+                                    todo.add(new String[]{impl, h.getName(), h.getDesc()});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return seen;
+        }
+
+        /** 往父類別與介面找實際宣告這個方法的 jar 內類別。 */
+        String declaringClass(String owner, String name, String desc) {
+            java.util.ArrayDeque<String> todo = new java.util.ArrayDeque<>(List.of(owner));
+            while (!todo.isEmpty()) {
+                ClassNode cn = classes.get(todo.poll());
+                if (cn == null) {
+                    continue;
+                }
+                if (declaredMethod(cn, name, desc) != null) {
+                    return cn.name;
+                }
+                if (cn.superName != null) {
+                    todo.add(cn.superName);
+                }
+                todo.addAll(cn.interfaces);
+            }
+            return null;
+        }
+
+        /**
+         * 方法內對 jar 外（JDK）會讓執行緒等待的呼叫：「key -> owner.name」。涵蓋 Object.wait、Thread.join／sleep／onSpinWait／yield、
+         * j.u.c 的 lock／lockInterruptibly／限時 tryLock、await*、park*、acquire*、阻塞佇列的 put／take／限時 offer、poll、
+         * Future／ForkJoinTask 的 get、join、Exchanger、invokeAll／Any，與 FileChannel.lock。JDK 同步容器（Vector 等）的方法鎖
+         * 只鎖自己、不回呼，不算。
+         */
+        List<String> jdkWaits(String key, MethodNode m) {
+            List<String> waits = new ArrayList<>();
+            for (AbstractInsnNode in : m.instructions) {
+                if (in instanceof MethodInsnNode mi && !classes.containsKey(mi.owner) && waits(mi.owner, mi.name, mi.desc)) {
+                    waits.add(key + " -> " + mi.owner + "." + mi.name);
+                }
+            }
+            return waits;
+        }
+
+        static boolean waits(String owner, String name, String desc) {
+            if (owner.equals("java/lang/Object")) {
+                return name.equals("wait");
+            }
+            if (owner.equals("java/lang/Thread")) {
+                return name.equals("join") || name.equals("sleep") || name.equals("onSpinWait") || name.equals("yield");
+            }
+            if (owner.startsWith("java/nio/channels/")) {
+                return name.equals("lock");
+            }
+            if (!owner.startsWith("java/util/concurrent/")) {
+                return false;
+            }
+            boolean timed = desc.contains("Ljava/util/concurrent/TimeUnit;");
+            return name.equals("lock") || name.equals("lockInterruptibly") || (name.equals("tryLock") && timed)
+                    || name.startsWith("await") || name.contains("Await") || name.startsWith("park") || name.startsWith("acquire")
+                    || name.equals("take") || (name.equals("put") && owner.contains("Blocking"))
+                    || ((name.equals("offer") || name.equals("poll")) && timed)
+                    || ((name.equals("get") || name.equals("join")) && (owner.contains("Future") || owner.contains("ForkJoinTask")))
+                    || name.equals("exchange") || name.equals("invokeAll") || name.equals("invokeAny");
+        }
+    }
+
+    /**
+     * streamer 的一層呼叫框會不會拿著鎖往下呼叫：synchronized、monitorenter，或直接取得 j.u.c 鎖／號誌、FileChannel 鎖。
+     * 框裡的 sleep 只是等時間、不拿著東西，不算。
+     */
+    static List<String> frameLocks(String key, MethodNode m) {
+        List<String> holds = new ArrayList<>();
+        if ((m.access & Opcodes.ACC_SYNCHRONIZED) != 0 || countOpcode(m, Opcodes.MONITORENTER) != 0) {
+            holds.add(key + " synchronized/monitorenter");
+        }
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi
+                    && (mi.owner.startsWith("java/util/concurrent/") || mi.owner.startsWith("java/nio/channels/"))
+                    && (mi.name.equals("lock") || mi.name.equals("lockInterruptibly") || mi.name.equals("tryLock")
+                        || mi.name.startsWith("acquire"))) {
+                holds.add(key + " -> " + mi.owner + "." + mi.name);
+            }
+        }
+        return holds;
+    }
+
+    static MethodNode declaredMethod(ClassNode cn, String name, String desc) {
+        if (cn == null) {
+            return null;
+        }
+        for (MethodNode m : cn.methods) {
+            if (m.name.equals(name) && m.desc.equals(desc)) {
+                return m;
+            }
+        }
+        return null;
     }
 
     /**

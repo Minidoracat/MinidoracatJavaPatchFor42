@@ -141,6 +141,19 @@ public final class LoadCheck {
                 }
                 System.out.println("vehicle orphan guard OK VehicleOrphanGuard.contains(ArrayList,Object)、"
                         + "setPosition(IsoPlayer,float,float,float) 簽名一致");
+                Class<?> gridLock = Class.forName("zombie.mdc.MetaGridLock", false, cl);
+                var lockedRoom = gridLock.getDeclaredMethod("getRoomByID",
+                        Class.forName("zombie.iso.IsoMetaGrid", false, cl), long.class);
+                var lockedRebuild = gridLock.getDeclaredMethod("clientProcessBuildings",
+                        Class.forName("zombie.iso.areas.isoregion.metagrid.WorldRegionToMetaGrid", false, cl),
+                        java.util.ArrayList.class);
+                if (lockedRoom.getReturnType() != Class.forName("zombie.iso.areas.IsoRoom", false, cl)
+                        || (lockedRoom.getModifiers() & psf) != psf
+                        || lockedRebuild.getReturnType() != void.class || (lockedRebuild.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("MetaGridLock signature");
+                }
+                System.out.println("metagrid lock OK MetaGridLock.getRoomByID(IsoMetaGrid,long)、"
+                        + "clientProcessBuildings(WorldRegionToMetaGrid,ArrayList) 簽名一致");
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;
             }

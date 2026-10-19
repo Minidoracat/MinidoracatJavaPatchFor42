@@ -1613,7 +1613,48 @@ public final class PatchConfig {
         mainLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/objects/IsoLightSwitch",
                 "chunkLoaded", "(Lzombie/iso/IsoChunk;)V", "zombie/mdc/StaleRoomGuard", "chunkLoaded"));
         mainLoad.expectedHits = 1;
+
+        // ---- W68 metagrid 房間表鎖（docs/patches.md 2cd）----
+        // World Streamer 反序列化 chunk 時經 IsoChunk.getRoom → IsoMetaGrid.getRoomByID 往 IsoMetaCell.isoRooms／isoBuildings
+        // （一般 HashMap）補房間；主執行緒 clientProcessBuildings 同時在 recalculateBuildingAndRoomIDs 複製、清空、重填同樣兩張表，
+        // 複製出 null（NPE "isoRoom" is null）或多一筆（AIOOBE）→ 斷線。jar 內全部 5 個 getRoomByID 呼叫點與 DataRoot 對
+        // clientProcessBuildings 的唯一呼叫 1:1 改道 MetaGridLock，同一把鎖互斥；原版方法照常各呼叫一次。
+        String gridLock = "zombie/mdc/MetaGridLock";
+        String roomByIdDesc = "(J)Lzombie/iso/areas/IsoRoom;";
+        Patcher.Site roomById = new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoMetaGrid", "getRoomByID",
+                roomByIdDesc, gridLock, "getRoomByID");
+        Patcher.MethodOps chunkRoom = chunk.method("getRoom", roomByIdDesc);   // setRoomID（streamer 反序列化、updateSquares）
+        chunkRoom.redirects.add(roomById);
+        chunkRoom.expectedHits = 1;
         patches.add(chunk);
+        Patcher.ClassPatch roomDef = new Patcher.ClassPatch("zombie/iso/RoomDef");
+        Patcher.MethodOps isoRoom = roomDef.method("getIsoRoom", "()Lzombie/iso/areas/IsoRoom;");   // doLoadGridsquare 等主執行緒
+        isoRoom.redirects.add(roomById);
+        isoRoom.expectedHits = 1;
+        patches.add(roomDef);
+        Patcher.ClassPatch isoBuilding = new Patcher.ClassPatch("zombie/iso/areas/IsoBuilding");
+        Patcher.MethodOps createFrom = isoBuilding.method("CreateFrom",
+                "(Lzombie/iso/BuildingDef;Lzombie/iso/IsoMetaCell;)V");   // 只在 getRoomByID 內（重入）
+        createFrom.redirects.add(roomById);
+        createFrom.expectedHits = 1;
+        patches.add(isoBuilding);
+        Patcher.ClassPatch cutaways = new Patcher.ClassPatch("zombie/iso/fboRenderChunk/FBORenderCutaways");
+        Patcher.MethodOps collapse = cutaways.method("CalculateBuildingsToCollapse", "()Z");
+        collapse.redirects.add(roomById);
+        collapse.expectedHits = 1;
+        patches.add(cutaways);
+        Patcher.ClassPatch metaGridPacket = new Patcher.ClassPatch("zombie/network/packets/MetaGridPacket");
+        Patcher.MethodOps lightsPacket = metaGridPacket.method("processClient", "(Lzombie/core/raknet/UdpConnection;)V");
+        lightsPacket.redirects.add(roomById);
+        lightsPacket.expectedHits = 1;
+        patches.add(metaGridPacket);
+        Patcher.ClassPatch dataRoot = new Patcher.ClassPatch("zombie/iso/areas/isoregion/data/DataRoot");
+        Patcher.MethodOps rebuild = dataRoot.method("clientProcessBuildings", "()V");
+        rebuild.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/areas/isoregion/metagrid/WorldRegionToMetaGrid", "clientProcessBuildings",
+                "(Ljava/util/ArrayList;)V", gridLock, "clientProcessBuildings"));
+        rebuild.expectedHits = 1;
+        patches.add(dataRoot);
 
         return patches;
     }

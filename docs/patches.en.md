@@ -3269,7 +3269,7 @@ squares whose room has a null `def`, walking the squares exactly as vanilla `chu
 `[MinidoracatJavaPatch][StaleRoomGuard] active=true|false` (with the raw flag value when set). Every re-binding logs
 `chunk <wx>,<wy>: <N> squares pointed to a cleared IsoRoom; rebound like WorldRegionToMetaGrid.updateSquares (#<n>)`, at most 20 lines per start.
 
-**Not handled**: the R1 HashMap race; squares that had no room before the rebuild and are inside one after it (no crash; they get the room at the next
+**Not handled**: the R1 HashMap race (handled by W68 from client package 0.2.9, see [2cd](#2cd)); squares that had no room before the rebuild and are inside one after it (no crash; they get the room at the next
 rebuild or reload, the same as vanilla for chunks that are already loaded); `IsoLightSwitch.load` reading a room that is being cleared on the streamer
 thread (a different moment, not reported).
 
@@ -4028,6 +4028,118 @@ classes). After release, check the banner fingerprint and `[mdc-javagate] OK: 14
 
 **Retirement**: reassess when TIS adds ownership or safehouse checks for livestock zones; rewrite if the read order in `processServer` changes
 (SmokeCheck turns red).
+
+<a id="2cd"></a>
+## 2cd. Room tables written by two threads (W68, client, default on; client package 0.2.9)
+
+**Symptom** (player report 2026-10-19, with client package 0.2.8; the same defect was reported to TIS on 42.20.4 as
+[#101035](https://theindiestone.com/forums/topic/101035/), no reply so far): while someone nearby builds or demolishes and this client is loading
+map chunks, the client is disconnected to the main menu. The player's client log (42.21.0 `4a0e9546ec`) has a single exception:
+`NullPointerException: Cannot read field "def" because "isoRoom" is null at WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs(WorldRegionToMetaGrid.java:468)`,
+called from `removeFromMetaGrid` ← `removeUserDefinedBuildingsFromCell` ← `WorldRegionToMetaGrid.clientProcessBuildings` ←
+`DataRoot.clientProcessBuildings` ← `IsoRegions.update` ← `IngameState.updateInternal`. The 42.20.4 report was
+`ArrayIndexOutOfBoundsException: Index 924 out of bounds for length 924` in the same method (through `addToMetaGrid`). That player's log has
+`[StaleRoomGuard] active=true`; W57 did not act this time and no patched class is on the stack.
+
+**Root cause** (javap on the 42.21.0 jar `e1a69eb7`; LineNumberTable: line 468 is `recalculateBuildingAndRoomIDs` offset 257–263, which puts back
+each IsoRoom copied by `new ArrayList<>(isoRooms.values())` under `isoRoom.def.id`):
+- `IsoMetaCell.isoRooms` and `isoBuildings` are plain `HashMap`s. When the World Streamer thread deserializes a chunk, `IsoGridSquare.setRoomID`
+  calls `IsoMetaGrid.getRoomByID` through `IsoChunk.getRoom`; on a miss it creates the IsoRoom and IsoBuilding and `put`s them into both maps.
+  Nothing on that path takes a lock.
+- When someone builds, removes or breaks a wall, door or floor nearby, the client main thread's `clientProcessBuildings` removes and rebuilds the
+  player-built buildings of the same and the neighbouring cells: `removeRoomDef` removes rooms from `isoRooms`, and every removed or added building
+  calls `recalculateBuildingAndRoomIDs`, which copies the values of both maps into an `ArrayList`, clears the maps and puts everything back. No lock
+  here either, and it does not wait for the streamer.
+- With two threads writing one HashMap, its recorded size no longer matches the nodes the copy can reach. One node too many and the copy runs past
+  the array (AIOOBE); one too few and the copied array ends with `null`, so reading `isoRoom.def` throws (this player). Nothing in the jar stores
+  `null` in these maps, so the null can only come from the concurrent modification. `IngameState.updateInternal` catches the exception and the player
+  is disconnected to the main menu.
+- It is intermittent because the rebuild has to coincide with the streamer adding a room. It is most likely when someone keeps building nearby while
+  this player is moving (chunks keep loading). Same upstream defect as W57 ([2bu](#2bu)): the main thread rebuilds the metagrid without coordinating
+  with the World Streamer. W57 is a chunk in hand-over that keeps a cleared room; here two threads write the same map.
+
+**Surgery**: the helper `zombie/mdc/MetaGridLock` holds one fair `ReentrantLock`. Every `IsoMetaGrid.getRoomByID(J)` call site in the jar and the
+only `WorldRegionToMetaGrid.clientProcessBuildings(ArrayList)` call, in `DataRoot.clientProcessBuildings`, are redirected 1:1 to it (the receiver
+becomes the first argument; 3 bytes for 3 bytes, frames unchanged), each with `expectedHits = 1`:
+
+| Class | Method | Redirected call | Who reaches it |
+|---|---|---|---|
+| `IsoChunk` (same ClassPatch as W57) | `getRoom(J)` | `getRoomByID` | `setRoomID`: the streamer deserializing a chunk, the rebuild's `updateSquares`, W57 rebinding |
+| `RoomDef` | `getIsoRoom()` | `getRoomByID` | main thread `doLoadGridsquare` and others |
+| `IsoBuilding` | `CreateFrom(BuildingDef, IsoMetaCell)` | `getRoomByID` | only inside `getRoomByID` (re-entrant) |
+| `FBORenderCutaways` | `CalculateBuildingsToCollapse()` | `getRoomByID` | main thread, preparing the frame |
+| `MetaGridPacket` | `processClient(UdpConnection)` | `getRoomByID` | room light switch packet |
+| `DataRoot` | `clientProcessBuildings()` | `WorldRegionToMetaGrid.clientProcessBuildings` | main thread rebuild |
+
+The helper calls the original method once, with the same return value and exceptions. A thread that wants to look up or add a room during a
+rebuild waits until the rebuild is done; a rebuild waits for a thread that is looking up or adding a room. The lock is fair: once the main thread
+queues, the streamer's next lookup queues behind it, so the main thread waits for at most one lookup.
+
+**Why it cannot deadlock** (all three are checked by SmokeCheck at build time):
+- `getRoomByID` never waits while holding the lock: its transitive calls in the jar (33 methods, including the `IsoRoom`, `IsoBuilding` and
+  `BuildingDef` constructors and `CreateFrom`) have no synchronized method, no monitorenter, no native method and no call to a JDK waiting API. The
+  only JDK lock it touches is the method lock of `IsoBuilding.rooms` (a `Vector`), which makes no callbacks.
+- The streamer never calls down while holding a lock (no synchronized method, no monitorenter, no direct acquisition of a j.u.c lock, semaphore or
+  FileChannel lock) anywhere on its way to `IsoChunk.getRoom`: `WorldStreamer` `threadLoop`, `loadReceivedChunks`, `DoChunk`, `DoChunkAlways`;
+  `IsoChunk` `LoadChunk`, `LoadOrCreate`, `LoadFromDisk`, `LoadFromBuffer`, `LoadFromDiskOrBuffer`, `LoadFromDiskOrBufferInternal`; `CellLoader` and
+  `IsoCell.PlaceLot` for new chunks; `IsoGridSquare.setRoomID`. The chunk file read/write lock is only held inside `SafeRead` and `SafeWrite`, and is
+  released before deserialization.
+- While holding the lock the rebuild may enter other monitors (`ObjectPool`, logging; the waiting streamer holds none of them), but it must not wait
+  for the streamer: the transitive calls of `clientProcessBuildings` (declared implementations only, 3972 methods) never touch `WorldStreamer`. Only 8
+  JDK calls in that closure can make a thread wait, and each was reviewed: render synchronization inside the Lua debugger's nested frame loop
+  (`SpriteRenderer` twice, `RenderContextQueueItem`, the two `Future.get` in `TextureDraw`, `sleep` in `UIManager$Sync`), the spin in the
+  `IsoSpriteInstance` pool, and the `UdpConnection.startPacket` lock that is only reached when a server sends the toxic building packet; none of them
+  waits for the streamer during a client rebuild. The main thread holds `MainThread.m_contextLock` for the whole frame, but `getRoomByID` never asks
+  for it.
+
+So a thread waiting for the lock holds nothing the rebuild needs, and the thread holding the lock never waits for them.
+
+**Kill switch**: `-Dmdc.metaGridLock=off` (or `0`) never locks, the same as vanilla; restart required. The first use logs one line to console.txt:
+`[MinidoracatJavaPatch][MetaGridLock] active=true|false` (with the raw value when the flag is set). When threads are waiting at the end of a rebuild it
+logs `clientProcessBuildings (<n> changed cells) held the lock <ms> ms; <k> thread(s) waited instead of touching the room maps mid-rebuild (#<n>)`, at
+most 20 lines per start; in vanilla, these are the moments when both threads touch the room maps.
+
+**Not handled**:
+- Mod Lua calling `getMetaGrid():getRoomByID(...)` directly (vanilla Lua does not): it goes through reflection and cannot be redirected.
+- Other unsynchronized accesses of the same kind: the `IsoMetaChunk` room arrays the streamer reads while deserializing (`getRoomAt`,
+  `getEmptyOutsideAt`), and `IsoCell.roomList` (`getRoomByID` adds to it under the lock; other main-thread readers do not lock). Not reported, out of
+  scope.
+- Servers: `clientProcessBuildings` only runs on clients and in single player. A self-hosted server started from the same install loads the client
+  package too; its `getRoomByID` then goes through the lock, which adds mutual exclusion and changes no result.
+
+**Gates and verification**:
+- SmokeCheck (both variants): reasons to exist — `isoRooms` and `isoBuildings` are `HashMap`s, `getRoomByID` takes no lock and `put`s into both,
+  `recalculateBuildingAndRoomIDs` copies the values of both maps and then clears and refills them, `setRoomID` calls `getRoomByID` through
+  `IsoChunk.getRoom` (red if TIS switches to a concurrent map or adds its own lock; then reassess the patch). Call-site census — exactly 5
+  `getRoomByID` call sites and 1 `clientProcessBuildings` call in the whole jar; red if one is added or moved. After surgery the 6 methods match
+  vanilla text (frames included) except for the redirected call. The three deadlock arguments above are recomputed at build time: the `getRoomByID`
+  closure (virtual calls including every override in the jar) has no violation, no streamer frame holds a lock, and the rebuild closure never touches
+  `WorldStreamer` while its waiting calls match the 8 reviewed ones exactly (one more or one fewer turns it red and requires a new review). The helper
+  calls the original once on each of its on and off paths, and the lock is fair. LoadCheck: both helper methods are public static with matching
+  signatures.
+- `MetaGridLockBehaviorTest` (both variants, on and off): a real `IsoMetaGrid` with one cell and 600 player-built rooms, through the redirected
+  `IsoChunk.getRoom`, `IsoBuilding.CreateFrom` and `DataRoot.clientProcessBuildings`. `DataRoot.changedCells` is replaced by a list whose `isEmpty()`
+  first runs the test action, so the action runs on the first line of vanilla `clientProcessBuildings`, inside the locked section. The verdicts do not
+  depend on timing: they check whether a thread is queued on the lock (`hasQueuedThread`) or has finished; 5 s is only a watchdog. on: during a
+  rebuild, another thread's `getRoom` is queued and finds the same room once the rebuild is done, and one wait is counted; while another thread is
+  stopped inside `getRoomByID` creating a room, a rebuild is queued until it is done, and the re-entrant `CreateFrom` works; 5000 real
+  `recalculateBuildingAndRoomIDs` rebuilds while a streamer looks up rooms nonstop (more than 5,600 lookups, interleaved): no exception on either
+  side, and the nodes reachable in both maps equal their recorded size. off (vanilla control): during a rebuild, another thread finishes its lookup;
+  while another thread creates a room, a rebuild runs to the end.
+- Throwaway reproduction (vanilla jar, both sides through the redirected call sites; 900 rooms, each "session" 200 ms, ending at the main thread's
+  first exception): with `-Dmdc.metaGridLock=off` all 300 sessions failed — AIOOBE 272, NPE without a message 16, `"isoBuilding" is null` 9,
+  `"isoRoom" is null` 3 (identical to the player's log). With the lock, 300 sessions and 2,150,991 rebuilds in total, no exception.
+- In game (2026-10-19, local SP `-debug`, client started from a game copy with a development build of the 0.2.9 standard variant; the
+  `stale-room-sp` scenario, the W57 in-game reproduction: 8 player-built rooms, 12 cycles of "teleport about 4000 tiles away for 6 s → back → remove
+  or place a wall next to the start every tick for 8 s", so chunks load while the main thread rebuilds): `RESULT PASS`, all 8 rooms recognized in
+  every cycle, no exception, 40,857 frames with p50 5 ms, p95 9 ms, max 199 ms. The console has `[MetaGridLock] active=true` and 11 wait lines (the
+  rebuild held the lock 0.4–4.7 ms while 1 thread waited to look up a room; each of these 11 was a moment when vanilla touches the room maps from
+  both threads), and W57 kept rebinding (all 20 log lines used). The vanilla race needs both threads inside the HashMap write at the same instant and
+  does not reproduce in 12 cycles of this scenario (neither did the 2026-10-09 runs with 0.2.6); the throwaway reproduction above is the vanilla
+  control.
+
+**Retirement**: once TIS fixes it (the SmokeCheck reasons to exist turn red), remove this patch from `PatchConfig.client()` and delete the helper
+and its test.
 
 ---
 

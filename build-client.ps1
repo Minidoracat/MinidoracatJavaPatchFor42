@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.8'
+$PACKAGE_VERSION = '0.2.9'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -72,8 +72,8 @@ Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.5($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.5-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.6($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.6-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -190,6 +190,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem')) {
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.vehicles.MdcVehicleSinkGuardBehaviorTest $run[0]
         Assert-Ok "MdcVehicleSinkGuardBehaviorTest $($run[0]) $id"
     }
+    # W68：on 與 off 各跑一次（off＝kill switch 實跑，重建與查房間照原版不互斥＝原版負對照）
+    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.metaGridLock=off')))) {
+        $jvmArgs = @($run[1])
+        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
+        Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
+    }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
 if (Test-Path "$R\patcher\tests-client-common") {
@@ -295,9 +301,12 @@ Modules
   loads. Two related 42.21.0 fixes for a vehicle left on an unloaded chunk with you aboard:
   the vehicle keeps updating (vanilla stops sending its position and the engine goes
   silent), and the server's old position no longer pulls the driver back when this client
-  is driving it. JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
-  -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off
-  and -Dmdc.driverRecallGuard=off turn them off.
+  is driving it. Both also include the 42.21.0 room table race fix: the map-loading thread
+  and a rebuild of nearby player-built buildings no longer change the same room tables at
+  the same time (vanilla can disconnect you with an error such as "isoRoom is null").
+  JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
+  -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
+  -Dmdc.driverRecallGuard=off and -Dmdc.metaGridLock=off turn them off.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
   this game session actually reached the hook.
@@ -379,8 +388,11 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   但那個 chunk 可能已經卸載並被重用到別處；改成拉進相鄰最近的已載入 chunk，相鄰都沒載入就留在原地（遊戲已經讓車停住）等載入。
   兩版也含兩項相關修補（車上有你、車卻被留在已卸載的 chunk 上時）：車照常更新（原版會停止送位置、引擎聲消失），
   以及你自己開的車不會再被伺服器的舊位置把駕駛拉回去。
+  兩版也含 42.21.0 房間表同時寫入修補：背景載入地圖和重建附近的自建建築不再同時改同一份房間表
+  （原版會跳出「isoRoom is null」這類錯誤並斷線）。
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
-  -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off 可分別關閉。
+  -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
+  -Dmdc.metaGridLock=off 可分別關閉。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
 

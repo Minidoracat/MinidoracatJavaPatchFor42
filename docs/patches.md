@@ -3667,7 +3667,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **kill switch**：`-Dmdc.staleRoomHeal=off`（或 `0`）一律直接呼叫原版，需重啟。第一次載入 chunk 時在 console.txt 記一行 `[MinidoracatJavaPatch][StaleRoomGuard] active=true|false`（設了旗標時附原值）；每次補綁記一行 `chunk <wx>,<wy>: <N> squares pointed to a cleared IsoRoom; rebound like WorldRegionToMetaGrid.updateSquares (#<n>)`，每次啟動最多 20 行。
 
-**不處理**：R1 的 HashMap 並行存取；格子原本沒有房間、重建後才有的情況（不會當機，要等下一次重建或重新載入，原版對已載入的 chunk 也是這樣）；`IsoLightSwitch.load` 在 streamer 執行緒讀到正在被清空的房間（另一個時間點，沒有回報）。
+**不處理**：R1 的 HashMap 並行存取（client 包 0.2.9 起由 W68 處理，見 [2cd](#2cd)）；格子原本沒有房間、重建後才有的情況（不會當機，要等下一次重建或重新載入，原版對已載入的 chunk 也是這樣）；`IsoLightSwitch.load` 在 streamer 執行緒讀到正在被清空的房間（另一個時間點，沒有回報）。
 
 **守門與驗證**：
 - SmokeCheck（兩個變體）：存在理由——`LoadFromDiskOrBufferInternal` 恰一個 `setRoomID`、`IsoRoom.clear` 把 def 設成 null、`hasLightSwitches` 讀 `def.objects` 前沒有 null 檢查（TIS 改了任一處就轉紅＝重估撤刀）；helper 依賴——`updateSquares` 只走 `IsoChunkMap.getChunk`，依序以 static `lambda$updateSquares$0`（含 `setRoomID`）、`$1`（含 `RecalcProperties`）呼叫 `forEachSquare`，收尾的 `2112L`、cutaway、lighting 各一，helper 的 `RENDER_DIRTY_FLAGS` 與原版常數相同；手術後 `loadInMainThread` 除了這一個呼叫之外文字（含 frames）與原版相同；負對照 `recalcNeighboursNow` 未改動。LoadCheck：helper 為 public static void。
@@ -4000,6 +4000,52 @@ console 記一行（不受 `-Dmdc.zoneSyncLog` 影響，同樣每分鐘最多 30
 - 實機 E2E（2026-10-18，本機 no-Steam 專用伺服器以 dist 為 classpath 最前面，客戶端是 Steam 本體；家族 E2E 情境 `zone-guard-mp`，test 用一般帳號）：伺服器在玩家旁邊開一間屬於別人的安全屋，客戶端用原版 API 畫三塊畜牧區（屋內一塊、和它相連而跨出屋外一塊、屋外一塊），照原版面板的做法刪屋內那塊。修補版：伺服器記 `拒絕移除 … 連帶 1 塊 … 安全屋 … by=test`，兩塊都還在伺服器上；客戶端送出前已先刪掉兩塊，4 秒後兩塊都被補回，聊天框收到中英提示。刪屋外那塊照原版刪掉；伺服器把 test 加成成員後再刪屋內那塊，照原版連同相連的一起刪掉。原版對照（`-Dmdc.zoneDeleteGuard=off`）：外人刪屋內那塊，伺服器連同相連的一起刪掉，客戶端也沒有了，聊天框只有原版的歡迎訊息。
 
 **退場**：官方加上畜牧區的擁有者或安全屋檢查時重估；`processServer` 的讀取順序變了（SmokeCheck 轉紅）就要改寫。
+
+<a id="2cd"></a>
+## 2cd. 房間表被兩條執行緒同時寫（W68，client，預設 on；client 包 0.2.9）
+
+**症狀**（2026-10-19 玩家回報，裝著 client 包 0.2.8；同一個缺陷在 42.20.4 已回報 TIS [101035](https://theindiestone.com/forums/topic/101035/)，至今沒有回覆）：附近有人蓋或拆東西、自己這邊正在載入地圖時，被斷線送回主選單。玩家的 client log（42.21.0 `4a0e9546ec`）只有一條例外：`NullPointerException: Cannot read field "def" because "isoRoom" is null at WorldRegionToMetaGrid.recalculateBuildingAndRoomIDs(WorldRegionToMetaGrid.java:468)`，往上是 `removeFromMetaGrid` ← `removeUserDefinedBuildingsFromCell` ← `WorldRegionToMetaGrid.clientProcessBuildings` ← `DataRoot.clientProcessBuildings` ← `IsoRegions.update` ← `IngameState.updateInternal`。42.20.4 的回報是同一個方法的 `ArrayIndexOutOfBoundsException: Index 924 out of bounds for length 924`（經 `addToMetaGrid`）。那位玩家的 log 有 `[StaleRoomGuard] active=true`，W57 這次沒有介入，修補包的 class 也不在堆疊上。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`；LineNumberTable：line 468＝`recalculateBuildingAndRoomIDs` offset 257–263，正把 `new ArrayList<>(isoRooms.values())` 複製出來的 IsoRoom 逐一以 `isoRoom.def.id` 放回）：
+- `IsoMetaCell.isoRooms`、`isoBuildings` 是一般 `HashMap`。World Streamer 執行緒反序列化 chunk 時，`IsoGridSquare.setRoomID` 經 `IsoChunk.getRoom` 呼叫 `IsoMetaGrid.getRoomByID`，查不到就建新的 IsoRoom、IsoBuilding 並 `put` 進兩張表。整條路徑沒有鎖。
+- 附近有人蓋、拆或打壞牆、門、地板時，主執行緒的 `clientProcessBuildings` 拆掉重建同一個與相鄰 cell 的自建建築：`removeRoomDef` 從 `isoRooms` 移除房間，每拆或建一棟就呼叫一次 `recalculateBuildingAndRoomIDs`，把兩張表的 values 複製到 `ArrayList`、清空、再逐一放回。這邊也沒有鎖，也不等 streamer。
+- 兩條執行緒同時寫同一個 HashMap，記錄的 size 和走得到的節點數就對不上：多一筆時複製越界（AIOOBE），少一筆時複製出來的陣列尾端是 null，放回時讀 `isoRoom.def` 就 NPE（這位玩家）。jar 裡沒有地方把 null 放進這兩張表，null 只可能來自並行修改。例外由 `IngameState.updateInternal` 接住，玩家被斷線送回主選單。
+- 時好時壞：要剛好在 streamer 補房間時重建。附近一直有人施工、自己又在移動（chunk 不斷載入）時最容易遇到。與 W57（[2bu](#2bu)）是同一個上游缺陷：主執行緒重建 metagrid 時不和 World Streamer 協調。W57 是交接中的 chunk 拿到被清空的房間，這裡是兩條執行緒同時寫同一張表。
+
+**手術**：helper `zombie/mdc/MetaGridLock` 持有一把公平的 `ReentrantLock`。jar 內每一個 `IsoMetaGrid.getRoomByID(J)` 呼叫點，以及 `DataRoot.clientProcessBuildings` 內唯一的 `WorldRegionToMetaGrid.clientProcessBuildings(ArrayList)`，都 1:1 改道到它（receiver 變第一參數，3 bytes 換 3 bytes、frames 原樣），各自 `expectedHits = 1`：
+
+| 類別 | 方法 | 改道的呼叫 | 誰會走到 |
+|---|---|---|---|
+| `IsoChunk`（與 W57 同一個 ClassPatch） | `getRoom(J)` | `getRoomByID` | `setRoomID`：streamer 反序列化 chunk、重建的 `updateSquares`、W57 補綁 |
+| `RoomDef` | `getIsoRoom()` | `getRoomByID` | 主執行緒 `doLoadGridsquare` 等 |
+| `IsoBuilding` | `CreateFrom(BuildingDef, IsoMetaCell)` | `getRoomByID` | 只在 `getRoomByID` 裡（重入） |
+| `FBORenderCutaways` | `CalculateBuildingsToCollapse()` | `getRoomByID` | 主執行緒準備畫面 |
+| `MetaGridPacket` | `processClient(UdpConnection)` | `getRoomByID` | 收到房間開關燈封包 |
+| `DataRoot` | `clientProcessBuildings()` | `WorldRegionToMetaGrid.clientProcessBuildings` | 主執行緒重建 |
+
+helper 照原版呼叫原方法一次，回傳值與例外不變。重建期間別的執行緒要查或補房間，等重建做完；有執行緒在查或補房間時，重建等它做完。公平鎖：主執行緒排隊後，streamer 下一次查房間排在它後面，所以主執行緒最多等一次查房間。
+
+**為什麼不會死結**（三點都由 SmokeCheck 鎖進建置期）：
+- 拿著鎖的 `getRoomByID` 不等任何東西：它在 jar 內的遞移呼叫（33 個方法，含 `IsoRoom`、`IsoBuilding`、`BuildingDef` 的建構子與 `CreateFrom`）沒有 synchronized、monitorenter、native，也不呼叫 JDK 的等待 API。唯一碰到的 JDK 鎖是 `IsoBuilding.rooms`（`Vector`）自己的方法鎖，它不回呼。
+- streamer 走到 `IsoChunk.getRoom` 的每一層都不拿著鎖往下呼叫（沒有 synchronized、monitorenter，也不直接取得 j.u.c 鎖、號誌或 FileChannel 鎖）：`WorldStreamer` 的 `threadLoop`、`loadReceivedChunks`、`DoChunk`、`DoChunkAlways`，`IsoChunk` 的 `LoadChunk`、`LoadOrCreate`、`LoadFromDisk`、`LoadFromBuffer`、`LoadFromDiskOrBuffer`、`LoadFromDiskOrBufferInternal`，新 chunk 的 `CellLoader` 與 `IsoCell.PlaceLot`，以及 `IsoGridSquare.setRoomID`。chunk 檔的讀寫鎖只在 `SafeRead`、`SafeWrite` 裡，反序列化之前就放掉了。
+- 重建拿著鎖時可以進別的 monitor（`ObjectPool`、log 等；等鎖的 streamer 手上沒有它們），但不能等 streamer：`clientProcessBuildings` 的遞移呼叫（只走宣告的實作，3972 個方法）完全不碰 `WorldStreamer`。這個閉包裡會讓執行緒等待的 JDK 呼叫只有 8 處，都已逐一看過：Lua 除錯器巢狀畫面迴圈裡的 render 同步（`SpriteRenderer` 兩處、`RenderContextQueueItem`、`TextureDraw` 的兩個 `Future.get`、`UIManager$Sync` 的 `sleep`）、`IsoSpriteInstance` 物件池的自旋，以及只在伺服器送毒氣封包時才走到的 `UdpConnection.startPacket` 鎖；客戶端重建時都不會等到 streamer。主執行緒整個 frame 都拿著 `MainThread.m_contextLock`，但拿著本鎖的 `getRoomByID` 不會去要它。
+
+所以等鎖的執行緒手上沒有重建需要的鎖，拿著鎖的執行緒也不會反過來等它們。
+
+**kill switch**：`-Dmdc.metaGridLock=off`（或 `0`）一律不上鎖，與原版相同，需重啟。第一次使用時在 console.txt 記一行 `[MinidoracatJavaPatch][MetaGridLock] active=true|false`（設了旗標時附原值）。重建結束時有執行緒在等，就記一行 `clientProcessBuildings (<n> changed cells) held the lock <ms> ms; <k> thread(s) waited instead of touching the room maps mid-rebuild (#<n>)`，每次啟動最多 20 行；原版在這種時候就是兩邊同時碰房間表。
+
+**不處理**：
+- MOD 的 Lua 直接呼叫 `getMetaGrid():getRoomByID(...)`（原版 Lua 沒有）：走反射，改道不到。
+- 同一類的其他未同步存取：streamer 反序列化時讀的 `IsoMetaChunk` 房間陣列（`getRoomAt`、`getEmptyOutsideAt`），以及 `IsoCell.roomList`（`getRoomByID` 在鎖內加入，主執行緒其他地方讀時不上鎖）。沒有回報，不在這次範圍。
+- 伺服器：`clientProcessBuildings` 只在客戶端與單機跑。自建伺服器從同一個安裝目錄載入 client 包時，伺服器的 `getRoomByID` 也經過這把鎖，只是多了互斥，結果不變。
+
+**守門與驗證**：
+- SmokeCheck（兩個變體）：存在理由——`isoRooms`、`isoBuildings` 是 `HashMap`，`getRoomByID` 沒有鎖並 `put` 兩張表，`recalculateBuildingAndRoomIDs` 複製兩張表的 values 後清空重填，`setRoomID` 經 `IsoChunk.getRoom` 呼叫 `getRoomByID`（TIS 換成並行安全的表或自己加鎖就轉紅，屆時重估撤刀）。呼叫點清冊——全 jar 的 `getRoomByID` 恰 5 個呼叫點、`clientProcessBuildings` 恰 1 個，新增或搬走都轉紅。手術後這 6 個方法除了被改道的呼叫，文字（含 frames）與原版相同。不死結的三個依據（上段）都在建置期重算：`getRoomByID` 閉包（虛擬呼叫含 jar 內所有覆寫）零違規、streamer 各層零持鎖、重建閉包不碰 `WorldStreamer` 且等待呼叫與已審的 8 處逐字相同（多一處、少一處都轉紅，要重新稽核）。helper 開、關兩條路各呼叫原方法一次，鎖是公平的。LoadCheck：兩個 helper 方法是 public static、簽名一致。
+- `MetaGridLockBehaviorTest`（兩個變體各跑 on、off）：真的 `IsoMetaGrid` 一個 cell、600 間自建房，走改道後的 `IsoChunk.getRoom`、`IsoBuilding.CreateFrom`、`DataRoot.clientProcessBuildings`。`DataRoot.changedCells` 換成 `isEmpty()` 會先跑測試動作的清單，動作就在原版 `clientProcessBuildings` 的第一行執行，也就是拿著鎖的那一段。判定不靠計時，看執行緒是排進鎖的佇列（`hasQueuedThread`）還是直接做完，5 秒只是防卡死。on：重建進行中，另一條執行緒的 `getRoom` 排進佇列，重建做完才查到同一間房，並記一次等待；另一條執行緒停在 `getRoomByID` 裡建房間時，重建排進佇列等它做完，`CreateFrom` 的重入照常；真的 `recalculateBuildingAndRoomIDs` 重建 5000 次，期間 streamer 連續查房間（5,600 次以上，兩邊交錯），兩邊零例外，兩張表走得到的筆數等於記錄的大小。off（原版負對照）：重建進行中，另一條執行緒直接查完；另一條執行緒在建房間時，重建直接做完。
+- 拋棄式重現（原版 jar，兩邊都走改道後的呼叫點；900 間房，每次「進服」200 ms，主執行緒出第一個例外就結束）：`-Dmdc.metaGridLock=off` 300 次全部出事——AIOOBE 272 次、沒有訊息的 NPE 16 次、`"isoBuilding" is null` 9 次、`"isoRoom" is null` 3 次（與玩家 log 逐字相同）。上鎖時 300 次、共 2,150,991 次重建，零例外。
+- 實機 E2E（2026-10-19，本機 SP `-debug`，客戶端從裝了 0.2.9 標準版開發建置的遊戲複本開；`stale-room-sp` 情境，即 W57 的實機重現：8 間自建房，12 輪「傳送到約 4000 格外 6 秒 → 傳回 → 8 秒內每個 tick 在起點旁拆／放一面牆」，chunk 一邊載入、主執行緒一邊重建）：`RESULT PASS`，每輪 8 間房都認得，零例外，40,857 幀 p50 5 ms、p95 9 ms、最大 199 ms。console 有 `[MetaGridLock] active=true` 與 11 行等待（重建拿著鎖 0.4–4.7 ms，期間 1 條執行緒等著查房間，原版這 11 次都是兩邊同時碰房間表），W57 照常補綁（記滿 20 行）。原版的競態要剛好撞在 HashMap 寫入的同一刻，這個情境 12 輪重現不出來（2026-10-09 的 0.2.6 輪次也沒有），原版負對照以上一條的拋棄式重現為準。
+
+**退場**：官方修好後（SmokeCheck 的存在理由轉紅）從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 
 ---
 

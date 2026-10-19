@@ -6,7 +6,7 @@
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、187 個命中點、72 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 兩個自建房間 bug：東西看不見、載入 chunk 時斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -160,6 +160,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W62 車被留在已卸載 chunk 上就不再更新（[2bz](docs/patches.md#2bz)） | 42.21.0：車上有本機乘客時，chunk 卸載的 `removeFromWorld` 移不掉這台車，車仍掛在那塊 chunk 上；之後 `BaseVehicle.update` 每幀再呼叫一次 `removeFromWorld` 就 return，車不再回報位置、引擎聲消失、乘客不擺位。 | 只在這個情況讓 `update` 改走原版「chunk 已回收」的分支（請求車輛更新後照常往下跑），車照常更新，等車底下的 chunk 載入後就換過去。 | 未回報 |
 | W63 駕駛被拉回伺服器的舊位置（[2bz](docs/patches.md#2bz)） | 42.21.0：伺服器位置的格子在 client 沒載入時，`VehiclePacket.doRemove` 把坐在車上的本機玩家移到那個位置；就算這台車由本機模擬、伺服器的位置只是本機送出去的舊值也一樣。 | 本機模擬的車（Local／LocalCollide）不移動駕駛，其餘照原版。 | 未回報 |
 | W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。翻覆的車要低於地板一層以上才處理，先扶正（保留車頭方向，0.2.8 起）。 | 未回報 |
+| W68 房間表被兩條執行緒同時寫（[2cd](docs/patches.md#2cd)） | 42.21.0（42.20.4 也有）：World Streamer 執行緒載入 chunk 時，經 `IsoMetaGrid.getRoomByID` 往 `IsoMetaCell.isoRooms`、`isoBuildings`（一般 `HashMap`）補房間。附近有人蓋或拆東西時，主執行緒重建自建建築，在 `recalculateBuildingAndRoomIDs` 複製、清空、重填同樣兩張表。兩邊沒有任何同步：複製出來的清單有 `null`（`NPE: "isoRoom" is null`）或多一筆（`ArrayIndexOutOfBoundsException`），client 被斷線送回主選單。 | 用同一把公平鎖包住 jar 內每一個 `getRoomByID` 呼叫與重建，兩邊不再同時碰這兩張表；原版方法照常執行。 | [#101035](https://theindiestone.com/forums/topic/101035/) |
 
 ### Native 防護（Linux dedicated server）
 
