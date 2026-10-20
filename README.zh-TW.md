@@ -252,7 +252,7 @@ bash uninstall.sh  # 下次重啟回到原版
 | `client-fixes-compat` | 只含 XL 樹房間修正與車輛修正，給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 
-**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）也會把 `.class` 檔放進遊戲資料夾。它已經替換本包要修補的 class 時，安裝器會以 code 7 停止、不改任何檔案，因為同一個 class 只能載入一份。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。那個卸載器照路徑刪檔，之前已經裝過本包的話，之後要再執行一次本安裝器。用 PZ_Optimization 時，安裝或移除前先關掉它的「Warm-start cache (Java AOT)」選項並開關遊戲一次：這個選項開著時，遊戲從它的快取載入 class，不讀遊戲資料夾，安裝器會拒絕。
+**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）也會把 `.class` 檔放進遊戲資料夾。它已經替換本包要修補的 class 時，安裝器會以 code 7 停止、不改任何檔案，因為同一個 class 只能載入一份。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。那個卸載器照路徑刪檔，之前已經裝過本包的話，之後要再執行一次本安裝器。用 PZ_Optimization 時，安裝或移除前先關掉它的「Warm-start cache (Java AOT)」選項：這個選項開著時，遊戲從它的快取載入 class，不讀遊戲資料夾，安裝器會拒絕。這個選項下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉。裝好後可以再打開；下次安裝、更新或移除本包前再關掉。
 
 也可以用 `build-client.ps1` 自行建置。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 

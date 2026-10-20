@@ -300,10 +300,12 @@ code 7 and changes nothing: only one copy of a class can run.
   (PZ_Optimization: Uninstall-PZ-Optimization.cmd in the game folder), then install.
   That uninstaller deletes by file name, so if these patches were already installed,
   run this installer again afterwards.
-- With PZ_Optimization, turn off its "Warm-start cache (Java AOT)" option, then start the
-  game once and close it before you install or remove these patches. While the option is
-  on, the game loads classes from PZ_Optimization's cache instead of the game folder, and
-  the installer refuses and tells you why.
+- With PZ_Optimization, turn off its "Warm-start cache (Java AOT)" option before you install
+  or remove these patches. While it is on, the game loads classes from PZ_Optimization's
+  cache instead of the game folder, and the installer refuses and tells you why. The option
+  takes effect at the next start: after turning it off, close the game, start it once more
+  to the main menu and close it. You can turn it back on afterwards; turn it off again
+  before the next install, update or removal.
 
 SAFETY
 - The installer only works on the exact game version it was built for: it checks the
@@ -411,9 +413,10 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 - 要完整版，先用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的
   Uninstall-PZ-Optimization.cmd），再安裝本包。那個卸載器照檔名刪檔，之前已經裝過本包的話，
   之後要再執行一次本安裝器。
-- 用 PZ_Optimization 時，安裝或移除本包前先關掉它的「Warm-start cache (Java AOT)」選項，
-  再開關遊戲一次。這個選項開著時，遊戲從 PZ_Optimization 的快取載入 class，不讀遊戲資料夾，
-  安裝器會說明原因並拒絕。
+- 用 PZ_Optimization 時，安裝或移除本包前先關掉它的「Warm-start cache (Java AOT)」選項。
+  這個選項開著時，遊戲從 PZ_Optimization 的快取載入 class，不讀遊戲資料夾，安裝器會說明原因並拒絕。
+  選項下次啟動才生效：關掉後先關閉遊戲，再開一次遊戲到主選單後關閉。裝好後可以再打開；
+  下次安裝、更新或移除本包前再關掉。
 
 【以前裝過舊版】
 - 裝過有 Uninstall-Patches.bat 的版本：直接照上面安裝即可，會自動換成新版。

@@ -301,8 +301,10 @@ still needs them, and the game closes when you join a server
 `client-fixes-compat` (the installer recommends it), or remove that mod with its own uninstaller (PZ_Optimization:
 `Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. That uninstaller deletes by path, so
 run this installer again afterwards if these patches were already installed. With PZ_Optimization, turn off its
-"Warm-start cache (Java AOT)" option and start the game once before installing or removing: while it is on, the game
-loads classes from that cache instead of the game folder, and the installer refuses.
+"Warm-start cache (Java AOT)" option before installing or removing: while it is on, the game loads classes from that
+cache instead of the game folder, and the installer refuses. The option takes effect at the next start, so after
+turning it off, start the game once more to the main menu and close it. You can turn it back on afterwards; turn it
+off again before the next install, update or removal.
 
 Build the package yourself with `build-client.ps1`; installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
