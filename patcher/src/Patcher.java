@@ -72,6 +72,18 @@ public final class Patcher {
     }
 
     /**
+     * 欄位讀取改道：把 {@code GETFIELD owner.name:desc} 換成 {@code INVOKESTATIC helper(Lowner;)desc}——receiver 變成
+     * helper 的唯一參數，回傳值取代欄位值。與 redirect 同形：堆疊效果（objectref → 值）與指令長度（3 bytes）都不變，
+     * 原 frames 照舊有效；和 FieldGetSwap 不同的是 helper 拿得到 receiver。只作用於所屬 MethodOps 的方法，命中數計入
+     * 該方法守門。W37 首用（2026-10-21）：放下動物時建構子的格子座標改讀 helper。
+     */
+    record FieldGetRedirect(String owner, String name, String desc, String helperOwner, String helperName) {
+        String helperDesc() {
+            return "(L" + owner + ";)" + desc;
+        }
+    }
+
+    /**
      * 欄位寫入前包裝：在每個 {@code opcode}（PUTFIELD／PUTSTATIC）owner.name:desc <b>之前</b>插入
      * 「INVOKESTATIC helper(desc)desc」——把即將寫入的值換成 helper 的回傳值。堆疊 1→1（PUTFIELD 的
      * objectref 留在值的下方不受影響）、線性、無新分支；只作用於所屬 MethodOps 的方法，命中數計入該方法守門。
@@ -153,6 +165,7 @@ public final class Patcher {
         CountClamp countClamp = null;
         FieldGetSwap fieldGetSwap = null;
         final List<FieldPutWrap> fieldPutWraps = new ArrayList<>();
+        final List<FieldGetRedirect> fieldGetRedirects = new ArrayList<>();
         VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
         int expectedHits = 0;
         int actualHits = 0;
@@ -338,6 +351,17 @@ public final class Patcher {
 
         @Override
         public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+            if (opcode == Opcodes.GETFIELD) {
+                for (FieldGetRedirect fr : ops.fieldGetRedirects) {
+                    if (fr.owner().equals(owner) && fr.name().equals(name) && fr.desc().equals(desc)) {
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, fr.helperOwner(), fr.helperName(), fr.helperDesc(), false);
+                        ops.actualHits++;
+                        clampState = 0;
+                        vehicleChunkState = 0;
+                        return;
+                    }
+                }
+            }
             for (FieldPutWrap pw : ops.fieldPutWraps) {
                 if (opcode == pw.opcode() && pw.owner().equals(owner) && pw.name().equals(name) && pw.desc().equals(desc)) {
                     super.visitMethodInsn(Opcodes.INVOKESTATIC, pw.helperOwner(), pw.helperName(), pw.helperDesc(), false);

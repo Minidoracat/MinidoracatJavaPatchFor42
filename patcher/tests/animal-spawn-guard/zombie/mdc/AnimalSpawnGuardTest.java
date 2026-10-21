@@ -2,18 +2,30 @@ package zombie.mdc;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import zombie.characters.animals.AnimalDefinitions;
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
+import zombie.core.TilePropertyAliasMap;
+import zombie.core.properties.PropertyContainer;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
+import zombie.iso.IsoMetaGrid;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.IsoObject;
+import zombie.iso.IsoWorld;
+import zombie.iso.SpriteDetails.IsoFlagType;
+import zombie.iso.sprite.IsoSprite;
+import zombie.network.GameServer;
 import zombie.network.PacketTypes;
+import zombie.network.ServerMap;
 import zombie.popman.animal.AnimalInstanceManager;
 import zombie.util.list.PZArrayList;
 
@@ -23,6 +35,9 @@ import zombie.util.list.PZArrayList;
  * movingObjects（IsoGameCharacter 建構子的 setMovingSquareNow；留著會被 getAnimals 看到）；(IsoCell) 載入用
  * 0,0,0 與正常建構不碰；grow／addBaby 只吞「本次呼叫有建構失敗」的 NPE，其餘例外穿透；水格放下的動物（adef null）
  * 不放回格子、註銷 AnimalInstanceManager、不送 DropAnimal；chunk 卸載只吞 adef null 動物的例外；off 全直通。
+ * 放下到水格旁的陸地格（真 IsoGridSquare：水格＝地板 FloorMaterial=Water，鄰格查 ServerMap 替身，碰撞讀 collideMatrix）：
+ * 鄰格是水、被圍欄擋住、有實心物都跳過，選第一個能放的；不是水格、四周沒有陸地都回原格；dropPlace 把原版指回水格的
+ * current 換回陸地格，dropSend 送陸地格。
  */
 public final class AnimalSpawnGuardTest {
 
@@ -152,6 +167,51 @@ public final class AnimalSpawnGuardTest {
         expect("建構完成的動物照原版放上格子、照送", placeSq.getMovingObjects().contains(placed)
                 && AnimalSpawnGuard.unsentForTest() == (off ? 0 : 1));
 
+        // 放下到水格旁的陸地格（2026-10-21）：建構子座標改讀 dropX／dropY；原版 setSquare／setCurrent 又指回水格，
+        // dropPlace 換回陸地格、dropSend 送陸地格。IsoCell.getGridSquare 在伺服器上走 ServerMap.instance。
+        GameServer.server = true;
+        ServerMap.instance = (ServerMap) raw(TestServerMap.class);
+        IsoWorld.instance.currentCell = cell;
+        IsoMetaGrid meta = IsoWorld.instance.metaGrid;   // testCollideAdjacent 先查 isValidChunk
+        meta.minX = 0;
+        meta.minY = 0;
+        meta.maxX = 10;
+        meta.maxY = 10;
+        registerFloorMaterial();
+        IsoGridSquare water = grid(300, 400, true);
+        grid(300, 399, true);                            // 北：也是水
+        IsoGridSquare fenced = grid(300, 401, false);    // 南：中間有圍欄
+        water.collideMatrix |= 1 << (1 + 2 * 3 + 9);
+        grid(299, 400, false).setCacheIsFree(false);     // 西：牆、樹之類的實心物
+        IsoGridSquare east = grid(301, 400, false);      // 東：第一個能放的
+        grid(301, 401, false);                           // 東南：也能放，但排在後面
+        expect(off ? "off：水格照原版回原格" : "水格：跳過水、圍欄、實心物，選上下左右中第一個能放的陸地格",
+                AnimalSpawnGuard.landFor(water) == (off ? water : east));
+        expect(off ? "off：建構子座標＝水格" : "建構子座標＝陸地格", AnimalSpawnGuard.dropX(water) == (off ? 300 : 301)
+                && AnimalSpawnGuard.dropY(water) == 400);
+        expect("陸地格回原格", AnimalSpawnGuard.landFor(fenced) == fenced && AnimalSpawnGuard.dropX(fenced) == 300
+                && AnimalSpawnGuard.dropY(fenced) == 401);
+        IsoGridSquare lake = grid(320, 420, true);       // 四周沒有載入的格子
+        expect("四周沒有陸地：回原格（照舊建構失敗、丟棄）", AnimalSpawnGuard.landFor(lake) == lake
+                && AnimalSpawnGuard.dropX(lake) == 320 && AnimalSpawnGuard.dropY(lake) == 420);
+
+        Fake moved = fake(cell, 301, 400);
+        set(moved, "adef", raw(AnimalDefinitions.class));
+        place(moved, east);                              // 建構子在陸地格建好
+        set(moved, "current", water);                    // 原版 setSquare／setCurrent 指回放下的水格
+        set(moved, "square", water);
+        AnimalSpawnGuard.dropPlace(moved);
+        expect(off ? "off：照原版放回水格" : "建好的動物留在陸地格、不在水格",
+                (moved.getCurrentSquare() == east) == !off && east.getMovingObjects().contains(moved) == !off
+                        && water.getMovingObjects().contains(moved) == off);
+        GameServer.server = false;                       // sendToRelative 在非伺服器直接返回
+        Object[] movedArgs = {null, moved, water};
+        AnimalSpawnGuard.dropSend(PacketTypes.PacketType.AnimalCommand, 300f, 400f, movedArgs);
+        expect(off ? "off：DropAnimal 送水格" : "DropAnimal 送陸地格", movedArgs[2] == (off ? water : east));
+        if (!off) {
+            expect("dropMoved=1", AnimalSpawnGuard.dropMovedForTest() == 1);
+        }
+
         // chunk 卸載：格子上沒建構完成的動物 removeFromWorld 丟例外時，原版中斷整個 cell 卸載。
         Fake stuck = fake(cell, 203, 203);
         stuck.removeNpe = true;
@@ -261,6 +321,50 @@ public final class AnimalSpawnGuardTest {
         set(a, "current", sq);
         set(a, "movingSq", sq);
         sq.getMovingObjects().add(a);
+    }
+
+    /** 真 IsoGridSquare：八方可通、無實心物；水格多一個地板物件（solidfloor＋FloorMaterial=Water）。 */
+    private static IsoGridSquare grid(int x, int y, boolean water) throws Exception {
+        IsoGridSquare sq = square();
+        sq.x = x;
+        sq.y = y;
+        sq.z = 0;
+        set(sq, "properties", new PropertyContainer());
+        sq.setCachedIsFree(true);
+        sq.setCacheIsFree(true);
+        sq.collideMatrix = 0;
+        if (water) {
+            PropertyContainer floorProps = new PropertyContainer();
+            floorProps.set(IsoFlagType.solidfloor);
+            floorProps.set("FloorMaterial", "Water");
+            IsoSprite sprite = (IsoSprite) raw(IsoSprite.class);
+            set(sprite, "properties", floorProps);
+            IsoObject floor = (IsoObject) raw(IsoObject.class);
+            floor.sprite = sprite;
+            sq.getObjects().add(floor);
+        }
+        TestServerMap.SQUARES.put(((long) x << 32) | (y & 0xffffffffL), sq);
+        return sq;
+    }
+
+    /** 測試 JVM 沒載入 tiledef：登記 FloorMaterial 的值，isWaterSquare 才讀得到 Water。 */
+    private static void registerFloorMaterial() throws Exception {
+        if (TilePropertyAliasMap.instance.getIDFromPropertyName("FloorMaterial") != -1) {
+            return;
+        }
+        Method register = TilePropertyAliasMap.class.getDeclaredMethod("register", String.class, ArrayList.class);
+        register.setAccessible(true);
+        register.invoke(TilePropertyAliasMap.instance, "FloorMaterial", new ArrayList<>(List.of("Grass", "Water")));
+    }
+
+    /** ServerMap 替身：IsoCell.getGridSquare 在伺服器上轉給 ServerMap.instance。 */
+    public static class TestServerMap extends ServerMap {
+        static final Map<Long, IsoGridSquare> SQUARES = new HashMap<>();
+
+        @Override
+        public IsoGridSquare getGridSquare(int x, int y, int z) {
+            return SQUARES.get(((long) x << 32) | (y & 0xffffffffL));
+        }
     }
 
     private static boolean throwsNpe(Runnable r) {

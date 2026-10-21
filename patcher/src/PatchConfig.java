@@ -1121,6 +1121,12 @@ public final class PatchConfig {
         chunkUnload.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/iso/IsoMovingObject", "removeFromWorld", "()V", spawnGuard, "chunkRemove"));
         chunkUnload.expectedHits += 2;
+        // (5) 放下的格子是水格時改放旁邊的陸地格（2026-10-21）：動物分支 new IsoAnimal 的兩個座標參數（offset 105
+        //     GETFIELD x、109 GETFIELD y，方法內各恰 1 個）改讀 dropX／dropY，建構子直接在陸地格建好；原版接著
+        //     setSquare／setCurrent 又指回水格，由上面的 dropPlace 換回陸地格、dropSend 送陸地格。
+        dropOps.fieldGetRedirects.add(new Patcher.FieldGetRedirect("zombie/iso/IsoGridSquare", "x", "I", spawnGuard, "dropX"));
+        dropOps.fieldGetRedirects.add(new Patcher.FieldGetRedirect("zombie/iso/IsoGridSquare", "y", "I", spawnGuard, "dropY"));
+        dropOps.expectedHits += 2;
 
         // W38：doMeta 補算快照（docs/patches.md 2ba）。updateStatsAway→checkZone→setDZone 會把動物
         // 移到 zone.animals 尾端，原版索引迴圈因而重複補算／漏算。頭部 begin、RETURN 前 end，方法內

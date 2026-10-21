@@ -3012,6 +3012,21 @@ SmokeCheck 釘三條存在理由（`IsoGameCharacter` 建構子內 `getAddList`�
 
 實機 E2E（JavaPatch E2E 技能 `animal-water-drop-mp`）：伺服器在陸地生一隻母雞、包成動物物品，對真的水格呼叫原版 `AddWorldInventoryItem`；玩家傳送到遠處 25 秒後，再問伺服器那一格還在不在。修補前的包：水格上留一隻半成品，那一格仍在記憶體裡，console 有 277 次 `textureSkinned` NPE。修補後：`[AnimalSpawnGuard] drop discarded`，水格上沒有半成品，那一格已卸載，零 NPE。這是 W37 第一次用真的建構子走完建構失敗。
 
+### 2026-10-21 放下的格子是水格時改放旁邊的陸地格
+
+**回報**：上一節的修補上線後（10-20 05:41 開服起生效），同一位玩家在自己河岸畜牧區放下的雞，10-20 20:45、20:46 與 10-21 02:56 共被丟棄三次（`drop discarded`，兩隻洛島紅、一隻來亨母雞）。玩家錄的影片裡，他站在看起來是草地的岸邊選「扔掉」，雞就不見了。那幾格人站得上去，也放得了東西（`canDropOnFloor` 成立），但 `getFloor()` 回傳的實心地板 `FloorMaterial` 是 `Water`，`isWaterSquare()` 成立，建構子的 water 檢查照樣失敗。上一節的做法擋住了記憶體事故，玩家仍然失去動物。
+
+**手術**（追加，在 W60 的 `IsoGridSquare` ClassPatch，該 class 命中點 7 → 9）：
+6. `AddWorldInventoryItem(InventoryItem,FFFZZ)` 動物分支 `new IsoAnimal` 的座標參數 `this.x`、`this.y`（javap offset 105、109 的 `GETFIELD`，方法內各恰 1 個）改成 `INVOKESTATIC AnimalSpawnGuard.dropX`／`dropY(IsoGridSquare)I`。放下的格子不是水格就回傳原座標；是水格時，`landFor` 依北、南、西、東、四個斜角的順序找第一個鄰格：已載入、不是水格、`isFree(false)`（有實心地板，沒有實心物或樹）、和放下的格子之間沒有牆、圍欄或門窗擋著（`testCollideAdjacent`，角色移動用的碰撞）。建構子因此直接在陸地格建出完整的動物，water 檢查不會失敗。
+7. 原版接著 `setSquare(this)`、`setCurrent(this)` 把動物指回放下的格子；`dropPlace` 在 `setMovingSquareNow` 之前把 square 與 current 換成 `landFor` 選的陸地格（同一次放下裡世界沒有變動，結果和 `dropX`／`dropY` 相同），`dropSend` 把 DropAnimal 封包裡的格子換成陸地格：客戶端照封包裡的格子自己建一隻（`AnimalCommandPacket`），不換的話客戶端會在水格上建、建構失敗。log 記 `drop moved from=<水格> pos=<陸地格>`，`dropMoved` 計數。
+8. 找不到陸地格時座標不變，照上一節丟棄（`drop discarded`）。只看 8 個鄰格：人站得上去的水格在岸邊，旁邊通常就有陸地。
+
+Patcher 新形態 `FieldGetRedirect`：把 `GETFIELD owner.name:desc` 換成 `INVOKESTATIC helper(Lowner;)desc`，堆疊效果（objectref → 值）與指令長度（3 bytes）都不變，原 frames 照舊有效，計入逐方法命中數。既有的 `fieldGetSwap` 在讀完欄位後才插 helper，helper 只拿得到欄位值，不知道是哪一格。Kill switch 同 `-Dmdc.animalSpawnGuard=0`（連同上一節與建構子撤出一起關）。
+
+**守門與驗證**：SmokeCheck 的 vanilla 前提加釘：動物分支的 `GETFIELD x`、`GETFIELD y` 各恰 1 個，都在 `new IsoAnimal` 與它的 `<init>` 之間，前一條都是 `aload_0`（讀的是放下的那一格）；W60 的手術後全文比對加進這兩個改道；helper 契約加上 `dropX`／`dropY` 各經 `landFor` 呼叫 `getX`／`getY` 一次。`AnimalSpawnGuardTest` on／off 用真的 `IsoGridSquare`（水格的地板物件是 `solidfloor`＋`FloorMaterial=Water`，鄰格經 `ServerMap` 替身查，碰撞讀 `collideMatrix`）：鄰格是水、隔著圍欄、有實心物都跳過，選第一個能放的；陸地格與四周沒有陸地的水格回原格；`dropPlace` 把指回水格的動物換到陸地格，`dropSend` 送陸地格；off 全部照原版。
+
+實機 E2E（`animal-water-drop-mp` 改成照原版抓起再扔掉）：原版地圖河岸的水格都是深水（`solidtrans`，人走不上去），情境在一格水格上疊一層旁邊陸地的地板，做出 `isWaterSquare()` 成立、人站得上去、`canDropOnFloor` 成立的格子；在北邊陸地生一隻母雞，玩家站上水格用 `ISPickupAnimal` 抓起，再用 `ISInventoryPaneContextMenu.dropItem` 扔掉。修補後：`drop moved from=<水格> pos=<北邊陸地>`，伺服器與客戶端都看到母雞在那格陸地，水格上沒有動物，玩家離開後那一格照常卸載，零 `textureSkinned` NPE（RESULT PASS，4 項檢查）。修補前的包（與正式服相同）：`drop discarded`，伺服器與客戶端都找不到母雞（RESULT FAIL，4 項檢查錯 2 項），就是玩家遇到的情形。
+
 <a id="2ba"></a>
 ## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
 

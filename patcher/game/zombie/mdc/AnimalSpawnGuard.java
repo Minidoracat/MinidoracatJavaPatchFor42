@@ -39,7 +39,11 @@ import zombie.popman.animal.AnimalInstanceManager;
  * {@code ServerMap.postupdate} 的迴圈每 tick 在這裡中斷，排在後面的 cell 不再卸載也不再更新，heap 約 1 小時用盡。
  * {@link #dropPlace} 把 adef 為 null 的動物移出世界、{@link #dropSend} 不送；{@link #chunkRemove} 是其他路徑
  * 放回格子時的保底：只對 adef 為 null 的動物吞 removeFromWorld 的例外。物品照原版被收走，那隻動物不保留。
- * kill switch {@code -Dmdc.animalSpawnGuard=0}（(1)–(3) 一起）。
+ * (4) 放下的格子是水格時改放旁邊的陸地格（2026-10-21 正式服：岸邊格看起來是草地、人站得上去，地板卻是水，
+ * 放下的雞都被 (3) 丟掉）：new IsoAnimal 的兩個座標參數改讀 {@link #dropX}／{@link #dropY}，建構子直接在
+ * {@link #landFor} 選的陸地格建好；原版接著 setSquare／setCurrent 又指回水格，{@link #dropPlace} 換回陸地格、
+ * {@link #dropSend} 送陸地格（客戶端照封包裡的格子建動物）。找不到陸地格照 (3) 丟棄。
+ * kill switch {@code -Dmdc.animalSpawnGuard=0}（(1)–(4) 一起）。
  */
 public final class AnimalSpawnGuard {
 
@@ -48,7 +52,10 @@ public final class AnimalSpawnGuard {
     private static final long DETAIL_LIMIT = 64L;
 
     // 帶座標的動物建構、grow／addBaby、放下動物與 chunk 卸載都在主執行緒。
-    private static long ctorFailures, removed, squareRemoved, swallowed, dropDiscarded, unsent, unloadBroken, anomalies;
+    private static long ctorFailures, removed, squareRemoved, swallowed, dropDiscarded, dropMoved, unsent, unloadBroken, anomalies;
+
+    // landFor 檢查的鄰格：先上下左右，再斜角。
+    private static final int[][] NEIGHBOURS = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
 
     /** IsoAnimal 帶座標建構子每個 RETURN 前。 */
     public static void afterCtor(IsoAnimal animal) {
@@ -145,9 +152,50 @@ public final class AnimalSpawnGuard {
         return true;
     }
 
+    /** {@code IsoGridSquare.AddWorldInventoryItem} 動物分支 new IsoAnimal 的 x 參數（原版讀放下的格子的 x）。 */
+    public static int dropX(IsoGridSquare sq) {
+        return landFor(sq).getX();
+    }
+
+    /** 同上的 y 參數。 */
+    public static int dropY(IsoGridSquare sq) {
+        return landFor(sq).getY();
+    }
+
+    /**
+     * 放下動物的格子：不是水格就是原格（照原版）。是水格（{@code isWaterSquare}，建構子的 water 檢查會失敗）時，回傳
+     * 鄰格中第一個能放動物的陸地格：已載入、不是水格、{@code isFree(false)}（有實心地板，沒有牆、樹之類的實心物）、
+     * 和放下的格子之間沒有牆、圍欄、門窗擋著（{@code testCollideAdjacent}，角色移動用的同一份碰撞）；找不到就回原格。
+     * 同一次放下裡 dropX、dropY、dropPlace 各呼叫一次，世界沒有變動，三次結果相同。
+     * ponytail: 只看 8 個鄰格；四周都是水或都被擋住時照舊丟棄，要更遠再擴大範圍。
+     */
+    static IsoGridSquare landFor(IsoGridSquare sq) {
+        if (!ENABLED || sq == null) {
+            return sq;
+        }
+        try {
+            if (!sq.isWaterSquare()) {
+                return sq;
+            }
+            IsoCell cell = sq.getCell();
+            for (int[] d : NEIGHBOURS) {
+                IsoGridSquare n = cell.getGridSquare(sq.getX() + d[0], sq.getY() + d[1], sq.getZ());
+                if (n != null && !n.isWaterSquare() && n.isFree(false) && !sq.testCollideAdjacent(null, d[0], d[1], 0)) {
+                    return n;
+                }
+            }
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+        return sq;
+    }
+
     /** {@code IsoGridSquare.AddWorldInventoryItem} 動物分支唯一 {@code setMovingSquareNow}（放下的格子）。 */
     public static void dropPlace(IsoAnimal animal) {
         if (!ENABLED || animal.adef != null) {
+            if (ENABLED) {
+                moveToLand(animal);
+            }
             animal.setMovingSquareNow();
             return;
         }
@@ -161,16 +209,49 @@ public final class AnimalSpawnGuard {
         }
         if (dropDiscarded <= DETAIL_LIMIT || dropDiscarded % 1000 == 0) {
             log("drop discarded " + describe(animal) + " dropDiscarded=" + dropDiscarded
-                    + "（放下的格子建不出動物；原版會把牠放回格子，cell 卸載時每 tick NPE、整個 cell 卸不掉。"
-                    + "物品已被收走，這隻動物沒有保留，也不送 DropAnimal）");
+                    + "（放下的格子建不出動物，原因見前一行 ctor failed；水格旁有能放的陸地格時已先改到那一格建。"
+                    + "原版會把牠放回格子，cell 卸載時每 tick NPE、整個 cell 卸不掉。物品已被收走，這隻動物沒有保留，"
+                    + "也不送 DropAnimal）");
         }
     }
 
-    /** 同一分支唯一 {@code INetworkPacket.sendToRelative}（DropAnimal；args[1] 是新建的動物）。 */
-    public static void dropSend(PacketTypes.PacketType type, float x, float y, Object[] args) {
-        if (ENABLED && args.length > 1 && args[1] instanceof IsoAnimal animal && animal.adef == null) {
-            unsent++;   // 伺服器已丟棄這隻；送出去，認得這隻動物的客戶端會照原版在同一個水格再建一次
+    /** 建構子已在 landFor 選的陸地格建好；原版 setSquare／setCurrent 指回放下的水格，換回陸地格。 */
+    private static void moveToLand(IsoAnimal animal) {
+        IsoGridSquare drop = animal.getCurrentSquare();
+        IsoGridSquare land = landFor(drop);
+        if (land == drop) {
             return;
+        }
+        try {
+            animal.setSquare(land);
+            animal.setCurrent(land);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+            return;
+        }
+        dropMoved++;
+        if (dropMoved <= DETAIL_LIMIT || dropMoved % 1000 == 0) {
+            log("drop moved from=" + drop.getX() + "," + drop.getY() + "," + drop.getZ() + " " + describe(animal)
+                    + " dropMoved=" + dropMoved + "（放下的格子是水格，原版建不出動物；改放旁邊的陸地格）");
+        }
+    }
+
+    /**
+     * 同一分支唯一 {@code INetworkPacket.sendToRelative}（DropAnimal；args[1] 是新建的動物、args[2] 是放下的格子，
+     * 客戶端在這一格建動物）。
+     */
+    public static void dropSend(PacketTypes.PacketType type, float x, float y, Object[] args) {
+        if (ENABLED && args.length > 1 && args[1] instanceof IsoAnimal animal) {
+            if (animal.adef == null) {
+                unsent++;   // 伺服器已丟棄這隻；送出去，認得這隻動物的客戶端會照原版在同一個水格再建一次
+                return;
+            }
+            IsoGridSquare at = animal.getCurrentSquare();
+            if (args.length > 2 && args[2] instanceof IsoGridSquare && at != null && at != args[2]) {
+                args[2] = at;   // dropPlace 換到陸地格了：客戶端也在陸地格建
+                x = at.getX();
+                y = at.getY();
+            }
         }
         INetworkPacket.sendToRelative(type, x, y, args);
     }
@@ -245,6 +326,7 @@ public final class AnimalSpawnGuard {
     static long swallowedForTest() { return swallowed; }
     static long anomaliesForTest() { return anomalies; }
     static long dropDiscardedForTest() { return dropDiscarded; }
+    static long dropMovedForTest() { return dropMoved; }
     static long unsentForTest() { return unsent; }
     static long unloadBrokenForTest() { return unloadBroken; }
 

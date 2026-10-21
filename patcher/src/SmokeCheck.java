@@ -3487,52 +3487,75 @@ public final class SmokeCheck {
         }
         failed += check("W60 vanilla 前提：四個方法各恰 1 個被觀測的呼叫；放下動物依序 copyFrom → get → add；LoaderThread 先 saveNow 再 LoadChunk",
                 w60Vanilla && 0 < w60Copy && w60Copy < w60Get && w60Get < w60Add && 0 < w60SaveNow && w60SaveNow < w60Load);
-        // W37 (3)：同一個 AddWorldInventoryItem 另有兩個改道（dropPlace、dropSend），一起算進手術後的預期文字。
-        // 存在理由（TIS 改掉時紅＝重估）：動物分支先在放下的格子 new IsoAnimal，之後才 setMovingSquareNow 放回格子、
-        // sendToRelative 告訴客戶端，各恰 1；IsoGameCharacter.removeFromWorld 呼叫 releaseRagdollController（沒建構完成的
-        // 動物在這裡 NPE）；IsoChunk.removeFromWorld 有兩個 IsoMovingObject.removeFromWorld（movingObjects／staticMovingObjects）。
+        // W37 (3)(4)：同一個 AddWorldInventoryItem 另有兩個改道（dropPlace、dropSend）與兩個欄位改道（dropX、dropY），
+        // 一起算進手術後的預期文字。存在理由（TIS 改掉時紅＝重估）：動物分支先在放下的格子 new IsoAnimal（座標參數是
+        // 這一格的 x、y 欄位，方法內各恰 1 個 GETFIELD、都在 NEW 與 <init> 之間、都讀 this），之後才 setMovingSquareNow
+        // 放回格子、sendToRelative 告訴客戶端，各恰 1；IsoGameCharacter.removeFromWorld 呼叫 releaseRagdollController（沒建構
+        // 完成的動物在這裡 NPE）；IsoChunk.removeFromWorld 有兩個 IsoMovingObject.removeFromWorld（movingObjects／staticMovingObjects）。
         String w37Helper = "zombie/mdc/AnimalSpawnGuard";
         String w37Net = "zombie/network/packets/INetworkPacket";
+        String w37Sq = "zombie/iso/IsoGridSquare";
         String w37RelDesc = "(Lzombie/network/PacketTypes$PacketType;FF[Ljava/lang/Object;)V";
         String w37DropDesc = "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;";
-        MethodNode vDrop = methodFromJar(jar, "zombie/iso/IsoGridSquare", "AddWorldInventoryItem", w37DropDesc);
-        int w37New = -1, w37Place = -1, w37Send = -1;
+        MethodNode vDrop = methodFromJar(jar, w37Sq, "AddWorldInventoryItem", w37DropDesc);
+        int w37NewObj = -1, w37GetX = -1, w37GetY = -1, w37New = -1, w37Place = -1, w37Send = -1;
+        boolean w37CoordsFromThis = true;
         w60I = 0;
         for (AbstractInsnNode in : vDrop.instructions) {
             w60I++;
+            if (in instanceof TypeInsnNode w37Type && w37Type.getOpcode() == Opcodes.NEW && w37Type.desc.equals(w60Animal)) w37NewObj = w60I;
+            if (isField(in, Opcodes.GETFIELD, w37Sq, "x", "I")) w37GetX = w60I;
+            if (isField(in, Opcodes.GETFIELD, w37Sq, "y", "I")) w37GetY = w60I;
+            if (isField(in, Opcodes.GETFIELD, w37Sq, "x", "I") || isField(in, Opcodes.GETFIELD, w37Sq, "y", "I")) {
+                w37CoordsFromThis &= isVar(prevReal(in), Opcodes.ALOAD, 0);
+            }
             if (isCall(in, Opcodes.INVOKESPECIAL, w60Animal, "<init>",
                     "(Lzombie/iso/IsoCell;IIILjava/lang/String;Lzombie/characters/animals/datas/AnimalBreed;)V")) w37New = w60I;
             if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "setMovingSquareNow", "()V")) w37Place = w60I;
             if (isCall(in, Opcodes.INVOKESTATIC, w37Net, "sendToRelative", w37RelDesc)) w37Send = w60I;
         }
-        failed += check("W37 vanilla 前提：放下動物先 new IsoAnimal，再 setMovingSquareNow、sendToRelative 各恰 1；"
-                        + "IsoGameCharacter.removeFromWorld 呼叫 releaseRagdollController；IsoChunk.removeFromWorld 有 2 個 removeFromWorld",
-                countExactCalls(vDrop, Opcodes.INVOKEVIRTUAL, w60Animal, "setMovingSquareNow", "()V") == 1
+        failed += check("W37 vanilla 前提：放下動物先 new IsoAnimal（座標參數讀這一格的 x、y 欄位，各恰 1），再 setMovingSquareNow、"
+                        + "sendToRelative 各恰 1；IsoGameCharacter.removeFromWorld 呼叫 releaseRagdollController；"
+                        + "IsoChunk.removeFromWorld 有 2 個 removeFromWorld",
+                countExactFields(vDrop, Opcodes.GETFIELD, w37Sq, "x", "I") == 1
+                && countExactFields(vDrop, Opcodes.GETFIELD, w37Sq, "y", "I") == 1
+                && w37CoordsFromThis && 0 < w37NewObj && w37NewObj < w37GetX && w37GetX < w37GetY && w37GetY < w37New
+                && countExactCalls(vDrop, Opcodes.INVOKEVIRTUAL, w60Animal, "setMovingSquareNow", "()V") == 1
                 && countExactCalls(vDrop, Opcodes.INVOKESTATIC, w37Net, "sendToRelative", w37RelDesc) == 1
                 && 0 < w37New && w37New < w37Place && w37Place < w37Send
                 && countExactCalls(methodFromJar(jar, "zombie/characters/IsoGameCharacter", "removeFromWorld", "()V"),
                         Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoGameCharacter", "releaseRagdollController", "()V") == 1
                 && countExactCalls(methodFromJar(jar, w60Chunk, "removeFromWorld", "()V"),
                         Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoMovingObject", "removeFromWorld", "()V") == 2);
-        String[] w37Drop = w60Expected.get("zombie/iso/IsoGridSquare.AddWorldInventoryItem" + w37DropDesc);
+        String[] w37Drop = w60Expected.get(w37Sq + ".AddWorldInventoryItem" + w37DropDesc);
         w37Drop[3] = w37Drop[3]
+                .replace("GETFIELD " + w37Sq + ".x : I", "INVOKESTATIC " + w37Helper + ".dropX (L" + w37Sq + ";)I")
+                .replace("GETFIELD " + w37Sq + ".y : I", "INVOKESTATIC " + w37Helper + ".dropY (L" + w37Sq + ";)I")
                 .replace("INVOKEVIRTUAL " + w60Animal + ".setMovingSquareNow ()V",
                         "INVOKESTATIC " + w37Helper + ".dropPlace (L" + w60Animal + ";)V")
                 // 原呼叫是介面靜態方法（Textifier 標 (itf)），改道後是一般類別的 INVOKESTATIC
                 .replace("INVOKESTATIC " + w37Net + ".sendToRelative " + w37RelDesc + " (itf)",
                         "INVOKESTATIC " + w37Helper + ".dropSend " + w37RelDesc);
-        failed += check("W37 helper 契約：dropPlace／dropSend／chunkRemove 各委派原呼叫恰 1 次",
+        failed += check("W37 helper 契約：dropPlace／dropSend／chunkRemove 各委派原呼叫恰 1 次；dropX／dropY 各經 landFor 讀 getX／getY 恰 1 次",
                 countExactCalls(method(distJava, w37Helper, "dropPlace", "(L" + w60Animal + ";)V"),
                         Opcodes.INVOKEVIRTUAL, w60Animal, "setMovingSquareNow", "()V") == 1
                 && countExactCalls(method(distJava, w37Helper, "dropSend", w37RelDesc),
                         Opcodes.INVOKESTATIC, w37Net, "sendToRelative", w37RelDesc) == 1
                 && countExactCalls(method(distJava, w37Helper, "chunkRemove", "(Lzombie/iso/IsoMovingObject;)V"),
-                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoMovingObject", "removeFromWorld", "()V") == 1);
+                        Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoMovingObject", "removeFromWorld", "()V") == 1
+                && countExactCalls(method(distJava, w37Helper, "dropX", "(L" + w37Sq + ";)I"),
+                        Opcodes.INVOKESTATIC, w37Helper, "landFor", "(L" + w37Sq + ";)L" + w37Sq + ";") == 1
+                && countExactCalls(method(distJava, w37Helper, "dropX", "(L" + w37Sq + ";)I"),
+                        Opcodes.INVOKEVIRTUAL, w37Sq, "getX", "()I") == 1
+                && countExactCalls(method(distJava, w37Helper, "dropY", "(L" + w37Sq + ";)I"),
+                        Opcodes.INVOKESTATIC, w37Helper, "landFor", "(L" + w37Sq + ";)L" + w37Sq + ";") == 1
+                && countExactCalls(method(distJava, w37Helper, "dropY", "(L" + w37Sq + ";)I"),
+                        Opcodes.INVOKEVIRTUAL, w37Sq, "getY", "()I") == 1);
         boolean w60Patched = true;
         for (String[] exp : w60Expected.values()) {
             w60Patched &= exp[3].equals(methodText(method(distJava, exp[0], exp[1], exp[2])));
         }
-        failed += check("W60 手術後：六個呼叫同形改道 AnimalLossProbe（AddWorldInventoryItem 另含 W37 兩個），其餘指令與 frames 保留", w60Patched);
+        failed += check("W60 手術後：六個呼叫同形改道 AnimalLossProbe（AddWorldInventoryItem 另含 W37 兩個呼叫、兩個欄位改道），其餘指令與 frames 保留", w60Patched);
         failed += check("W60 helper 契約：每個原方法在 helper 內恰呼叫 1 次", w60Helper);
 
         // ---- W66 畜牧區同步修補（docs/patches.md 2cb）----
