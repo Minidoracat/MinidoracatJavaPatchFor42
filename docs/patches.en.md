@@ -4286,6 +4286,79 @@ After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 143`; t
 
 **Retirement**: reassess when TIS fixes the ID scheme or how `UnregisterEntity` handles a mismatch (the SmokeCheck reasons to exist turn red).
 
+<a id="2cf"></a>
+## 2cf. Bandit Raid story infinite loop (W70, server, default on)
+
+**Symptom** (production, 2026-10-24): about 55 minutes after three map mods were added at once, the main loop stayed on one frame for about
+10 minutes (12 `MainLoopWatchdog` snapshots), the heap grew from 26 GB to the 40 GB limit, the whole server showed black edges and new
+connections could not get in, until the health check restarted the server. All 12 snapshots were on the same path:
+
+```text
+RandomizedBuildingBase.addZombies / RandomizedWorldBase.createRandomDeadBody
+  ← RDSBanditRaid.randomizeDeadSurvivor(RDSBanditRaid.java:143/149)
+  ← RBBasic.addRandomDeadSurvivorStory ← RBBasic.randomizeBuilding ← RandomizedBuildingBase.ChunkLoaded
+  ← IsoChunk.randomizeBuildingsEtc ← IsoChunk.doLoadGridsquare ← ServerMap$ServerCell.RecalcAll2 ← ServerCell.Load2
+  ← ServerMap.preupdate ← GameServer.main
+```
+
+The shutdown save kept the zombies and corpses the loop had created: the building's 8 chunk files were 11–16 MB each (normally 9–40 KB),
+and the cell's `zpop` file grew from 113 KB to 1.5 MB. After the restart, whenever a player came near, the server dropped to 1.3 FPS (object
+list average 45,000, normally 3,000–5,000). That had to be cleaned up separately with the server stopped; this patch only stops it from
+happening again.
+
+**Root cause** (javap against the 42.21.0 jar `e1a69eb7`):
+- For buildings with more than 5 rooms, `randomizeDeadSurvivor` computes `size = min((int) Math.floor(rooms / 10), 10)` (offsets 677–695)
+  and runs `size` rounds, each adding 2–3 zombies (`addZombies`) and 2–3 corpses (`createRandomDeadBody`).
+- The outer loop counter is local slot 9 (offset 701 `istore 9`, 703 `iload 9; iload_2; if_icmpge`, 793 `iinc 9, 1`), and the inner corpse
+  loop uses slot 9 as well (756 `istore 9`, 787 `iinc 9, 1`). When the inner loop ends the counter equals the corpse count, 2 or 3, and the
+  outer increment brings it back to 3 or 4.
+- So the outer loop never ends when `size` ≥ 5; with `size` = 4 each round has a 50% chance of running one more, but it ends. `isValid` skips
+  buildings with more than 100 rooms, so buildings with 50–100 rooms are affected. A round where `getRandomRoomNoKids` returns null does not
+  reset the counter, but large buildings almost always have a room.
+- Trigger: the building has not been explored, the world is at least 30 days old (`setMinimumDays(30)`), and Bandit Raid is picked from the
+  dead-survivor stories (weight 1). Most buildings on the vanilla map were explored long ago on our server; newly added map areas are all new,
+  which is where this hit.
+
+**Surgery**: the only `Math.floor(D)D` in `RDSBanditRaid.randomizeDeadSurvivor` (offset 682, the line that computes `size`) is redirected 1:1
+to `zombie/mdc/BanditRaidLoopGuard.floor`, which returns 4 when the result is above 4 and `Math.floor` otherwise. In vanilla the loop already
+ends for buildings with 40–49 rooms (`size` = 4), so buildings with 50–100 rooms now run the same way as 40–49; buildings with 49 rooms or fewer
+behave exactly as before. The inner counter is not changed: that would need a different local slot or extra instructions, which is not one of
+the existing same-shape surgeries.
+
+Console (one line per catch; after the first 50, one line every 1000):
+
+```text
+[MinidoracatJavaPatch][BanditRaidLoopGuard] 攔下 Bandit Raid 無限迴圈：輪數 <n> → 4（房間數約 <n×10> 以上）clamped=<total>（-Dmdc.banditRaidLoopGuard=0|off 回原版）
+```
+
+(`攔下 Bandit Raid 無限迴圈：輪數 <n> → 4` = caught the Bandit Raid infinite loop, rounds <n> → 4; `房間數約 <n×10> 以上` = about <n×10> rooms or
+more.)
+
+**Kill switch**: `-Dmdc.banditRaidLoopGuard=0|off`, restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/BanditRaidLoopGuard.class` and `RDSBanditRaid.class` and replaces `PatchInfo.class`
+(143 → 145 classes). After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 145`; the catch line only appears when a building
+that drew this story loads.
+
+**Not handled**:
+- Zombies and corpses that were already created: this patch only stops it from happening again. On 2026-10-24 that building's chunks were reset
+  with the server stopped, and the `zpop` file was restored from a backup taken before the incident.
+- Buildings with `size` = 4 run one more round half of the time: vanilla behavior that ends, unchanged.
+
+**Checks**:
+- SmokeCheck: reason to exist — the method has exactly one `Math.floor`, followed by `d2i; istore` into size, and the body of the outer loop
+  (`iload i; iload size; if_icmpge`) contains `iconst_0; istore i` (the inner loop reuses the counter; turns red when TIS fixes it, then reassess
+  the patch). After surgery the method text (frames included) is identical to vanilla except the redirected call, the other `RDSBanditRaid`
+  methods are unchanged, and the helper calls `Math.floor` exactly once.
+- `BanditRaidLoopGuardTest` (`build.ps1` [9zm/10], one JVM each for on and off): loads both the vanilla `RDSBanditRaid` from the jar and the
+  patched one from dist in one JVM, replaces only the world and random calls (`Rand` 15 sites, room lookups 6, `addZombies` 3, corpses 3 + 3,
+  vehicle 1, world 3) with stubs (every world square is null, random numbers come from a seed), runs the loops, counters and branches from the
+  original bytecode, and records the order of stub calls. For 1–49 rooms × 40 seeds (room lookups miss 1 time in 4) both records are identical;
+  for 50–100 rooms with a room always found, vanilla exceeds 5000 stub calls in all 33 runs (control), on finishes all 1020 runs, each matching
+  the 45-room record for the same seed and clamping once; off never ends, like vanilla.
+
+**Retirement**: remove the patch when TIS fixes the inner loop counter (the SmokeCheck reason to exist turns red).
+
 ---
 
 <a id="3"></a>

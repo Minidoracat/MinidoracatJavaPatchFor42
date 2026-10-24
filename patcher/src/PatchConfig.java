@@ -1436,6 +1436,19 @@ public final class PatchConfig {
         metaGridLoad.expectedHits = 1;
         patches.add(metaGrid);
 
+        // ---- W70 Bandit Raid 劇情無限迴圈（docs/patches.md 2cf）----
+        // randomizeDeadSurvivor 的「size 輪」外層迴圈與內層放屍體迴圈共用 local slot 9（javap offset 756／787／793），
+        // 內層跑完計數器回到 2–3，size = min(floor(房間數/10), 10) ≥ 5（50–100 間房）時外層永遠跑不完，主執行緒卡在
+        // cell 載入、一直生殭屍和屍體。方法內唯一 Math.floor（offset 682，算 size）1:1 改道 BanditRaidLoopGuard.floor：
+        // 大於 4 回 4（40–49 間房原版就會跑完）。-Dmdc.banditRaidLoopGuard=0|off。
+        Patcher.ClassPatch banditRaid = new Patcher.ClassPatch(
+                "zombie/randomizedWorld/randomizedDeadSurvivor/RDSBanditRaid");
+        Patcher.MethodOps banditRaidRandomize = banditRaid.method("randomizeDeadSurvivor", "(Lzombie/iso/BuildingDef;)V");
+        banditRaidRandomize.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D",
+                "zombie/mdc/BanditRaidLoopGuard", "floor"));
+        banditRaidRandomize.expectedHits = 1;
+        patches.add(banditRaid);
+
         return patches;
     }
 

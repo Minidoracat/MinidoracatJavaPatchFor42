@@ -3768,6 +3768,54 @@ public final class SmokeCheck {
                         && countExactCalls(w69Helper, Opcodes.INVOKESTATIC, w69Mgr, "UnregisterEntity", "(L" + w69Ge + ";)V") == 0
                         && countNew(w69Helper, "java/lang/RuntimeException") == 0);
 
+        // ---- W70 Bandit Raid 劇情無限迴圈（docs/patches.md 2cf）----
+        // 存在理由：randomizeDeadSurvivor 唯一 Math.floor 算出 size（d2i／istore s），之後的外層迴圈 iload i／iload s／if_icmpge，
+        // 迴圈體內又有 iconst_0／istore i（內層放屍體迴圈重用同一個計數器）＝50–100 間房永遠跑不完。TIS 修掉時紅＝重估撤刀。
+        String w70Raid = "zombie/randomizedWorld/randomizedDeadSurvivor/RDSBanditRaid";
+        String w70Guard = "zombie/mdc/BanditRaidLoopGuard";
+        String w70Desc = "(Lzombie/iso/BuildingDef;)V";
+        MethodNode w70Vanilla = methodFromJar(jar, w70Raid, "randomizeDeadSurvivor", w70Desc);
+        AbstractInsnNode w70Floor = firstCall(w70Vanilla, Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D");
+        AbstractInsnNode w70D2i = w70Floor == null ? null : nextReal(w70Floor);
+        AbstractInsnNode w70Store = w70D2i == null ? null : nextReal(w70D2i);
+        int w70SizeSlot = w70D2i != null && w70D2i.getOpcode() == Opcodes.D2I && w70Store instanceof VarInsnNode w70S
+                && w70S.getOpcode() == Opcodes.ISTORE ? w70S.var : -1;
+        int w70Counter = -1;
+        LabelNode w70Exit = null;
+        boolean w70Reused = false;
+        for (AbstractInsnNode in = w70Store; in != null; in = in.getNext()) {
+            if (w70Exit == null && in instanceof VarInsnNode a && a.getOpcode() == Opcodes.ILOAD
+                    && nextReal(a) instanceof VarInsnNode b && b.getOpcode() == Opcodes.ILOAD && b.var == w70SizeSlot
+                    && nextReal(b) instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IF_ICMPGE) {
+                w70Counter = a.var;
+                w70Exit = j.label;
+                in = j;
+            } else if (w70Exit != null && in == w70Exit) {
+                break;
+            } else if (w70Exit != null && in.getOpcode() == Opcodes.ICONST_0
+                    && nextReal(in) instanceof VarInsnNode s && s.getOpcode() == Opcodes.ISTORE && s.var == w70Counter) {
+                w70Reused = true;
+            }
+        }
+        failed += check("W70 vanilla 前提：randomizeDeadSurvivor 恰一個 Math.floor 算出 size，之後的外層迴圈體內有內層迴圈把同一個計數器歸零（slot "
+                        + w70Counter + "）",
+                countExactCalls(w70Vanilla, Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1
+                        && w70SizeSlot >= 0 && w70Counter >= 0 && w70Reused);
+        failed += check("W70 手術後：唯一 Math.floor 同形改道 BanditRaidLoopGuard.floor，其餘指令與 frames 保留；RDSBanditRaid 其餘方法不變",
+                methodText(w70Vanilla).replace("INVOKESTATIC java/lang/Math.floor (D)D", "INVOKESTATIC " + w70Guard + ".floor (D)D")
+                        .equals(methodText(method(distJava, w70Raid, "randomizeDeadSurvivor", w70Desc)))
+                        && classNodeFromJar(jar, w70Raid).methods.stream()
+                                .filter(m -> !(m.name + m.desc).equals("randomizeDeadSurvivor" + w70Desc))
+                                .allMatch(m -> {
+                                    try {
+                                        return methodText(m).equals(methodText(method(distJava, w70Raid, m.name, m.desc)));
+                                    } catch (Exception e) {
+                                        return false;
+                                    }
+                                }));
+        failed += check("W70 helper 契約：floor 內恰一次 Math.floor",
+                countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

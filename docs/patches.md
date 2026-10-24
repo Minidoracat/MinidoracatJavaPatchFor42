@@ -4128,6 +4128,49 @@ console（每分鐘最多 20 行，超過的只計數，下一分鐘第一次記
 
 **退場**：官方修好 ID 算法或 `UnregisterEntity` 的處理（SmokeCheck 存在理由轉紅）時重估。
 
+<a id="2cf"></a>
+## 2cf. Bandit Raid 劇情無限迴圈（W70，server，預設 on）
+
+**症狀**（2026-10-24 正式服）：一次加了三張地圖 MOD 後約 55 分鐘，主迴圈停在同一幀約 10 分鐘（`MainLoopWatchdog` 12 份快照），heap 從 26 GB 漲到 40 GB 上限，全服卡黑邊、新連線進不來，最後由健康檢查重開。12 份快照都停在同一條路徑：
+
+```text
+RandomizedBuildingBase.addZombies／RandomizedWorldBase.createRandomDeadBody
+  ← RDSBanditRaid.randomizeDeadSurvivor(RDSBanditRaid.java:143／149)
+  ← RBBasic.addRandomDeadSurvivorStory ← RBBasic.randomizeBuilding ← RandomizedBuildingBase.ChunkLoaded
+  ← IsoChunk.randomizeBuildingsEtc ← IsoChunk.doLoadGridsquare ← ServerMap$ServerCell.RecalcAll2 ← ServerCell.Load2
+  ← ServerMap.preupdate ← GameServer.main
+```
+
+關機存檔把迴圈生出來的殭屍和屍體存了下來：那棟樓的 8 個 chunk 檔各 11–16 MB（平常 9–40 KB），所在 cell 的 `zpop` 檔從 113 KB 變成 1.5 MB。重開後只要有人靠近，伺服器就掉到 1.3 FPS（物件清單平均 4.5 萬，平常 3–5 千）。這些要停服另外清理，本刀只防止再發生。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `randomizeDeadSurvivor` 在房間數大於 5 的建築先算 `size = min((int) Math.floor(房間數 / 10), 10)`（offset 677–695），再跑 `size` 輪，每輪 `addZombies` 2–3 隻、`createRandomDeadBody` 2–3 具。
+- 外層迴圈的計數器是 local slot 9（offset 701 `istore 9`、703 `iload 9; iload_2; if_icmpge`、793 `iinc 9, 1`），內層放屍體的迴圈也用 slot 9（756 `istore 9`、787 `iinc 9, 1`）。內層跑完時計數器等於屍體數 2 或 3，外層加 1 後回到 3 或 4。
+- 所以 `size` ≥ 5 時外層永遠跑不完；`size` = 4 時每輪有一半機會再跑一輪，但會結束。`isValid` 不選超過 100 間房的建築，受影響的是 50–100 間房的建築。`getRandomRoomNoKids` 回 null 的那一輪不歸零計數器，但大樓幾乎都找得到房間。
+- 觸發條件：建築沒被探索過、世界存活滿 30 天（`setMinimumDays(30)`）、從死亡倖存者劇情抽中 Bandit Raid（權重 1）。正式服原版地圖的建築大多早已探索過，新加的地圖區域整片都是新的，才會碰到。
+
+**手術**：`RDSBanditRaid.randomizeDeadSurvivor` 唯一的 `Math.floor(D)D`（offset 682，算 `size` 那一行）1:1 改道 `zombie/mdc/BanditRaidLoopGuard.floor`：結果大於 4 時回 4，其餘照 `Math.floor`。原版 40–49 間房（`size` = 4）的建築迴圈本來就會結束，所以 50–100 間房的建築改照 40–49 間房的方式跑；49 間房以下行為完全不變。內層計數器不改：要換 local slot 或加指令，不是既有的同形手術。
+
+console（每攔下一次一行，前 50 次之後每 1000 次一行）：
+
+```text
+[MinidoracatJavaPatch][BanditRaidLoopGuard] 攔下 Bandit Raid 無限迴圈：輪數 <n> → 4（房間數約 <n×10> 以上）clamped=<累計>（-Dmdc.banditRaidLoopGuard=0|off 回原版）
+```
+
+**kill switch**：`-Dmdc.banditRaidLoopGuard=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/BanditRaidLoopGuard.class` 與 `RDSBanditRaid.class`，`PatchInfo.class` 換新（143 → 145 個 class）。上線後確認橫幅指紋與 `[mdc-javagate] OK: 145`；攔下行只在抽中這個劇情的大樓載入時出現。
+
+**不處理**：
+- 已經生出來的殭屍和屍體：本刀只防止再發生。2026-10-24 那棟樓在停服時重置 chunk，並把 `zpop` 換回事發前的備份。
+- `size` = 4 的建築每輪一半機會多跑一輪：原版行為，會結束，不改。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——方法內恰一個 `Math.floor`，之後 `d2i; istore` 存成 size，外層迴圈 `iload i; iload size; if_icmpge` 的迴圈體內有 `iconst_0; istore i`（內層重用同一個計數器；TIS 修掉就轉紅，重估撤刀）。手術後除了被改道的呼叫，方法文字（含 frames）與原版相同，`RDSBanditRaid` 其餘方法不變；helper 內恰一次 `Math.floor`。
+- `BanditRaidLoopGuardTest`（`build.ps1` [9zm/10]，on、off 兩個 JVM）：同一個 JVM 載入 jar 裡的原版與 dist 內手術後的 `RDSBanditRaid`，只把碰世界與亂數的呼叫（`Rand` 15 處、取房間 6、`addZombies` 3、屍體 3＋3、車 1、世界 3）換成替身（世界格子一律 null、亂數照種子），迴圈、計數器與分支照原 bytecode 跑，以替身被呼叫的順序當紀錄。1–49 間房 × 40 個種子（取房間有 1/4 機會落空）兩份逐筆相同；50–100 間房、永遠找得到房間時，原版 33 組全部超過 5000 次替身呼叫（負對照），on 的 1020 組全部跑完、每組都和同種子的 45 間房紀錄相同、各 clamped 一次；off 跟原版一樣停不下來。
+
+**退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
+
 ---
 
 <a id="3"></a>

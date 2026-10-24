@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 70 patched classes, 194 patch sites and 73 helper classes on 42.21.0.
+  actions and log noise. 71 patched classes, 195 patch sites and 74 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; three 42.21.0
   player-built room bugs: vanishing objects, and two disconnects while chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -81,6 +81,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W40 / W41 `processItems` ([2bc](docs/patches.en.md#2bc), [2bd](docs/patches.en.md#2bd)) | The vehicle loader thread writes `IsoCell.processItems` directly. A null gets in, `ProcessItems` throws every 5 s, the list stops shrinking and linear `contains` during chunk loading froze the server for 5–16 s (FPS 9.8 → 2–3). | W40 skips and removes nulls in the same frame; W41 queues off-thread registrations and applies them on the main thread. | draft |
 | Hit packet null guards ([2c](docs/patches.en.md#2c)) | `hit/Zombie.process` and `hit/Fall.process` dereference fields that a malformed packet leaves null. | Null guard before the super call. | not reported |
 | W15 Main-loop watchdog ([2ac](docs/patches.en.md#2ac)) | Freezes leave no stack trace. | Observe only: snapshots the main thread after 5 s without a frame. It showed that the remaining freezes are the synchronous `QueuedSaveAll`. | suggestion [#100925](https://theindiestone.com/forums/topic/100925/) |
+| W70 Bandit Raid story infinite loop ([2cf](docs/patches.en.md#2cf)) | The Bandit Raid dead-survivor story reuses the outer loop counter in its inner corpse loop, so for an unexplored building with 50–100 rooms the loop never ends: the main thread stays inside the cell load and keeps spawning zombies and corpses until the heap is full (10-minute freeze on our server after adding new maps; the shutdown save kept tens of thousands of zombies and their corpses). | Caps the round count at 4, the largest value for which the vanilla loop ends, so these buildings run like a 40–49-room building; smaller buildings are unchanged. | not reported |
 
 ### Data integrity: lost chunks, animals and vehicles
 

@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 70 個 patched class、194 個命中點、73 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 71 個 patched class、195 個命中點、74 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -67,6 +67,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W40／W41 `processItems`（[2bc](docs/patches.md#2bc)、[2bd](docs/patches.md#2bd)） | 載車的背景執行緒直接寫 `IsoCell.processItems`，混進 null 後 `ProcessItems` 每 5 秒丟例外、清單不再縮減，chunk 載入時的線性 `contains` 讓伺服器凍結 5–16 秒（FPS 9.8 → 2–3）。 | W40 同一幀略過並移除 null；W41 把非主執行緒的登記排入佇列，由主執行緒補登記。 | 草稿 |
 | hit 封包 null 守衛（[2c](docs/patches.md#2c)） | `hit/Zombie.process` 與 `hit/Fall.process` 會解參考損壞封包留下的 null 欄位。 | 在呼叫 super 之前加 null 守衛。 | 未回報 |
 | W15 主迴圈看門狗（[2ac](docs/patches.md#2ac)） | 凍結當下沒有任何 stack 可查。 | 純觀測：超過 5 秒沒有新的一幀就對主執行緒拍 stack。結果顯示剩下的凍結都來自同步的 `QueuedSaveAll`。 | 建議 [#100925](https://theindiestone.com/forums/topic/100925/) |
+| W70 Bandit Raid 劇情無限迴圈（[2cf](docs/patches.md#2cf)） | 死亡倖存者劇情 Bandit Raid 的內層放屍體迴圈重用外層的計數器，沒探索過、50–100 間房的建築抽到時外層永遠跑不完：主執行緒卡在載入那個 cell，一直生殭屍和屍體直到 heap 用盡（本服加新地圖後凍結 10 分鐘，關機存檔存下數萬隻殭屍和大量屍體）。 | 輪數上限改成 4（原版迴圈會結束的最大值），這些建築改照 40–49 間房的方式跑；更小的建築行為不變。 | 未回報 |
 
 ### 資料完整性：chunk、動物與車輛遺失
 

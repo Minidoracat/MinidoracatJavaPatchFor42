@@ -128,6 +128,7 @@ $helperEntries = @(
     'zombie/mdc/ZoneDeleteGuard.class',
     'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/entity/MdcEntityIdGuard.class',
+    'zombie/mdc/BanditRaidLoopGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -616,6 +617,12 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "MdcEntityIdGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.entityIdGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcEntityIdGuardTest off
 Assert-Ok "MdcEntityIdGuardTest（off，原版負對照）"
+
+Write-Host "[9zm/10] Bandit Raid 劇情無限迴圈（W70）：原版與手術後的真 randomizeDeadSurvivor 迴圈（世界與亂數換替身），1–49 間房逐筆相同；50–100 間房原版停不下來（負對照）、on 照 45 間房跑完、off 跟原版一樣..."
+java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" on
+Assert-Ok "BanditRaidLoopGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+Assert-Ok "BanditRaidLoopGuardTest（off，kill switch 回原版）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
