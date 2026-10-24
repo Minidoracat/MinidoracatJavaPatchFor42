@@ -99,12 +99,35 @@ public final class IoPoolIsolation {
 
     private static final ThreadLocal<Local> LOCAL = ThreadLocal.withInitial(Local::new);
 
+    /*
+     * 主執行緒快取（2026-10-24）：主執行緒的 ThreadLocalMap 條目很多，ThreadLocal.get 常走
+     * getEntryAfterMiss 線性探測；正式服 63 份主執行緒 dump 有 3 份停在這裡（送 chunk 給玩家的
+     * IsoChunk.SaveLoadedChunk 每寫一個欄位標頭就查一次）。第一次由名為 main 的執行緒取用時記下
+     * 它與它的 Local；之後主執行緒只比對 Thread 身分。只有主執行緒會通過身分比對而讀 mainLocal，
+     * 兩個欄位都只由主執行緒寫一次，其他執行緒讀到舊值（null）只會照常走 ThreadLocal。
+     */
+    private static Thread mainThread;
+    private static Local mainLocal;
+
+    private static Local state() {
+        Thread t = Thread.currentThread();
+        if (t == mainThread) {
+            return mainLocal;
+        }
+        Local l = LOCAL.get();
+        if (mainThread == null && "main".equals(t.getName())) {
+            mainLocal = l;
+            mainThread = t;
+        }
+        return l;
+    }
+
     /** 本執行緒對應池；off 或分槽溢位回 null＝呼叫端原樣委派 vanilla 共用池（每個改道目標恰一處委派）。 */
     private static ArrayDeque<Object> local(ConcurrentLinkedDeque<?> q) {
         if (!ENABLED) {
             return null;
         }
-        ArrayDeque<Object> d = LOCAL.get().pool(q);
+        ArrayDeque<Object> d = state().pool(q);
         if (d == null) {
             slotOverflow.incrementAndGet();
         }
@@ -127,7 +150,7 @@ public final class IoPoolIsolation {
         if (d.size() < MAX_PER_POOL) {
             d.addFirst(x);   // LIFO：剛歸還的物件仍在 L1，下一次 poll 直接命中
         } else {
-            LOCAL.get().dropped++;
+            state().dropped++;
         }
         return true;
     }

@@ -2621,6 +2621,8 @@ ByteBlock.End:   12: getstatic pool_data_block 16: invokevirtual …contains（$
 helper 不認識任何欄位名：以傳入的池實例做 identity 分槽（每執行緒 `ThreadLocal<Local>`，最多 8 個相異池 → 各一顆 `ArrayDeque`，實際 5 個；超出的池原樣委派 vanilla、計 `slotOverflow`）。`poll` 回本執行緒先前歸還的物件或 null（呼叫端自行 new）；`offer` 進本執行緒池、LIFO（剛歸還的仍在 L1）、每池上限 1024（超出丟給 GC；vanilla 全域池無界）、回傳恆 true；跨執行緒配置／歸還安全（歸還進歸還者的池）。SaveAll 的 worker 每次是新執行緒 → 從空池起步（每執行緒駐留＝巢狀深度，數十顆
 24-byte 物件）、結束隨 Thread 物件 GC。熱路徑零共用寫入：無 AtomicLong、無 CAS；橫幅在每執行緒首次建 `Local` 時 CAS 印一次。三個改道目標各恰一處委派 vanilla（off／分槽溢位路徑）。
 
+主執行緒另走靜態快取（2026-10-24）：主執行緒的 `ThreadLocalMap` 條目多，`ThreadLocal.get` 常走 `getEntryAfterMiss` 線性探測。正式服 47 人、FPS 4 時抓的 63 份主執行緒 dump 有 3 份停在這裡，都在送 chunk 給玩家的 `IsoChunk.SaveLoadedChunk`（每寫一個欄位標頭就查一次）。第一次由名為 `main` 的執行緒取用時記下它與它的 `Local`，之後主執行緒只比對 `Thread` 身分；其他執行緒照舊走 `ThreadLocal`。兩個靜態欄位只由主執行緒寫一次，也只有主執行緒會通過身分比對而讀到 `mainLocal`，所以不需要 volatile。
+
 語意差異只有一處：`ByteBlock.End` 的 `assert !Core.debug || !pool.contains(block)` 改查本執行緒池——正式服 assertions 關閉，該分支是死碼。header／block 物件本身的 bytes 佈局零變化，存檔格式與網路格式不受影響（純配置策略）。kill switch `-Dmdc.ioPoolIsolation=0`（三處全部回到 vanilla 共用池）。
 
 ### 守門與驗證
@@ -2629,6 +2631,7 @@ helper 不認識任何欄位名：以傳入的池實例做 identity 分槽（每
 - `IoPoolIsolationTest`（on／off 各獨立 JVM，走 dist 內手術後的真 `BitHeader`／`ByteBlock`）：寫→讀 round trip 逐位元；同執行緒 LIFO 回收同實例；4 執行緒 ×20000 巢狀配置零例外、on 時
   IdentityHashMap 交集為空＋全域池恆空＋每執行緒駐留＝巢狀深度、off 時全域池收到歸還；`contains`／cap 1024＋dropped／第 9 個相異池溢位委派 vanilla／`offer(null)` NPE。
 - A/B（`temp/IoPoolBench.java`，dist 手術後真類別，每 iter 3 alloc＋3 release）：1 執行緒 69→32ns、**4 執行緒 1095→38ns（29×）**、8 執行緒 1858→44ns。
+- 主執行緒快取 A/B（`temp/IoPoolMainBench.java`，dist 真類別，同一 JVM 兩條各塞 64／1000／4000 個 ThreadLocal（一半失效）的執行緒，poll＋offer 一對）：main 走快取 2.1–2.2ns、worker 走 `ThreadLocal` 9.2–9.7ns。微基準的表在 L1 裡；正式服主執行緒的表冷，差距以 dump 比例（約 5%）為準。
 
 ### 驗收
 

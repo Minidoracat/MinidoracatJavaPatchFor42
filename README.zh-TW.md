@@ -98,7 +98,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W47 動物視線空間預篩（[2bj](docs/patches.md#2bj)） | W18-2 之後每次視線檢查仍要走約 4,300 個物件：約 50 人時每幀約 16 ms（主迴圈約 9%）。 | 每幀建一次殭屍網格；結果與原版相同（4,000 個隨機世界差分）；基準每幀 4,780 → 約 250 µs。 | 未回報 |
 | W48-2 動物聽覺索引（[2bk](docs/patches.md#2bk)） | 每隻動物每個 tick 都掃過整份全域聲音清單（約 4,300 個、範圍內平均約 12 個）。 | 結果相同的空間索引（每 256 次比對一次原版；13 萬次比對零不一致）：每幀 4.34 → 0.69 ms。 | 未回報 |
 | W45 `processItems` 身分索引（[2bh](docs/patches.md#2bh)） | 每登記一件物品都要對約 3 萬件的清單做線性 `contains`。 | 帶身分索引的清單，順序與內容不變；每件登記 43 → 0.3 µs（基準）。 | 草稿 |
-| W25 序列化物件池隔離（[2am](docs/patches.md#2am)） | `SaveAll` 的 worker 有 80% 的取樣卡在 `BitHeader` 與 `ByteBlock` 的 `ConcurrentLinkedDeque` 池競爭。 | 改為執行緒私有池：4 執行緒時每次 1,095 → 38 ns（29 倍）。 | 未回報 |
+| W25 序列化物件池隔離（[2am](docs/patches.md#2am)） | `SaveAll` 的 worker 有 80% 的取樣卡在 `BitHeader` 與 `ByteBlock` 的 `ConcurrentLinkedDeque` 池競爭。 | 改為執行緒私有池（主執行緒不查 `ThreadLocal`）：4 執行緒時每次 1,095 → 38 ns（29 倍）。 | 未回報 |
 | W35 使用中玩家索引（[2ax](docs/patches.md#2ax)） | `UsingPlayerUpdateSystem` 每幀掃過所有 IsoObject entity（JFR 5.9%），只為了在玩家走遠時清掉 `usingPlayer`。 | 只追蹤有 `usingPlayer` 的物件，並定期全表稽核。 | 未回報 |
 | W34 聲音參數（[2aw](docs/patches.md#2aw)） | 伺服器替沒人讀的 dummy emitter 計算 FMOD 腳步參數（1.6%）。 | 伺服器上略過。 | 未回報 |
 | W4-1 chunk 請求併包（[2p](docs/patches.md#2p)） | 每位玩家的 chunk 供給上限是主迴圈 FPS × 一列 chunk；3 FPS 時開車會超過供給（黑邊）。 | 把佇列中的請求併成較大的批次（預設 observe）。 | 未回報 |
