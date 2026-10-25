@@ -1276,22 +1276,38 @@ public final class PatchConfig {
         // getObjectIndex／getLifeLeft、沒有任何作用。唯一 IsoObject.update()（javap bci 82）與 ArrayList.removeAll
         // （bci 20）同形改道，頭部 beginPass、唯一 RETURN（bci 108）前 endPass；addToProcessIsoObject／
         // addToProcessIsoObjectRemove 頭部記錄非主執行緒寫入。-Dmdc.isoObjectGate 0|off/1|on/2|observe（預設，只量）。
+        // W75：非主執行緒的 addToProcessIsoObjectRemove 排回主執行緒（docs/patches.md 2cj；比照 W41）。全 jar 唯一呼叫點在
+        // IsoObject.removeFromWorld()（下方 IsoObject ClassPatch），ProcessIsoObject 頭部排空、addToProcessIsoObject 頭部取消。
+        // -Dmdc.isoObjectRemoveDefer 預設 on，0|off 純委派；與 W73 isoObjectGate 無關。
+        String isoRemoveDefer = "zombie/mdc/IsoObjectRemoveDefer";
         String isoGate = "zombie/mdc/IsoObjectUpdateGate";
         Patcher.MethodOps processIsoObject = isoCell.method("ProcessIsoObject", "()V");
         processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/iso/IsoObject", "update", "()V", isoGate, "update"));
         processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z", isoGate, "removeAll"));
-        processIsoObject.headCall = new Patcher.HeadCall(isoGate, "beginPass", cellArg);
+        // W75 起頭部改呼叫 IsoObjectRemoveDefer.beginPass（先排空 W75 佇列，再呼叫 W73 beginPass）。
+        processIsoObject.headCall = new Patcher.HeadCall(isoRemoveDefer, "beginPass", cellArg);
         processIsoObject.tailCall = new Patcher.TailCall(isoGate, "endPass", cellArg);
         processIsoObject.expectedHits = 4;   // 兩個改道＋head＋單一 RETURN
         Patcher.MethodOps isoAdd = isoCell.method("addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V");
-        isoAdd.headCall = new Patcher.HeadCall(isoGate, "touchAdd", cellArg);
+        // W75 起頭部改呼叫 IsoObjectRemoveDefer.beforeAdd(cell, object)（先 W73 touchAdd，再取消同物件的待移除）。
+        isoAdd.headCall = new Patcher.HeadCall(isoRemoveDefer, "beforeAdd",
+                "(Lzombie/iso/IsoCell;Lzombie/iso/IsoObject;)V", new int[]{0, 1});
         isoAdd.expectedHits = 1;
         Patcher.MethodOps isoRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
         isoRemove.headCall = new Patcher.HeadCall(isoGate, "touchRemove", cellArg);
         isoRemove.expectedHits = 1;
         patches.add(isoCell);
+        // W75：IsoObject.removeFromWorld() bci 15 唯一 invokevirtual IsoCell.addToProcessIsoObjectRemove 同形改道
+        // （receiver 前置）。非主執行緒（實測 ServerPlayersVehicles 載車：BaseVehicle.load → addAnimalInTrailer →
+        // IsoAnimal.removeFromWorld）排進佇列，主執行緒照原版。IsoObject 原本沒有 server ClassPatch。
+        Patcher.ClassPatch isoObjectPatch = new Patcher.ClassPatch("zombie/iso/IsoObject");
+        Patcher.MethodOps objRemove = isoObjectPatch.method("removeFromWorld", "()V");
+        objRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                "addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V", isoRemoveDefer, "addToProcessIsoObjectRemove"));
+        objRemove.expectedHits = 1;
+        patches.add(isoObjectPatch);
 
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
         // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點

@@ -4303,6 +4303,44 @@ console（開服第一輪一行，之後每 60 秒一行，數字都是這 60 �
 
 **退場**：判讀完、決定（或不做）批次化閘門之後可以關掉或撤刀。
 
+<a id="2cj"></a>
+## 2cj. 非主執行緒的每幀更新清單移除排回主執行緒（W75，server，預設 on）
+
+**症狀**（2026-10-25 正式服，W73 觀測）：50 分鐘內 20 次 `off-main-thread remove thread=ServerPlayersVehicles`，來源都是載車時把拖車裡的動物移出世界：`BaseVehicle.load → addAnimalInTrailer → IsoAnimal.removeFromWorld → … → IsoObject.removeFromWorld → IsoCell.addToProcessIsoObjectRemove`；`offThreadAdds` 為 0。原版在背景執行緒讀 `processIsoObjectSet`、可能寫 `processIsoObjectRemove`（兩個都是 `HashSet`），主執行緒同時在 `ProcessIsoObject` 頭部 `removeAll`／`clear`、在 `addToProcessIsoObject` 改同兩份集合。目前沒有觀察到 `ConcurrentModificationException`，但 HashSet 並行寫入可能讓移除遺失或內部結構損壞（同類問題見 W40／W41 的 `processItems`）。
+
+**原版語意**（javap 對 42.21.0 jar `e1a69eb7`）：`addToProcessIsoObjectRemove` 是 `processIsoObjectSet.contains → processIsoObjectRemove.add`；`addToProcessIsoObject` 是 `processIsoObjectRemove.remove → processIsoObjectSet.add → processIsoObject.add`（加回會取消待移除）；`ProcessIsoObject` 頭部 `isEmpty → removeAll → removeAll → clear` 之後才進更新迴圈。全 jar 對 `addToProcessIsoObjectRemove` 只有 `IsoObject.removeFromWorld()` 一個呼叫點（offset 15）。
+
+**手術**（比照 W41）：
+- `IsoObject.removeFromWorld()` offset 15 唯一的 `invokevirtual IsoCell.addToProcessIsoObjectRemove` 1:1 改道 `zombie/mdc/IsoObjectRemoveDefer.addToProcessIsoObjectRemove(IsoCell, IsoObject)`（receiver 前置，命中 1；`IsoObject` 原本沒有 server ClassPatch）。非主執行緒（`GameServer.mainThread` 以外）不跑原版，把（cell, 物件）排進佇列；主執行緒或 `mainThread` 還沒設定時照原版。佇列超過 10 萬筆時照原版直接呼叫。
+- `ProcessIsoObject` 頭部（W73 的頭部呼叫改經 `IsoObjectRemoveDefer.beginPass`）：先排空佇列，對每筆呼叫原版 `addToProcessIsoObjectRemove`，再呼叫 W73 的 `beginPass`。排空在原版 `isEmpty`／`removeAll` 之前，所以移除在同一輪生效，與原版背景呼叫後下一幀的結果相同。
+- `addToProcessIsoObject` 頭部（W73 的 `touchAdd` 改經 `IsoObjectRemoveDefer.beforeAdd(cell, object)`，HeadCall 帶 slot 0、1）：先呼叫 W73 `touchAdd`，再把佇列裡同一 cell＋物件的待移除拿掉，對應原版那行 `processIsoObjectRemove.remove(object)`，「背景移除→主執行緒加回」結果與原版相同。只有主執行緒的加入會取消；非主執行緒的加入不在本刀範圍（觀測為 0）。
+- 用頭部呼叫而不是改道 `addToProcessIsoObject` 的呼叫點：呼叫點遍布十幾個類別，Lua（例如 MinidoracatFixesFor42 的 `MDFX_ChargerIdleGuard`）也直接呼叫這個公開方法，頭部呼叫才能涵蓋全部。
+- 與 W73 無關：`-Dmdc.isoObjectGate=0` 時 W73 的 `beginPass`／`touchAdd` 直接返回，W75 照樣排空與取消。
+
+console（前 20 次延後與之後每 1000 次各一行附來源；第一幀一行首次生效；之後每 5 分鐘一行心跳，數值為累計）：
+
+```text
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] deferred n=<n> thread=<執行緒> via=<呼叫來源>
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] 首次生效 on raw=<property>（…）
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] beat deferred=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> anomalies=<n> sources=[<次數>×<來源> | … | other×<n>]
+```
+
+**驗收**：上線後 W73 心跳的 `offThreadRemoves` 不再增加（背景呼叫不再進到 `IsoCell.addToProcessIsoObjectRemove`），W75 心跳 `deferred` 與 `drained`＋`cancelled`＋`pending` 相符、`overflow=0`、`anomalies=0`。
+
+**kill switch**：`-Dmdc.isoObjectRemoveDefer=0|off` 純委派（原版在呼叫端執行緒直接跑），需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/IsoObjectRemoveDefer.class`、`IsoObjectRemoveDefer$Entry.class` 與 patched `zombie/iso/IsoObject.class`，`IsoCell.class`、`PatchInfo.class` 換新（151 → 154 個 class）。
+
+**不處理**：
+- 同一個 `IsoObject.removeFromWorld()` 緊接著（offset 20）在背景執行緒呼叫 `removeFromStaticUpdaterObjectList`：動物不在 static updater 清單裡時只讀 Set（`remove` 回 false），沒有觀測到寫入；另案。
+- `addToProcessIsoObject` 的非主執行緒延後：觀測 0 次。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——上面三個原版語意（呼叫順序逐一比對）與全 jar 唯一呼叫點；手術後 `IsoObject.removeFromWorld()` 除了被改道的呼叫，方法文字（含 frames）與原版相同，`IsoObject` 其餘方法不變；`ProcessIsoObject` 頭部改為 `IsoObjectRemoveDefer.beginPass`、`addToProcessIsoObject` 頭部 `beforeAdd(cell, object)` 真指令 +3；helper 的 `beginPass` 先 `drain` 再 W73 `beginPass`、`beforeAdd` 恰一次 W73 `touchAdd`、`drain` 恰一次呼叫原版。
+- `IsoObjectRemoveDeferTest`（`build.ps1` [9zq/10]，on、off、on＋W73 off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `ProcessIsoObject`／`addToProcessIsoObject`／`addToProcessIsoObjectRemove`，兩份 Set 換成記錄執行緒的 `HashSet` 子類。`mainThread` 為 null 與主執行緒呼叫照原版；背景呼叫 on 不碰任何集合、排隊，下一次 `ProcessIsoObject` 移除且當幀不 update，與原版循序執行結果相同；off（原版負對照）背景執行緒直接讀寫 Set；「背景移除→主執行緒加回」取消、物件照常 update；取消只比對同一 cell＋物件；心跳欄位。三個 mutant（不取消、排空放在 `removeAll` 之後、在背景執行緒排空）都至少一個情境與原版不同。
+
+**退場**：官方讓背景載車不再呼叫 `removeFromWorld`，或 `IsoCell` 這兩份集合改成執行緒安全時撤刀。
+
 ---
 
 <a id="3"></a>

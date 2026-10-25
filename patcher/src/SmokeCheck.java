@@ -3911,6 +3911,7 @@ public final class SmokeCheck {
         failed += check("W70 helper 契約：floor 內恰一次 Math.floor",
                 countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
         failed += checkIsoObjectGate(jar, distJava);
+        failed += checkIsoObjectRemoveDefer(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -6822,20 +6823,29 @@ public final class SmokeCheck {
                 subclasses.isEmpty() && equalsInChain.isEmpty() && superOf.containsKey(thump));
 
         MethodNode pProcess = method(distJava, cell, "ProcessIsoObject", "()V");
-        failed += check("W73 手術後：ProcessIsoObject 的 update／removeAll 1:1 改道、頭部 beginPass、唯一 RETURN 前 endPass、真指令恰 +4",
+        String defer = "zombie/mdc/IsoObjectRemoveDefer";   // W75 起兩個頭部呼叫改經 W75 helper（再轉呼叫 W73）
+        failed += check("W73 手術後：ProcessIsoObject 的 update／removeAll 1:1 改道、頭部 beginPass（W75 起經 IsoObjectRemoveDefer）、唯一 RETURN 前 endPass、真指令恰 +4",
                 countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "update", "(L" + obj + ";)V") == 1
                 && countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z") == 1
                 && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, obj, "update", "()V") == 0
                 && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 0
-                && headCallSlotsOk(pProcess, gate, "beginPass", cellDesc, 0)
+                && headCallSlotsOk(pProcess, defer, "beginPass", cellDesc, 0)
                 && tailCallOk(pProcess, gate, "endPass", cellDesc)
                 && realInsnCount(pProcess) == realInsnCount(vProcess) + 4);
-        for (String[] w : new String[][]{{"addToProcessIsoObject", "touchAdd"}, {"addToProcessIsoObjectRemove", "touchRemove"}}) {
-            MethodNode vW = methodFromJar(jar, cell, w[0], "(L" + obj + ";)V");
-            MethodNode pW = method(distJava, cell, w[0], "(L" + obj + ";)V");
-            failed += check("W73 " + w[0] + " 頭部 " + w[1] + "、真指令恰 +2",
-                    headCallSlotsOk(pW, gate, w[1], cellDesc, 0) && realInsnCount(pW) == realInsnCount(vW) + 2);
-        }
+        MethodNode vAdd = methodFromJar(jar, cell, "addToProcessIsoObject", "(L" + obj + ";)V");
+        MethodNode pAdd = method(distJava, cell, "addToProcessIsoObject", "(L" + obj + ";)V");
+        failed += check("W73／W75 addToProcessIsoObject 頭部 IsoObjectRemoveDefer.beforeAdd(cell, object)、真指令恰 +3",
+                headCallSlotsOk(pAdd, defer, "beforeAdd", "(L" + cell + ";L" + obj + ";)V", 0, 1)
+                && realInsnCount(pAdd) == realInsnCount(vAdd) + 3);
+        MethodNode vRem = methodFromJar(jar, cell, "addToProcessIsoObjectRemove", "(L" + obj + ";)V");
+        MethodNode pRem = method(distJava, cell, "addToProcessIsoObjectRemove", "(L" + obj + ";)V");
+        failed += check("W73 addToProcessIsoObjectRemove 頭部 touchRemove、真指令恰 +2",
+                headCallSlotsOk(pRem, gate, "touchRemove", cellDesc, 0) && realInsnCount(pRem) == realInsnCount(vRem) + 2);
+        MethodNode deferBegin = method(distJava, defer, "beginPass", cellDesc);
+        MethodNode deferAdd = method(distJava, defer, "beforeAdd", "(L" + cell + ";L" + obj + ";)V");
+        failed += check("W73 helper 鏈：IsoObjectRemoveDefer.beginPass 恰一次轉呼叫 W73 beginPass、beforeAdd 恰一次轉呼叫 W73 touchAdd",
+                countExactCalls(deferBegin, Opcodes.INVOKESTATIC, gate, "beginPass", cellDesc) == 1
+                && countExactCalls(deferAdd, Opcodes.INVOKESTATIC, gate, "touchAdd", cellDesc) == 1);
 
         MethodNode skippable = method(distJava, gate, "skippable", "(L" + obj + ";)Z");
         int fcmpl = 0, fcmpg = 0, thumpLdc = 0, serverGets = 0;
@@ -6853,6 +6863,68 @@ public final class SmokeCheck {
         failed += check("W73 helper 契約：removeAll 只呼叫原版 ArrayList.removeAll（off 與量測兩條路各 1）",
                 countExactCalls(method(distJava, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z"),
                         Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 2);
+        return failed;
+    }
+
+    /** 方法內所有 MethodInsn 依序的 owner.name（W75 用來比對呼叫順序）。 */
+    static List<String> callOrder(MethodNode m) {
+        List<String> out = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof MethodInsnNode mi) out.add(mi.owner + "." + mi.name);
+        }
+        return out;
+    }
+
+    /**
+     * W75 非主執行緒 addToProcessIsoObjectRemove 排回主執行緒（docs/patches.md 2cj）。存在理由：原版 addToProcessIsoObjectRemove
+     * 直接讀寫兩個 HashSet（contains→add），addToProcessIsoObject 先 Remove.remove 再 Set.add→ArrayList.add，ProcessIsoObject
+     * 頭部 isEmpty→removeAll→removeAll→clear；全 jar 只有 IsoObject.removeFromWorld() 一個呼叫點。TIS 改動任一條時紅＝重評。
+     */
+    static int checkIsoObjectRemoveDefer(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String cell = "zombie/iso/IsoCell";
+        String obj = "zombie/iso/IsoObject";
+        String defer = "zombie/mdc/IsoObjectRemoveDefer";
+        String objDesc = "(L" + obj + ";)V";
+        String cellObjDesc = "(L" + cell + ";L" + obj + ";)V";
+        failed += check("W75 vanilla 前提：addToProcessIsoObjectRemove＝processIsoObjectSet.contains → processIsoObjectRemove.add（只碰兩個 Set）",
+                callOrder(methodFromJar(jar, cell, "addToProcessIsoObjectRemove", objDesc))
+                        .equals(List.of("java/util/Set.contains", "java/util/Set.add"))
+                && countFieldTouches(methodFromJar(jar, cell, "addToProcessIsoObjectRemove", objDesc), cell, "processIsoObjectSet") == 1
+                && countFieldTouches(methodFromJar(jar, cell, "addToProcessIsoObjectRemove", objDesc), cell, "processIsoObjectRemove") == 1);
+        MethodNode vAdd = methodFromJar(jar, cell, "addToProcessIsoObject", objDesc);
+        failed += check("W75 vanilla 前提：addToProcessIsoObject＝processIsoObjectRemove.remove → processIsoObjectSet.add → processIsoObject.add（取消點）",
+                callOrder(vAdd).equals(List.of("java/util/Set.remove", "java/util/Set.add", "java/util/ArrayList.add"))
+                && countFieldTouches(vAdd, cell, "processIsoObjectRemove") == 1);
+        failed += check("W75 vanilla 前提：ProcessIsoObject 頭部 Set.isEmpty → ArrayList.removeAll → Set.removeAll → Set.clear，之後才進迴圈（size／get／update）",
+                callOrder(methodFromJar(jar, cell, "ProcessIsoObject", "()V")).subList(0, 5)
+                        .equals(List.of("java/util/Set.isEmpty", "java/util/ArrayList.removeAll", "java/util/Set.removeAll",
+                                "java/util/Set.clear", "java/util/ArrayList.size")));
+        List<String> callers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObjectRemove", objDesc);
+        failed += check("W75 呼叫點清冊：全 jar 對 addToProcessIsoObjectRemove 只有 IsoObject.removeFromWorld() 一處（實際 " + callers + "）",
+                callers.equals(List.of(obj + ".removeFromWorld()V")));
+        MethodNode vRemove = methodFromJar(jar, obj, "removeFromWorld", "()V");
+        failed += check("W75 手術後：IsoObject.removeFromWorld() 的 addToProcessIsoObjectRemove 同形改道 IsoObjectRemoveDefer，其餘指令與 frames 保留；IsoObject 其餘方法不變",
+                methodText(vRemove).replace("INVOKEVIRTUAL " + cell + ".addToProcessIsoObjectRemove " + objDesc,
+                                "INVOKESTATIC " + defer + ".addToProcessIsoObjectRemove " + cellObjDesc)
+                        .equals(methodText(method(distJava, obj, "removeFromWorld", "()V")))
+                && classNodeFromJar(jar, obj).methods.stream()
+                        .filter(m -> !(m.name + m.desc).equals("removeFromWorld()V"))
+                        .allMatch(m -> {
+                            try {
+                                return methodText(m).equals(methodText(method(distJava, obj, m.name, m.desc)));
+                            } catch (Exception e) {
+                                return false;
+                            }
+                        }));
+        MethodNode begin = method(distJava, defer, "beginPass", "(L" + cell + ";)V");
+        List<String> beginOrder = callOrder(begin);
+        failed += check("W75 helper 契約：beginPass 先 drain 再 W73 beginPass；drain 恰一次呼叫原版 addToProcessIsoObjectRemove；改道入口有原版直通與溢位兩條",
+                beginOrder.indexOf(defer + ".drain") >= 0
+                && beginOrder.indexOf(defer + ".drain") < beginOrder.indexOf("zombie/mdc/IsoObjectUpdateGate.beginPass")
+                && countExactCalls(method(distJava, defer, "drain", "()V"), Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObjectRemove", objDesc) == 1
+                && countExactCalls(method(distJava, defer, "addToProcessIsoObjectRemove", cellObjDesc), Opcodes.INVOKEVIRTUAL, cell,
+                        "addToProcessIsoObjectRemove", objDesc) == 2);
         return failed;
     }
 

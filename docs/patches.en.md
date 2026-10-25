@@ -4630,6 +4630,76 @@ evening-peak data; pfguard's own cost on this thread is estimated separately at 
 
 **Retirement**: turn it off or remove it once the data has been read and the batching gate has been decided (either way).
 
+<a id="2cj"></a>
+## 2cj. Off-main-thread per-frame update list removals moved to the main thread (W75, server, default on)
+
+**Symptom** (2026-10-25 production, W73 observation): 20 `off-main-thread remove thread=ServerPlayersVehicles` lines in 50 minutes, all from
+moving animals out of the world while a vehicle loads: `BaseVehicle.load → addAnimalInTrailer → IsoAnimal.removeFromWorld → … →
+IsoObject.removeFromWorld → IsoCell.addToProcessIsoObjectRemove`; `offThreadAdds` is 0. Vanilla reads `processIsoObjectSet` and may write
+`processIsoObjectRemove` (both `HashSet`) on the background thread while the main thread runs `removeAll` / `clear` at the head of
+`ProcessIsoObject` and changes the same two sets in `addToProcessIsoObject`. No `ConcurrentModificationException` has been seen, but concurrent
+HashSet writes can lose a removal or corrupt the set (the same class of problem as W40/W41 on `processItems`).
+
+**Vanilla semantics** (javap against the 42.21.0 jar `e1a69eb7`): `addToProcessIsoObjectRemove` is `processIsoObjectSet.contains →
+processIsoObjectRemove.add`; `addToProcessIsoObject` is `processIsoObjectRemove.remove → processIsoObjectSet.add → processIsoObject.add` (adding
+back cancels a pending removal); the head of `ProcessIsoObject` runs `isEmpty → removeAll → removeAll → clear` before the update loop. The only
+call to `addToProcessIsoObjectRemove` in the jar is in `IsoObject.removeFromWorld()` (offset 15).
+
+**Surgery** (like W41):
+- The only `invokevirtual IsoCell.addToProcessIsoObjectRemove` in `IsoObject.removeFromWorld()` (offset 15) is redirected 1:1 to
+  `zombie/mdc/IsoObjectRemoveDefer.addToProcessIsoObjectRemove(IsoCell, IsoObject)` (receiver first, 1 hit; `IsoObject` had no server ClassPatch).
+  Off the main thread (`GameServer.mainThread`) it queues (cell, object) instead of running vanilla; on the main thread, or while `mainThread` is
+  not set yet, it runs vanilla. Above 100,000 queued entries it calls vanilla directly.
+- Head of `ProcessIsoObject` (W73's head call now goes through `IsoObjectRemoveDefer.beginPass`): drains the queue, calling vanilla
+  `addToProcessIsoObjectRemove` for each entry, then calls W73's `beginPass`. The drain runs before vanilla's `isEmpty` / `removeAll`, so the
+  removal takes effect in the same pass, matching vanilla after a background call.
+- Head of `addToProcessIsoObject` (W73's `touchAdd` now goes through `IsoObjectRemoveDefer.beforeAdd(cell, object)`, a HeadCall with slots 0 and
+  1): calls W73's `touchAdd`, then drops queued removals of the same cell and object, mirroring vanilla's `processIsoObjectRemove.remove(object)`,
+  so "background remove, then main-thread add" ends the same as vanilla. Only main-thread adds cancel; off-thread adds are out of scope (observed 0).
+- A head call rather than redirecting the `addToProcessIsoObject` call sites: those are spread over a dozen classes, and Lua (for example
+  `MDFX_ChargerIdleGuard` in MinidoracatFixesFor42) calls this public method directly; only a head call covers all of them.
+- Independent of W73: with `-Dmdc.isoObjectGate=0`, W73's `beginPass` / `touchAdd` return at once and W75 still drains and cancels.
+
+Console (one line with the source for each of the first 20 deferrals and every 1000th; one first-use line on the first frame; then one
+heartbeat every 5 minutes, cumulative values):
+
+```text
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] deferred n=<n> thread=<thread> via=<caller chain>
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] 首次生效 on raw=<property>（…）
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] beat deferred=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> anomalies=<n> sources=[<count>×<caller chain> | … | other×<n>]
+```
+
+**Acceptance**: after it goes live, W73's `offThreadRemoves` stops growing (background calls no longer reach
+`IsoCell.addToProcessIsoObjectRemove`), and in the W75 heartbeat `deferred` equals `drained` + `cancelled` + `pending`, with `overflow=0` and
+`anomalies=0`.
+
+**Kill switch**: `-Dmdc.isoObjectRemoveDefer=0|off` delegates directly (vanilla runs on the calling thread); restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/IsoObjectRemoveDefer.class`, `IsoObjectRemoveDefer$Entry.class` and the patched
+`zombie/iso/IsoObject.class`, and replaces `IsoCell.class` and `PatchInfo.class` (151 → 154 classes).
+
+**Not handled**:
+- The same `IsoObject.removeFromWorld()` then calls `removeFromStaticUpdaterObjectList` on the background thread (offset 20): an animal is not
+  in the static updater list, so that call only reads the set (`remove` returns false); no write has been observed. Separate case.
+- Deferring off-thread `addToProcessIsoObject`: observed 0 times.
+
+**Checks**:
+- SmokeCheck: reasons to exist — the three vanilla semantics above (call order compared one by one) and the single call site in the jar; after
+  surgery `IsoObject.removeFromWorld()` is identical to vanilla (frames included) except the redirected call, the other `IsoObject` methods are
+  unchanged; the head of `ProcessIsoObject` is `IsoObjectRemoveDefer.beginPass` and `addToProcessIsoObject` has `beforeAdd(cell, object)` with
+  +3 real instructions; the helper's `beginPass` calls `drain` before W73's `beginPass`, `beforeAdd` calls W73's `touchAdd` once, and `drain`
+  calls vanilla once.
+- `IsoObjectRemoveDeferTest` (`build.ps1` [9zq/10], one JVM each for on, off, and on with W73 off, checking that argv matches the actual switch):
+  runs the patched `ProcessIsoObject` / `addToProcessIsoObject` / `addToProcessIsoObjectRemove` from dist with both sets replaced by a
+  `HashSet` subclass that records which thread touched them. `mainThread` null and main-thread calls run vanilla; a background call in on mode
+  touches no set and is queued, the next `ProcessIsoObject` removes the object without updating it that frame, matching vanilla run in
+  order; off (vanilla control) reads and writes the sets on the background thread; "background remove, then main-thread add" is cancelled and
+  the object keeps updating; cancellation only matches the same cell and object; heartbeat fields. Each of three mutants (no cancel, drain after
+  `removeAll`, drain on the background thread) differs from vanilla in at least one scenario.
+
+**Retirement**: remove the patch when TIS stops calling `removeFromWorld` from background vehicle loading, or makes these `IsoCell` sets
+thread-safe.
+
 ---
 
 <a id="3"></a>
