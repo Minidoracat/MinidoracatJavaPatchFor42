@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 71 個 patched class、196 個命中點、75 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 71 個 patched class、195 個命中點、74 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -54,7 +54,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ## 修補目錄
 
-狀態欄以 42.21.0 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫；「不適用」表示不是原版 bug。
+狀態欄以 42.21.0 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。
 
 ### 穩定性：凍結、活鎖與崩潰
 
@@ -103,7 +103,6 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W34 聲音參數（[2aw](docs/patches.md#2aw)） | 伺服器替沒人讀的 dummy emitter 計算 FMOD 腳步參數（1.6%）。 | 伺服器上略過。 | 未回報 |
 | W4-1 chunk 請求併包（[2p](docs/patches.md#2p)） | 每位玩家的 chunk 供給上限是主迴圈 FPS × 一列 chunk；3 FPS 時開車會超過供給（黑邊）。 | 把佇列中的請求併成較大的批次（預設 observe）。 | 未回報 |
 | W53 步行時縮小車輛相關範圍（[2bq](docs/patches.md#2bq)） | client 對每台已載入的車每幀重算所有蒙皮零件的骨架（KI5／rSemiTruck 系每台 22–47 µs），而伺服器的車輛相關範圍（1080p ±88 格）比 client 自己的 chunk map 還寬，車多的地方載入上百台、每幀數毫秒。 | 步行時只送、只留圓形 R 格內的車（預設 64，結果一律是原版的子集）；有人在車內或加入中照原版。預設 observe 只計數；正式服快照中 107 台的地點，R=64／48 剩 57／28 台。另外計數坐在停著的車裡的情況，評估停車時是否也照步行算。 | 未回報 |
-| W71 格子載入旗標（[2cg](docs/patches.md#2cg)） | 不是原版 bug：Vanilla Foods Expanded 對每個載入的格子判斷有沒有地上物品和容器，我們的 Lua 伺服器補丁接手後，空格子仍要 4 次 Lua→Java 呼叫（約 1.3 µs）。 | `IsoGridSquare` 新增 `mdcLoadFlags()`，一次呼叫回傳兩個判斷的結果（與原版 API 逐項相同、不配置物件），Lua 每格只呼叫 1 次；沒裝本包時 Lua 照原本的呼叫。 | 不適用 |
 
 ### 網路：頻寬與重送迴圈
 

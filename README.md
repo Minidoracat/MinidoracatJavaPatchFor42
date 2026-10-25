@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 71 patched classes, 196 patch sites and 75 helper classes on 42.21.0.
+  actions and log noise. 71 patched classes, 195 patch sites and 74 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; three 42.21.0
   player-built room bugs: vanishing objects, and two disconnects while chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -68,7 +68,7 @@ At ~63 players the main loop held 9.4–10.1 FPS with every patch counter report
 
 Status is the default on 42.21.0. Every server patch has a `-Dmdc.*` kill switch (see its section) unless
 noted. **TIS**: a topic number links to our forum report; "draft" means a report is written but not posted;
-"not reported" means no report yet; "n/a" means it is not a vanilla bug.
+"not reported" means no report yet.
 
 ### Stability: freezes, livelocks and crashes
 
@@ -117,7 +117,6 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W34 Emitter parameters ([2aw](docs/patches.en.md#2aw)) | The server computes FMOD footstep parameters for a dummy emitter that nothing reads (1.6%). | Skips them on the server. | not reported |
 | W4-1 Chunk request packing ([2p](docs/patches.en.md#2p)) | Chunk supply per player is capped at main-loop FPS × one row of chunks; at 3 FPS a car outruns it (black edges). | Packs queued requests into larger batches (observe mode by default). | not reported |
 | W53 Smaller vehicle range on foot ([2bq](docs/patches.en.md#2bq)) | The client recomputes the skeleton of every skinned part of every loaded vehicle each frame (22–47 µs per KI5/rSemiTruck vehicle), and the server's vehicle relevance range (±88 tiles at 1080p) is wider than the client's own chunk map, so busy spots load over a hundred vehicles and cost several ms per frame. | On foot, only sends and keeps vehicles within a circle of R tiles (default 64; always a subset of vanilla); vanilla while anyone on the connection is in a vehicle or joining. Observe (count only) by default; at a spot with 107 vehicles in a production snapshot, R=64/48 leaves 57/28. It also counts players sitting in parked vehicles, to evaluate treating them like walking. | not reported |
-| W71 Square load flags ([2cg](docs/patches.en.md#2cg)) | Not a vanilla bug: Vanilla Foods Expanded checks every loaded square for ground items and containers, and with our Lua server patch in place an empty square still costs 4 Lua→Java calls (about 1.3 µs). | Adds `IsoGridSquare.mdcLoadFlags()`, which returns both results in one call (identical to the vanilla API, no allocation), so Lua makes one call per square; without this package Lua keeps the original calls. | n/a |
 
 ### Network: bandwidth and resend loops
 

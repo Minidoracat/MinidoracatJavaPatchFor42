@@ -1449,13 +1449,6 @@ public final class PatchConfig {
         banditRaidRandomize.expectedHits = 1;
         patches.add(banditRaid);
 
-        // ---- W71 格子載入旗標（docs/patches.md 2cg）----
-        // IsoGridSquare 新增 public int mdcLoadFlags()，委派 SquareLoadFlags.flags：bit 1＝getWorldObjects() 非空、
-        // bit 2＝getObjects() 裡有物件 getContainerCount() > 0。Kahlua 自動曝露 IsoGridSquare 的 public 方法，ServerPatch 的
-        // VFE load slim 每格 1 次 Lua→Java 呼叫取代 4 次。掛在 W60 的 IsoGridSquare ClassPatch（同一 class 只能有一個 ClassPatch）。
-        // -Dmdc.squareLoadFlags=0|off 回 -1（Lua 走原本 4 次呼叫的路）。
-        dropSquare.delegates.add(new Patcher.DelegateMethod("mdcLoadFlags", "()I", "zombie/mdc/SquareLoadFlags", "flags"));
-
         return patches;
     }
 
