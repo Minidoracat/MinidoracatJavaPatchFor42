@@ -4174,6 +4174,51 @@ console（每攔下一次一行，前 50 次之後每 1000 次一行）：
 
 **退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
 
+<a id="2cg"></a>
+## 2cg. 雞舍內動物產蛋不搜尋畜牧區雞舍（W72，server，預設 on）
+
+**症狀**（2026-10-25 正式服，45–48 人、FPS 9.2–9.6、主執行緒 CPU 94%）：60 份主執行緒 dump 有 3 份停在 `DesignationZoneAnimal.getZone`，其中 2 份是同一條路徑：
+
+```text
+DesignationZoneAnimal.getZone ← DesignationZoneAnimal.getAllDZones ← DesignationZoneAnimal.getHutchsConnected
+  ← AnimalData.getRegionHutch ← AnimalData.checkEggs ← IsoHutch.updateAnimalInside ← IsoHutch.update
+  ← HutchManager.updateAll ← IsoWorld.updateInternal
+```
+
+正式服有 666 塊畜牧區；`getZone` 每次線性掃整份清單，`getAllDZones` 對整組相連畜牧區沿四邊外一格逐格呼叫它。以正式服畜牧區幾何在本機用真 jar 量，一次 `getHutchsConnected` 平均 33.6 µs（雞舍大小的單塊畜牧區 15.1 µs）。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `IsoHutch.update` 每個 tick 對雞舍內每隻動物呼叫 `AnimalData.checkEggs(cal, false)`。蛋時間到了的動物會在 offset 254、261 各算一次 `getRegionHutch()`，每次又呼叫 3 次 `getHutchsConnected()`（offset 32 `isEmpty`、45 `size`、55 `get`），也就是每隻每 tick 6 次整組畜牧區相連搜尋。
+- 雞舍內的動物 `parent.hutch != null`，所以 offset 257 `ifnull`、267 `ifne`（`isDoorClosed`）、277 `ifnonnull`（讀 `IsoAnimal.hutch`）三條路都跳到同一個 offset 351（`else if (parent.addEgg(false))`）：搜尋結果對雞舍內的動物不影響任何分支。
+- `addEgg(false)` 對雞舍內的動物是 `hutch.addAnimalInNestBox`：產蛋箱都有母雞或都已有 10 顆蛋時回 false，`eggTime` 不歸零，於是下一個 tick 重來。雞舍滿、蛋沒人撿時，每隻這樣的母雞每 tick 白算 6 次搜尋（約 90–200 µs）。
+- 搜尋一路（`getRegionHutch` → `getHutchsConnected` → `getAllDZones` → `getZone`、`IsoAnimal.getConnectedDZone`、`IsoHutch.isDoorClosed`）沒有任何欄位寫入，只新建區域清單並呼叫清單與 `String.equals`，略過它不改任何狀態或亂數。
+
+**手術**：`AnimalData.checkEggs` 內 4 個 `getRegionHutch()`（offset 254、261、281、295）1:1 改道 `zombie/mdc/HutchEggRegion.regionHutch`：動物已在雞舍內（`parent.hutch != null`）時直接回傳 `parent.hutch`，否則照原版搜尋。281、295 只在 277 確認 `parent.hutch == null` 之後才到，照原版。掛在 W33／W42／W60 已有的 `AnimalData` ClassPatch，`expectedHits = 4`。
+
+行為差異只有一種：原版搜尋本身丟例外（畜牧區的雞舍清單含 null，`testHutch.type` NPE）時，雞舍內的動物不再丟；原版這時每個 tick 都會丟例外打斷 `IsoHutch.update`。`IsoHutch.update` 有 `isOwner()`（`!GameClient.client`）守衛，client 不跑這段，也沒有 desync。
+
+console（開機第一次呼叫印一行，之後每 5 分鐘一行）：
+
+```text
+[MinidoracatJavaPatch][HutchEggRegion] mode=<0|1|2> calls=<n> skips=<n> samples=<n> sampleUs=<x.x> estSavedMs=<n> sampleErrors=<n> logErrors=<n>
+```
+
+`calls` 是改道點被呼叫的累計次數，`skips` 是其中動物在雞舍內、略過搜尋的次數（observe 時是可略過的次數），`sampleUs` 是每 256 次略過抽量一次原版 `getRegionHutch()` 的平均耗時（只計時、結果丟掉），`estSavedMs` ＝ `skips` × `sampleUs`（累計毫秒；observe 時是可省下的量）。兩行 `estSavedMs` 的差 ÷ 300 秒就是每秒省下的主執行緒毫秒數。第一行在 `mode=` 前多一段「首次生效」說明。
+
+**kill switch**：`-Dmdc.hutchEggRegion`：`1|on`（預設）、`2|observe`（照原版搜尋，只計數並抽樣計時）、`0|off`（純委派、不計數）；其他值當 on；需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/HutchEggRegion.class`，`AnimalData.class` 與 `PatchInfo.class` 換新。上線後確認橫幅指紋與 `[mdc-javagate] OK: <manifest 行數>`，並看到 `[HutchEggRegion]` 首次生效行。
+
+**不處理**：
+- 雞舍外的動物（`callToHutch`、`checkEggs` 走 offset 281／295）仍照原版搜尋：結果真的會用到。要加速得替畜牧區查詢建索引（第三輪研究的方案 B），等本刀上線後的 dump 仍看得到 `getZone` 再評估。
+- 產蛋箱滿了沒人撿時母雞的蛋時間一直卡在「已到期」、不再產蛋：原版行為，本刀不改。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`checkEggs` 恰 4 個 `getRegionHutch`；第 1 個之後是 `IFNULL`、第 2 個之後是 `isDoorClosed` 的 `IFNE`、再來 `aload_0; getfield parent; getfield IsoAnimal.hutch; IFNONNULL`，三個跳轉目標相同，且目標是 `aload_0; getfield parent; iconst_0; invokevirtual IsoAnimal.addEgg(Z)Z`；第 3、4 個在 `IFNONNULL` 之後。搜尋一路六個方法沒有 `PUTFIELD`／`PUTSTATIC`／`INVOKEINTERFACE`／`INVOKEDYNAMIC`，呼叫只限清單方法、`String.equals` 與彼此。任一條轉紅＝TIS 改了流程或搜尋，先重估再談。手術後 `checkEggs` 除了 4 個改道，方法文字（含 frames）與原版相同；helper 只讀 `AnimalData.parent` 與 `IsoAnimal.hutch`、沒有 `PUTFIELD`、會委派原版 `getRegionHutch`。
+- `HutchEggRegionTest`（`build.ps1` [9zn/10]，on、observe、off 各一個 JVM，測試自驗 argv 與實際模式相符）：同一個 JVM 各用一個隔離 class loader 載入 dist 內手術後的 `AnimalData`（連同 dist 內的 helper）、jar 內的原版，以及 8 個把 `getRegionHutch()` 改道到測試內 mutant 的原版；三方都只把讀交配季的 `SandboxOptions`（測試 JVM 建不起）換成同形替身。動物、行為、雞舍是只覆寫出口（`addEgg`、`callToHutch`、`addMetaEgg`、`haveRoomForNewEggs`、`isWild` 等）的子類，畜牧區是真的 `DesignationZoneAnimal`（兩塊相連、一塊不相連），原版的相連搜尋與雞舍型別比對照原碼跑。23040 種情境（動物在不在雞舍內、雞舍放在哪一塊與型別、門開關、有沒有空位、meta、`addEgg`／`addMetaEgg` 結果、蛋時間、今天蛋數、野生、`adef.hutches`）逐筆比對 `eggsToday`、`eggTime`、產卵欄位、出口呼叫順序與例外。on：只有「雞舍內、原版搜尋自己丟例外」那 160 種不同（原版丟 NPE、on 不丟），每一種都和照 on 語意自己寫的 mutant 相同；雞舍內情境的搜尋次數 3360 → 22（只剩抽樣）；calls／skips 與改道點命中數相符，抽樣數照每 256 次一次；同一個丟例外情境連跑 256 次，抽樣搜尋丟的例外只計 `sampleErrors`、不外拋；心跳行格式相符。observe、off：23040 種逐筆相同、搜尋次數相同；observe 計數相符，off 不計數。mutant：一律回 null、一律回 `parent.hutch`、只在雞舍外短路、雞舍外不比型別都被抓到；雞舍內回 null、雞舍內回別的雞舍與原版相同（等價的證明）。
+
+**退場**：TIS 讓雞舍內的動物不再走這段搜尋，或改了 `checkEggs` 的分支（SmokeCheck 存在理由轉紅）時重估。
+
 <a id="2ch"></a>
 ## 2ch. IsoObject 每幀更新閘（W73，server，預設 observe）
 
