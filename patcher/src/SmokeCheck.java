@@ -2881,6 +2881,97 @@ public final class SmokeCheck {
                 methodText(vDataUpdate).replace("INVOKEVIRTUAL " + animalDataCls + ".hourGrow (Z)V",
                         "INVOKESTATIC " + awayHelper + ".liveHourGrow (L" + animalDataCls + ";Z)V")
                         .equals(methodText(method(distJava, animalDataCls, "update", "()V"))));
+        // ---- W72 雞舍內動物產蛋不搜尋畜牧區雞舍（docs/patches.md 2cg）----
+        // 等價依據：checkEggs 第 1 個 getRegionHutch 後的 IFNULL、第 2 個之後 isDoorClosed 的 IFNE、讀 parent.hutch 的 IFNONNULL
+        // 三個跳轉同一個目標（addEgg(false) 那段），所以 parent.hutch != null 時搜尋結果不影響走向；搜尋一路沒有欄位寫入、
+        // 只呼叫清單與字串方法，略過不改任何狀態。任一條紅＝TIS 改了流程或搜尋，先重估再談，不改斷言。
+        String w72Data = "zombie/characters/animals/datas/AnimalData";
+        String w72Animal = "zombie/characters/animals/IsoAnimal";
+        String w72HutchCls = "zombie/iso/objects/IsoHutch";
+        String w72Zone = "zombie/iso/areas/DesignationZoneAnimal";
+        String w72Helper = "zombie/mdc/HutchEggRegion";
+        String w72Desc = "(Lzombie/util/PZCalendar;Z)V";
+        String w72Region = "()L" + w72HutchCls + ";";
+        MethodNode w72Vanilla = methodFromJar(jar, w72Data, "checkEggs", w72Desc);
+        List<AbstractInsnNode> w72Sites = new ArrayList<>();
+        for (AbstractInsnNode in : w72Vanilla.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w72Data, "getRegionHutch", w72Region)) {
+                w72Sites.add(in);
+            }
+        }
+        LabelNode w72Target = null;
+        boolean w72SameTarget = false;
+        if (w72Sites.size() == 4) {
+            AbstractInsnNode a = nextReal(w72Sites.get(0));
+            AbstractInsnNode door = nextReal(w72Sites.get(1));
+            AbstractInsnNode b = door == null ? null : nextReal(door);
+            AbstractInsnNode load = b == null ? null : nextReal(b);
+            AbstractInsnNode parentGet = load == null ? null : nextReal(load);
+            AbstractInsnNode hutchGet = parentGet == null ? null : nextReal(parentGet);
+            AbstractInsnNode c = hutchGet == null ? null : nextReal(hutchGet);
+            if (a instanceof JumpInsnNode ja && ja.getOpcode() == Opcodes.IFNULL
+                    && isCall(door, Opcodes.INVOKEVIRTUAL, w72HutchCls, "isDoorClosed", "()Z")
+                    && b instanceof JumpInsnNode jb && jb.getOpcode() == Opcodes.IFNE
+                    && load instanceof VarInsnNode lv && lv.getOpcode() == Opcodes.ALOAD && lv.var == 0
+                    && parentGet instanceof FieldInsnNode pf && pf.getOpcode() == Opcodes.GETFIELD
+                    && pf.owner.equals(w72Data) && pf.name.equals("parent")
+                    && hutchGet instanceof FieldInsnNode hf && hf.getOpcode() == Opcodes.GETFIELD
+                    && hf.owner.equals(w72Animal) && hf.name.equals("hutch")
+                    && c instanceof JumpInsnNode jc && jc.getOpcode() == Opcodes.IFNONNULL
+                    && ja.label == jb.label && jb.label == jc.label
+                    && w72Vanilla.instructions.indexOf(jc) < w72Vanilla.instructions.indexOf(w72Sites.get(2))) {
+                w72Target = ja.label;
+                AbstractInsnNode t0 = nextReal(w72Target);
+                AbstractInsnNode t1 = t0 == null ? null : nextReal(t0);
+                AbstractInsnNode t2 = t1 == null ? null : nextReal(t1);
+                AbstractInsnNode t3 = t2 == null ? null : nextReal(t2);
+                w72SameTarget = t0 instanceof VarInsnNode v0 && v0.getOpcode() == Opcodes.ALOAD && v0.var == 0
+                        && t1 instanceof FieldInsnNode f1 && f1.name.equals("parent")
+                        && t2 != null && t2.getOpcode() == Opcodes.ICONST_0
+                        && isCall(t3, Opcodes.INVOKEVIRTUAL, w72Animal, "addEgg", "(Z)Z");
+            }
+        }
+        failed += check("W72 vanilla 前提：checkEggs 恰 4 個 getRegionHutch；第 1 個後 IFNULL、第 2 個後 isDoorClosed 的 IFNE、"
+                        + "讀 parent.hutch 的 IFNONNULL 跳同一個目標（addEgg(false)），且第 3、4 個在 IFNONNULL 之後",
+                w72Sites.size() == 4 && w72SameTarget);
+        String[][] w72Pure = {
+                {w72Data, "getRegionHutch", w72Region},
+                {w72Zone, "getHutchsConnected", "()Ljava/util/ArrayList;"},
+                {w72Zone, "getAllDZones", "(Ljava/util/ArrayList;L" + w72Zone + ";L" + w72Zone + ";)Ljava/util/ArrayList;"},
+                {w72Zone, "getZone", "(III)L" + w72Zone + ";"},
+                {w72Animal, "getConnectedDZone", "()Ljava/util/ArrayList;"},
+                {w72HutchCls, "isDoorClosed", "()Z"}};
+        Set<String> w72Allowed = Set.of("java/util/ArrayList.<init>", "java/util/ArrayList.size", "java/util/ArrayList.get",
+                "java/util/ArrayList.isEmpty", "java/util/ArrayList.add", "java/util/ArrayList.addAll",
+                "java/util/ArrayList.contains", "java/util/ArrayList.clear", "java/lang/String.equals",
+                w72Animal + ".getConnectedDZone", w72Zone + ".getHutchsConnected", w72Zone + ".getAllDZones",
+                w72Zone + ".getZone");
+        List<String> w72Impure = new ArrayList<>();
+        for (String[] p : w72Pure) {
+            for (AbstractInsnNode in : methodFromJar(jar, p[0], p[1], p[2]).instructions) {
+                int op = in.getOpcode();
+                if (op == Opcodes.PUTFIELD || op == Opcodes.PUTSTATIC || op == Opcodes.INVOKEDYNAMIC
+                        || op == Opcodes.INVOKEINTERFACE
+                        || in instanceof MethodInsnNode mi && !w72Allowed.contains(mi.owner + "." + mi.name)) {
+                    w72Impure.add(p[1] + ":" + op);
+                }
+            }
+        }
+        failed += check("W72 vanilla 前提：getRegionHutch→getHutchsConnected→getAllDZones→getZone、getConnectedDZone、"
+                        + "isDoorClosed 沒有欄位寫入，只呼叫清單與 String.equals（" + w72Impure + "）",
+                w72Impure.isEmpty());
+        failed += check("W72 手術後：checkEggs 4 個 getRegionHutch 同形改道 HutchEggRegion.regionHutch，其餘指令與 frames 保留",
+                methodText(w72Vanilla).replace("INVOKEVIRTUAL " + w72Data + ".getRegionHutch " + w72Region,
+                        "INVOKESTATIC " + w72Helper + ".regionHutch (L" + w72Data + ";)L" + w72HutchCls + ";")
+                        .equals(methodText(method(distJava, w72Data, "checkEggs", w72Desc))));
+        MethodNode w72HelperMethod = method(distJava, w72Helper, "regionHutch", "(L" + w72Data + ";)L" + w72HutchCls + ";");
+        failed += check("W72 helper 契約：regionHutch 只讀 AnimalData.parent 與 IsoAnimal.hutch、沒有 PUTFIELD、委派原版 getRegionHutch",
+                countExactFields(w72HelperMethod, Opcodes.GETFIELD, w72Animal, "hutch", "L" + w72HutchCls + ";") == 1
+                        && countFieldTouchesOfOwner(w72HelperMethod, w72Animal) == 1
+                        && countFieldTouchesOfOwner(w72HelperMethod, w72Data) == 1
+                        && java.util.stream.StreamSupport.stream(w72HelperMethod.instructions.spliterator(), false)
+                                .noneMatch(in -> in.getOpcode() == Opcodes.PUTFIELD)
+                        && countExactCalls(w72HelperMethod, Opcodes.INVOKEVIRTUAL, w72Data, "getRegionHutch", w72Region) >= 1);
         // W38：存在理由＝updateStatsAway 內 checkZone→setDZone 會 remove＋add（移到清單尾端）。
         String metaSnap = "zombie/mdc/AnimalMetaSnapshot";
         String zoneArg = "(L" + zoneCls + ";)V";

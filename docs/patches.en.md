@@ -4362,6 +4362,96 @@ that drew this story loads.
 
 **Retirement**: remove the patch when TIS fixes the inner loop counter (the SmokeCheck reason to exist turns red).
 
+<a id="2cg"></a>
+## 2cg. Hutch animals skip the paddock hutch search when laying (W72, server, default on)
+
+**Symptom** (production, 2026-10-25, 45–48 players, 9.2–9.6 FPS, main thread at 94% CPU): 3 of 60 main-thread dumps were inside
+`DesignationZoneAnimal.getZone`, and 2 of them were on the same path:
+
+```text
+DesignationZoneAnimal.getZone ← DesignationZoneAnimal.getAllDZones ← DesignationZoneAnimal.getHutchsConnected
+  ← AnimalData.getRegionHutch ← AnimalData.checkEggs ← IsoHutch.updateAnimalInside ← IsoHutch.update
+  ← HutchManager.updateAll ← IsoWorld.updateInternal
+```
+
+The server had 666 animal zones (paddocks). `getZone` scans the whole list linearly, and `getAllDZones` calls it for every tile one step
+outside each edge of every connected zone. Measured locally with the real jar on the production zone geometry, one `getHutchsConnected` call
+averages 33.6 µs (15.1 µs for a single coop-sized zone).
+
+**Root cause** (javap against the 42.21.0 jar `e1a69eb7`):
+- `IsoHutch.update` calls `AnimalData.checkEggs(cal, false)` for every animal inside the hutch on every tick. An animal whose egg time has come
+  calls `getRegionHutch()` once at offset 254 and once at 261, and each call runs `getHutchsConnected()` three times (offset 32 `isEmpty`,
+  45 `size`, 55 `get`): six full connected-zone searches per animal per tick.
+- For an animal inside a hutch `parent.hutch != null`, so the three branches at offset 257 `ifnull`, 267 `ifne` (`isDoorClosed`) and 277
+  `ifnonnull` (reads `IsoAnimal.hutch`) all jump to the same offset 351 (`else if (parent.addEgg(false))`): the search result does not affect
+  any branch for an animal inside a hutch.
+- For an animal inside a hutch, `addEgg(false)` is `hutch.addAnimalInNestBox`; when every nest box has a hen or already holds 10 eggs it
+  returns false, `eggTime` is not reset, and the next tick does it all again. With a full hutch and nobody collecting eggs, every such hen
+  wastes six searches per tick (about 90–200 µs).
+- The whole search (`getRegionHutch` → `getHutchsConnected` → `getAllDZones` → `getZone`, `IsoAnimal.getConnectedDZone`,
+  `IsoHutch.isDoorClosed`) writes no fields; it only creates local lists and calls list methods and `String.equals`, so skipping it changes no
+  state and no random numbers.
+
+**Surgery**: the 4 `getRegionHutch()` calls in `AnimalData.checkEggs` (offsets 254, 261, 281, 295) are redirected 1:1 to
+`zombie/mdc/HutchEggRegion.regionHutch`: when the animal is inside a hutch (`parent.hutch != null`) it returns `parent.hutch`, otherwise it
+runs the vanilla search. 281 and 295 are only reached after 277 has established `parent.hutch == null`, so they stay vanilla. It goes on the
+`AnimalData` ClassPatch that W33, W42 and W60 already use, `expectedHits = 4`.
+
+The only behavior difference: when the vanilla search itself throws (a zone's hutch list contains null, `testHutch.type` NPE), an animal inside
+a hutch no longer throws; vanilla would throw on every tick and interrupt `IsoHutch.update`. `IsoHutch.update` is guarded by `isOwner()`
+(`!GameClient.client`), so the client never runs this code and there is no desync.
+
+Console (one line on the first call after start, then one every 5 minutes):
+
+```text
+[MinidoracatJavaPatch][HutchEggRegion] mode=<0|1|2> calls=<n> skips=<n> samples=<n> sampleUs=<x.x> estSavedMs=<n> sampleErrors=<n> logErrors=<n>
+```
+
+`calls` is the total number of redirected calls, `skips` the ones where the animal was inside a hutch and the search was skipped (in observe,
+the ones that could be skipped), `sampleUs` the average time of the vanilla `getRegionHutch()` measured once every 256 skips (timing only,
+the result is discarded), and `estSavedMs` = `skips` × `sampleUs` (total milliseconds; in observe, what could be saved). The difference in
+`estSavedMs` between two lines divided by 300 seconds is the main-thread milliseconds saved per second. The first line has a "首次生效"
+(first active) note before `mode=`.
+
+**Kill switch**: `-Dmdc.hutchEggRegion`: `1|on` (default), `2|observe` (vanilla search, counting and sampled timing only), `0|off` (pure
+delegation, no counting); any other value means on; restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/HutchEggRegion.class` and replaces `AnimalData.class` and `PatchInfo.class`. After it goes live,
+check the banner fingerprint and `[mdc-javagate] OK: <manifest lines>`, and look for the first `[HutchEggRegion]` line.
+
+**Not handled**:
+- Animals outside a hutch (`callToHutch`, and `checkEggs` at offsets 281/295) still run the vanilla search: the result is actually used there.
+  Speeding that up needs an index for zone lookups (option B of the third-round research); reassess if `getZone` still shows up in dumps
+  after this patch.
+- When nest boxes are full and nobody collects the eggs, the hen's egg time stays "due" and she lays no more: vanilla behavior, unchanged.
+
+**Checks**:
+- SmokeCheck: reason to exist — `checkEggs` has exactly 4 `getRegionHutch` calls; the 1st is followed by `IFNULL`, the 2nd by `isDoorClosed`
+  and `IFNE`, then `aload_0; getfield parent; getfield IsoAnimal.hutch; IFNONNULL`; the three jumps share one target, and that target is
+  `aload_0; getfield parent; iconst_0; invokevirtual IsoAnimal.addEgg(Z)Z`; the 3rd and 4th calls come after the `IFNONNULL`. The six methods of
+  the search contain no `PUTFIELD`/`PUTSTATIC`/`INVOKEINTERFACE`/`INVOKEDYNAMIC` and call only list methods, `String.equals` and each other.
+  Any of these turning red means TIS changed the flow or the search: reassess first. After surgery the `checkEggs` method text (frames
+  included) is identical to vanilla except the 4 redirects; the helper reads only `AnimalData.parent` and `IsoAnimal.hutch`, has no
+  `PUTFIELD`, and delegates to the vanilla `getRegionHutch`.
+- `HutchEggRegionTest` (`build.ps1` [9zn/10], one JVM each for on, observe and off; the test checks that argv matches the actual mode): one JVM
+  loads, each in its own isolated class loader, the patched `AnimalData` from dist (together with the helper from dist), the vanilla one from
+  the jar, and 8 vanilla copies whose `getRegionHutch()` is redirected to mutants inside the test; all of them only replace the
+  `SandboxOptions` mating-season read (it cannot be built in a test JVM) with a same-shape stub. Animals, behavior and hutches are subclasses
+  that override only the exits (`addEgg`, `callToHutch`, `addMetaEgg`, `haveRoomForNewEggs`, `isWild` and so on); the zones are real
+  `DesignationZoneAnimal` objects (two connected, one separate), so the vanilla connected search and hutch type match run from the original
+  code. 23,040 scenarios (inside a hutch or not, which zone holds which hutch type, door open/closed, free nest box, meta, `addEgg`/`addMetaEgg`
+  results, egg time, eggs today, wild, `adef.hutches`) compare `eggsToday`, `eggTime`, the clutch fields, the order of exit calls and
+  exceptions. On: only the 160 scenarios "inside a hutch and the vanilla search itself throws" differ (vanilla throws an NPE, on does not), and
+  each matches a mutant written to on's semantics; searches in inside-hutch scenarios drop from 3360 to 22 (sampling only); calls/skips match
+  the redirect hit counts and samples are one every 256; running one throwing scenario 256 times, the sampled search's exception is only
+  counted in `sampleErrors` and never escapes; the heartbeat line matches its format. Observe and off: all 23,040 identical with the same search
+  counts; observe counts match, off does not count. Mutants: always null, always `parent.hutch`, short-circuit only outside a hutch, and
+  ignoring the hutch type outside a hutch are all caught; returning null or a different hutch inside a hutch stays identical to vanilla (the
+  equivalence proof).
+
+**Retirement**: reassess when TIS stops running this search for animals inside a hutch or changes the `checkEggs` branches (the SmokeCheck
+reason to exist turns red).
+
 ---
 
 <a id="3"></a>

@@ -1039,6 +1039,16 @@ public final class PatchConfig {
                 "zombie/characters/animals/IsoAnimal", "checkForChickenpocalypse",
                 "(Lzombie/characters/animals/IsoAnimal;)Z", lossProbe, "growDuplicate"));
         growOps.expectedHits = 1;
+        // ---- W72 雞舍內動物產蛋不搜尋畜牧區雞舍（2026-10-25；docs/patches.md 2cg）----
+        // checkEggs 內 4 個 getRegionHutch()（javap offset 254、261、281、295）1:1 改道 HutchEggRegion.regionHutch：
+        // parent.hutch != null 時直接回傳它，否則照原版。254／261 之後的 ifnull 257、ifne 267、ifnonnull 277（讀 IsoAnimal.hutch）
+        // 都跳 351（addEgg(false)），雞舍內的動物不論搜尋結果都走到 351；281／295 只在 parent.hutch == null 時才到。
+        // 原版每次搜尋是 3 次 getHutchsConnected（整組畜牧區相連搜尋），雞舍滿時每 tick 重來。-Dmdc.hutchEggRegion=0|off、2|observe。
+        Patcher.MethodOps eggRegion = animalData.method("checkEggs", "(Lzombie/util/PZCalendar;Z)V");
+        eggRegion.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/characters/animals/datas/AnimalData", "getRegionHutch", "()Lzombie/iso/objects/IsoHutch;",
+                "zombie/mdc/HutchEggRegion", "regionHutch"));
+        eggRegion.expectedHits = 4;
         patches.add(animalData);
 
         // ---- W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）----

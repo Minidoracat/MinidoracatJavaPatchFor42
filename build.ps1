@@ -129,6 +129,7 @@ $helperEntries = @(
     'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/entity/MdcEntityIdGuard.class',
     'zombie/mdc/BanditRaidLoopGuard.class',
+    'zombie/mdc/HutchEggRegion.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -623,6 +624,15 @@ java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\jav
 Assert-Ok "BanditRaidLoopGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" off
 Assert-Ok "BanditRaidLoopGuardTest（off，kill switch 回原版）"
+
+Write-Host "[9zn/10] 雞舍內動物產蛋不搜尋畜牧區雞舍（W72）：dist 內手術後的 AnimalData.checkEggs 與 jar 原版 23040 種情境逐筆比對（真畜牧區相連搜尋、雞舍型別比對，只把交配季 SandboxOptions 換成替身），on 只差在雞舍內、原版搜尋自己丟例外那類，雞舍內搜尋只剩每 256 次一次抽樣；observe／off 逐筆相同、搜尋次數相同；改到雞舍外那半邊的 mutant 全抓到，只改雞舍內那半邊的 mutant 與原版相同..."
+# 三個模式各跑一次：測試自驗 argv 與實際 MODE 相符，property 名稱打錯會炸在測試裡。
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+Assert-Ok "HutchEggRegionTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.hutchEggRegion=2" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" observe
+Assert-Ok "HutchEggRegionTest（observe，只計數照原版）"
+java -Xverify:all "-Dmdc.hutchEggRegion=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+Assert-Ok "HutchEggRegionTest（off，kill switch 回原版）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
