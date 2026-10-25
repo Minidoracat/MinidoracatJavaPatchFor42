@@ -4174,6 +4174,45 @@ console（每攔下一次一行，前 50 次之後每 1000 次一行）：
 
 **退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
 
+<a id="2ch"></a>
+## 2ch. IsoObject 每幀更新閘（W73，server，預設 observe）
+
+**症狀**（2026-10-25 晚峰，45–48 人，FPS 9.2–9.6、主執行緒 CPU 94%）：60 份 thread dump 中 `IsoCell.ProcessIsoObject` 在堆疊上 7 次，其中 5 次以它本身為最上層（約 8% 主執行緒，約 9 ms／幀）。最上層是它本身＝停在不含 safepoint poll 的便宜 `update()` 本體或迴圈本身，跟玩家建造物的空操作 update 相符；但清單大小與組成沒有任何現成紀錄，所以本刀第一次部署只量。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `IsoCell.updateInternal` 每幀呼叫 `ProcessIsoObject`，沒有 server 守衛；它對 `processIsoObject` 每件呼叫 `IsoObject.update()`（offset 82，全方法唯一），有東西要移除的幀先 `ArrayList.removeAll(processIsoObjectRemove)`（offset 20）。
+- 進清單的是 `IsoThumpable`（玩家建造物、搬過的家具，`addToWorld` 無條件登記）、爐子、洗衣機／烘衣機、壁爐、烤肉架、堆肥箱、陷阱、飼料槽、發電機、充電器、屠宰鉤；冰箱只有客戶端登記。物件只要還在已載入的 chunk 上就每幀 update，chunk 卸載經 `IsoObject.removeFromWorld` 正常移除（沒有漏）。
+- 伺服器上 `IsoThumpable.update()` 的路徑：offset 1 `getObjectIndex()`（`square.objects.indexOf`，-1 就 return）→ offset 12 `GameServer.server` ifne 298 → offset 299–305 `getLifeLeft`／`ldc -1.0f`／`fcmpl`／`ifle 420`，420 是 `return`。`lifeLeft` 初值 -1，只有有燃料的燈才 > -1；所以一般建造物每幀只做一次線性 `indexOf` 與一次 getter，沒有任何寫入。全 jar 沒有 `IsoThumpable` 子類別。
+
+**手術**（掛在 W40／W45／W47 的 `IsoCell` ClassPatch）：`ProcessIsoObject` 的 `IsoObject.update()` 與 `ArrayList.removeAll` 1:1 改道 `zombie/mdc/IsoObjectUpdateGate.update`／`removeAll`，頭部 `beginPass`、唯一 RETURN（offset 108）前 `endPass`（命中 4）；`addToProcessIsoObject`／`addToProcessIsoObjectRemove` 頭部 `touchAdd`／`touchRemove`（各命中 1）。清單內容、順序與其他物件的更新順序都不動。
+- **observe（預設）**：照原版逐件 update。一般幀每件只多一次旗標判斷（本機 6 萬件量三次，每件多 0.55–0.69 ns；off 與原版差 ±0.4 ns 以內；8 萬件約每幀 0.05 ms），每幀兩次 `nanoTime`；每 5 分鐘挑一幀逐件計時（每件兩次 `nanoTime`＋一次 HashMap 查詢），同一幀結束時走一遍清單普查，寫一行心跳。
+- **on**：`GameServer.server`、精確類別 `IsoThumpable`、每幀即時讀的 `lifeLeft` 不是 `> -1`（與原版 `fcmpl; ifle` 相同，NaN 也跳過）時不呼叫 update。燈被點起來（`setLifeLeft`、`loadChange`）下一幀就恢復原版路徑，不需追蹤寫入點。每 4096 次跳過抽一次照原版跑，前後比對 `IsoThumpable` 宣告的全部欄位，不一致就本次啟動永久回原版並印一行座標。
+- **off**：純委派，不計數、不出心跳。
+
+console（第一幀一行首次生效，之後每 5 分鐘一行；frames／pass／removeAll／timed 是本區間值，skips／audits／fallback／offThread 是累計值）：
+
+```text
+[MinidoracatJavaPatch][IsoObjectGate] 首次生效 mode=observe raw=null server=true（…）
+[MinidoracatJavaPatch][IsoObjectGate] beat mode=observe frames=<n> passAvgMs=<ms> passMaxMs=<ms> size=<清單長度> setSize=<processIsoObjectSet 大小> nulls=<n> removeAll=calls:<n>,removed:<n>,avgUs:<µs>,maxUs:<µs> thump=<n>(skip=<可跳過>,lit=<燈>,orphan=<不在格子 objects 裡>) noSquare=<n> noChunk=<已卸載卻還在清單> classes=<類別:數量,…> timedMs=<逐件計時幀總計> skipMs=<可跳過件> skipNetMs=<扣掉 nanoTime 成本> skipN=<n> tsNs=<一次 nanoTime ns> timed=IsoThumpable(skip):<n>/<µs>,<類別>:<n>/<µs>,… skips=<n> audits=<n> fallback=<n> offThreadAdds=<n> offThreadRemoves=<n> anomalies=<n>
+```
+
+**判讀與開 on 的條件**：`skipNetMs`（逐件計時那一幀裡可跳過的 thumpable 實際花的毫秒）連續幾次晚峰心跳都 ≥ 2 ms（約 2% 主執行緒）才開 on；開 on 後 `passAvgMs` 應降低約 `skipNetMs` × 0.8，降幅不到一半就撤回 observe。`noChunk` 非零＝有物件在 chunk 卸載後還留在清單（漏），`offThreadAdds`／`offThreadRemoves` 非零＝有非主執行緒寫清單（已知可能來源：屠宰鉤建構子在 LoadChunk 執行緒、WorldStreamer Convert／SoftReset job），兩者都另案處理。
+
+**kill switch**：`-Dmdc.isoObjectGate=0|off`（原版）、`1|on`（跳過）、`2|observe`（預設）；未知值當 observe，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/IsoObjectUpdateGate.class`，`IsoCell.class` 換新。上線後確認首次生效行 `mode=observe`，5 分鐘後第一行 beat。
+
+**不處理**：
+- 洗衣機／烘衣機閒置時每幀查電力、堆肥箱幾乎每幀掃容器兩遍：有寫入，不是空操作，不能套同一種跳過；看心跳 `timed` 再另案。
+- 「只迭代活躍子集」（連 thumpable 的 header 都不碰）：要追蹤 6 個 `putfield lifeLeft` 與 Lua 經 getter 改清單，複雜度等同 W45；等 on 之後殘餘仍 ≥ 2 ms 再評估。
+- `removeAll` 改寫：保序是原版與 MinidoracatFixesFor42 `MDFX_ChargerIdleGuard` 的前提；identity 掃描在 ZGC 下實測沒有比較快。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`ProcessIsoObject` 恰一個 `IsoObject.update()`、一個 `ArrayList.removeAll`（參數是 `processIsoObjectRemove`）、一個 null 檢查、單一 RETURN；`IsoThumpable.update` 伺服器路徑如上（逐條比對）且整個方法以 SHA-256 釘住；`getLifeLeft` 是單純 getter；`getObjectIndex`（SHA 釘）→ `IsoGridSquare.getObjects` getter → `PZArrayList.indexOf`／`objectsEqual` 沒有寫入、沒有 throw；全 jar 沒有 `IsoThumpable` 子類別，`IsoThumpable` 與 jar 內祖先沒有覆寫 `equals`（任一條紅＝重評跳過條件，不要直接改釘）。手術後 `ProcessIsoObject` 兩處改道、head、tail、真指令恰 +4；兩個 add 方法頭部各 +2；W40 的「IsoCell 其餘方法逐指令不變」把這三個方法列入例外。helper 的 `skippable` 讀 `GameServer.server`、以 `getClass` 比 `IsoThumpable.class`、用 `fcmpl`（不是 `fcmpg`）。
+- `IsoObjectUpdateGateTest`（`build.ps1` [9zo/10]，observe、on、0、未知值四個 JVM，各自驗 argv 與實際模式相符）：原版 jar 的真 `IsoThumpable.update` 與閘門在伺服器／客戶端 × `lifeLeft`（-1、-2、-1 的下一個 float、-Inf、NaN、-0.5、-0、0、5、+Inf）× 格子（無、不在 objects、在 objects）共 60 格逐欄位（含祖先）相同，跳過次數只在 on 且等於預期；子類別一律照原版；原版負對照（燈的 update 會寫欄位，差分抓得到錯誤跳過）；五個 mutant（`>=`、`<= -1`、拿掉 server 檢查、改 instanceof、拿掉 lifeLeft 判斷）全被抓到；dist 內手術後的真 `ProcessIsoObject`：null 略過、其他物件照常、燈照原版、removeAll 計數、心跳每個欄位、心跳後區間歸零、非主執行緒 add／remove 各記一次（off 全部不記）；on 另驗 8192 次可跳過抽 2 次照原版跑、比對不一致即永久停用且之後全照原版。
+
+**退場**：官方讓 `IsoThumpable` 不再每幀登記，或 SmokeCheck 存在理由轉紅時重估；observe 資料顯示可跳過部分 < 2 ms／幀就整刀撤回。
+
 ---
 
 <a id="3"></a>

@@ -1261,6 +1261,26 @@ public final class PatchConfig {
         cellInit.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoCell", "objectList",
                 "Ljava/util/Set;", "zombie/mdc/AnimalLosIndex", "wrapObjectList"));
         cellInit.expectedHits = 2;
+        // W73：IsoObject 每幀更新閘（docs/patches.md 2ch）。ProcessIsoObject 每幀對 processIsoObject 每件 update()；
+        // 伺服器上 lifeLeft 不是 > -1 的 IsoThumpable（玩家建造物、搬過的家具，不是有燃料的燈）update() 只讀
+        // getObjectIndex／getLifeLeft、沒有任何作用。唯一 IsoObject.update()（javap bci 82）與 ArrayList.removeAll
+        // （bci 20）同形改道，頭部 beginPass、唯一 RETURN（bci 108）前 endPass；addToProcessIsoObject／
+        // addToProcessIsoObjectRemove 頭部記錄非主執行緒寫入。-Dmdc.isoObjectGate 0|off/1|on/2|observe（預設，只量）。
+        String isoGate = "zombie/mdc/IsoObjectUpdateGate";
+        Patcher.MethodOps processIsoObject = isoCell.method("ProcessIsoObject", "()V");
+        processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoObject", "update", "()V", isoGate, "update"));
+        processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z", isoGate, "removeAll"));
+        processIsoObject.headCall = new Patcher.HeadCall(isoGate, "beginPass", cellArg);
+        processIsoObject.tailCall = new Patcher.TailCall(isoGate, "endPass", cellArg);
+        processIsoObject.expectedHits = 4;   // 兩個改道＋head＋單一 RETURN
+        Patcher.MethodOps isoAdd = isoCell.method("addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V");
+        isoAdd.headCall = new Patcher.HeadCall(isoGate, "touchAdd", cellArg);
+        isoAdd.expectedHits = 1;
+        Patcher.MethodOps isoRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
+        isoRemove.headCall = new Patcher.HeadCall(isoGate, "touchRemove", cellArg);
+        isoRemove.expectedHits = 1;
         patches.add(isoCell);
 
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject

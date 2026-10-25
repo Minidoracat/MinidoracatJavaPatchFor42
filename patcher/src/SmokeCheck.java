@@ -2949,6 +2949,10 @@ public final class SmokeCheck {
         java.util.Set<String> piTargets = new java.util.HashSet<>();
         piTargets.add("ProcessItems(Ljava/util/Iterator;)V");
         piTargets.add("<init>(II)V");   // W45 FieldPutWrap；形狀由下方 W45 守門鎖住
+        // W73：ProcessIsoObject 與兩個 addToProcessIsoObject* 的形狀由下方 W73 守門（checkIsoObjectGate）鎖住。
+        piTargets.add("ProcessIsoObject()V");
+        piTargets.add("addToProcessIsoObject(Lzombie/iso/IsoObject;)V");
+        piTargets.add("addToProcessIsoObjectRemove(Lzombie/iso/IsoObject;)V");
         for (String[] w : piWriters) {
             piTargets.add(w[0] + w[1]);
             MethodNode vW = methodFromJar(jar, isoCellCls, w[0], w[1]);
@@ -3815,6 +3819,7 @@ public final class SmokeCheck {
                                 }));
         failed += check("W70 helper 契約：floor 內恰一次 Math.floor",
                 countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
+        failed += checkIsoObjectGate(jar, distJava);
 
         if (failed > 0) {
             System.exit(1);
@@ -6554,6 +6559,146 @@ public final class SmokeCheck {
             }
         }
         return inside;
+    }
+
+    /** W73：42.21.0 原版 IsoThumpable.update()V／IsoObject.getObjectIndex()I 的 debuglessMethodText SHA-256（跳過等價性的依據）。 */
+    static final String W73_THUMP_UPDATE_SHA = "f5e87bcfbb5ebe99d9b9530c424f2395381db0c7beb5e9ee4bc5347c254881ce";
+    static final String W73_OBJECT_INDEX_SHA = "f82a5485a7a2e36f101e67cda4189ebd3b3f44a1950683bd1d5cd65dc24817a0";
+
+    /**
+     * W73 IsoObject 每幀更新閘（docs/patches.md 2ch；掛在 W40／W45 的 IsoCell ClassPatch）。
+     * 存在理由：伺服器上 lifeLeft 不是 &gt; -1 的 IsoThumpable，原版 update 只走 getObjectIndex（無寫入）→
+     * GameServer.server → getLifeLeft／ldc -1.0f／fcmpl／ifle → return。TIS 改動這條路徑、getObjectIndex／indexOf
+     * 的無副作用、或在 IsoThumpable 家族加 equals／子類別時紅＝重評跳過條件，不要直接改釘。
+     */
+    static int checkIsoObjectGate(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String cell = "zombie/iso/IsoCell";
+        String obj = "zombie/iso/IsoObject";
+        String thump = "zombie/iso/objects/IsoThumpable";
+        String gate = "zombie/mdc/IsoObjectUpdateGate";
+        String cellDesc = "(L" + cell + ";)V";
+        MethodNode vProcess = methodFromJar(jar, cell, "ProcessIsoObject", "()V");
+        AbstractInsnNode vRemoveAll = firstCall(vProcess, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z");
+        int returns = 0;
+        int nullChecks = 0;
+        for (AbstractInsnNode in : vProcess.instructions) {
+            if (in.getOpcode() == Opcodes.RETURN) returns++;
+            if (in.getOpcode() == Opcodes.IFNONNULL) nullChecks++;
+        }
+        failed += check("W73 vanilla 前提：ProcessIsoObject 恰 1 個 IsoObject.update()、1 個 ArrayList.removeAll(processIsoObjectRemove)、1 個 null 檢查、單一 RETURN",
+                countExactCalls(vProcess, Opcodes.INVOKEVIRTUAL, obj, "update", "()V") == 1
+                && countExactCalls(vProcess, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 1
+                && prevReal(vRemoveAll) instanceof FieldInsnNode rf && rf.getOpcode() == Opcodes.GETFIELD
+                        && rf.owner.equals(cell) && rf.name.equals("processIsoObjectRemove")
+                && nullChecks == 1 && returns == 1);
+
+        MethodNode vUpdate = methodFromJar(jar, thump, "update", "()V");
+        AbstractInsnNode[] h = firstReal(vUpdate, 7);
+        boolean pathOk = h[0] instanceof VarInsnNode h0 && h0.getOpcode() == Opcodes.ALOAD && h0.var == 0
+                && isCall(h[1], Opcodes.INVOKEVIRTUAL, thump, "getObjectIndex", "()I")
+                && h[2].getOpcode() == Opcodes.ICONST_M1 && h[3].getOpcode() == Opcodes.IF_ICMPNE
+                && h[4].getOpcode() == Opcodes.RETURN
+                && h[5] instanceof FieldInsnNode sf && sf.getOpcode() == Opcodes.GETSTATIC
+                        && sf.owner.equals("zombie/network/GameServer") && sf.name.equals("server")
+                && h[6] instanceof JumpInsnNode toServer && toServer.getOpcode() == Opcodes.IFNE;
+        if (pathOk) {
+            AbstractInsnNode a = nextReal(((JumpInsnNode) h[6]).label);
+            AbstractInsnNode b = a == null ? null : nextReal(a);
+            AbstractInsnNode c = b == null ? null : nextReal(b);
+            AbstractInsnNode d = c == null ? null : nextReal(c);
+            AbstractInsnNode e = d == null ? null : nextReal(d);
+            pathOk = a instanceof VarInsnNode av && av.getOpcode() == Opcodes.ALOAD && av.var == 0
+                    && isCall(b, Opcodes.INVOKEVIRTUAL, thump, "getLifeLeft", "()F")
+                    && c instanceof LdcInsnNode l && Float.valueOf(-1.0f).equals(l.cst)
+                    && d != null && d.getOpcode() == Opcodes.FCMPL
+                    && e instanceof JumpInsnNode skip && skip.getOpcode() == Opcodes.IFLE
+                    && nextReal(skip.label) != null && nextReal(skip.label).getOpcode() == Opcodes.RETURN;
+        }
+        failed += check("W73 vanilla 前提：IsoThumpable.update 伺服器路徑＝getObjectIndex（-1 即 return）→ GameServer.server ifne → "
+                        + "getLifeLeft／ldc -1.0f／fcmpl／ifle → return，且整個方法與 42.21.0 逐指令相同（SHA 釘）",
+                pathOk && sha256Hex(debuglessMethodText(jar, thump, "update", "()V")).equals(W73_THUMP_UPDATE_SHA));
+        AbstractInsnNode[] g = firstReal(methodFromJar(jar, thump, "getLifeLeft", "()F"), 4);
+        failed += check("W73 vanilla 前提：getLifeLeft 是單純 getter（aload_0／getfield lifeLeft／freturn）",
+                realInsnCount(methodFromJar(jar, thump, "getLifeLeft", "()F")) == 3
+                && g[1] instanceof FieldInsnNode gf && gf.owner.equals(thump) && gf.name.equals("lifeLeft")
+                && g[2].getOpcode() == Opcodes.FRETURN);
+        MethodNode getObjects = methodFromJar(jar, "zombie/iso/IsoGridSquare", "getObjects", "()Lzombie/util/list/PZArrayList;");
+        AbstractInsnNode[] go = firstReal(getObjects, 3);
+        int indexWrites = 0;
+        String pz = "zombie/util/list/PZArrayList";
+        for (MethodNode m : List.of(methodFromJar(jar, pz, "indexOf", "(Ljava/lang/Object;)I"),
+                methodFromJar(jar, pz, "indexOf", "(Ljava/lang/Object;Lzombie/util/lambda/Invokers$Params2$Boolean$ICallback;)I"),
+                methodFromJar(jar, pz, "objectsEqual", "(Ljava/lang/Object;Ljava/lang/Object;)Z"))) {
+            for (AbstractInsnNode in : m.instructions) {
+                int op = in.getOpcode();
+                if (op == Opcodes.PUTFIELD || op == Opcodes.PUTSTATIC || op == Opcodes.ATHROW) indexWrites++;
+            }
+        }
+        failed += check("W73 vanilla 前提：getObjectIndex（SHA 釘）→ IsoGridSquare.getObjects getter → PZArrayList.indexOf／objectsEqual 無寫入、無 throw",
+                sha256Hex(debuglessMethodText(jar, obj, "getObjectIndex", "()I")).equals(W73_OBJECT_INDEX_SHA)
+                && realInsnCount(getObjects) == 3 && go[1] instanceof FieldInsnNode of && of.name.equals("objects")
+                && go[2].getOpcode() == Opcodes.ARETURN && indexWrites == 0);
+
+        Map<String, String> superOf = new HashMap<>();
+        Set<String> declaresEquals = new HashSet<>();
+        try (ZipFile zf = new ZipFile(jar.toFile())) {
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry ze = en.nextElement();
+                if (!ze.getName().endsWith(".class")) continue;
+                ClassNode cn = new ClassNode();
+                new ClassReader(zf.getInputStream(ze).readAllBytes())
+                        .accept(cn, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                superOf.put(cn.name, cn.superName);
+                for (MethodNode m : cn.methods) {
+                    if (m.name.equals("equals") && m.desc.equals("(Ljava/lang/Object;)Z")) declaresEquals.add(cn.name);
+                }
+            }
+        }
+        List<String> subclasses = new ArrayList<>();
+        superOf.forEach((k, v) -> { if (thump.equals(v)) subclasses.add(k); });
+        List<String> equalsInChain = new ArrayList<>();
+        for (String cur = thump; cur != null && superOf.containsKey(cur); cur = superOf.get(cur)) {
+            if (declaresEquals.contains(cur)) equalsInChain.add(cur);
+        }
+        failed += check("W73 vanilla 前提：全 jar 沒有 IsoThumpable 子類別（實際 " + subclasses + "），IsoThumpable 與 jar 內祖先沒有覆寫 equals（實際 "
+                        + equalsInChain + "）",
+                subclasses.isEmpty() && equalsInChain.isEmpty() && superOf.containsKey(thump));
+
+        MethodNode pProcess = method(distJava, cell, "ProcessIsoObject", "()V");
+        failed += check("W73 手術後：ProcessIsoObject 的 update／removeAll 1:1 改道、頭部 beginPass、唯一 RETURN 前 endPass、真指令恰 +4",
+                countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "update", "(L" + obj + ";)V") == 1
+                && countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z") == 1
+                && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, obj, "update", "()V") == 0
+                && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 0
+                && headCallSlotsOk(pProcess, gate, "beginPass", cellDesc, 0)
+                && tailCallOk(pProcess, gate, "endPass", cellDesc)
+                && realInsnCount(pProcess) == realInsnCount(vProcess) + 4);
+        for (String[] w : new String[][]{{"addToProcessIsoObject", "touchAdd"}, {"addToProcessIsoObjectRemove", "touchRemove"}}) {
+            MethodNode vW = methodFromJar(jar, cell, w[0], "(L" + obj + ";)V");
+            MethodNode pW = method(distJava, cell, w[0], "(L" + obj + ";)V");
+            failed += check("W73 " + w[0] + " 頭部 " + w[1] + "、真指令恰 +2",
+                    headCallSlotsOk(pW, gate, w[1], cellDesc, 0) && realInsnCount(pW) == realInsnCount(vW) + 2);
+        }
+
+        MethodNode skippable = method(distJava, gate, "skippable", "(L" + obj + ";)Z");
+        int fcmpl = 0, fcmpg = 0, thumpLdc = 0, serverGets = 0;
+        for (AbstractInsnNode in : skippable.instructions) {
+            if (in.getOpcode() == Opcodes.FCMPL) fcmpl++;
+            if (in.getOpcode() == Opcodes.FCMPG) fcmpg++;
+            if (in instanceof LdcInsnNode l && l.cst instanceof org.objectweb.asm.Type t && t.getInternalName().equals(thump)) thumpLdc++;
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.GETSTATIC && f.owner.equals("zombie/network/GameServer")
+                    && f.name.equals("server")) serverGets++;
+        }
+        failed += check("W73 helper 契約：skippable 讀 GameServer.server、精確類別比對 IsoThumpable.class（getClass）、getLifeLeft 以 fcmpl 比 -1（NaN 跳過，不得是 fcmpg）",
+                serverGets == 1 && thumpLdc == 1 && fcmpl == 1 && fcmpg == 0
+                && countExactCalls(skippable, Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;") == 1
+                && countExactCalls(skippable, Opcodes.INVOKEVIRTUAL, thump, "getLifeLeft", "()F") == 1);
+        failed += check("W73 helper 契約：removeAll 只呼叫原版 ArrayList.removeAll（off 與量測兩條路各 1）",
+                countExactCalls(method(distJava, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z"),
+                        Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 2);
+        return failed;
     }
 
     private SmokeCheck() {}

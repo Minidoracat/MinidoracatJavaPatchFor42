@@ -4362,6 +4362,88 @@ that drew this story loads.
 
 **Retirement**: remove the patch when TIS fixes the inner loop counter (the SmokeCheck reason to exist turns red).
 
+<a id="2ch"></a>
+## 2ch. IsoObject per-frame update gate (W73, server, default observe)
+
+**Symptom** (2026-10-25 evening peak, 45–48 players, FPS 9.2–9.6, main thread CPU 94%): `IsoCell.ProcessIsoObject` is on the stack in 7 of
+60 thread dumps, and is itself the top frame in 5 of them (about 8% of the main thread, about 9 ms per frame). A top frame of the method itself
+means the thread stopped inside a cheap `update()` body without a safepoint poll, or in the loop itself, which matches the no-op update of
+player-built objects. Nothing logs the list size or composition, so the first deployment only measures.
+
+**Root cause** (javap against the 42.21.0 jar `e1a69eb7`):
+- `IsoCell.updateInternal` calls `ProcessIsoObject` every frame with no server guard; it calls `IsoObject.update()` on every entry of
+  `processIsoObject` (offset 82, the only one in the method), after `ArrayList.removeAll(processIsoObjectRemove)` (offset 20) on frames that have
+  removals.
+- Members are `IsoThumpable` (player-built objects and moved furniture; `addToWorld` registers them unconditionally), stoves, washers/dryers,
+  fireplaces, barbecues, composters, traps, feeding troughs, generators, battery chargers and butcher hooks; fridges are registered on clients
+  only. An object is updated every frame as long as its chunk is loaded; chunk unload removes it through `IsoObject.removeFromWorld` (no leak).
+- `IsoThumpable.update()` on the server: offset 1 `getObjectIndex()` (`square.objects.indexOf`, returns on -1) → offset 12 `GameServer.server`
+  ifne 298 → offsets 299–305 `getLifeLeft` / `ldc -1.0f` / `fcmpl` / `ifle 420`, and 420 is `return`. `lifeLeft` starts at -1 and is only above
+  -1 for fuelled lamps, so an ordinary built object costs one linear `indexOf` and one getter per frame and writes nothing. No class in the jar
+  extends `IsoThumpable`.
+
+**Surgery** (on the `IsoCell` ClassPatch shared with W40/W45/W47): in `ProcessIsoObject`, `IsoObject.update()` and `ArrayList.removeAll` are
+redirected 1:1 to `zombie/mdc/IsoObjectUpdateGate.update` / `removeAll`, with `beginPass` at the head and `endPass` before the only RETURN
+(offset 108) (4 hits); `addToProcessIsoObject` / `addToProcessIsoObjectRemove` get `touchAdd` / `touchRemove` at the head (1 hit each). List
+contents, order and the update order of other objects are unchanged.
+- **observe (default)**: updates every object as vanilla. An ordinary frame adds one flag check per object (measured locally at 0.55–0.69 ns
+  per object over 60,000 objects, three runs; off is within ±0.4 ns of vanilla; about 0.05 ms per frame at 80,000 objects) and two `nanoTime`
+  calls per frame; every 5 minutes one frame is timed per object (two `nanoTime` calls and one HashMap lookup per object), and at the end of that
+  frame the list is walked once for a census and one heartbeat line is written.
+- **on**: skips the update when `GameServer.server` is set, the exact class is `IsoThumpable`, and `lifeLeft`, read live every frame, is not
+  `> -1` (same as vanilla `fcmpl; ifle`, so NaN is skipped too). A lamp that gets lit (`setLifeLeft`, `loadChange`) takes the vanilla path from
+  the next frame on, so no write tracking is needed. Every 4096th skip runs the vanilla update and compares all fields declared by
+  `IsoThumpable` before and after; any difference disables the gate permanently for this run and logs the coordinates.
+- **off**: plain delegation, no counting, no heartbeat.
+
+Console (one first-use line on the first frame, then one line every 5 minutes; frames/pass/removeAll/timed are per interval,
+skips/audits/fallback/offThread are cumulative):
+
+```text
+[MinidoracatJavaPatch][IsoObjectGate] 首次生效 mode=observe raw=null server=true（…）
+[MinidoracatJavaPatch][IsoObjectGate] beat mode=observe frames=<n> passAvgMs=<ms> passMaxMs=<ms> size=<list length> setSize=<processIsoObjectSet size> nulls=<n> removeAll=calls:<n>,removed:<n>,avgUs:<µs>,maxUs:<µs> thump=<n>(skip=<skippable>,lit=<lamps>,orphan=<not in square objects>) noSquare=<n> noChunk=<unloaded but still listed> classes=<class:count,…> timedMs=<timed frame total> skipMs=<skippable> skipNetMs=<minus nanoTime cost> skipN=<n> tsNs=<ns per nanoTime> timed=IsoThumpable(skip):<n>/<µs>,<class>:<n>/<µs>,… skips=<n> audits=<n> fallback=<n> offThreadAdds=<n> offThreadRemoves=<n> anomalies=<n>
+```
+
+**Reading it and when to turn on**: turn on only if `skipNetMs` (milliseconds the skippable thumpables actually cost in the timed frame) is
+≥ 2 ms (about 2% of the main thread) in several evening-peak heartbeats. After turning on, `passAvgMs` should drop by about `skipNetMs` × 0.8;
+if it drops by less than half of that, go back to observe. A non-zero `noChunk` means objects stay listed after their chunk unloads (a leak); a
+non-zero `offThreadAdds`/`offThreadRemoves` means another thread writes the list (known possible sources: the butcher hook constructor on the
+LoadChunk thread and WorldStreamer Convert/SoftReset jobs). Both are separate cases.
+
+**Kill switch**: `-Dmdc.isoObjectGate=0|off` (vanilla), `1|on` (skip), `2|observe` (default); unknown values mean observe; restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/IsoObjectUpdateGate.class` and replaces `IsoCell.class`. After it goes live, check the first-use
+line with `mode=observe`, and the first beat line 5 minutes later.
+
+**Not handled**:
+- Idle washers/dryers checking power every frame and composters scanning their container twice almost every frame: they write state, so they are
+  not no-ops and cannot use the same skip; see the heartbeat `timed` field before opening a separate case.
+- Iterating only an active subset (not touching thumpable headers at all): needs tracking of 6 `putfield lifeLeft` sites and Lua edits of the list
+  through the getter, about as complex as W45; reassess only if more than 2 ms per frame remains after on.
+- Rewriting `removeAll`: order preservation is a premise of vanilla and of MinidoracatFixesFor42 `MDFX_ChargerIdleGuard`, and an identity scan was
+  not faster under ZGC in measurements.
+
+**Checks**:
+- SmokeCheck: reasons to exist — `ProcessIsoObject` has exactly one `IsoObject.update()`, one `ArrayList.removeAll` (argument
+  `processIsoObjectRemove`), one null check and a single RETURN; the server path of `IsoThumpable.update` is as above (checked instruction by
+  instruction) and the whole method is pinned by SHA-256; `getLifeLeft` is a plain getter; `getObjectIndex` (SHA pinned) → `IsoGridSquare.getObjects`
+  getter → `PZArrayList.indexOf` / `objectsEqual` have no writes and no throw; no class in the jar extends `IsoThumpable`, and neither `IsoThumpable`
+  nor its ancestors in the jar override `equals` (any red means re-evaluating the skip condition, not editing the pin). After surgery
+  `ProcessIsoObject` has both redirects, head, tail and exactly +4 real instructions; both add methods have +2 at the head; W40's "other IsoCell
+  methods unchanged" check lists these three methods as exceptions. The helper's `skippable` reads `GameServer.server`, compares `getClass` with
+  `IsoThumpable.class` and uses `fcmpl` (not `fcmpg`).
+- `IsoObjectUpdateGateTest` (`build.ps1` [9zo/10], one JVM each for observe, on, 0 and an unknown value, each checking that argv matches the
+  actual mode): the real `IsoThumpable.update` from the vanilla jar and the gate agree field by field (ancestors included) over server/client ×
+  `lifeLeft` (-1, -2, the float just below -1, -Inf, NaN, -0.5, -0, 0, 5, +Inf) × square (none, not in objects, in objects), 60 cases, and skips
+  happen only in on and exactly as expected; subclasses always run vanilla; vanilla control (a lamp's update writes fields, so the diff catches a
+  wrong skip); all five mutants (`>=`, `<= -1`, no server check, instanceof, no lifeLeft check) are caught; the patched `ProcessIsoObject` from
+  dist skips nulls, updates other objects, runs lamps as vanilla, counts removeAll, fills every heartbeat field, resets the interval after the
+  heartbeat and counts one off-thread add and one off-thread remove (off counts nothing); on also checks that 2 of 8192 skippable calls run vanilla
+  and that a mismatch disables the gate permanently, after which everything runs vanilla.
+
+**Retirement**: reassess when TIS stops registering `IsoThumpable` for per-frame updates or a SmokeCheck reason to exist turns red; remove the whole
+patch if observe data shows the skippable part is under 2 ms per frame.
+
 ---
 
 <a id="3"></a>

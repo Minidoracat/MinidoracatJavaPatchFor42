@@ -129,6 +129,7 @@ $helperEntries = @(
     'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/entity/MdcEntityIdGuard.class',
     'zombie/mdc/BanditRaidLoopGuard.class',
+    'zombie/mdc/IsoObjectUpdateGate.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -623,6 +624,18 @@ java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\jav
 Assert-Ok "BanditRaidLoopGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" off
 Assert-Ok "BanditRaidLoopGuardTest（off，kill switch 回原版）"
+
+Write-Host "[9zo/10] IsoObject 每幀更新閘（W73）：真 IsoThumpable.update 與閘門逐欄位差分（伺服器／客戶端 × lifeLeft 含 NaN、±Inf、-0、-1 × 格子狀態 × 子類別）、燈的原版負對照、mutant、真 ProcessIsoObject（removeAll、心跳欄位、非主執行緒寫入）、on 抽樣比對與停用、off 不計數..."
+# observe＝出貨組態（照原版逐件 update、只量）；on＝跳過伺服器上 lifeLeft 不是 > -1 的 IsoThumpable；off＝純委派；
+# 未知值落回 observe。測試自驗 argv 與實際 MODE 相符，property 拼錯不得假綠。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest observe
+Assert-Ok "IsoObjectUpdateGateTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.isoObjectGate=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest on
+Assert-Ok "IsoObjectUpdateGateTest（on，跳過伺服器空操作 IsoThumpable）"
+java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest off
+Assert-Ok "IsoObjectUpdateGateTest（0，純委派）"
+java -Xverify:all "-Dmdc.isoObjectGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest unknown
+Assert-Ok "IsoObjectUpdateGateTest（未知值落回 observe）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
