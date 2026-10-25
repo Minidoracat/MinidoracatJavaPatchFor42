@@ -4362,6 +4362,68 @@ that drew this story loads.
 
 **Retirement**: remove the patch when TIS fixes the inner loop counter (the SmokeCheck reason to exist turns red).
 
+<a id="2cg"></a>
+## 2cg. Square load flags (W71, server, default on)
+
+**Purpose**: this patch does not fix a vanilla bug. It is a faster entry point for the Vanilla Foods Expanded (VFE) load patch in our
+Lua-side server patch mod `MinidoracatServerPatchFor42`. VFE checks every loaded square (`LoadGridsquare`) for ground items and containers,
+and most squares have neither. With the ServerPatch patch in place an empty square still costs 4 Lua→Java calls (`getWorldObjects` →
+`ArrayList.isEmpty`, `getObjectContainers(nil, nil, list)` → `PZArrayList.isEmpty`); each Kahlua call looks up the method and converts
+arguments, measured at about 1.3 µs per square. W71 brings that down to one call per square.
+
+**Surgery** (new form, "add a delegating method"): adds `public int mdcLoadFlags()` to `zombie/iso/IsoGridSquare`. The body is three
+instructions and no vanilla method is touched:
+
+```text
+aload_0
+invokestatic zombie/mdc/SquareLoadFlags.flags(Lzombie/iso/IsoGridSquare;)I
+ireturn
+```
+
+There are no branches, so no StackMapTable is needed (max stack 1, max locals 1; `ClassWriter(0)` is unchanged). The build fails if vanilla
+already has a method with the same name and descriptor. Kahlua exposes it automatically: `LuaManager.Exposer` calls `setExposed` on
+`IsoGridSquare`, and `LuaJavaClassExposer` exposes the public non-static methods from `getMethods()`. On servers without this package and on
+every client, Lua gets nil. It hangs off the W60 `IsoGridSquare` ClassPatch (one class may only have one ClassPatch).
+
+**Return value**: bit 1 = `getWorldObjects()` is not empty; bit 2 = at least one object in `getObjects()` has `getContainerCount() > 0`
+(VFE's own check, secondary containers included); every other bit is 0. The helper walks `getObjects()` with an index loop, allocates
+nothing, and returns at the first container. With the kill switch off it returns -1; Lua treats a negative value as "entry point missing"
+and takes the original 4-call path.
+
+Console (one line on the first call):
+
+```text
+[MinidoracatJavaPatch][SquareLoadFlags] 首次生效 enabled=true（-Dmdc.squareLoadFlags=0|off 回 -1，Lua 走原本的呼叫）
+```
+
+(`首次生效` = first activation; `回 -1，Lua 走原本的呼叫` = returns -1 and Lua uses the original calls.)
+
+**Kill switch**: `-Dmdc.squareLoadFlags=0|off`, restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/SquareLoadFlags.class` and replaces `IsoGridSquare.class` and `PatchInfo.class`
+(145 → 146 classes). After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 146`; the first-activation line only appears
+once the ServerPatch VFE patch actually calls the method.
+
+**Checks**:
+- SmokeCheck: vanilla `IsoGridSquare` has no method named `mdcLoadFlags` (turns red if TIS adds one; then reassess the patch); after surgery
+  there is exactly one, public and non-static with descriptor `()I`, and the method count is vanilla + 1; its real instructions are exactly
+  the three above, max stack and max locals are 1, with no frames and no try/catch; the helper is public static and calls `getWorldObjects`,
+  `getObjects` and `getContainerCount` once each.
+- `SquareLoadFlagsTest` (`build.ps1` [9zn/10], one JVM each for on and off): vanilla control — the vanilla `IsoGridSquare` loaded by a
+  class loader that only sees the jar throws `NoSuchMethodException` from `getMethod("mdcLoadFlags")`; the patched class from dist has exactly
+  one public non-static `()I` in `getMethods()`. With on, the real method is called by reflection: an empty square and a square with only plain
+  objects return 0, ground items only 1, containers only 2, both 3; an object with a main and a secondary container, an object with only a
+  secondary container, and a container on the third object all return 2; every square matches the vanilla API (`getWorldObjects().isEmpty()`,
+  per-object `getContainerCount() > 0`) and all other bits are 0; a hot loop of one million calls allocates 0 bytes. With off, every call
+  returns -1.
+
+**Not handled**: `getObjectContainers` only collects main containers, so it differs from VFE's `getContainerCount` for an object that only has
+secondary containers. This patch follows the upstream check; the ServerPatch analysis of the old path shows the engine only adds secondary
+containers to objects that already have a main one, so the two agree in a real world.
+
+**Retirement**: remove the patch when ServerPatch no longer uses it (VFE removed or its check rewritten); if TIS adds a method with the same
+name the build fails, so rename it before going live.
+
 ---
 
 <a id="3"></a>

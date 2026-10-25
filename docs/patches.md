@@ -4174,6 +4174,41 @@ console（每攔下一次一行，前 50 次之後每 1000 次一行）：
 
 **退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
 
+<a id="2cg"></a>
+## 2cg. 格子載入旗標（W71，server，預設 on）
+
+**用途**：這一刀不修原版 bug，是給本服 Lua 層伺服器補丁 MOD `MinidoracatServerPatchFor42` 的 Vanilla Foods Expanded（VFE）載入補丁用的加速入口。VFE 對每個載入的格子（`LoadGridsquare`）判斷「有沒有地上物品、有沒有容器」，絕大多數格子兩者都沒有。ServerPatch 接手後，空格子仍要 4 次 Lua→Java 呼叫（`getWorldObjects` → `ArrayList.isEmpty`、`getObjectContainers(nil, nil, list)` → `PZArrayList.isEmpty`），Kahlua 每次呼叫都要查方法、轉參數，實測每格約 1.3 µs；W71 讓 Lua 每格只呼叫 1 次。
+
+**手術**（新形態「新增委派方法」）：在 `zombie/iso/IsoGridSquare` 新增 `public int mdcLoadFlags()`，方法體只有三條指令，不碰任何原版方法：
+
+```text
+aload_0
+invokestatic zombie/mdc/SquareLoadFlags.flags(Lzombie/iso/IsoGridSquare;)I
+ireturn
+```
+
+沒有分支，所以不需要 StackMapTable（max stack 1、max locals 1，`ClassWriter(0)` 不變）。原版已有同名同描述子的方法時建置失敗。Kahlua 會自動曝露：`LuaManager.Exposer` 對 `IsoGridSquare` 呼叫 `setExposed`，`LuaJavaClassExposer` 以 `getMethods()` 曝露 public 非 static 方法。沒裝本包的伺服器與所有客戶端上，Lua 取到的是 nil。掛在 W60 的 `IsoGridSquare` ClassPatch（同一 class 只能有一個 ClassPatch）。
+
+**回傳值**：bit 1＝`getWorldObjects()` 非空；bit 2＝`getObjects()` 裡至少一個物件 `getContainerCount() > 0`（VFE 上游自己的判斷，含次要容器）；其他 bit 一律 0。helper 以索引迴圈走 `getObjects()`，不配置物件；找到第一個容器就回傳。kill switch 關閉時回 -1，Lua 把負數當「沒有這個入口」，走原本 4 次呼叫的路。
+
+console（第一次被呼叫時一行）：
+
+```text
+[MinidoracatJavaPatch][SquareLoadFlags] 首次生效 enabled=true（-Dmdc.squareLoadFlags=0|off 回 -1，Lua 走原本的呼叫）
+```
+
+**kill switch**：`-Dmdc.squareLoadFlags=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/SquareLoadFlags.class`，`IsoGridSquare.class` 與 `PatchInfo.class` 換新（145 → 146 個 class）。上線後確認橫幅指紋與 `[mdc-javagate] OK: 146`；首次生效行要等 ServerPatch 的 VFE 補丁實際呼叫才會出現。
+
+**守門與驗證**：
+- SmokeCheck：原版 `IsoGridSquare` 沒有任何名為 `mdcLoadFlags` 的方法（TIS 自己加了同名方法時轉紅，重估這一刀）；手術後恰一個、access 為 public 非 static、描述子 `()I`，方法總數＝原版＋1；方法體真指令恰為上面三條、max stack／locals 皆 1、沒有 frame 與 try/catch；helper 是 public static，`getWorldObjects`、`getObjects`、`getContainerCount` 各呼叫一處。
+- `SquareLoadFlagsTest`（`build.ps1` [9zn/10]，on、off 兩個 JVM）：原版負對照——只含 jar 的 class loader 載入的原版 `IsoGridSquare`，`getMethod("mdcLoadFlags")` 丟 `NoSuchMethodException`；dist 內手術後的 `getMethods()` 恰一個 public 非 static `()I`。on 經反射呼叫真方法：空格子與只有普通物件回 0、只有地上物品 1、只有容器 2、兩者 3，物件有主容器＋次要容器、只有次要容器、容器在第 3 個物件都回 2，每格都與原版 API（`getWorldObjects().isEmpty()`、逐物件 `getContainerCount() > 0`）逐項相同、其他 bit 為 0；熱迴圈 100 萬次配置 0 bytes。off 全部回 -1。
+
+**不處理**：`getObjectContainers` 只收主容器，與上游的 `getContainerCount` 在「只有次要容器的物件」上不同；本刀照上游條件算，ServerPatch 的舊路徑論證引擎只在已有主容器時才加次要容器，兩者在實際世界上等價。
+
+**退場**：ServerPatch 不再使用（VFE 移除或改寫判斷）時撤刀；TIS 加了同名方法時建置失敗，先改名再上線。
+
 ---
 
 <a id="3"></a>

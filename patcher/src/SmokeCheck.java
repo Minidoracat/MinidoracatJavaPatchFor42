@@ -3816,6 +3816,48 @@ public final class SmokeCheck {
         failed += check("W70 helper 契約：floor 內恰一次 Math.floor",
                 countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
 
+        // ---- W71 格子載入旗標（docs/patches.md 2cg）----
+        // 新增委派方法 IsoGridSquare.mdcLoadFlags()I：原版沒有這個名字（TIS 自己加了時紅＝重估這一刀；Patcher 也會擋同名同描述子），
+        // patched 恰一個 public 非 static ()I，方法體恰為 aload_0／invokestatic SquareLoadFlags.flags／ireturn，原版方法一個不少。
+        String w71Sq = "zombie/iso/IsoGridSquare";
+        String w71Helper = "zombie/mdc/SquareLoadFlags";
+        String w71HelperDesc = "(L" + w71Sq + ";)I";
+        ClassNode w71Vanilla = classNodeFromJar(jar, w71Sq);
+        ClassNode w71Patched = classNode(distJava, w71Sq);
+        failed += check("W71 vanilla 前提：IsoGridSquare 沒有任何名為 mdcLoadFlags 的方法",
+                w71Vanilla.methods.stream().noneMatch(m -> m.name.equals("mdcLoadFlags")));
+        List<MethodNode> w71Added = w71Patched.methods.stream().filter(m -> m.name.equals("mdcLoadFlags")).toList();
+        MethodNode w71M = w71Added.size() == 1 ? w71Added.get(0) : null;
+        failed += check("W71 手術後：恰一個 mdcLoadFlags，public 非 static、描述子 ()I；其餘方法數與原版相同",
+                w71M != null && w71M.access == Opcodes.ACC_PUBLIC && w71M.desc.equals("()I")
+                        && w71Patched.methods.size() == w71Vanilla.methods.size() + 1);
+        List<AbstractInsnNode> w71Insns = new ArrayList<>();
+        int w71Pseudo = 0;
+        if (w71M != null) {
+            for (AbstractInsnNode in : w71M.instructions) {
+                if (in.getOpcode() >= 0) {
+                    w71Insns.add(in);
+                } else if (in instanceof FrameNode) {
+                    w71Pseudo++;
+                }
+            }
+        }
+        failed += check("W71 bytecode：恰為 aload_0／invokestatic " + w71Helper + ".flags" + w71HelperDesc
+                        + "／ireturn，max stack 1、max locals 1，沒有 frame 與 try/catch",
+                w71Insns.size() == 3 && w71Pseudo == 0
+                        && w71Insns.get(0) instanceof VarInsnNode w71Load && w71Load.getOpcode() == Opcodes.ALOAD && w71Load.var == 0
+                        && w71Insns.get(1) instanceof MethodInsnNode w71Call && w71Call.getOpcode() == Opcodes.INVOKESTATIC
+                        && w71Call.owner.equals(w71Helper) && w71Call.name.equals("flags") && w71Call.desc.equals(w71HelperDesc)
+                        && !w71Call.itf
+                        && w71Insns.get(2).getOpcode() == Opcodes.IRETURN
+                        && w71M.maxStack == 1 && w71M.maxLocals == 1 && w71M.tryCatchBlocks.isEmpty());
+        MethodNode w71Flags = method(distJava, w71Helper, "flags", w71HelperDesc);
+        failed += check("W71 helper 契約：SquareLoadFlags.flags 是 public static，只讀 getWorldObjects／getObjects／getContainerCount",
+                w71Flags.access == (Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC)
+                        && countExactCalls(w71Flags, Opcodes.INVOKEVIRTUAL, w71Sq, "getWorldObjects", "()Ljava/util/ArrayList;") == 1
+                        && countExactCalls(w71Flags, Opcodes.INVOKEVIRTUAL, w71Sq, "getObjects", "()Lzombie/util/list/PZArrayList;") == 1
+                        && countExactCalls(w71Flags, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "getContainerCount", "()I") == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

@@ -3,6 +3,7 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -154,6 +155,23 @@ public final class Patcher {
      */
     record TailCall(String helperOwner, String helperName, String helperDesc) {}
 
+    /**
+     * 新增委派方法（W71 首用）：在 class 尾端新增 {@code public name()<ret>}，方法體只有
+     * {@code aload_0; invokestatic helperOwner.helperName(L<class>;)<ret>; <x>return}。不碰任何原版方法，
+     * 沒有分支所以不需要 StackMapTable（{@code ClassWriter(0)} 不變）。只支援無參數、非 void 的 instance 方法；
+     * 原版已有同名同描述子的方法時建置失敗（TIS 自己加了同名方法要被擋下）。
+     */
+    record DelegateMethod(String name, String desc, String helperOwner, String helperName) {
+        DelegateMethod {
+            if (!desc.startsWith("()") || desc.endsWith(")V")) {
+                throw new IllegalArgumentException("DelegateMethod 只支援無參數、有回傳值的方法，收到 " + name + desc);
+            }
+        }
+        String helperDesc(String owner) {
+            return "(L" + owner + ";" + desc.substring(1);
+        }
+    }
+
     static final class MethodOps {
         final String name, desc;
         final List<Site> redirects = new ArrayList<>();
@@ -175,6 +193,7 @@ public final class Patcher {
     static final class ClassPatch {
         final String internalName;
         final List<MethodOps> methods = new ArrayList<>();
+        final List<DelegateMethod> delegates = new ArrayList<>();
         ClassPatch(String internalName) { this.internalName = internalName; }
         MethodOps method(String name, String desc) {
             MethodOps m = new MethodOps(name, desc);
@@ -193,6 +212,12 @@ public final class Patcher {
         }
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String sig, String[] ex) {
+            for (DelegateMethod d : patch.delegates) {
+                if (d.name().equals(name) && d.desc().equals(desc)) {
+                    throw new IllegalStateException(patch.internalName + "." + name + desc
+                            + " 原版已有同名同描述子的方法，不能再新增委派方法（TIS 自己加了？重新評估這一刀）");
+                }
+            }
             MethodVisitor mv = super.visitMethod(access, name, desc, sig, ex);
             for (MethodOps ops : patch.methods) {
                 if (ops.name.equals(name) && ops.desc.equals(desc)) {
@@ -200,6 +225,21 @@ public final class Patcher {
                 }
             }
             return mv;
+        }
+        @Override
+        public void visitEnd() {
+            for (DelegateMethod d : patch.delegates) {
+                Type ret = Type.getReturnType(d.desc());
+                MethodVisitor mv = super.visitMethod(Opcodes.ACC_PUBLIC, d.name(), d.desc(), null, null);
+                mv.visitCode();
+                mv.visitVarInsn(Opcodes.ALOAD, 0);
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, d.helperOwner(), d.helperName(),
+                        d.helperDesc(patch.internalName), false);
+                mv.visitInsn(ret.getOpcode(Opcodes.IRETURN));
+                mv.visitMaxs(Math.max(1, ret.getSize()), 1);
+                mv.visitEnd();
+            }
+            super.visitEnd();
         }
     }
 
@@ -526,7 +566,7 @@ public final class Patcher {
                 ClassWriter cw = new ClassWriter(0);   // frames/maxs 原樣保留
                 cr.accept(new PatchingVisitor(cw, p), 0);
 
-                int total = 0;
+                int total = p.delegates.size();   // 每個新增的委派方法算一個命中點
                 for (MethodOps m : p.methods) {
                     if (m.actualHits != m.expectedHits) {
                         throw new IllegalStateException(p.internalName + "." + m.name + m.desc

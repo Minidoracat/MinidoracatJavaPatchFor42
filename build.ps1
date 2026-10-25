@@ -129,6 +129,7 @@ $helperEntries = @(
     'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/entity/MdcEntityIdGuard.class',
     'zombie/mdc/BanditRaidLoopGuard.class',
+    'zombie/mdc/SquareLoadFlags.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -623,6 +624,12 @@ java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\jav
 Assert-Ok "BanditRaidLoopGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" off
 Assert-Ok "BanditRaidLoopGuardTest（off，kill switch 回原版）"
+
+Write-Host "[9zn/10] 格子載入旗標（W71）：原版 IsoGridSquare 沒有 mdcLoadFlags（負對照），patched 的真方法四種組合、次要容器、與原版 API 逐項相同、不配置物件；off 一律 -1..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SquareLoadFlagsTest "$R\work\projectzomboid.jar" on
+Assert-Ok "SquareLoadFlagsTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.squareLoadFlags=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SquareLoadFlagsTest "$R\work\projectzomboid.jar" off
+Assert-Ok "SquareLoadFlagsTest（off，kill switch 回 -1）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
