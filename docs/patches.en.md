@@ -4444,6 +4444,102 @@ line with `mode=observe`, and the first beat line 5 minutes later.
 **Retirement**: reassess when TIS stops registering `IsoThumpable` for per-frame updates or a SmokeCheck reason to exist turns red; remove the whole
 patch if observe data shows the skippable part is under 2 ms per frame.
 
+<a id="2ci"></a>
+## 2ci. Pathfinding thread probe (W74, server, default on, observe only)
+
+**Symptom** (production, 2026-10-25, 45–48 players): `PathfindNativeThread` runs at 99–100% CPU (93% on average over the first 44 minutes
+after boot), and all 60 thread dumps show it in `PathfindNative.findPath ← PathfindNativeThread.findPath ← updateThread`. It is a separate
+thread and the main thread never waits for it (requests and results only go through `ConcurrentLinkedQueue`s), so it does not lower the FPS;
+the cost of saturation is the pathfinding queue: zombies and animals stand still while they wait for a result.
+
+**Vanilla structure** (javap against the 42.21.0 jar; native side from objdump of the 42.21.0 `libPZPathFind64.so`):
+- `PathfindNativeThread.runInner` paces each round at 50 ms (`50000000L` in `Sync.endFrame`); `updateThread` drains the chunk (at most 10
+  `ChunkUpdateTask`s per round), square, vehicle and request task queues (8 `ConcurrentLinkedQueue.poll` calls, offsets 7/54/68/96/110/140/154/182),
+  calls `PathfindNative.update()` (offset 192), then serves at most 2 non-cancelled requests (`requestsPerUpdate = 2`, offset 195 `iconst_2`).
+  Throughput is capped at 40 requests per second; with the CPU saturated each request costs at least 25 ms on average.
+- `PathRequestTask.init` puts requests in three queues: players, zombies with a target, and everything else (all animals and zombies without a
+  target); `RequestQueue.removeFirst` serves them in that strict priority.
+- On the native side the six JNI entry points `updateChunk`/`removeChunk`/`updateSquare`/`addVehicle`/`removeVehicle`/`teleportVehicle` all
+  set one global flag; when `findPath` sees the flag on entry it releases every visibility graph, runs `createVisibilityGraphs` (including
+  `createVehicleClusters`) and increments `HLAStar::ModificationCount` (each chunk level's high-level regions are rebuilt the next time a search
+  touches them). So whenever a round runs any world-change task, the next native `findPath` pays a global rebuild. How much of each search that
+  rebuild is could not be measured before this patch.
+
+**Surgery** (all same-shape 1:1 redirects to `zombie/pathfind/nativeCode/MdcPathfindProbe`, receiver first; the helper lives in the target
+package so it can read the package-private request fields and task classes):
+- `PathfindNativeThread.updateThread()V`: the 8 `INVOKEVIRTUAL ConcurrentLinkedQueue.poll` → `poll(ConcurrentLinkedQueue)`, which counts chunk
+  (update and remove), square and vehicle tasks by the class of the polled task; `INVOKESTATIC PathfindNative.update()V` → `update()`, which closes
+  the round and then calls vanilla. `expectedHits` 9.
+- `PathfindNativeThread.findPath(PathFindRequest)V`: the `INVOKEVIRTUAL PathfindNative.findPath(PathFindRequest,ByteBuffer,Z)I` at offset 20 →
+  `findPath(PathfindNative,…)`: timing, result (a native result other than 1 counts as a failure), requester and queue wait. `expectedHits` 1.
+- `PathRequestTask.execute()V`: the `INVOKEVIRTUAL PathfindNativeThread.addRequest(PathFindRequest,I)V` at offset 11 → `addRequest(PathfindNativeThread,…)`,
+  which records when the request entered the priority queue. `expectedHits` 1.
+- Enqueue and round bookkeeping happens before the vanilla call; `findPath` times the vanilla call and records afterwards. The vanilla call
+  happens exactly once with the same arguments, its return value is returned unchanged, and its exceptions propagate unchanged (not counted in
+  `calls`, counted in `thrown`); a RuntimeException in the bookkeeping only increments `anomalies`. All bookkeeping runs on the pathfinding thread
+  (single writer), and the line is written from that thread with `DebugLog.log`, like the other off-main-thread helpers (ChunkSaveIsolation,
+  ChunkWriteGuard).
+- Rebuild split: the native flag is set by world-change tasks and cleared by the next native `findPath`. The probe splits calls into `rb` (a
+  world-change task ran since the previous native `findPath`, so this call pays the rebuild) and `nr`. The two biases go in opposite directions:
+  native does not set the flag for a chunk with a stale `loadId`, so the `rb` count is an upper bound; high-level regions are rebuilt when a later
+  search first touches them, partly inside `nr` calls, so the `rb − nr` difference is a lower bound on the rebuild cost.
+- Probe cost (measured locally in `build.ps1` [9zp/10] with native replaced by a stub that returns at once): 71 ns per request (one `addRequest`
+  plus one `findPath`), plus one `nanoTime` and a few counters per round. Against at least 25 ms per request that is about 3 parts per million.
+
+Console (one line at the first round, then one line every 60 seconds; every number except `total` covers those 60 seconds):
+
+```text
+[MinidoracatJavaPatch][PathfindProbe] 首次生效（純觀測，每 60 秒一行；-Dmdc.pathfindProbe=0|off 停用）
+[MinidoracatJavaPatch][PathfindProbe] beat sec=<window s> rounds=<n> roundMsAvg=<ms> roundMsMax=<ms> worldRounds=<rounds with world changes> chunk=<n> square=<n> vehicle=<n> enq=<players>/<zombies with target>/<others> calls=<native findPath calls> extra=<2nd+ target of multi-target requests> fail=<n> thrown=<n> busyPct=<native time / window %> usAvg=<µs> usP95=<µs> usMax=<µs> rb=<n>/<avg µs>/<p95 µs> nr=<n>/<avg µs>/<p95 µs> rebuildPct=<%|n/a> waitMs=<avg>/<p95>/<max> player=<n>/<fail>/<avg µs>/<avg wait ms>/<p95 wait ms> aggroZombie=… zombie=… animal=… other=… otherTasks=<n> waitDropped=<n> anomalies=<n> total=<cumulative calls>
+```
+
+(`首次生效（純觀測，每 60 秒一行；…停用）` = active (observe only, one line every 60 seconds; … disables it).)
+
+Fields: `roundMs` is the interval between two `update()` calls (including time the thread sat idle waiting for work). `enq` counts requests
+entering the priority queues; minus each requester's `n` it gives the requests that were cancelled or are still waiting. `waitMs` runs from the
+request entering the priority queue to the start of its first native `findPath`; it leaves out the hop from the main thread to the next round
+of the pathfinding thread (at most one round, see `roundMsAvg`). p95 is the upper bound of a histogram with 4 buckets per octave (≤ 25% error,
+never above the maximum). `rebuildPct = rb count × (rb average − nr average) ÷ total time`. Requesters by mover class: `animal` (`IsoAnimal`),
+`player` (other `IsoPlayer`), `aggroZombie` (`IsoZombie` with a non-null `target`), `zombie`, `other`.
+
+**Reading it** (a few evening-peak lines after it goes live):
+- `busyPct` near 100 and `roundMsAvg` well above 50: cost-bound. Look at `rebuildPct`: at 30% or more a world-change batching gate is worth
+  building (it spreads the rebuild from once per round to once per T ms; amortized over k rounds each request costs about
+  `1 − rebuildPct × (1 − 1/k)`, so 30% with k=5 gives about 1.3× throughput and 50% about 1.7×); below 15% it is not (removing the rebuild
+  entirely would give about 1.18×), so look at requesters with a high `usP95` or `fail` instead (for example a negative cache if failed requests
+  are expensive).
+- `roundMsAvg` about 50, `calls` about `rounds × 2` and long `waitMs`: the 2-per-round cap is the bottleneck; consider raising `requestsPerUpdate`
+  (same-length constant surgery).
+- An `animal` wait p95 far above the others: the strict priority serves animals last, which is vanilla's trade-off.
+- `anomalies`, `otherTasks` and `waitDropped` should be 0; a non-zero `thrown` means native pathfinding threw (vanilla handles it as before).
+
+**Kill switch**: `-Dmdc.pathfindProbe=0|off`, restart required; when off, all four entry points only delegate: no clock reads, no counters, no
+log lines.
+
+**Deployment**: the manifest adds `zombie/pathfind/nativeCode/MdcPathfindProbe.class`, `MdcPathfindProbe$Hist.class`, `PathfindNativeThread.class`
+and `PathRequestTask.class` (+4 classes; `PatchInfo.class` is replaced). After it goes live, check for the first-run line and then one `beat`
+line per minute.
+
+**Not handled**: this patch does not change pathfinding. The batching gate, `requestsPerUpdate` and a negative cache wait for this patch's
+evening-peak data; pfguard's own cost on this thread is estimated separately at about 0.1% (out of scope here).
+
+**Checks**:
+- SmokeCheck: reason to exist — `updateThread` has exactly 8 `ConcurrentLinkedQueue.poll`, 1 `PathfindNative.update` followed by `iconst_2; istore`
+  (`requestsPerUpdate = 2`) and 1 `RequestQueue.isEmpty`; `Sync.endFrame` has exactly one `50000000L`; `findPath(PathFindRequest)` has exactly 1
+  `PathfindNative.findPath`; `PathRequestTask.execute` has exactly 1 `addRequest`. If any of these changes, the round and rebuild figures must be
+  reinterpreted. After surgery the three methods are identical to vanilla (frames included) except the redirected calls, and the other methods of
+  both classes are unchanged; the helper's `poll`/`update`/`addRequest` each call vanilla exactly once, and `findPath` once on each of its on/off
+  paths.
+- `MdcPathfindProbeTest` (`build.ps1` [9zp/10], one JVM each for on and off, checking that argv matches the actual switch): runs the patched
+  `updateThread`, `findPath(PathFindRequest)` and `PathRequestTask.execute` from dist (the test JVM has no native library, so both native entry
+  points throw `UnsatisfiedLinkError`, which checks that vanilla exceptions propagate unchanged): chunk, square and vehicle tasks each run once
+  in the original order, `taskReturnQueue` receives the same tasks, requests land in the same vanilla priority queue (same objects, same order);
+  a stub `PathfindNative` overriding `findPath` checks the vanilla return value, identical arguments, exactly one vanilla call, and that the same
+  `RuntimeException` and `Error` objects propagate; on checks the requester split, multi-target calls, failures, the `rb`/`nr` split and the line's
+  fields; off counts nothing (vanilla control); finally it measures the probe cost per request (limit 20 µs, measured 71 ns).
+
+**Retirement**: turn it off or remove it once the data has been read and the batching gate has been decided (either way).
+
 ---
 
 <a id="3"></a>

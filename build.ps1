@@ -130,6 +130,8 @@ $helperEntries = @(
     'zombie/entity/MdcEntityIdGuard.class',
     'zombie/mdc/BanditRaidLoopGuard.class',
     'zombie/mdc/IsoObjectUpdateGate.class',
+    'zombie/pathfind/nativeCode/MdcPathfindProbe.class',
+    'zombie/pathfind/nativeCode/MdcPathfindProbe$Hist.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -636,6 +638,12 @@ java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\
 Assert-Ok "IsoObjectUpdateGateTest（0，純委派）"
 java -Xverify:all "-Dmdc.isoObjectGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest unknown
 Assert-Ok "IsoObjectUpdateGateTest（未知值落回 observe）"
+
+Write-Host "[9zp/10] 尋路執行緒觀測（W74）：真 updateThread／findPath／PathRequestTask.execute（native 換成原樣上拋的 UnsatisfiedLinkError），任務照原順序執行、請求進同一佇列、回傳值與參數同一物件、例外原樣上拋、off 零計數，並量每次 findPath 的探針成本..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindProbeTest on
+Assert-Ok "MdcPathfindProbeTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindProbeTest off
+Assert-Ok "MdcPathfindProbeTest（off，只委派零計數）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
