@@ -4313,7 +4313,7 @@ console（開服第一輪一行，之後每 60 秒一行，數字都是這 60 �
 **手術**（比照 W41）：
 - `IsoObject.removeFromWorld()` offset 15 唯一的 `invokevirtual IsoCell.addToProcessIsoObjectRemove` 1:1 改道 `zombie/mdc/IsoObjectRemoveDefer.addToProcessIsoObjectRemove(IsoCell, IsoObject)`（receiver 前置，命中 1；`IsoObject` 原本沒有 server ClassPatch）。非主執行緒（`GameServer.mainThread` 以外）不跑原版，把（cell, 物件）排進佇列；主執行緒或 `mainThread` 還沒設定時照原版。佇列超過 10 萬筆時照原版直接呼叫。
 - `ProcessIsoObject` 頭部（W73 的頭部呼叫改經 `IsoObjectRemoveDefer.beginPass`）：先排空佇列，對每筆呼叫原版 `addToProcessIsoObjectRemove`，再呼叫 W73 的 `beginPass`。排空在原版 `isEmpty`／`removeAll` 之前，所以移除在同一輪生效，與原版背景呼叫後下一幀的結果相同。
-- `addToProcessIsoObject` 頭部（W73 的 `touchAdd` 改經 `IsoObjectRemoveDefer.beforeAdd(cell, object)`，HeadCall 帶 slot 0、1）：先呼叫 W73 `touchAdd`，再把佇列裡同一 cell＋物件的待移除拿掉，對應原版那行 `processIsoObjectRemove.remove(object)`，「背景移除→主執行緒加回」結果與原版相同。只有主執行緒的加入會取消；非主執行緒的加入不在本刀範圍（觀測為 0）。
+- `addToProcessIsoObject` 頭部（W73 的 `touchAdd` 改經 `IsoObjectRemoveDefer.beforeAdd(cell, object)`，HeadCall 帶 slot 0、1）：先呼叫 W73 `touchAdd`，再把佇列裡同一 cell＋物件的待移除拿掉，對應原版那行 `processIsoObjectRemove.remove(object)`，「背景移除→主執行緒加回」結果與原版相同。W75-2（[2ck](#2ck)）起，任何直接執行的加入都會取消（主執行緒，或沒有改道、開關 off 時的背景執行緒），只有排空自己呼叫的加入不取消。
 - 用頭部呼叫而不是改道 `addToProcessIsoObject` 的呼叫點：呼叫點遍布十幾個類別，Lua（例如 MinidoracatFixesFor42 的 `MDFX_ChargerIdleGuard`）也直接呼叫這個公開方法，頭部呼叫才能涵蓋全部。
 - 與 W73 無關：`-Dmdc.isoObjectGate=0` 時 W73 的 `beginPass`／`touchAdd` 直接返回，W75 照樣排空與取消。
 
@@ -4340,6 +4340,47 @@ console（前 20 次延後與之後每 1000 次各一行附來源；第一幀一
 - `IsoObjectRemoveDeferTest`（`build.ps1` [9zq/10]，on、off、on＋W73 off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `ProcessIsoObject`／`addToProcessIsoObject`／`addToProcessIsoObjectRemove`，兩份 Set 換成記錄執行緒的 `HashSet` 子類。`mainThread` 為 null 與主執行緒呼叫照原版；背景呼叫 on 不碰任何集合、排隊，下一次 `ProcessIsoObject` 移除且當幀不 update，與原版循序執行結果相同；off（原版負對照）背景執行緒直接讀寫 Set；「背景移除→主執行緒加回」取消、物件照常 update；取消只比對同一 cell＋物件；心跳欄位。三個 mutant（不取消、排空放在 `removeAll` 之後、在背景執行緒排空）都至少一個情境與原版不同。
 
 **退場**：官方讓背景載車不再呼叫 `removeFromWorld`，或 `IsoCell` 這兩份集合改成執行緒安全時撤刀。
+
+---
+
+<a id="2ck"></a>
+## 2ck. 非主執行緒的每幀更新清單加入排回主執行緒（W75-2，server，預設 on）
+
+**症狀**（2026-10-26 正式服，W73 觀測）：00:06 開服到 00:56 `offThreadAdds=81`，前 20 行來源全是同一條：`LoadChunk` 執行緒讀 chunk 檔時建構屠宰鉤，`IsoChunk.LoadFromDiskOrBuffer → IsoGridSquare.load → IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`。前一場（22:16 開服）整場 0 次，集中在重啟後大量載入 chunk 時。原版在背景執行緒寫 `processIsoObjectRemove`、`processIsoObjectSet`（HashSet）與 `processIsoObject`（ArrayList），主執行緒同時在 `ProcessIsoObject` 走訪清單、`removeAll`、`clear`。
+
+**原版**（javap 對 42.21.0 jar `e1a69eb7`）：`IsoButcherHook` 恰三個 `invokevirtual IsoCell.addToProcessIsoObject`——`<init>(IsoGridSquare)` offset 37、`<init>(IsoCell)` offset 22（`super(cell)` 之後、cell 為 null 時跳過）、`load` offset 18（只在 `GameClient.client` 分支，伺服器跑不到）。讀檔工廠 classID 40（`IsoObject$40`）呼叫 `<init>(IsoCell)`。
+
+**手術**：
+- `IsoButcherHook` 三個呼叫點 1:1 改道 `zombie/mdc/IsoObjectRemoveDefer.addToProcessIsoObject(IsoCell, IsoObject)`（receiver 前置；新 `IsoButcherHook` ClassPatch，三個方法各命中 1）。非主執行緒排進 W75 同一條 FIFO 佇列（op＝ADD），保留背景執行緒加入與移除的先後；主執行緒或 `mainThread` 還沒設定時照原版。佇列上限沿用 10 萬筆，超過照原版直接跑。
+- 排空（`ProcessIsoObject` 頭部、原版 `removeAll` 之前）依 FIFO 對每筆呼叫原版：ADD 呼叫 `addToProcessIsoObject`、REMOVE 呼叫 `addToProcessIsoObjectRemove`。排空期間原版加入頭部的 `beforeAdd` 不取消，否則背景「先加後移」時排空的加入會把後面那筆移除取消掉、物件留在清單（原版是被移除）。
+- **與原版循序結果相同**：同一 cell＋物件的最終狀態只取決於最後一次呼叫（加入＝留在清單；移除＝下一次 `removeAll` 後不在）。直接執行的原版呼叫一定晚於佇列裡同一物件的所有呼叫，所以先取消佇列裡同一 cell＋物件的相反操作，剩下的同類操作在排空時是冪等的。加入頭部 `beforeAdd` 取消待移除（W75 原案，現在也包括沒有改道的背景加入）；`IsoObject.removeFromWorld` 改道的直接分支（主執行緒，或 W75 off 時的背景執行緒）取消待加入——原版「背景加入後主執行緒移除」是下一輪 `removeAll` 拿掉、不會被 update，延後後若不取消會留在清單。
+- 開關各自獨立：`-Dmdc.isoObjectAddDefer`（本刀）、`-Dmdc.isoObjectRemoveDefer`（W75）、`-Dmdc.isoObjectGate`（W73）任一個 off 時另外兩個照常。W75 off 時背景移除照原版在背景執行緒直接跑，仍先取消佇列裡同一物件的待加入；這時取消與主執行緒排空同一筆有極小的競態（排空先拿到就照原版循序可能顛倒），和原版本來的背景寫入同等級，只有混合開關時才會發生。
+
+console（前 20 次延後與之後每 1000 次各一行附來源；首次生效行列出兩個開關；心跳併進 W75 那行，數值為累計）：
+
+```text
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] deferred add n=<n> thread=<執行緒> via=<呼叫來源>
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] 首次生效 remove=on add=on raw=<W75 property>/<W75-2 property>（…）
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] beat deferred=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> anomalies=<n> sources=[…] add=deferred:<n>,drained:<n>,cancelled:<n>,overflow:<n> addSources=[<次數>×<來源> | …]
+```
+
+`deferred`／`drained`／`cancelled`／`overflow`／`sources` 是移除（W75，欄位與之前相同）；`add=` 與 `addSources` 是加入；`pending`／`maxPending` 是兩者共用的佇列。
+
+**驗收**：上線後重啟大量載入 chunk 時，W73 心跳的 `offThreadAdds` 不再增加，W75 心跳 `add=deferred` 增加且 `deferred`＝`drained`＋`cancelled`（兩種操作各自）＋共用的 `pending`，`overflow=0`、`anomalies=0`。
+
+**kill switch**：`-Dmdc.isoObjectAddDefer=0|off` 純委派（原版在呼叫端執行緒直接跑），需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/IsoObjectRemoveDefer$Stats.class` 與 patched `zombie/iso/IsoButcherHook.class`，`IsoObjectRemoveDefer.class`、`IsoObjectRemoveDefer$Entry.class`、`PatchInfo.class` 換新（154 → 156 個 class）。
+
+**不處理**（全 jar 其他 `addToProcessIsoObject` 呼叫點，這次不改）：
+- 各類物件的 `addToWorld`：`IsoThumpable`、`IsoStove`、`IsoBarbecue`、`IsoCarBatteryCharger`、`IsoClothingDryer`、`IsoClothingWasher`、`IsoCombinationWasherDryer`、`IsoStackedWasherDryer`、`IsoCompost`、`IsoFeedingTrough`、`IsoFireplace`、`IsoGenerator`、`IsoTrap`。chunk 載入時由 `IsoChunk.doLoadGridsquare` 呼叫，一般在主執行緒（`ServerMap.preupdate → ServerCell.Load2 → RecalcAll2`）；`WorldStreamer` 的 Convert／SoftReset job 會在自己的執行緒直接呼叫 `doLoadGridsquare`，這條是非主執行緒，但觀測 0 次。
+- `IsoObject.addToWorld` 的冰箱分支與 `IsoObject.checkHaveElectricity`：都在 `!GameServer.server` 內，伺服器跑不到。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`IsoButcherHook` 恰三個呼叫點（列出方法）、`<init>(IsoCell)` 在 `super(cell)` 之後以 `aload_1`／`aload_0` 呼叫、讀檔工廠 `IsoObject$40` 建構 `IsoButcherHook(IsoCell)`、`IsoGridSquare.load` 呼叫 `factoryFromFileInput`；手術後三個方法除了改道，文字與 frames 不變，`IsoButcherHook` 其餘方法不變。helper 契約：`drain` 各恰一次呼叫原版加入與移除、兩個改道入口各恰一次呼叫原版、移除入口在呼叫原版之前取消待加入、`beforeAdd` 呼叫取消。W73、W75 既有守門維持綠燈。
+- `IsoObjectAddDeferTest`（`build.ps1` [9zr/10]，on、off、on＋W75 off＋W73 off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `IsoButcherHook(IsoCell)` 建構子與真 `IsoCell`，兩份 Set 換成記錄執行緒的 `HashSet` 子類、清單換成記錄每件被取出（update）次數的 `ArrayList` 子類，每個情境另以原版在主執行緒依呼叫時間循序跑一份比對。`mainThread` 為 null 與主執行緒建構照原版；背景加入 on 不碰集合與清單、排隊，下一輪在清單且被 update 一次；背景「先加後移」排空後不在清單、不被 update；背景移除後主執行緒加入留在清單；背景加入後主執行緒移除不在清單、不被 update（取消待加入）；取消只比對同一 cell＋物件；心跳欄位；off（原版負對照）背景執行緒直接讀寫集合與清單。三個 mutant（排空時不跳過取消、主執行緒移除不取消待加入、ADD／REMOVE 分兩條佇列，兩種排空順序各一個情境）都與原版不同。
+
+**退場**：官方把屠宰鉤的登記移到 `addToWorld`，或 `IsoCell` 這三份集合改成執行緒安全時撤刀。
 
 ---
 

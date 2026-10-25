@@ -135,6 +135,7 @@ $helperEntries = @(
     'zombie/pathfind/nativeCode/MdcPathfindProbe$Hist.class',
     'zombie/mdc/IsoObjectRemoveDefer.class',
     'zombie/mdc/IsoObjectRemoveDefer$Entry.class',
+    'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -665,6 +666,15 @@ java -Xverify:all "-Dmdc.isoObjectRemoveDefer=off" -cp "$R\work\out;$R\dist\java
 Assert-Ok "IsoObjectRemoveDeferTest（off，原版負對照）"
 java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectRemoveDeferTest on
 Assert-Ok "IsoObjectRemoveDeferTest（on，W73 off 時照樣運作）"
+
+Write-Host "[9zr/10] 非主執行緒的每幀更新清單加入排回主執行緒（W75-2）：真 IsoButcherHook(IsoCell) 建構子＋真 IsoCell，背景加入下一輪生效並被更新、背景先加後移不在清單、背景移除後主執行緒加入、背景加入後主執行緒移除（取消待加入）、主執行緒與 mainThread=null 照原版、原版負對照、三個 mutant..."
+# on＝出貨組態；off＝isoObjectAddDefer 純委派（原版負對照）；on-removeoff＝W75 off 時這刀照常。測試自驗 argv 與實際開關相符。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest on
+Assert-Ok "IsoObjectAddDeferTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.isoObjectAddDefer=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest off
+Assert-Ok "IsoObjectAddDeferTest（off，原版負對照）"
+java -Xverify:all "-Dmdc.isoObjectRemoveDefer=0" "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest on-removeoff
+Assert-Ok "IsoObjectAddDeferTest（on，W75 與 W73 off 時照常）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

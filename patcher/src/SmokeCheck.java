@@ -6919,12 +6919,77 @@ public final class SmokeCheck {
                         }));
         MethodNode begin = method(distJava, defer, "beginPass", "(L" + cell + ";)V");
         List<String> beginOrder = callOrder(begin);
-        failed += check("W75 helper 契約：beginPass 先 drain 再 W73 beginPass；drain 恰一次呼叫原版 addToProcessIsoObjectRemove；改道入口有原版直通與溢位兩條",
+        failed += check("W75／W75-2 helper 契約：beginPass 先 drain 再 W73 beginPass；drain 各恰一次呼叫原版 addToProcessIsoObjectRemove／addToProcessIsoObject；"
+                        + "兩個改道入口各恰一次呼叫原版（直通與溢位共用），移除入口在呼叫原版之前取消待加入",
                 beginOrder.indexOf(defer + ".drain") >= 0
                 && beginOrder.indexOf(defer + ".drain") < beginOrder.indexOf("zombie/mdc/IsoObjectUpdateGate.beginPass")
                 && countExactCalls(method(distJava, defer, "drain", "()V"), Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObjectRemove", objDesc) == 1
+                && countExactCalls(method(distJava, defer, "drain", "()V"), Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObject", objDesc) == 1
                 && countExactCalls(method(distJava, defer, "addToProcessIsoObjectRemove", cellObjDesc), Opcodes.INVOKEVIRTUAL, cell,
-                        "addToProcessIsoObjectRemove", objDesc) == 2);
+                        "addToProcessIsoObjectRemove", objDesc) == 1
+                && countExactCalls(method(distJava, defer, "addToProcessIsoObject", cellObjDesc), Opcodes.INVOKEVIRTUAL, cell,
+                        "addToProcessIsoObject", objDesc) == 1
+                && callOrder(method(distJava, defer, "addToProcessIsoObjectRemove", cellObjDesc)).indexOf(defer + ".cancel")
+                        < callOrder(method(distJava, defer, "addToProcessIsoObjectRemove", cellObjDesc)).indexOf(cell + ".addToProcessIsoObjectRemove")
+                && countExactCalls(method(distJava, defer, "beforeAdd", cellObjDesc), Opcodes.INVOKESTATIC, defer, "cancel", "(L" + cell + ";L" + obj + ";Z)V") == 1);
+        failed += checkButcherHookAddDefer(jar, distJava);
+        return failed;
+    }
+
+    /**
+     * W75-2：IsoButcherHook 的 addToProcessIsoObject 排回主執行緒（docs/patches.md 2ck）。存在理由：IsoButcherHook 恰三個
+     * invokevirtual IsoCell.addToProcessIsoObject（兩個建構子與 load），其中 &lt;init&gt;(IsoCell) 是 IsoObject 讀檔工廠（classID 40）
+     * 呼叫的建構子；工廠在 IsoGridSquare.load 裡呼叫（LoadChunk 執行緒）。TIS 改動時紅＝重評。
+     */
+    static int checkButcherHookAddDefer(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String hook = "zombie/iso/IsoButcherHook";
+        String cell = "zombie/iso/IsoCell";
+        String obj = "zombie/iso/IsoObject";
+        String defer = "zombie/mdc/IsoObjectRemoveDefer";
+        String objDesc = "(L" + obj + ";)V";
+        String[][] sites = {{"<init>", "(Lzombie/iso/IsoGridSquare;)V"}, {"<init>", "(L" + cell + ";)V"}, {"load", "(Ljava/nio/ByteBuffer;IZ)V"}};
+        List<String> callers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObject", objDesc);
+        long hookCallers = callers.stream().filter(c -> c.startsWith(hook + ".")).count();
+        failed += check("W75-2 vanilla 前提：IsoButcherHook 恰三個 addToProcessIsoObject 呼叫點（兩個建構子、load 的 GameClient.client 分支），"
+                        + "全 jar 共 " + callers.size() + " 個",
+                hookCallers == 3
+                && callers.contains(hook + ".<init>(Lzombie/iso/IsoGridSquare;)V")
+                && callers.contains(hook + ".<init>(L" + cell + ";)V")
+                && callers.contains(hook + ".load(Ljava/nio/ByteBuffer;IZ)V"));
+        MethodNode vCellCtor = methodFromJar(jar, hook, "<init>", "(L" + cell + ";)V");
+        AbstractInsnNode ctorAdd = firstCall(vCellCtor, Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObject", objDesc);
+        failed += check("W75-2 vanilla 前提：<init>(IsoCell) 在 super(cell) 之後以 aload_1／aload_0 呼叫 addToProcessIsoObject（cell 為 null 時跳過）",
+                ctorAdd != null && prevReal(ctorAdd) instanceof VarInsnNode a0 && a0.var == 0
+                && prevReal(prevReal(ctorAdd)) instanceof VarInsnNode a1 && a1.var == 1
+                && firstCallIndex(vCellCtor, Opcodes.INVOKESPECIAL, obj, "<init>", "(L" + cell + ";)V")
+                        < firstCallIndex(vCellCtor, Opcodes.INVOKEVIRTUAL, cell, "addToProcessIsoObject", objDesc));
+        int hookFactory = 0;
+        for (MethodNode m : classNodeFromJar(jar, "zombie/iso/IsoObject$40").methods) {
+            hookFactory += countExactCalls(m, Opcodes.INVOKESPECIAL, hook, "<init>", "(L" + cell + ";)V");
+        }
+        failed += check("W75-2 vanilla 前提：讀檔工廠 IsoObject$40 建構 IsoButcherHook(IsoCell)；IsoGridSquare.load 呼叫 factoryFromFileInput",
+                hookFactory == 1
+                && countExactCalls(methodFromJar(jar, "zombie/iso/IsoGridSquare", "load", "(Ljava/nio/ByteBuffer;IZ)V"), Opcodes.INVOKESTATIC, obj,
+                        "factoryFromFileInput", "(L" + cell + ";Ljava/nio/ByteBuffer;)L" + obj + ";") >= 1);
+        boolean same = true;
+        for (String[] s : sites) {
+            same &= methodText(methodFromJar(jar, hook, s[0], s[1]))
+                    .replace("INVOKEVIRTUAL " + cell + ".addToProcessIsoObject " + objDesc,
+                            "INVOKESTATIC " + defer + ".addToProcessIsoObject (L" + cell + ";L" + obj + ";)V")
+                    .equals(methodText(method(distJava, hook, s[0], s[1])));
+        }
+        java.util.Set<String> targets = new java.util.HashSet<>();
+        for (String[] s : sites) targets.add(s[0] + s[1]);
+        boolean othersSame = classNodeFromJar(jar, hook).methods.stream().filter(m -> !targets.contains(m.name + m.desc)).allMatch(m -> {
+            try {
+                return methodText(m).equals(methodText(method(distJava, hook, m.name, m.desc)));
+            } catch (Exception e) {
+                return false;
+            }
+        });
+        failed += check("W75-2 手術後：IsoButcherHook 三個方法除了 addToProcessIsoObject 同形改道 IsoObjectRemoveDefer，文字與 frames 不變；其餘方法不變",
+                same && othersSame);
         return failed;
     }
 

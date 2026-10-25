@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 74 個 patched class、217 個命中點、80 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 75 個 patched class、220 個命中點、81 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -69,6 +69,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W15 主迴圈看門狗（[2ac](docs/patches.md#2ac)） | 凍結當下沒有任何 stack 可查。 | 純觀測：超過 5 秒沒有新的一幀就對主執行緒拍 stack。結果顯示剩下的凍結都來自同步的 `QueuedSaveAll`。 | 建議 [#100925](https://theindiestone.com/forums/topic/100925/) |
 | W70 Bandit Raid 劇情無限迴圈（[2cf](docs/patches.md#2cf)） | 死亡倖存者劇情 Bandit Raid 的內層放屍體迴圈重用外層的計數器，沒探索過、50–100 間房的建築抽到時外層永遠跑不完：主執行緒卡在載入那個 cell，一直生殭屍和屍體直到 heap 用盡（本服加新地圖後凍結 10 分鐘，關機存檔存下數萬隻殭屍和大量屍體）。 | 輪數上限改成 4（原版迴圈會結束的最大值），這些建築改照 40–49 間房的方式跑；更小的建築行為不變。 | 未回報 |
 | W75 非主執行緒的每幀更新清單移除（[2cj](docs/patches.md#2cj)） | 拖車裡有動物的車在 `ServerPlayersVehicles` 執行緒載入時，`IsoObject.removeFromWorld` 在那條執行緒呼叫 `IsoCell.addToProcessIsoObjectRemove`，讀寫主執行緒每幀在 `ProcessIsoObject` 改動的兩個 `HashSet`（本服 50 分鐘 20 次）。 | 把這些呼叫排隊，下一次 `ProcessIsoObject` 頭部在主執行緒、原版移除步驟之前執行，移除在同一輪生效；主執行緒加回同一物件時取消待移除，與原版加入時的行為相同。 | 未回報 |
+| W75-2 非主執行緒的每幀更新清單加入（[2ck](docs/patches.md#2ck)） | `LoadChunk` 執行緒讀 chunk 檔時，屠宰鉤的建構子在那條執行緒呼叫 `IsoCell.addToProcessIsoObject`，寫入主執行緒每幀使用的清單與集合（本服重啟後 50 分鐘 81 次）。 | 與 W75 共用同一條 FIFO 佇列（加入與移除保留先後），下一次 `ProcessIsoObject` 頭部在主執行緒執行；直接移除同一物件時取消待加入，任何先後順序的結果都與原版相同。 | 未回報 |
 
 ### 資料完整性：chunk、動物與車輛遺失
 

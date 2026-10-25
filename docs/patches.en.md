@@ -4655,7 +4655,8 @@ call to `addToProcessIsoObjectRemove` in the jar is in `IsoObject.removeFromWorl
   removal takes effect in the same pass, matching vanilla after a background call.
 - Head of `addToProcessIsoObject` (W73's `touchAdd` now goes through `IsoObjectRemoveDefer.beforeAdd(cell, object)`, a HeadCall with slots 0 and
   1): calls W73's `touchAdd`, then drops queued removals of the same cell and object, mirroring vanilla's `processIsoObjectRemove.remove(object)`,
-  so "background remove, then main-thread add" ends the same as vanilla. Only main-thread adds cancel; off-thread adds are out of scope (observed 0).
+  so "background remove, then main-thread add" ends the same as vanilla. Since W75-2 ([2ck](#2ck)) every directly executed add cancels (main thread,
+  or a background thread on a call site that is not redirected or whose switch is off); only the adds the drain itself makes do not.
 - A head call rather than redirecting the `addToProcessIsoObject` call sites: those are spread over a dozen classes, and Lua (for example
   `MDFX_ChargerIdleGuard` in MinidoracatFixesFor42) calls this public method directly; only a head call covers all of them.
 - Independent of W73: with `-Dmdc.isoObjectGate=0`, W73's `beginPass` / `touchAdd` return at once and W75 still drains and cancels.
@@ -4698,6 +4699,87 @@ heartbeat every 5 minutes, cumulative values):
   `removeAll`, drain on the background thread) differs from vanilla in at least one scenario.
 
 **Retirement**: remove the patch when TIS stops calling `removeFromWorld` from background vehicle loading, or makes these `IsoCell` sets
+thread-safe.
+
+---
+
+<a id="2ck"></a>
+## 2ck. Off-main-thread per-frame update list adds moved to the main thread (W75-2, server, default on)
+
+**Symptom** (2026-10-26 production, W73 observation): from the 00:06 start to 00:56, `offThreadAdds=81`, and the first 20 lines all have the same
+source: the `LoadChunk` thread builds a butcher hook while reading a chunk file, `IsoChunk.LoadFromDiskOrBuffer → IsoGridSquare.load →
+IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`. The previous
+session (22:16 start) had 0; it clusters in the mass chunk loading after a restart. Vanilla writes `processIsoObjectRemove`, `processIsoObjectSet`
+(HashSet) and `processIsoObject` (ArrayList) on the background thread while the main thread iterates the list and runs `removeAll` / `clear` in
+`ProcessIsoObject`.
+
+**Vanilla** (javap against the 42.21.0 jar `e1a69eb7`): `IsoButcherHook` has exactly three `invokevirtual IsoCell.addToProcessIsoObject` —
+`<init>(IsoGridSquare)` offset 37, `<init>(IsoCell)` offset 22 (after `super(cell)`, skipped when cell is null), and `load` offset 18 (only in
+the `GameClient.client` branch, unreachable on the server). The load factory for classID 40 (`IsoObject$40`) calls `<init>(IsoCell)`.
+
+**Surgery**:
+- The three call sites in `IsoButcherHook` are redirected 1:1 to `zombie/mdc/IsoObjectRemoveDefer.addToProcessIsoObject(IsoCell, IsoObject)`
+  (receiver first; new `IsoButcherHook` ClassPatch, 1 hit per method). Off the main thread the call goes into the same FIFO queue as W75
+  (op = ADD), keeping the order of background adds and removes; on the main thread, or while `mainThread` is not set, it runs vanilla. The
+  100,000-entry limit is shared; above it the call runs vanilla directly.
+- The drain (head of `ProcessIsoObject`, before vanilla's `removeAll`) calls vanilla for each entry in FIFO order: ADD calls
+  `addToProcessIsoObject`, REMOVE calls `addToProcessIsoObjectRemove`. During the drain, `beforeAdd` at the head of vanilla's add does not cancel;
+  otherwise, for a background "add then remove", the drained add would cancel the queued remove and leave the object listed (vanilla removes it).
+- **Same result as vanilla run in call order**: the final state of a cell and object depends only on the last call (add = listed; remove = gone
+  after the next `removeAll`). A directly executed vanilla call is always later than every queued call for the same object, so it first cancels
+  the opposite queued operations of the same cell and object; the remaining same-kind entries are idempotent when drained. `beforeAdd` at the head
+  of the add cancels queued removals (the W75 rule, now also for background adds on call sites that are not redirected); the direct branch of the
+  `IsoObject.removeFromWorld` redirect (main thread, or a background thread with W75 off) cancels queued adds — vanilla's "background add, then
+  main-thread remove" is removed by the next `removeAll` and never updated, and without cancelling it the deferred add would stay listed.
+- Switches are independent: `-Dmdc.isoObjectAddDefer` (this patch), `-Dmdc.isoObjectRemoveDefer` (W75) and `-Dmdc.isoObjectGate` (W73); turning
+  one off leaves the other two working. With W75 off, a background remove still runs vanilla on the background thread and first cancels queued
+  adds of the same object; that cancel can race with the main thread draining the same entry (if the drain wins, the order can flip), which is the
+  same class of race as vanilla's own background writes and only happens with mixed switches.
+
+Console (one line with the source for each of the first 20 deferrals and every 1000th; the first-use line lists both switches; the heartbeat is
+merged into the W75 line, cumulative values):
+
+```text
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] deferred add n=<n> thread=<thread> via=<caller chain>
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] 首次生效 remove=on add=on raw=<W75 property>/<W75-2 property>（…）
+[MinidoracatJavaPatch][IsoObjectRemoveDefer] beat deferred=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> anomalies=<n> sources=[…] add=deferred:<n>,drained:<n>,cancelled:<n>,overflow:<n> addSources=[<count>×<caller chain> | …]
+```
+
+`deferred` / `drained` / `cancelled` / `overflow` / `sources` are removals (W75, same fields as before); `add=` and `addSources` are adds;
+`pending` / `maxPending` are the shared queue.
+
+**Acceptance**: during the mass chunk loading after a restart, W73's `offThreadAdds` stops growing, W75's `add=deferred` grows, `deferred`
+equals `drained` + `cancelled` (per operation) plus the shared `pending`, with `overflow=0` and `anomalies=0`.
+
+**Kill switch**: `-Dmdc.isoObjectAddDefer=0|off` delegates directly (vanilla runs on the calling thread); restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/IsoObjectRemoveDefer$Stats.class` and the patched `zombie/iso/IsoButcherHook.class`, and replaces
+`IsoObjectRemoveDefer.class`, `IsoObjectRemoveDefer$Entry.class` and `PatchInfo.class` (154 → 156 classes).
+
+**Not handled** (the other `addToProcessIsoObject` call sites in the jar are unchanged):
+- `addToWorld` of `IsoThumpable`, `IsoStove`, `IsoBarbecue`, `IsoCarBatteryCharger`, `IsoClothingDryer`, `IsoClothingWasher`,
+  `IsoCombinationWasherDryer`, `IsoStackedWasherDryer`, `IsoCompost`, `IsoFeedingTrough`, `IsoFireplace`, `IsoGenerator` and `IsoTrap`. During
+  chunk loading `IsoChunk.doLoadGridsquare` calls them, normally on the main thread (`ServerMap.preupdate → ServerCell.Load2 → RecalcAll2`);
+  `WorldStreamer` Convert/SoftReset jobs call `doLoadGridsquare` on their own thread, which is off the main thread, but 0 such calls were observed.
+- The fridge branch of `IsoObject.addToWorld` and `IsoObject.checkHaveElectricity`: both inside `!GameServer.server`, unreachable on the server.
+
+**Checks**:
+- SmokeCheck: reasons to exist — `IsoButcherHook` has exactly three call sites (methods listed), `<init>(IsoCell)` calls after `super(cell)` with
+  `aload_1` / `aload_0`, the load factory `IsoObject$40` builds `IsoButcherHook(IsoCell)`, and `IsoGridSquare.load` calls `factoryFromFileInput`;
+  after surgery the three methods are identical to vanilla (frames included) except the redirect, and the other `IsoButcherHook` methods are
+  unchanged. Helper contract: `drain` calls vanilla add and remove once each, both redirect entries call vanilla once each, the remove entry cancels
+  queued adds before calling vanilla, and `beforeAdd` calls the cancel. The existing W73 and W75 checks stay green.
+- `IsoObjectAddDeferTest` (`build.ps1` [9zr/10], one JVM each for on, off, and on with W75 and W73 off, checking that argv matches the actual
+  switches): runs the patched `IsoButcherHook(IsoCell)` constructor and the real `IsoCell` from dist, with both sets replaced by a `HashSet`
+  subclass that records the touching thread and the list by an `ArrayList` subclass that counts how often each object is fetched (updated); each
+  scenario is also run with vanilla on the main thread in call order and compared. `mainThread` null and main-thread construction run vanilla; a
+  background add in on mode touches no set or list and is queued, then is listed and updated once in the next pass; a background "add then remove"
+  is not listed and not updated after the drain; "background remove, then main-thread add" stays listed; "background add, then main-thread
+  remove" is not listed and not updated (queued add cancelled); cancellation only matches the same cell and object; heartbeat fields; off
+  (vanilla control) reads and writes the sets and list on the background thread. Three mutants (no skip of cancellation during the drain, main-thread
+  remove without cancelling queued adds, ADD/REMOVE in two queues, one scenario per drain order) all differ from vanilla.
+
+**Retirement**: remove the patch when TIS moves the butcher hook registration into `addToWorld`, or makes these three `IsoCell` collections
 thread-safe.
 
 ---

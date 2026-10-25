@@ -1308,6 +1308,19 @@ public final class PatchConfig {
                 "addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V", isoRemoveDefer, "addToProcessIsoObjectRemove"));
         objRemove.expectedHits = 1;
         patches.add(isoObjectPatch);
+        // W75-2：IsoButcherHook 三個 invokevirtual IsoCell.addToProcessIsoObject 同形改道（receiver 前置；docs/patches.md 2ck）。
+        // 實測 LoadChunk 執行緒讀檔時建構屠宰鉤（IsoGridSquare.load → factoryFromFileInput → IsoButcherHook.<init>(IsoCell)）
+        // 寫清單；非主執行緒排進 W75 同一條 FIFO 佇列（op＝ADD），主執行緒照原版。load 那處只在 GameClient.client 分支，
+        // 伺服器跑不到，一併改道保持全類別一致。-Dmdc.isoObjectAddDefer 預設 on，0|off 純委派；與 W75、W73 開關各自獨立。
+        Patcher.ClassPatch butcherHook = new Patcher.ClassPatch("zombie/iso/IsoButcherHook");
+        for (String[] m : new String[][]{{"<init>", "(Lzombie/iso/IsoGridSquare;)V"}, {"<init>", "(Lzombie/iso/IsoCell;)V"},
+                {"load", "(Ljava/nio/ByteBuffer;IZ)V"}}) {
+            Patcher.MethodOps hookAdd = butcherHook.method(m[0], m[1]);
+            hookAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell",
+                    "addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V", isoRemoveDefer, "addToProcessIsoObject"));
+            hookAdd.expectedHits = 1;
+        }
+        patches.add(butcherHook);
 
         // W35：使用中玩家索引（docs/patches.md 2ax）。UsingPlayerUpdateSystem.update 每幀全掃 IsoObject
         // bucket 只為清離開 10 格的 usingPlayer（晚峰 JFR 5.9%）。追蹤 usingPlayer 的三個寫入點
