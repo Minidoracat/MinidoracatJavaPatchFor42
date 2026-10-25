@@ -4708,8 +4708,9 @@ thread-safe.
 
 **Symptom** (2026-10-26 production, W73 observation): from the 00:06 start to 00:56, `offThreadAdds=81`, and the first 20 lines all have the same
 source: the `LoadChunk` thread builds a butcher hook while reading a chunk file, `IsoChunk.LoadFromDiskOrBuffer → IsoGridSquare.load →
-IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`. The previous
-session (22:16 start) had 0; it clusters in the mass chunk loading after a restart. Vanilla writes `processIsoObjectRemove`, `processIsoObjectSet`
+IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`. By 01:14 it had
+reached 110: not only after startup, it keeps happening whenever players load chunks with butcher hooks; the previous session (22:16 start) had 0.
+Vanilla writes `processIsoObjectRemove`, `processIsoObjectSet`
 (HashSet) and `processIsoObject` (ArrayList) on the background thread while the main thread iterates the list and runs `removeAll` / `clear` in
 `ProcessIsoObject`.
 
@@ -4748,7 +4749,7 @@ merged into the W75 line, cumulative values):
 `deferred` / `drained` / `cancelled` / `overflow` / `sources` are removals (W75, same fields as before); `add=` and `addSources` are adds;
 `pending` / `maxPending` are the shared queue.
 
-**Acceptance**: during the mass chunk loading after a restart, W73's `offThreadAdds` stops growing, W75's `add=deferred` grows, `deferred`
+**Acceptance**: after it goes live, W73's `offThreadAdds` stops growing, W75's `add=deferred` grows, `deferred`
 equals `drained` + `cancelled` (per operation) plus the shared `pending`, with `overflow=0` and `anomalies=0`.
 
 **Kill switch**: `-Dmdc.isoObjectAddDefer=0|off` delegates directly (vanilla runs on the calling thread); restart required.

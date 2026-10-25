@@ -4346,7 +4346,7 @@ console（前 20 次延後與之後每 1000 次各一行附來源；第一幀一
 <a id="2ck"></a>
 ## 2ck. 非主執行緒的每幀更新清單加入排回主執行緒（W75-2，server，預設 on）
 
-**症狀**（2026-10-26 正式服，W73 觀測）：00:06 開服到 00:56 `offThreadAdds=81`，前 20 行來源全是同一條：`LoadChunk` 執行緒讀 chunk 檔時建構屠宰鉤，`IsoChunk.LoadFromDiskOrBuffer → IsoGridSquare.load → IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`。前一場（22:16 開服）整場 0 次，集中在重啟後大量載入 chunk 時。原版在背景執行緒寫 `processIsoObjectRemove`、`processIsoObjectSet`（HashSet）與 `processIsoObject`（ArrayList），主執行緒同時在 `ProcessIsoObject` 走訪清單、`removeAll`、`clear`。
+**症狀**（2026-10-26 正式服，W73 觀測）：00:06 開服到 00:56 `offThreadAdds=81`，前 20 行來源全是同一條：`LoadChunk` 執行緒讀 chunk 檔時建構屠宰鉤，`IsoChunk.LoadFromDiskOrBuffer → IsoGridSquare.load → IsoObject.factoryFromFileInput → IsoObject$40.InstantiateObject → IsoButcherHook.<init>(IsoCell) → IsoCell.addToProcessIsoObject`。到 01:14 累計 110 次：不只開服後，玩家走動載入有屠宰鉤的 chunk 時也持續出現；前一場（22:16 開服）整場 0 次。原版在背景執行緒寫 `processIsoObjectRemove`、`processIsoObjectSet`（HashSet）與 `processIsoObject`（ArrayList），主執行緒同時在 `ProcessIsoObject` 走訪清單、`removeAll`、`clear`。
 
 **原版**（javap 對 42.21.0 jar `e1a69eb7`）：`IsoButcherHook` 恰三個 `invokevirtual IsoCell.addToProcessIsoObject`——`<init>(IsoGridSquare)` offset 37、`<init>(IsoCell)` offset 22（`super(cell)` 之後、cell 為 null 時跳過）、`load` offset 18（只在 `GameClient.client` 分支，伺服器跑不到）。讀檔工廠 classID 40（`IsoObject$40`）呼叫 `<init>(IsoCell)`。
 
@@ -4366,7 +4366,7 @@ console（前 20 次延後與之後每 1000 次各一行附來源；首次生效
 
 `deferred`／`drained`／`cancelled`／`overflow`／`sources` 是移除（W75，欄位與之前相同）；`add=` 與 `addSources` 是加入；`pending`／`maxPending` 是兩者共用的佇列。
 
-**驗收**：上線後重啟大量載入 chunk 時，W73 心跳的 `offThreadAdds` 不再增加，W75 心跳 `add=deferred` 增加且 `deferred`＝`drained`＋`cancelled`（兩種操作各自）＋共用的 `pending`，`overflow=0`、`anomalies=0`。
+**驗收**：上線後 W73 心跳的 `offThreadAdds` 不再增加，W75 心跳 `add=deferred` 增加且 `deferred`＝`drained`＋`cancelled`（兩種操作各自）＋共用的 `pending`，`overflow=0`、`anomalies=0`。
 
 **kill switch**：`-Dmdc.isoObjectAddDefer=0|off` 純委派（原版在呼叫端執行緒直接跑），需重啟。
 
