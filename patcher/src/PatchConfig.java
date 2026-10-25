@@ -1449,6 +1449,35 @@ public final class PatchConfig {
         banditRaidRandomize.expectedHits = 1;
         patches.add(banditRaid);
 
+        // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
+        // PathfindNativeThread 正式服 99–100% CPU、dump 60/60 在 native findPath。純觀測、同形改道到
+        // zombie/pathfind/nativeCode/MdcPathfindProbe（同 package 才讀得到 package-private 的請求欄位與任務類別）：
+        // updateThread 的 8 個 ConcurrentLinkedQueue.poll（javap offset 7／54／68／96／110／140／154／182，計
+        // chunk／格子／載具任務）＋唯一 INVOKESTATIC PathfindNative.update()V（offset 192，輪次邊界與每分鐘一行）；
+        // findPath(PathFindRequest) 唯一 PathfindNative.findPath（offset 20，計時、成敗、請求者、排隊時間）；
+        // PathRequestTask.execute 唯一 addRequest（offset 11，入隊時間）。回傳值、例外、呼叫次數與順序同原版。
+        // -Dmdc.pathfindProbe=0|off 只委派。
+        String pfProbe = "zombie/pathfind/nativeCode/MdcPathfindProbe";
+        String pfNative = "zombie/pathfind/nativeCode/PathfindNative";
+        String pfRequest = "Lzombie/pathfind/nativeCode/PathFindRequest;";
+        Patcher.ClassPatch pfThread = new Patcher.ClassPatch("zombie/pathfind/nativeCode/PathfindNativeThread");
+        Patcher.MethodOps pfUpdate = pfThread.method("updateThread", "()V");
+        pfUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/concurrent/ConcurrentLinkedQueue",
+                "poll", "()Ljava/lang/Object;", pfProbe, "poll"));
+        pfUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, pfNative, "update", "()V", pfProbe, "update"));
+        pfUpdate.expectedHits = 9;
+        Patcher.MethodOps pfFind = pfThread.method("findPath", "(" + pfRequest + ")V");
+        pfFind.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, pfNative, "findPath",
+                "(" + pfRequest + "Ljava/nio/ByteBuffer;Z)I", pfProbe, "findPath"));
+        pfFind.expectedHits = 1;
+        patches.add(pfThread);
+        Patcher.ClassPatch pfTask = new Patcher.ClassPatch("zombie/pathfind/nativeCode/PathRequestTask");
+        Patcher.MethodOps pfExecute = pfTask.method("execute", "()V");
+        pfExecute.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/pathfind/nativeCode/PathfindNativeThread",
+                "addRequest", "(" + pfRequest + "I)V", pfProbe, "addRequest"));
+        pfExecute.expectedHits = 1;
+        patches.add(pfTask);
+
         return patches;
     }
 

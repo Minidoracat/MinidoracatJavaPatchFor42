@@ -3816,6 +3816,70 @@ public final class SmokeCheck {
         failed += check("W70 helper 契約：floor 內恰一次 Math.floor",
                 countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
 
+        // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
+        // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
+        // 之後最多 2 個請求（iconst_2／istore_2 緊接 update），Sync 週期 50 ms；findPath(PathFindRequest) 是唯一 native
+        // 尋路入口，PathRequestTask.execute 是唯一把請求放進優先佇列的地方。任一前提變了，beat 的輪次與重建分組要重新解讀。
+        String w74Pkg = "zombie/pathfind/nativeCode/";
+        String w74Thread = w74Pkg + "PathfindNativeThread";
+        String w74Task = w74Pkg + "PathRequestTask";
+        String w74Native = w74Pkg + "PathfindNative";
+        String w74Probe = w74Pkg + "MdcPathfindProbe";
+        String w74Req = "L" + w74Pkg + "PathFindRequest;";
+        String w74Clq = "java/util/concurrent/ConcurrentLinkedQueue";
+        String w74FindDesc = "(" + w74Req + "Ljava/nio/ByteBuffer;Z)I";
+        String w74AddDesc = "(" + w74Req + "I)V";
+        MethodNode w74UpdateVanilla = methodFromJar(jar, w74Thread, "updateThread", "()V");
+        MethodNode w74FindVanilla = methodFromJar(jar, w74Thread, "findPath", "(" + w74Req + ")V");
+        MethodNode w74ExecVanilla = methodFromJar(jar, w74Task, "execute", "()V");
+        AbstractInsnNode w74UpdateCall = firstCall(w74UpdateVanilla, Opcodes.INVOKESTATIC, w74Native, "update", "()V");
+        AbstractInsnNode w74Two = w74UpdateCall == null ? null : nextReal(w74UpdateCall);
+        AbstractInsnNode w74Store = w74Two == null ? null : nextReal(w74Two);
+        failed += check("W74 vanilla 前提：updateThread 恰 8 個 ConcurrentLinkedQueue.poll、1 個 PathfindNative.update 緊接 requestsPerUpdate = 2"
+                        + "（iconst_2／istore），每輪恰 1 個 RequestQueue.isEmpty 迴圈",
+                countExactCalls(w74UpdateVanilla, Opcodes.INVOKEVIRTUAL, w74Clq, "poll", "()Ljava/lang/Object;") == 8
+                        && countExactCalls(w74UpdateVanilla, Opcodes.INVOKESTATIC, w74Native, "update", "()V") == 1
+                        && w74Two != null && w74Two.getOpcode() == Opcodes.ICONST_2
+                        && w74Store instanceof VarInsnNode w74S && w74S.getOpcode() == Opcodes.ISTORE
+                        && countExactCalls(w74UpdateVanilla, Opcodes.INVOKEVIRTUAL, w74Pkg + "RequestQueue", "isEmpty", "()Z") == 1);
+        failed += check("W74 vanilla 前提：Sync.endFrame 週期 50,000,000 ns（20 輪/s）",
+                countLongConst(methodFromJar(jar, w74Thread + "$Sync", "endFrame", "()V"), 50_000_000L) == 1);
+        failed += check("W74 vanilla 前提：findPath(PathFindRequest) 恰 1 個 PathfindNative.findPath；PathRequestTask.execute 恰 1 個 addRequest",
+                countExactCalls(w74FindVanilla, Opcodes.INVOKEVIRTUAL, w74Native, "findPath", w74FindDesc) == 1
+                        && countExactCalls(w74ExecVanilla, Opcodes.INVOKEVIRTUAL, w74Thread, "addRequest", w74AddDesc) == 1);
+        String w74PollVanilla = "INVOKEVIRTUAL " + w74Clq + ".poll ()Ljava/lang/Object;";
+        String w74PollProbe = "INVOKESTATIC " + w74Probe + ".poll (L" + w74Clq + ";)Ljava/lang/Object;";
+        Set<String> w74Touched = Set.of(w74Thread + ".updateThread()V", w74Thread + ".findPath(" + w74Req + ")V",
+                w74Task + ".execute()V");
+        boolean w74OthersSame = true;
+        for (String w74Cls : List.of(w74Thread, w74Task)) {
+            for (MethodNode w74M : classNodeFromJar(jar, w74Cls).methods) {
+                if (!w74Touched.contains(w74Cls + "." + w74M.name + w74M.desc)) {
+                    w74OthersSame &= methodText(w74M).equals(methodText(method(distJava, w74Cls, w74M.name, w74M.desc)));
+                }
+            }
+        }
+        failed += check("W74 手術後：updateThread 8 個 poll 與 update、findPath 的 native findPath、execute 的 addRequest 同形改道 MdcPathfindProbe，"
+                        + "其餘指令與 frames 保留；兩個 class 其餘方法不變",
+                methodText(w74UpdateVanilla).replace(w74PollVanilla, w74PollProbe)
+                        .replace("INVOKESTATIC " + w74Native + ".update ()V", "INVOKESTATIC " + w74Probe + ".update ()V")
+                        .equals(methodText(method(distJava, w74Thread, "updateThread", "()V")))
+                        && methodText(w74FindVanilla).replace("INVOKEVIRTUAL " + w74Native + ".findPath " + w74FindDesc,
+                                "INVOKESTATIC " + w74Probe + ".findPath (L" + w74Native + ";" + w74FindDesc.substring(1))
+                        .equals(methodText(method(distJava, w74Thread, "findPath", "(" + w74Req + ")V")))
+                        && methodText(w74ExecVanilla).replace("INVOKEVIRTUAL " + w74Thread + ".addRequest " + w74AddDesc,
+                                "INVOKESTATIC " + w74Probe + ".addRequest (L" + w74Thread + ";" + w74AddDesc.substring(1))
+                        .equals(methodText(method(distJava, w74Task, "execute", "()V")))
+                        && w74OthersSame);
+        failed += check("W74 helper 契約：poll／update／addRequest 各恰一次呼叫原版，findPath 的 on／off 兩條路各一次",
+                countExactCalls(method(distJava, w74Probe, "poll", "(L" + w74Clq + ";)Ljava/lang/Object;"),
+                        Opcodes.INVOKEVIRTUAL, w74Clq, "poll", "()Ljava/lang/Object;") == 1
+                        && countExactCalls(method(distJava, w74Probe, "update", "()V"), Opcodes.INVOKESTATIC, w74Native, "update", "()V") == 1
+                        && countExactCalls(method(distJava, w74Probe, "findPath", "(L" + w74Native + ";" + w74FindDesc.substring(1)),
+                                Opcodes.INVOKEVIRTUAL, w74Native, "findPath", w74FindDesc) == 2
+                        && countExactCalls(method(distJava, w74Probe, "addRequest", "(L" + w74Thread + ";" + w74AddDesc.substring(1)),
+                                Opcodes.INVOKEVIRTUAL, w74Thread, "addRequest", w74AddDesc) == 1);
+
         if (failed > 0) {
             System.exit(1);
         }

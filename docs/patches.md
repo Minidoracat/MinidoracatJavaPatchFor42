@@ -4174,6 +4174,51 @@ console（每攔下一次一行，前 50 次之後每 1000 次一行）：
 
 **退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
 
+<a id="2ci"></a>
+## 2ci. 尋路執行緒觀測（W74，server，預設 on，純觀測）
+
+**現象**（2026-10-25 正式服，45–48 人）：`PathfindNativeThread` 99–100% CPU（開服 44 分鐘平均 93%），60 份 thread dump 全部停在 `PathfindNative.findPath ← PathfindNativeThread.findPath ← updateThread`。它是獨立執行緒，主執行緒不會等它（只經 `ConcurrentLinkedQueue` 送請求、收結果），所以不拉低 FPS；滿載的代價是尋路排隊，殭屍與動物在等結果時原地不動。
+
+**原版結構**（javap 對 42.21.0 jar；native 以 objdump 對 42.21.0 `libPZPathFind64.so`）：
+- `PathfindNativeThread.runInner` 每輪由 `Sync` 控在 50 ms（`endFrame` 的 `50000000L`）；`updateThread` 依序取空 chunk（每輪最多 10 個 `ChunkUpdateTask`）、格子、載具、請求四個任務佇列（8 個 `ConcurrentLinkedQueue.poll`，offset 7／54／68／96／110／140／154／182），呼叫 `PathfindNative.update()`（offset 192），再以 `requestsPerUpdate = 2`（offset 195 `iconst_2`）最多處理 2 個未取消的請求。吞吐上限是每秒 40 個請求；CPU 吃滿時每個請求平均至少 25 ms。
+- 請求依 `PathRequestTask.init` 分三個佇列：玩家、有目標的殭屍、其他（所有動物與沒目標的殭屍），`RequestQueue.removeFirst` 嚴格依此優先。
+- native 端 `updateChunk`／`removeChunk`／`updateSquare`／`addVehicle`／`removeVehicle`／`teleportVehicle` 六個 JNI 都會設起一個全域旗標；`findPath` 一進門看到旗標就釋放全部可見圖、`createVisibilityGraphs`（含 `createVehicleClusters`）、遞增 `HLAStar::ModificationCount`（每個 chunk level 的高階區域在之後的搜尋中重算）。所以每輪只要有任何世界變動任務，下一次 native `findPath` 就要付一次全域重建。重建佔每次尋路多少，在這刀之前量不到。
+
+**手術**（全部同形 1:1 改道到 `zombie/pathfind/nativeCode/MdcPathfindProbe`，receiver 前置；helper 放在目標 package，才讀得到 package-private 的請求欄位與任務類別）：
+- `PathfindNativeThread.updateThread()V`：8 個 `INVOKEVIRTUAL ConcurrentLinkedQueue.poll` → `poll(ConcurrentLinkedQueue)`，依取出的任務類別計 chunk（更新與移除）、格子、載具；`INVOKESTATIC PathfindNative.update()V` → `update()`，先結算這一輪再呼叫原版。`expectedHits` 9。
+- `PathfindNativeThread.findPath(PathFindRequest)V`：offset 20 的 `INVOKEVIRTUAL PathfindNative.findPath(PathFindRequest,ByteBuffer,Z)I` → `findPath(PathfindNative,…)`，計時、記成敗（native 回傳不是 1 算失敗）、請求者、排隊時間。`expectedHits` 1。
+- `PathRequestTask.execute()V`：offset 11 的 `INVOKEVIRTUAL PathfindNativeThread.addRequest(PathFindRequest,I)V` → `addRequest(PathfindNativeThread,…)`，記入隊時刻。`expectedHits` 1。
+- 入隊與輪次的簿記在原版呼叫之前，`findPath` 的計時包住原版呼叫、記帳在之後；原版呼叫只有一次、參數原樣、回傳值原樣、例外原樣上拋（不計入 `calls`，另計 `thrown`）；簿記自己的 RuntimeException 只計 `anomalies`。所有簿記都在尋路執行緒上（單寫者），log 也在同一執行緒用 `DebugLog.log` 寫，與 ChunkSaveIsolation、ChunkWriteGuard 等非主執行緒 helper 相同。
+- 重建分組：native 旗標在世界變動任務後成立、下一次 native `findPath` 後清除。探針以「上次 native `findPath` 之後有沒有執行過世界變動任務」把每次呼叫分成 `rb`（付重建）與 `nr`（不付）。兩個偏差方向相反：native 對 `loadId` 過期的 chunk 不設旗標，所以 `rb` 次數是上界；高階區域在之後第一次被搜尋碰到時才重算，有一部分會落在 `nr` 呼叫裡，所以 `rb − nr` 的差是重建成本的下界。
+- 探針成本（本機 `build.ps1` [9zp/10] 量測，native 換成立即回傳的替身）：每個請求（一次 `addRequest`＋一次 `findPath`）多 71 ns；每輪另有一次 `nanoTime` 與幾個計數。相對每個請求至少 25 ms，約百萬分之 3。
+
+console（開服第一輪一行，之後每 60 秒一行，數字都是這 60 秒內的值，`total` 除外）：
+
+```text
+[MinidoracatJavaPatch][PathfindProbe] 首次生效（純觀測，每 60 秒一行；-Dmdc.pathfindProbe=0|off 停用）
+[MinidoracatJavaPatch][PathfindProbe] beat sec=<視窗秒數> rounds=<輪數> roundMsAvg=<每輪平均 ms> roundMsMax=<最長一輪 ms> worldRounds=<有世界變動的輪數> chunk=<n> square=<n> vehicle=<n> enq=<玩家>/<有目標殭屍>/<其他> calls=<native findPath 次數> extra=<多目標的第 2 個以後> fail=<n> thrown=<n> busyPct=<native 耗時佔視窗 %> usAvg=<µs> usP95=<µs> usMax=<µs> rb=<n>/<平均 µs>/<p95 µs> nr=<n>/<平均 µs>/<p95 µs> rebuildPct=<%|n/a> waitMs=<平均>/<p95>/<最大> player=<n>/<失敗>/<平均 µs>/<平均等待 ms>/<p95 等待 ms> aggroZombie=… zombie=… animal=… other=… otherTasks=<n> waitDropped=<n> anomalies=<n> total=<累計 calls>
+```
+
+欄位說明：`roundMs` 是相鄰兩次 `update()` 的間隔（含執行緒閒置等通知的時間）。`enq` 是請求進優先佇列的次數，與各請求者的 `n` 相減就是被取消或還在排的。`waitMs` 從請求進優先佇列算到它第一次 native `findPath` 開始，不含主執行緒送出到尋路執行緒下一輪撿起的那一段（最多一輪，看 `roundMsAvg`）。p95 是每倍頻 4 桶的直方圖上界（誤差 ≤ 25%，不超過最大值）。`rebuildPct = rb 次數 ×（rb 平均 − nr 平均）÷ 總耗時`。請求者依 mover 類別分：`animal`（`IsoAnimal`）、`player`（其他 `IsoPlayer`）、`aggroZombie`（`IsoZombie` 且 `target` 非 null）、`zombie`、`other`。
+
+**判讀**（上線後看晚峰幾行）：
+- `busyPct` 接近 100 且 `roundMsAvg` 遠大於 50：成本瓶頸。看 `rebuildPct`：≥ 30% 值得做世界變動批次化閘門（把重建從每輪一次攤到每 T 毫秒一次；k 輪攤一次時每個請求成本約剩 `1 − rebuildPct × (1 − 1/k)`，30%、k=5 約 1.3 倍吞吐，50% 約 1.7 倍）；< 15% 不值得（全部拿掉也只有約 1.18 倍），改看 `usP95`／`fail` 高的請求者（例如失敗請求很貴時考慮負快取）。
+- `roundMsAvg` 約 50、`calls` 約等於 `rounds × 2` 且 `waitMs` 很長：每輪 2 個的上限才是瓶頸，考慮把 `requestsPerUpdate` 調大（同長度常數手術）。
+- `animal` 的等待 p95 遠大於其他：嚴格優先序讓動物排最後，屬原版取捨。
+- `anomalies`、`otherTasks`、`waitDropped` 應為 0；`thrown` 非 0 代表 native 尋路丟例外（原版照樣處理）。
+
+**kill switch**：`-Dmdc.pathfindProbe=0|off`，需重啟；關掉後四個入口都只委派，不讀時鐘、不計數、不寫 log。
+
+**部署**：manifest 新增 `zombie/pathfind/nativeCode/MdcPathfindProbe.class`、`MdcPathfindProbe$Hist.class` 與 `PathfindNativeThread.class`、`PathRequestTask.class`（+4 個 class，`PatchInfo.class` 換新）。上線後確認 console 有「首次生效」一行，之後每分鐘一行 `beat`。
+
+**不處理**：本刀不改尋路行為。批次化閘門、`requestsPerUpdate`、負快取都等這刀的晚峰數據再決定；pfguard 對這條執行緒的成本另估約 0.1%（不在本刀範圍）。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——`updateThread` 恰 8 個 `ConcurrentLinkedQueue.poll`、1 個 `PathfindNative.update` 緊接 `iconst_2; istore`（`requestsPerUpdate = 2`）、1 個 `RequestQueue.isEmpty`；`Sync.endFrame` 恰一個 `50000000L`；`findPath(PathFindRequest)` 恰 1 個 `PathfindNative.findPath`；`PathRequestTask.execute` 恰 1 個 `addRequest`。任一變了，beat 的輪次與重建分組要重新解讀。手術後三個方法除了被改道的呼叫，方法文字（含 frames）與原版相同，兩個 class 其餘方法不變；helper 的 `poll`／`update`／`addRequest` 各恰一次呼叫原版，`findPath` 的 on／off 兩條路各一次。
+- `MdcPathfindProbeTest`（`build.ps1` [9zp/10]，on、off 兩個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `updateThread`、`findPath(PathFindRequest)`、`PathRequestTask.execute`（測試 JVM 沒有 native 庫，兩個 native 入口丟 `UnsatisfiedLinkError`，正好驗原版例外原樣上拋）：chunk、格子、載具任務照原順序各執行一次、`taskReturnQueue` 收到同一批任務、請求進原版同一個優先佇列（同一物件、原順序）；以覆寫 `findPath` 的替身驗回傳原版值、參數同一物件、原版恰一次、`RuntimeException` 與 `Error` 同一物件上拋；on 的請求者分類、多目標、失敗、`rb`／`nr` 分組與一行欄位正確；off 全部零計數（原版負對照）；最後量每個請求的探針成本（上限 20 µs，實測 71 ns）。
+
+**退場**：判讀完、決定（或不做）批次化閘門之後可以關掉或撤刀。
+
 ---
 
 <a id="3"></a>
