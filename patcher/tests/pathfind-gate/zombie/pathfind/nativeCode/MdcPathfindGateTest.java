@@ -22,7 +22,8 @@ import zombie.ai.astar.Mover;
  * 測試 JVM 沒有 native 庫，丟 {@code UnsatisfiedLinkError} 當作一輪結束；閘門在呼叫 native 之前就結算並決定下一輪）。
  *
  * <p>鎖：開服第一輪開、之後每 T 開一輪；關閉時世界任務留在佇列、請求照常進優先佇列；開閘一輪套完全部積壓（超過 10 個 chunk）
- * 且 FIFO；{@code execute} 丟例外與原版相同；T=0 與原版逐輪相同（含 10 個上限）；W74 計數、rb／nr 分組、心跳欄位、refail。
+ * 且 FIFO；{@code execute} 丟例外與原版相同；T=0 與原版逐輪相同（含 10 個上限）；W74 計數、rb／nr 分組、心跳欄位、refail；
+ * {@code staleMsMax} 不含輪與輪之間的閒置、穩定狀態約 T 到 T 加一輪；同一個 chunk 移除後又載入的 {@code reload10}／{@code reload60}。
  * 情境另以測試內的 updateThread 模型（照 javap 抄的原版迴圈）跑三個 mutant，各自至少一個情境與出貨語意不同。
  */
 public final class MdcPathfindGateTest {
@@ -197,6 +198,10 @@ public final class MdcPathfindGateTest {
     static final String B_ON = "exec=[] ret=[req] chunk=[c1] sq=[s1] veh=[v1] req=[] otherQ=1 thrown=-";
     static final String B_OFF = "exec=[c1,s1,v1] ret=[c1,s1,v1,req] chunk=[] sq=[] veh=[] req=[] otherQ=1 thrown=-";
     static final String C_ALL = "exec=[a,b] ret=[a] chunk=[c] sq=[s1] veh=[] req=[req] otherQ=0 thrown=boom";
+    /** R1 之後、R2（第一個被擋輪次）之前的閒置；staleMsMax 不得把它算進去。 */
+    static final long IDLE_MS = 400L;
+    /** stale 穩定狀態測試裡輪與輪之間的間隔（模擬 Sync 每輪 50 ms）。 */
+    static final long ROUND_MS = 50L;
 
     public static void main(String[] args) throws Exception {
         String mode = args.length > 0 ? args[0] : "gate-on";
@@ -215,7 +220,11 @@ public final class MdcPathfindGateTest {
             boundary();
         }
         scenarios(gate);
+        if (gate) {
+            staleSteady();
+        }
         refail(probe);
+        reload(probe);
 
         if (failed > 0) {
             System.out.println("MdcPathfindGateTest FAIL " + failed);
@@ -241,6 +250,7 @@ public final class MdcPathfindGateTest {
         MdcPathfindProbe.findPath(fake, request(new OtherMover()), bb, false);
         MdcPathfindProbe.findPath(fake, request(new OtherMover()), bb, false);
 
+        Thread.sleep(IDLE_MS);
         t.chunkTaskQueue.add(new Chunk("c16"));
         t.squareTaskQueue.add(new Square("s2"));
         t.vehicleTaskQueue.add(new Vehicle("v2"));
@@ -279,8 +289,10 @@ public final class MdcPathfindGateTest {
 
         long[] stats = MdcPathfindGate.statsForTest();
         if (gate) {
-            expect("閘門計數：opens=2、heldRounds=2、drained 18+4、最大 18、staleMsMax ≥ 30（實際 " + java.util.Arrays.toString(stats) + "）",
-                    stats[0] == 2 && stats[1] == 2 && stats[2] == 22 && stats[3] == 18 && stats[4] >= 30_000_000L);
+            expect("閘門計數：opens=2、heldRounds=2、drained 18+4、最大 18、staleMsMax ≥ 30 且不含 R2 前閒置的 " + IDLE_MS
+                            + " ms（實際 " + java.util.Arrays.toString(stats) + "）",
+                    stats[0] == 2 && stats[1] == 2 && stats[2] == 22 && stats[3] == 18 && stats[4] >= 30_000_000L
+                            && stats[4] < IDLE_MS * 1_000_000L);
         } else {
             expect("T=0 閘門零計數（純委派）", java.util.Arrays.equals(stats, new long[5]));
         }
@@ -298,12 +310,14 @@ public final class MdcPathfindGateTest {
             String window = MdcPathfindProbe.windowForTest();
             System.out.println("beat line: " + window);
             String gateFields = gate ? " gate=1000 opens=2 heldRounds=2 drained=11/18 staleMsMax=" : " gate=0 opens=0 heldRounds=0 drained=0/0 staleMsMax=0 ";
-            expect("心跳行尾：" + gateFields.trim() + " … chunkU=17 chunkR=1 refail=0",
-                    window.contains(gateFields) && window.endsWith(" chunkU=17 chunkR=1 refail=0")
+            String tail = " chunkU=17 chunkR=1 refail=0 reload10=1 reload60=1";
+            expect("心跳行尾：" + gateFields.trim() + " …" + tail + "（r1 之後緊接著載入同一個 chunk c5）",
+                    window.contains(gateFields) && window.endsWith(tail)
                             && window.indexOf(" total=") < window.indexOf(" gate="));
             if (gate) {
                 String stale = window.substring(window.indexOf(" staleMsMax=") + 12, window.indexOf(" chunkU="));
-                expect("心跳 staleMsMax ≥ 30（實際 " + stale + "）", Long.parseLong(stale) >= 30L);
+                expect("心跳 staleMsMax ≥ 30 且 < " + IDLE_MS + "（實際 " + stale + "）",
+                        Long.parseLong(stale) >= 30L && Long.parseLong(stale) < IDLE_MS);
             }
             expect("簿記無異常", MdcPathfindProbe.anomaliesForTest() == 0);
         } else {
@@ -442,7 +456,129 @@ public final class MdcPathfindGateTest {
         MdcPathfindProbe.findPath(fake, target(m1, 11f, 20f, 0f), bb, false);
         expect("refail 表滿 10,000 筆整表清空（清空後同一目標不算重試）",
                 MdcPathfindProbe.refailsForTest() == 4 && MdcPathfindProbe.refailMapSizeForTest() == 1);
-        expect("心跳 refail=4", MdcPathfindProbe.windowForTest().endsWith(" refail=4"));
+        expect("心跳 refail=4", MdcPathfindProbe.windowForTest().contains(" refail=4 "));
+    }
+
+    /** stale 穩定狀態：每輪間隔 ROUND_MS、每輪都有新 chunk；從關閉後第一輪到開閘那輪 ≈ T（T − 一輪到 T ＋ 一輪）。 */
+    private static void staleSteady() throws Exception {
+        PathfindNativeThread t = fresh();
+        REAL.run(t);
+        MdcPathfindGate.lastOpenNs = System.nanoTime() - MdcPathfindGate.GATE_NS;
+        REAL.run(t);
+        REAL.run(t);
+        expect("stale 穩定狀態：前置兩輪後閘門關、積壓為空", !MdcPathfindGate.open && t.chunkTaskQueue.isEmpty());
+        MdcPathfindProbe.resetWindowForTest();
+        int held = 0;
+        for (boolean wasOpen = false; !wasOpen; held++) {
+            Thread.sleep(ROUND_MS);
+            t.chunkTaskQueue.add(new Chunk("k" + held));
+            wasOpen = MdcPathfindGate.open;
+            REAL.run(t);
+            if (held > 200) {
+                throw new AssertionError("閘門一直沒開");
+            }
+        }
+        long staleMs = MdcPathfindGate.statsForTest()[4] / 1_000_000L;
+        long lo = MdcPathfindGate.GATE_MS - ROUND_MS;
+        long hi = MdcPathfindGate.GATE_MS + 2 * ROUND_MS;
+        expect("stale 穩定狀態：每 " + ROUND_MS + " ms 一輪，staleMsMax 在 " + lo + "–" + hi + "（實際 " + staleMs + "，"
+                + (held - 1) + " 輪被擋）", staleMs >= lo && staleMs <= hi);
+    }
+
+    /**
+     * reload：真 updateThread 執行 ChunkRemoveTask 後，同一個 chunk 的 ChunkUpdateTask 在 10 秒內計 reload10、60 秒內計 reload60
+     * （含 reload10）；超過 60 秒、別的 chunk、沒移除過都不計；beat 清掉超過 60 秒的紀錄、留下較新的；表滿整表清空；探針 off 不計。
+     */
+    private static void reload(boolean probe) throws Exception {
+        PathfindNativeThread t = fresh();
+        MdcPathfindProbe.ageRemovedForTest(MdcPathfindProbe.RELOAD60_NS + 1L);
+        MdcPathfindProbe.resetWindowForTest();
+        boolean empty = MdcPathfindProbe.removedSizeForTest() == 0;
+        runChunks(t, remove(1, 2), load(1, 2));
+        String within10 = reloads();
+        runChunks(t, remove(1, 2));
+        MdcPathfindProbe.ageRemovedForTest(30_000_000_000L);
+        runChunks(t, load(1, 2));
+        String within60 = reloads();
+        runChunks(t, remove(1, 2));
+        MdcPathfindProbe.ageRemovedForTest(MdcPathfindProbe.RELOAD60_NS + 1L);
+        runChunks(t, load(1, 2));
+        String over60 = reloads();
+        runChunks(t, remove(1, 2), load(2, 1), load(-1, 2));
+        String otherChunk = reloads();
+        runChunks(t, remove(3, -1), load(-1, -1));
+        String negative = reloads();
+        runChunks(t, load(3, -1));
+        String negativeSame = reloads();
+        if (!probe) {
+            expect("探針 off：reload 不計、最近移除表不長（實際 " + negativeSame + "，表 "
+                    + MdcPathfindProbe.removedSizeForTest() + "）",
+                    negativeSame.equals("0/0") && MdcPathfindProbe.removedSizeForTest() == 0);
+            return;
+        }
+        expect("reload：移除後馬上載入 1/1、隔 30 秒 1/2、超過 60 秒不計 1/2、別的 chunk 與沒移除過不計 1/2、"
+                        + "負座標不撞 key 1/2→2/3（實際 " + within10 + "、" + within60 + "、" + over60 + "、" + otherChunk + "、"
+                        + negative + "→" + negativeSame + "）",
+                empty && within10.equals("1/1") && within60.equals("1/2") && over60.equals("1/2")
+                        && otherChunk.equals("1/2") && negative.equals("1/2") && negativeSame.equals("2/3"));
+        String tail = MdcPathfindProbe.windowForTest();
+        expect("心跳行尾 reload10=2 reload60=3", tail.endsWith(" reload10=2 reload60=3"));
+
+        // 表裡剩 (1,2)；推 59 秒後再移除 (5,5)，再推 2 秒：(1,2) 61 秒、(5,5) 2 秒。
+        MdcPathfindProbe.ageRemovedForTest(59_000_000_000L);
+        runChunks(t, remove(5, 5));
+        MdcPathfindProbe.ageRemovedForTest(2_000_000_000L);
+        int before = MdcPathfindProbe.removedSizeForTest();
+        MdcPathfindProbe.resetWindowForTest();
+        int after = MdcPathfindProbe.removedSizeForTest();
+        String reset = reloads();
+        runChunks(t, load(1, 2), load(5, 5));
+        expect("beat：清掉超過 60 秒的 (1,2)、留下 2 秒的 (5,5)，計數歸零；之後載入 (1,2) 不計、(5,5) 計 1/1（實際 表 " + before
+                        + "→" + after + "、" + reset + "→" + reloads() + "）",
+                before == 2 && after == 1 && reset.equals("0/0") && reloads().equals("1/1"));
+
+        Object[] fill = new Object[MdcPathfindProbe.REMOVED_CAP];
+        for (int i = 0; i < fill.length; i++) {
+            fill[i] = remove(1000 + i, 0);
+        }
+        runChunks(t, fill);
+        int full = MdcPathfindProbe.removedSizeForTest();
+        runChunks(t, remove(7, 7));
+        expect("最近移除表滿 " + MdcPathfindProbe.REMOVED_CAP + " 筆整表清空（實際 " + full + "→"
+                + MdcPathfindProbe.removedSizeForTest() + "）", full == MdcPathfindProbe.REMOVED_CAP
+                && MdcPathfindProbe.removedSizeForTest() == 1);
+        MdcPathfindProbe.resetWindowForTest();
+    }
+
+    /** 把 chunk 任務照順序放進佇列，強制開閘跑一輪真 updateThread（T=0 時本來就每輪開）。 */
+    private static void runChunks(PathfindNativeThread t, Object... tasks) throws Exception {
+        for (Object task : tasks) {
+            t.chunkTaskQueue.add((IPathfindTask) task);
+        }
+        MdcPathfindGate.open = true;
+        Throwable thrown = REAL.run(t);
+        if (thrown != null || !t.chunkTaskQueue.isEmpty()) {
+            throw new AssertionError("chunk 佇列沒排空", thrown);
+        }
+    }
+
+    private static ChunkRemove remove(int wx, int wy) {
+        ChunkRemove task = new ChunkRemove("r" + wx + "," + wy);
+        task.wx = wx;
+        task.wy = wy;
+        return task;
+    }
+
+    private static Chunk load(int wx, int wy) {
+        Chunk task = new Chunk("u" + wx + "," + wy);
+        task.wx = wx;
+        task.wy = wy;
+        return task;
+    }
+
+    private static String reloads() {
+        long[] r = MdcPathfindProbe.reloadForTest();
+        return r[0] + "/" + r[1];
     }
 
     private static void fillA(PathfindNativeThread t) {

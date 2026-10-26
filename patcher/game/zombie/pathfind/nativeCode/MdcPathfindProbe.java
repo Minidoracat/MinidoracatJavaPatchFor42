@@ -1,5 +1,7 @@
 package zombie.pathfind.nativeCode;
 
+import gnu.trove.map.hash.TLongLongHashMap;
+
 import java.nio.ByteBuffer;
 import java.util.IdentityHashMap;
 import java.util.Locale;
@@ -21,7 +23,8 @@ import zombie.debug.DebugLog;
  *
  * <p><b>手術</b>（全在 {@code zombie.pathfind.nativeCode}，同形 1:1 改道，receiver 前置）：
  * {@code PathfindNativeThread.updateThread} 的 8 個 {@code ConcurrentLinkedQueue.poll} 與唯一 {@code PathfindNative.update()}
- * 改道到 W81 {@link MdcPathfindGate}，再由它呼叫 {@link #poll}（依取出的任務類別計 chunk／格子／載具）與 {@link #update}
+ * 改道到 W81 {@link MdcPathfindGate}，再由它呼叫 {@link #poll}（依取出的任務類別計 chunk／格子／載具；同一個 chunk 移除後
+ * 10／60 秒內又載入計 {@code reload10}／{@code reload60}）與 {@link #update}
  * （輪次邊界、每分鐘一行，行尾併 W81 欄位）；
  * {@code PathfindNativeThread.findPath(PathFindRequest)} 唯一 native 入口 → {@link #findPath}（計時、成敗、請求者、排隊時間、
  * 同一個 mover 對同一目標格連續失敗 {@code refail}）；
@@ -44,6 +47,11 @@ public final class MdcPathfindProbe {
     static final int WAIT_CAP = 8192;
     /** {@code refail} 的 mover → 上次失敗目標格表上限；滿了整表清掉。 */
     static final int REFAIL_CAP = 10_000;
+    static final long RELOAD10_NS = 10_000_000_000L;
+    static final long RELOAD60_NS = 60_000_000_000L;
+    // ponytail: 「最近移除」表上限 65,536 筆（正式服每分鐘約 17,000 個移除，beat 每 60 秒清一次，最多留約 120 秒 ≈ 34,000 筆）；
+    // 滿了整表清空，之後 60 秒內的 reload 少算。移除量長到常常頂到上限時，改成插入時順手淘汰超過 60 秒的紀錄。
+    static final int REMOVED_CAP = 65_536;
 
     static final int CAT_PLAYER = 0;
     static final int CAT_AGGRO_ZOMBIE = 1;
@@ -55,6 +63,8 @@ public final class MdcPathfindProbe {
     // ---- 尋路執行緒單寫 ----
     private static final IdentityHashMap<PathFindRequest, Long> ENQUEUED = new IdentityHashMap<>();
     private static final IdentityHashMap<Mover, Long> LAST_FAIL = new IdentityHashMap<>();
+    /** chunk（wx,wy 合成 long）→ 尋路執行緒執行 {@code ChunkRemoveTask} 的 nanoTime；不隨視窗歸零，beat 時清掉超過 60 秒的。 */
+    private static final TLongLongHashMap REMOVED = new TLongLongHashMap(1024, 0.5f, Long.MIN_VALUE, Long.MIN_VALUE);
     private static PathFindRequest lastRequest;
     private static boolean pendingWorld;
     private static int roundChunk;
@@ -76,6 +86,8 @@ public final class MdcPathfindProbe {
     private static long chunkUTasks;
     private static long chunkRTasks;
     private static long refails;
+    private static long reload10;
+    private static long reload60;
     private static long requestTasks;
     private static long otherTasks;
     private static final long[] ENQ = new long[3];
@@ -113,12 +125,17 @@ public final class MdcPathfindProbe {
     public static Object poll(ConcurrentLinkedQueue<?> queue) {
         Object task = queue.poll();
         if (ENABLED && task != null) {
-            if (task instanceof ChunkUpdateTask) {
+            if (task instanceof ChunkUpdateTask chunk) {
                 roundChunk++;
                 chunkUTasks++;
-            } else if (task instanceof ChunkRemoveTask) {
+                countReload(chunkKey(chunk.wx, chunk.wy));
+            } else if (task instanceof ChunkRemoveTask chunk) {
                 roundChunk++;
                 chunkRTasks++;
+                if (REMOVED.size() >= REMOVED_CAP) {
+                    REMOVED.clear();
+                }
+                REMOVED.put(chunkKey(chunk.wx, chunk.wy), System.nanoTime());
             } else if (task instanceof SquareUpdateTask) {
                 roundSquare++;
             } else if (task instanceof VehicleUpdateTask || task instanceof VehicleAddTask
@@ -131,6 +148,25 @@ public final class MdcPathfindProbe {
             }
         }
         return task;
+    }
+
+    static long chunkKey(int wx, int wy) {
+        return (long) wx << 32 | wy & 0xFFFFFFFFL;
+    }
+
+    /** 同一個 chunk 被移除後多久又載入（只觀測）：10 秒內計 reload10，60 秒內計 reload60（含 reload10）。 */
+    private static void countReload(long key) {
+        long removedNs = REMOVED.remove(key);
+        if (removedNs == Long.MIN_VALUE) {
+            return;
+        }
+        long age = System.nanoTime() - removedNs;
+        if (age <= RELOAD60_NS) {
+            reload60++;
+            if (age <= RELOAD10_NS) {
+                reload10++;
+            }
+        }
     }
 
     /** 取代 {@code PathRequestTask.execute} 內的 {@code PathfindNativeThread.addRequest}（請求移入優先佇列的時刻）。 */
@@ -344,7 +380,9 @@ public final class MdcPathfindProbe {
         MdcPathfindGate.appendBeat(sb);
         sb.append(" chunkU=").append(chunkUTasks)
                 .append(" chunkR=").append(chunkRTasks)
-                .append(" refail=").append(refails);
+                .append(" refail=").append(refails)
+                .append(" reload10=").append(reload10)
+                .append(" reload60=").append(reload60);
         return sb.toString();
     }
 
@@ -381,6 +419,9 @@ public final class MdcPathfindProbe {
         chunkUTasks = 0L;
         chunkRTasks = 0L;
         refails = 0L;
+        reload10 = 0L;
+        reload60 = 0L;
+        REMOVED.retainEntries((key, removedNs) -> now - removedNs <= RELOAD60_NS);
         MdcPathfindGate.resetWindow();
         requestTasks = 0L;
         otherTasks = 0L;
@@ -506,6 +547,19 @@ public final class MdcPathfindProbe {
 
     static int refailMapSizeForTest() {
         return LAST_FAIL.size();
+    }
+
+    static long[] reloadForTest() {
+        return new long[] {reload10, reload60};
+    }
+
+    static int removedSizeForTest() {
+        return REMOVED.size();
+    }
+
+    /** 把「最近移除」表每筆紀錄往前推 {@code ns}（模擬時間過去）。 */
+    static void ageRemovedForTest(long ns) {
+        REMOVED.transformValues(removedNs -> removedNs - ns);
     }
 
     static long[] enqForTest() {

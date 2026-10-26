@@ -4973,18 +4973,28 @@ Console (one line at the first round; the heartbeat is appended to W74's `beat` 
 
 ```text
 [MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）
-[MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n>
+[MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n> reload10=<reloaded within 10 s of removal> reload60=<reloaded within 60 s of removal>
 ```
 
 (`首次生效（世界變動每 1000 ms 最多套用一次；…；0|off 每輪都套用＝原版）` = active (world changes applied at most once every 1000 ms; …; 0|off
 applies them every round = vanilla).)
 
 Fields: `drained` counts the world tasks (chunk + square + vehicle) applied in open rounds. `staleMsMax` is how long the oldest queued task had
-waited when the gate opened, approximating its enqueue time by the start of the first held round (at most one round short); in steady state it
-is about T to T plus one round. `chunkU` + `chunkR` equals W74's `chunk`. `refail` counts failures where a mover's target cell (`floor` of x, y,
-z) equals the target cell of its previous failure; it is recorded on the pathfinding thread only (an `IdentityHashMap` from mover to cell,
-cleared when it exceeds 10,000 entries; multi-target requests only count their first target) and measures how large the loop of animals
-retrying the same target right after a failure is. Observe only. At T=0 all gate fields are 0 (pure delegation counts nothing).
+waited when the gate opened: measured from the start of the first held round to the start of the open round, where a round starts at its first
+`poll`, approximating the oldest task's enqueue time by the former (at most one round short). Idle time in `notifier.wait()` between rounds is
+not counted (the thread does not idle while a queue holds tasks, so held rounds are back to back); in steady state it is about T to T plus one
+round. `chunkU` + `chunkR` equals W74's `chunk`. `refail` counts failures where a mover's target cell (`floor` of x, y, z) equals the target
+cell of its previous failure; it is recorded on the pathfinding thread only (an `IdentityHashMap` from mover to cell, cleared when it exceeds
+10,000 entries; multi-target requests only count their first target) and measures how large the loop of animals retrying the same target right
+after a failure is. Observe only. `reload10`/`reload60` count, within the window, chunks that the pathfinding thread loaded again within 10/60
+seconds of removing them (`reload60` includes `reload10`): running a `ChunkRemoveTask` records the chunk (`wx`, `wy`) and the time in a
+"recently removed" table, and running a `ChunkUpdateTask` for the same chunk takes the entry out and checks the gap; more than 60 seconds or no
+entry counts nothing. The table is not reset per window: each beat drops entries older than 60 seconds, and it is cleared outright at 65,536
+entries (which can only undercount). Pathfinding thread only, observe only. Whether a delayed ServerCell unload is worth doing:
+`reload60 ÷ chunkU` is the share of loads that brought back a chunk removed less than 60 seconds earlier, i.e. the most a 60-second unload delay could save
+(plus as many removals and the rebuild work that follows them); `reload10 ÷ chunkU` is what a 10-second delay could save. A single-digit share is
+not worth it; `reload10` making up most of `reload60` means most chunks come back within 10 seconds, so a short delay is enough. At T=0 all gate
+fields are 0 (pure delegation counts nothing); `reload10`/`reload60` belong to the probe, keep counting at T=0, and are 0 with the probe off.
 
 **Behavior difference**: pathfinding sees world changes up to T (plus one round) late: a door that was just closed, a wall that was just built,
 a vehicle that just stopped or drove off, or a newly loaded chunk is planned against the old state for that long; a mover that bumps into it
@@ -5016,13 +5026,18 @@ the `refail` numbers.
 - `MdcPathfindGateTest` (`build.ps1` [9zv/10], three JVMs: T=1000 with the probe on (shipping configuration), T=0 with the probe on (vanilla
   control) and T=1000 with the probe off, each checking argv): runs the patched `updateThread` from dist (native `update` throws
   `UnsatisfiedLinkError` as in the W74 test; the gate closes the round before that). Four rounds in a row: the first round after boot is open
-  and applies 16 chunk tasks (including a removal) plus the square and vehicle tasks in one go, in order; the second is closed, world tasks stay
-  queued and requests still reach `otherQ`; the round in which T expires is still closed and opens the next one; the open round applies the
-  backlog chunk → square → vehicle, FIFO within each, with `taskReturnQueue` in the same order; W74's counters, `worldRounds`, the `rb`/`nr`
-  split and the heartbeat fields are correct. `decide`'s boundary: 1 ns short stays closed, exactly T opens. Three scenarios (open gate with 15
-  `ChunkUpdateTask`s, closed gate, `execute` throwing) give the expected results; at T=0 they match vanilla round for round (cap of 10,
-  exception semantics). `refail`: counted only for the same cell, not reset by a success in between, not counted for the 2nd target of a
-  multi-target request, negative coordinates, cleared at 10,000 entries; nothing counted with the probe off. Mutants (run through a model of
+  and applies 16 chunk tasks (including a removal) plus the square and vehicle tasks in one go, in order; the second (after 400 ms of idle) is
+  closed, world tasks stay queued and requests still reach `otherQ`; the round in which T expires is still closed and opens the next one; the
+  open round applies the backlog chunk → square → vehicle, FIFO within each, with `taskReturnQueue` in the same order; W74's counters,
+  `worldRounds`, the `rb`/`nr` split and the heartbeat fields are correct, and `staleMsMax` excludes the 400 ms idle. `staleMsMax` in steady
+  state (a round every 50 ms, a new chunk each round) lands between T minus one round and T plus two rounds. `decide`'s boundary: 1 ns short
+  stays closed, exactly T opens. Three scenarios (open gate with 15 `ChunkUpdateTask`s, closed gate, `execute` throwing) give the expected
+  results; at T=0 they match vanilla round for round (cap of 10, exception semantics). `refail`: counted only for the same cell, not reset by a
+  success in between, not counted for the 2nd target of a multi-target request, negative coordinates, cleared at 10,000 entries; nothing counted
+  with the probe off. `reload10`/`reload60` (time is simulated by a test entry that ages the "recently removed" entries): a load right after the
+  removal counts 1/1, after 30 seconds only `reload60`, after more than 60 seconds nothing; loading another chunk or one never removed counts
+  nothing; negative coordinates do not collide in the combined key; a beat drops entries older than 60 seconds, keeps newer ones and resets the
+  counts; the table is cleared at 65,536 entries; nothing counted and the table stays empty with the probe off. Mutants (run through a model of
   vanilla's loops transcribed from javap, which is first checked against the real `updateThread`): still capped at 10 when open, blocking the
   request queue when closed, swallowing the exception while draining; all three are caught.
 

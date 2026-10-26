@@ -37,7 +37,8 @@ public final class MdcPathfindGate {
     static boolean open = true;
     static long lastOpenNs = System.nanoTime();
     static boolean announced;
-    private static long lastUpdateNs;
+    private static boolean roundPolled;
+    private static long roundStartNs;
     private static int roundDrained;
     private static boolean roundHeld;
     private static boolean holding;
@@ -74,6 +75,11 @@ public final class MdcPathfindGate {
         if (GATE_NS <= 0L) {
             return MdcPathfindProbe.poll(queue);
         }
+        if (!roundPolled) {
+            // 這輪的開頭：第一次 poll，不含上一輪結束後 notifier.wait() 的閒置
+            roundPolled = true;
+            roundStartNs = System.nanoTime();
+        }
         PathfindNativeThread thread = PathfindNativeThread.instance;
         if (queue == thread.requestTaskQueue || queue.peek() == null) {
             return MdcPathfindProbe.poll(queue);
@@ -105,8 +111,8 @@ public final class MdcPathfindGate {
     }
 
     private static void closeRound(long now) {
-        long roundStart = lastUpdateNs;
-        lastUpdateNs = now;
+        long roundStart = roundPolled ? roundStartNs : now;
+        roundPolled = false;
         if (open) {
             opens++;
             drainedSum += roundDrained;
