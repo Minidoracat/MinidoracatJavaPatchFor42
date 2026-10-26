@@ -138,6 +138,7 @@ $helperEntries = @(
     'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
     'zombie/core/MdcBuildActionGuard.class',
     'zombie/mdc/SpriteUpdateGuard.class',
+    'zombie/mdc/ZombieReuseOwner.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -694,6 +695,13 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "SpriteUpdateGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.spriteUpdateRange=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest off
 Assert-Ok "SpriteUpdateGuardTest（off，原版負對照）"
+
+Write-Host "[9zu/10] 回收的殭屍物件清掉上一輪的網路擁有者（W80）：真 reuseZombie＋helper 對照 jar 內原版（resetForReuse 換同形替身），帶擁有者進池 on 清成 null、原版與 off 照舊，原方法在清之前呼叫、例外原樣上拋、已在池裡照原版早退，心跳帶抑噪 #5 計數..."
+# on＝出貨組態；off＝不清擁有者（原版負對照，計數照常）。測試自驗 argv 與實際開關相符。
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+Assert-Ok "ZombieReuseOwnerTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+Assert-Ok "ZombieReuseOwnerTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

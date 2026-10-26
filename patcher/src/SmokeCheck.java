@@ -3913,6 +3913,7 @@ public final class SmokeCheck {
         failed += checkIsoObjectGate(jar, distJava);
         failed += checkIsoObjectRemoveDefer(jar, distJava);
         failed += checkActionValidation(jar, distJava);
+        failed += checkZombieReuseOwner(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7088,6 +7089,114 @@ public final class SmokeCheck {
         failed += check("W79 helper 契約：getGridSquare 恰一次呼叫原版 IsoCell.getGridSquare(III)",
                 countExactCalls(method(distJava, sug, "getGridSquare", "(L" + cell + ";III)Lzombie/iso/IsoGridSquare;"),
                         Opcodes.INVOKEVIRTUAL, cell, "getGridSquare", gsqDesc) == 1);
+        return failed;
+    }
+
+    /**
+     * W80 回收的殭屍物件清掉上一輪的網路擁有者（docs/patches.md 2co）：存在理由（原版回收路徑不清擁有者；任一項變紅＝官方
+     * 可能已修，先重估撤刀，不改斷言）、掛點語境、同形手術、helper 契約。
+     */
+    static int checkZombieReuseOwner(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String vzm = "zombie/VirtualZombieManager";
+        String zombie = "zombie/characters/IsoZombie";
+        String helper = "zombie/mdc/ZombieReuseOwner";
+        String reuseDesc = "(L" + zombie + ";)V";
+        MethodNode vReuse = methodFromJar(jar, vzm, "reuseZombie", reuseDesc);
+        AbstractInsnNode reset = firstCall(vReuse, Opcodes.INVOKEVIRTUAL, zombie, "resetForReuse", "()V");
+        AbstractInsnNode a0 = reset == null ? null : nextReal(reset);
+        AbstractInsnNode a1 = a0 == null ? null : nextReal(a0);
+        AbstractInsnNode add = a1 == null ? null : nextReal(a1);
+        failed += check("W80 掛點：reuseZombie 恰 1 個 IsoZombie.resetForReuse()（前 aload_1，後 aload_0/aload_1/addToReusable）；"
+                        + "全 jar 只有這一個 resetForReuse 呼叫點",
+                countExactCalls(vReuse, Opcodes.INVOKEVIRTUAL, zombie, "resetForReuse", "()V") == 1
+                && prevRealOrNull(reset) instanceof VarInsnNode r && r.getOpcode() == Opcodes.ALOAD && r.var == 1
+                && a0 instanceof VarInsnNode l0 && l0.getOpcode() == Opcodes.ALOAD && l0.var == 0
+                && a1 instanceof VarInsnNode l1 && l1.getOpcode() == Opcodes.ALOAD && l1.var == 1
+                && add instanceof MethodInsnNode ad && ad.owner.equals(vzm) && ad.name.equals("addToReusable") && ad.desc.equals(reuseDesc)
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, zombie, "resetForReuse", "()V")
+                        .equals(List.of(vzm + ".reuseZombie" + reuseDesc)));
+        String nzc = "zombie/characters/component/NetworkZombieComponent";
+        MethodNode vReset = methodFromJar(jar, zombie, "resetForReuse", "()V");
+        MethodNode vCreate = methodFromJar(jar, vzm, "createZombieOutsideWorld", "(Lzombie/iso/IsoDirections;ZI)L" + zombie + ";");
+        failed += check("W80 存在理由：原版 resetForReuse 與 createZombieOutsideWorld 都不呼叫 setOwner／setOwnerPlayer、不碰 NetworkZombieComponent",
+                countCalls(vReset, zombie, "setOwner") + countCalls(vReset, zombie, "setOwnerPlayer") == 0
+                && countCalls(vCreate, zombie, "setOwner") + countCalls(vCreate, zombie, "setOwnerPlayer") == 0
+                && countCallsToOwner(vReset, nzc) + countCallsToOwner(vCreate, nzc) == 0
+                && !methodText(vReset).contains(nzc) && !methodText(vCreate).contains(nzc));
+        // 死掉的殭屍會帶著擁有者進池的上游前提：moveZombie 已死分支第一個 setOwner 只在 OnGround 時跑到，removeFromWorld 不直接清
+        String nzm = "zombie/popman/NetworkZombieManager";
+        MethodNode vMove = methodFromJar(jar, nzm, "moveZombie", "(L" + zombie + ";Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)V");
+        AbstractInsnNode firstSetOwner = firstCall(vMove, Opcodes.INVOKEVIRTUAL, zombie, "setOwner", "(Lzombie/core/raknet/UdpConnection;)V");
+        boolean onGroundGate = false;
+        for (AbstractInsnNode in = firstSetOwner; in != null; in = in.getPrevious()) {
+            if (in instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IF_ACMPNE
+                    && prevReal(j) instanceof FieldInsnNode rs && rs.name.equals("realState")
+                    && prevReal(prevReal(prevReal(j))) instanceof FieldInsnNode og && og.getOpcode() == Opcodes.GETSTATIC
+                    && og.name.equals("OnGround")
+                    && vMove.instructions.indexOf(j.label) > vMove.instructions.indexOf(firstSetOwner)) {
+                onGroundGate = true;
+                break;
+            }
+        }
+        MethodNode vRemove = methodFromJar(jar, zombie, "removeFromWorld", "()V");
+        failed += check("W80 存在理由：moveZombie 開頭是 isDead 分支、其第一個 setOwner 只在 realState==OnGround 時執行，全方法恰 3 個 setOwner"
+                        + "（已死 OnGround、活著改歸、活著清空；多一個＝官方可能補清了，先重估撤刀）；IsoZombie.removeFromWorld 只經 moveZombie 處理擁有者、不直接 setOwner／setOwnerPlayer",
+                firstCallIndex(vMove, Opcodes.INVOKEVIRTUAL, zombie, "isDead", "()Z") == 2 && firstSetOwner != null && onGroundGate
+                && countCalls(vMove, zombie, "setOwner") == 3
+                && countCalls(vRemove, zombie, "setOwner") + countCalls(vRemove, zombie, "setOwnerPlayer") == 0
+                && countCalls(vRemove, nzm, "moveZombie") == 1);
+        MethodNode pReuse = method(distJava, vzm, "reuseZombie", reuseDesc);
+        boolean vzmOthersSame = classNodeFromJar(jar, vzm).methods.stream()
+                .filter(m -> !(m.name.equals("reuseZombie") && m.desc.equals(reuseDesc))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, vzm, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W80 手術後：reuseZombie 唯一 resetForReuse 同形改道 ZombieReuseOwner，其餘指令與 frames 不變；VirtualZombieManager 其餘方法不變",
+                methodText(pReuse).equals(methodText(vReuse).replace("INVOKEVIRTUAL " + zombie + ".resetForReuse ()V",
+                        "INVOKESTATIC " + helper + ".resetForReuse (L" + zombie + ";)V"))
+                && vzmOthersSame);
+        MethodNode h = method(distJava, helper, "resetForReuse", reuseDesc);
+        String setOwnerDesc = "(Lzombie/core/raknet/UdpConnection;)V";
+        String setPlayerDesc = "(Lzombie/characters/IsoPlayer;)V";
+        AbstractInsnNode resetCall = firstCall(h, Opcodes.INVOKEVIRTUAL, zombie, "resetForReuse", "()V");
+        AbstractInsnNode setOwner = firstCall(h, Opcodes.INVOKEVIRTUAL, zombie, "setOwner", setOwnerDesc);
+        AbstractInsnNode setPlayer = firstCall(h, Opcodes.INVOKEVIRTUAL, zombie, "setOwnerPlayer", setPlayerDesc);
+        boolean resetOutsideTry = resetCall != null && h.tryCatchBlocks.stream().noneMatch(t ->
+                h.instructions.indexOf(t.start) <= h.instructions.indexOf(resetCall)
+                        && h.instructions.indexOf(resetCall) < h.instructions.indexOf(t.end));
+        AbstractInsnNode recheck = firstCall(h, Opcodes.INVOKEVIRTUAL, nzm, "recheck", "(Lzombie/network/IConnection;)V");
+        // recheck 的引數必須是清欄位前存進區域變數的舊擁有者（清完再 getOwner() 會是 null，清單不動）。
+        // 只看存入到 recheck 之間沒被改寫：javac 會讓 catch 的例外變數重用同一個 slot。
+        AbstractInsnNode getOwnerCall = firstCall(h, Opcodes.INVOKEVIRTUAL, zombie, "getOwner", "()Lzombie/core/raknet/UdpConnection;");
+        AbstractInsnNode ownerStore = getOwnerCall == null ? null : nextReal(getOwnerCall);
+        int ownerSlot = ownerStore instanceof VarInsnNode saved && saved.getOpcode() == Opcodes.ASTORE ? saved.var : -1;
+        boolean ownerKept = ownerSlot >= 0 && recheck != null
+                && h.instructions.indexOf(ownerStore) < h.instructions.indexOf(recheck);
+        for (AbstractInsnNode in = ownerKept ? ownerStore.getNext() : null; in != null && in != recheck; in = in.getNext()) {
+            if (in instanceof VarInsnNode v && v.getOpcode() == Opcodes.ASTORE && v.var == ownerSlot) {
+                ownerKept = false;
+            }
+        }
+        boolean recheckOldOwner = ownerKept
+                && prevReal(recheck) instanceof VarInsnNode arg && arg.getOpcode() == Opcodes.ALOAD && arg.var == ownerSlot
+                && setOwner != null && h.instructions.indexOf(getOwnerCall) < h.instructions.indexOf(setOwner);
+        failed += check("W80 helper 契約：恰一次呼叫原版 resetForReuse（在任何 try 之外，例外原樣上拋），之後 setOwner(null)、setOwnerPlayer(null) 各一次，"
+                        + "再以清欄位前存下的舊擁有者 recheck 一次（在 try 內）；catch 只有 RuntimeException",
+                countExactCalls(h, Opcodes.INVOKEVIRTUAL, zombie, "resetForReuse", "()V") == 1
+                && countCalls(h, zombie, "setOwner") == 1 && countCalls(h, zombie, "setOwnerPlayer") == 1
+                && countCalls(h, nzm, "recheck") == 1
+                && setOwner != null && setPlayer != null && recheck != null && resetOutsideTry && recheckOldOwner
+                && callsInsideTryRange(h, Opcodes.INVOKEVIRTUAL, nzm, "recheck", "(Lzombie/network/IConnection;)V") == 1
+                && h.instructions.indexOf(resetCall) < h.instructions.indexOf(setOwner)
+                && h.instructions.indexOf(setOwner) < h.instructions.indexOf(setPlayer)
+                && h.instructions.indexOf(setPlayer) < h.instructions.indexOf(recheck)
+                && prevReal(setOwner).getOpcode() == Opcodes.ACONST_NULL
+                && prevReal(setPlayer).getOpcode() == Opcodes.ACONST_NULL
+                && h.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
         return failed;
     }
 

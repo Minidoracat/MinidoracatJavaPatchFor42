@@ -49,6 +49,8 @@ public final class PatchConfig {
         pickM.expectedHits = 9;
         patches.add(pick);
 
+        // 抑噪 #5：moveZombie 的 `There are no zombies in nz.zombies.` 不印、改計數（LogFilter.moveZombieMissCount，
+        // W80 心跳的 nzMissing）。至少一部分來源是回收的殭屍物件帶著舊擁有者（W80 修掉）。
         Patcher.ClassPatch nzm = new Patcher.ClassPatch("zombie/popman/NetworkZombieManager");
         Patcher.MethodOps nzmM = nzm.method("moveZombie",
                 "(Lzombie/characters/IsoZombie;Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)V");
@@ -1568,6 +1570,18 @@ public final class PatchConfig {
                 "addRequest", "(" + pfRequest + "I)V", pfProbe, "addRequest"));
         pfExecute.expectedHits = 1;
         patches.add(pfTask);
+
+        // ---- W80 回收的殭屍物件清掉上一輪的網路擁有者（docs/patches.md 2co）----
+        // reuseZombie 唯一 invokevirtual IsoZombie.resetForReuse()V（javap offset 119，前 aload_1、後 aload_0/aload_1/
+        // addToReusable）同形改道 ZombieReuseOwner（receiver 前置）：先呼叫原方法，再清 owner／ownerPlayer、recheck(舊擁有者)
+        // 把牠從舊擁有清單拿掉。全 jar 只有這一個 resetForReuse 呼叫點；VirtualZombieManager 原本沒有 ClassPatch。
+        // -Dmdc.zombieReuseOwner=0|off 不清（照樣計數）。
+        Patcher.ClassPatch vzm = new Patcher.ClassPatch("zombie/VirtualZombieManager");
+        Patcher.MethodOps vzmReuse = vzm.method("reuseZombie", "(Lzombie/characters/IsoZombie;)V");
+        vzmReuse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoZombie",
+                "resetForReuse", "()V", "zombie/mdc/ZombieReuseOwner", "resetForReuse"));
+        vzmReuse.expectedHits = 1;
+        patches.add(vzm);
 
         return patches;
     }

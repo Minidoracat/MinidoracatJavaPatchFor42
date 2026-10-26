@@ -37,7 +37,7 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 | 2 | SkinningBoneHierarchy.buildBoneHierarchy | `SkeletonBone not resolved for bone: X` | MOD 模型骨架非標準骨名，開機刷屏 | 骨架建構結果完全不變 |
 | 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **exact 白名單 37 名**（初版 MetalBigWireFence／WoodFloorLvl3／Wooden_Windows；42.20 加 DoubleWireGate／BrickWallLvl2／MetalSmallWireFence／BrickWindowFrameLvl2／Piano／WoodenWallLvl3；42.20.3 加 SandFloor／WoodenDarkWallLvl3／GravelFloor／Floor_SpringGrass／DoubleDoor／WoodenWindowFrameLvl3／WoodFloorLvl2／Wood_DoubleDoorDark／WoodDoorFrameLvl3／Fences_MetalFarmGate；42.20.4 加 Commercial_FullGlassBlackWall／Commercial_GridGlassBlackWall／Commercial_HalfGlassRedWall／Commercial_FullGlassRedWall／Commercial_HalfGlassBlackWall／Commercial_GridGlassRedWall／MetalFloorLvl1／Wood_Crate_Lvl2／Floor_SummerGrass／WoodFloorLvl1／WoodenDarkDoorFrameLvl3／Composter／BrickFloorLvl1／Floor_SummerGrassCorner／ComposterShoddy／DoubleFenceGate／WoodenDarkWindowFrameLvl3／Floor_Concrete，見 §2bf；完整訊息 equals；入列門檻 ≥4 筆/h 見 AGENTS.md 手術鐵則，名單行為由 LogFilterNoiseTest 鎖） | 特定物件載入必刷（42.20 六名為 5.5h 實測 1183 筆；42.20.3 十名為 26h 實測 23,517 筆＝當時最大殘留噪音源，17 個 ≤86 筆低量名依門檻刻意不收）。37 名的生效定義都來自建築 MOD 的 entity 覆寫（其中 22 名與 vanilla 同名、15 名為 MOD 專屬），名單的退役訊號跟著該 MOD 更新走，不跟 PZ 版本走（42.21.0 審計：觸發程式碼位元不變，無名稱可移除） | **其他名稱（含 null 與低量名）照常警告**；resetObjectInfo 清理照跑 |
 | 4 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
-| 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals） | 殭屍擁有權轉移競態，MP 常態 | 擁有權轉移邏輯照舊 |
+| 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals；**不印、改計數**，累計在 W80 心跳的 `nzMissing`） | 換擁有者時舊擁有者的清單裡沒有這隻殭屍。至少一部分是回收的殭屍物件帶著上一輪的擁有者（原版缺陷，[W80](#2co) 修掉）；其他來源沒查 | 擁有權轉移邏輯照舊 |
 | 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
@@ -4477,6 +4477,49 @@ console（拒絕時每 10 秒最多 20 行）：
 - `SpriteUpdateGuardTest`（`build.ps1` [9zt/10]，on、off 兩個 JVM，自驗 argv）：走 dist 內手術後的真 `receiveUpdateItemSprite`＋真 wire，真 `IsoCell` 的伺服器分支轉給記錄呼叫的 `ServerMap` 子類。照原版取格子：玩家身旁、每軸恰 20 格、樓層差 1、同機多人任一位在範圍內；不取格子並記 log：21 格、遠處、樓層差 2、同機多人都不在範圍內、連線上沒有玩家；off 照原版。
 
 **退場**：官方在伺服器端驗證 `UpdateItemSprite` 的距離，或改成伺服器權威時撤刀。
+
+---
+
+<a id="2co"></a>
+## 2co. 回收的殭屍物件清掉上一輪的網路擁有者（W80，server，預設 on）
+
+**症狀**（2026-10-26 Quest 屍潮 E2E 調查）：生成的殭屍有一部分兩個客戶端都看不到，伺服器上卻在、而且有擁有者；改歸別的玩家時伺服器印 `moveZombie: There are no zombies in nz.zombies.`（[抑噪 #5](#1)），之後才出現。Quest horde-mp 迴圈（`--define loop=10`，原版伺服器、Quest 還沒有 Lua 修正；第 8 輪 A 被名單外的殭屍咬死而中止）32 隻裡生成時帶擁有者的 15 隻兩端都沒看到，`nil` 的 17 隻都看到，那行 12 次。正式服的這行被抑噪 #5 丟掉；唯一沒過濾的一輪是 42.21.0 更新後 JavaPatch 停用的那輪（9/28 20:53～9/29 00:05，約 47 人），22:23～00:00 有 1,353 行（每分鐘最多 91）。
+
+**原版**（42.21.0 jar `e1a69eb7`）：
+- 殭屍死後擁有者 X 留在物件上：`NetworkZombieManager.moveZombie` 的已死分支只在 `realState == OnGround` 時清擁有者。屍體建立時 `removeFromWorld` 把 onlineId 設成 −1，`getZombieAuth` 下一次就把牠從 X 的擁有清單拿掉：欄位是 X，X 的清單沒有牠。
+- 物件 5 秒後經 `VirtualZombieManager.reuseZombie` 進回收池，`IsoZombie.resetForReuse()` 不碰擁有者；`createZombieOutsideWorld` 把牠交給下一隻殭屍（人口管理、Lua `addZombies*`、建築故事都走這裡）。
+- 新殭屍出生時擁有者＝X，X 的清單卻沒有牠。`updateAuth` 選到 X 時 `moveZombie` 因 `getOwner() == to` 什麼都不做：伺服器不把牠送給任何客戶端、也沒有人模擬，所有人都看不到。改歸別人時才從 X 的清單移除失敗、印那行，加進新擁有者的清單後出現。
+- 已死的才會帶：活著被 `removeFromWorld` 的殭屍會經 `moveZombie(z, null, null)` 的活著分支清掉擁有者。
+
+**手術**：`VirtualZombieManager.reuseZombie` 唯一 `invokevirtual IsoZombie.resetForReuse()`（javap offset 119，前 `aload_1`、後 `aload_0; aload_1; addToReusable`）1:1 改道 `zombie/mdc/ZombieReuseOwner.resetForReuse(IsoZombie)`（receiver 前置；新 `VirtualZombieManager` ClassPatch，命中 1）。helper 先呼叫原方法（例外原樣上拋，跟原版一樣不進池），再 `setOwner(null)`、`setOwnerPlayer(null)`，接著呼叫原版 `NetworkZombieManager.recheck(X)`（持 `owns.lock`）把擁有者不是 X 的物件從 X 的擁有清單拿掉。出生時沒有擁有者，`updateAuth` 照原版規則指派並加進對方的清單。全 jar 只有這一個 `resetForReuse` 呼叫點；其他直接 `addToReusable` 的只有 `init`（新物件）與 `IsoCell.Dispose`（關世界時把還在 cell 的殭屍直接放進池，可能帶擁有者，但 `IngameState.exit` 隨後 `VirtualZombieManager.Reset()` 清空整個池，不會帶到下一局）。
+
+**切點**：選進池時清，不選出池時清：出池在 `createZombieOutsideWorld` 的重用分支，是一長串逐欄位重設，沒有單一呼叫可同形改道；進池的 `resetForReuse` 就是原版「重用前重設」的地方。不改 `moveZombie` 的已死分支：擁有者要把死亡同步到倒地，提早清可能影響死亡動畫（推論）。為什麼還要 `recheck`：X 的清單在進池前通常已經沒有牠（`NetworkZombiePacker.postupdate` 每一輪對已進入遊戲的連線拿掉 onlineId −1 的殭屍），但死亡在網路封包處理時發生、同一輪接著同步存檔讓主迴圈停超過 5 秒時，同一輪的 `VirtualZombieManager.update` 就把牠回收，人口管理還可能在 `postupdate` 之前把牠拿去生成、配新 onlineId，X 的清單就一直留著牠。只清欄位的話，`updateAuth` 改歸 Y 時牠同時在 X 與 Y 的清單（兩個客戶端都拿到模擬權），歸回 X 時在 X 的清單出現兩次；擁有者欄位還在時，原版在這種時序下欄位與清單是一致的。`recheck` 讓欄位與 X 的清單在進池當下就一致。沒處理的同類情況（原版本來就這樣，本刀沒有更糟）：封包死亡時已經倒地（`realState == OnGround`）的，已死分支先清了欄位、X 的清單還留著，進池時已沒有舊擁有者可以 `recheck`；`recheck(X)` 也不碰別的連線的清單（例如 `clearTargetAuth` 改歸時留下的）。
+
+**抑噪 #5 改計數**：這行仍不印，`LogFilter.log` 每遇到一次計數，本刀心跳帶出累計 `nzMissing`（與本刀開關無關）。上線後比對每小時的 `nzMissing` 與上面那輪的 1,353 行／97 分鐘，看剩下多少是其他來源。
+
+console（第一次回收一行首次生效，之後每 30 分鐘一行，數值為開服以來累計）：
+
+```text
+[MinidoracatJavaPatch][ZombieReuseOwner] 首次生效（-Dmdc.zombieReuseOwner=0|off 不清擁有者）mode=on reused=<n> stale=<n> nzMissing=<n> anomalies=<n>
+[MinidoracatJavaPatch][ZombieReuseOwner] beat mode=on reused=<n> stale=<n> nzMissing=<n> anomalies=<n>
+```
+
+`reused`＝進回收池的次數；`stale`＝其中還帶擁有者的次數（on 時都已清掉，off 時照原版留著）；`nzMissing`＝抑噪 #5 的累計。
+
+**驗收**：上線後心跳 `stale` 隨殭屍死亡增加、`anomalies=0`；`nzMissing` 每小時明顯低於上面那輪；玩家不再回報「打不到、看不到的殭屍」。
+
+**kill switch**：`-Dmdc.zombieReuseOwner=0|off` 不清擁有者（照樣計數與心跳），需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/ZombieReuseOwner.class` 與 patched `zombie/VirtualZombieManager.class`，`zombie/mdc/LogFilter.class`、`PatchInfo.class` 換新（159 → 161 個 class）。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——原版 `resetForReuse` 與 `createZombieOutsideWorld` 都不呼叫 `setOwner`／`setOwnerPlayer`、不碰 `NetworkZombieComponent`；`moveZombie` 開頭是 `isDead` 分支、其第一個 `setOwner` 只在 `realState == OnGround` 時執行，全方法恰 3 個 `setOwner`；`IsoZombie.removeFromWorld` 只經 `moveZombie` 處理擁有者（任一項變紅＝官方可能已修，先重估撤刀）；掛點語境與全 jar 唯一呼叫點；手術後 `reuseZombie` 除了改道，文字與 frames 不變，`VirtualZombieManager` 其餘方法不變；helper 恰一次呼叫原方法且在任何 try 之外，之後 `setOwner(null)`、`setOwnerPlayer(null)`、`recheck` 各一次、依此順序，`recheck` 的引數是清欄位前存下的舊擁有者、在 try 內，catch 只有 `RuntimeException`。
+- `ZombieReuseOwnerTest`（`build.ps1` [9zu/10]，on、off 兩個 JVM，自驗 argv）：dist 內手術後的真 `reuseZombie`＋helper 與 jar 內原版 `reuseZombie` 各自隔離載入，擁有者走真的 `NetworkZombieComponent`、擁有清單走真的 `NetworkZombieManager`；測試 JVM 跑不了真的 `resetForReuse`（要 SandboxOptions、動作群組與動畫），兩邊的呼叫都換成同一個同形替身。帶擁有者（連線＋玩家）進池：原版照舊（負對照）、on 清成 null、off 照舊；原方法恰一次、呼叫當下擁有者仍是上一輪的；X 的清單還留著這個物件、另有一個已歸 Y 卻還留在 X 清單的殘留項時，on 拿掉這兩個、X 名下其他殭屍留著（同原版 `recheck`），原版與 off 整份照舊（off 不呼叫 `recheck`）；只帶擁有玩家也清；沒有擁有者照原版；已在池裡照原版早退、不呼叫原方法；原方法丟例外時兩邊都原樣上拋、不進池、擁有者不動；計數與首次生效行帶 `nzMissing`。`LogFilterNoiseTest` 另驗抑噪 #5 每次 +1、其他被攔的 log 不計。
+- MP 實機（2026-10-26，本機專用伺服器＋兩個客戶端；Quest horde-mp `--define loop=10`，Quest 用 `940096f`，還沒有 Lua 繞過）：每輪生成 4 隻、A 砍完、15 秒後下一輪。on（`quest-hzloop-w80on-1026a`）：`HZLOOP SUMMARY n=10 bad=0`，40 隻生成時擁有者都是 `nil`、兩端都看到、砍完沒有殘留。off（`quest-hzloop-w80off-1026a`，`-Dmdc.zombieReuseOwner=off`）：`bad=4`，第 7～10 輪的 16 隻生成時帶擁有者，其中 15 隻兩端都沒看到（另 1 隻已改歸另一位玩家才出現），擁有者是 `nil` 的 24 隻都看到。兩輪伺服器的例外與原版那輪相同（都是開服時 MOD 的雜訊）。
+
+**退場**：官方在回收或出生時清擁有者（SmokeCheck 存在理由變紅）時撤刀。
+
+**官方回報**：[report/2026-10-26-zombie-reuse-stale-owner-tis.md](report/2026-10-26-zombie-reuse-stale-owner-tis.md)（草稿，未送出）。
 
 ---
 

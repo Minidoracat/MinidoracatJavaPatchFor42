@@ -1,5 +1,7 @@
 package zombie.mdc;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.iso.IsoChunk;
@@ -78,9 +80,16 @@ public final class LogFilter {
         "No packet handler for type:",                                                   // PacketsCache <init>
     };
 
+    /**
+     * 抑噪 #5：{@code NetworkZombieManager.moveZombie} 換擁有者時舊擁有者的清單裡沒有這隻殭屍。原文不印、改計數，
+     * W80（{@link ZombieReuseOwner}）的心跳帶出累計 {@code nzMissing}；W80 修掉的是回收物件帶舊擁有者這個來源。
+     */
+    static final String MOVE_ZOMBIE_MISS = "moveZombie: There are no zombies in nz.zombies.";
+    private static final AtomicLong MOVE_ZOMBIE_MISSES = new AtomicLong();
+
     /** DebugLog.log(String) 呼叫點。 */
     private static final String[] LOG_EXACT = {
-        "moveZombie: There are no zombies in nz.zombies.",                               // NetworkZombieManager
+        MOVE_ZOMBIE_MISS,                                                                // NetworkZombieManager（計數）
     };
     private static final String[] LOG_PREFIX = {
         "ItemPickInfo -> cannot get ID for ",                                            // ItemPickInfo（debug 診斷前綴不同、照常轉發）
@@ -156,9 +165,17 @@ public final class LogFilter {
 
     public static void log(String message) {
         if (suppressesLog(message)) {
+            if (MOVE_ZOMBIE_MISS.equals(message)) {
+                MOVE_ZOMBIE_MISSES.incrementAndGet();
+            }
             return;
         }
         DebugLog.log(message);
+    }
+
+    /** 抑噪 #5 開服以來的累計（W80 心跳讀）。 */
+    public static long moveZombieMissCount() {
+        return MOVE_ZOMBIE_MISSES.get();
     }
 
     public static void logType(DebugType type, String message) {

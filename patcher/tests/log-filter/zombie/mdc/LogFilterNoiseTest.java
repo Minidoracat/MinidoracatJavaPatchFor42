@@ -70,7 +70,17 @@ public final class LogFilterNoiseTest {
         require(!LogFilter.suppressesLog("IsoChunk.removeFromWorld: vehicle was removed from world id=42"),
                 "改字的訊息必須放行");
         require(!LogFilter.suppressesLog(null), "suppressesLog(null) 必須放行（不得 NPE）");
-        System.out.println("log-filter OK  雙向鏡像 37+5／equals 紀律／名單防呆／prefix 行為全數通過");
+        // 抑噪 #5 改計數：完整字串必攔且每次 +1；同為被攔的其他 log 不計、改字或延伸的放行
+        require(LogFilter.suppressesLog(LogFilter.MOVE_ZOMBIE_MISS)
+                && LogFilter.MOVE_ZOMBIE_MISS.equals("moveZombie: There are no zombies in nz.zombies."), "#5 原文必須被攔");
+        require(!LogFilter.suppressesLog(LogFilter.MOVE_ZOMBIE_MISS + " "), "#5 延伸字串必須放行（equals）");
+        long misses = LogFilter.moveZombieMissCount();
+        LogFilter.log(LogFilter.MOVE_ZOMBIE_MISS);
+        LogFilter.log(LogFilter.MOVE_ZOMBIE_MISS);
+        LogFilter.log("IsoChunk.removeFromWorld: vehicle wasn't removed from world id=42");
+        LogFilter.log("ItemPickInfo -> cannot get ID for container");
+        require(LogFilter.moveZombieMissCount() == misses + 2, "#5 每次 +1，其他被攔的 log 不計");
+        System.out.println("log-filter OK  雙向鏡像 37+5／equals 紀律／名單防呆／prefix 行為／#5 計數全數通過");
     }
 
     private static void requireSuppressed(String msg) {
