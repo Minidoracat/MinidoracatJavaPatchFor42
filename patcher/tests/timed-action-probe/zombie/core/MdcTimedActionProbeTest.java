@@ -30,6 +30,8 @@ import zombie.network.packets.NetTimedActionPacket;
 public final class MdcTimedActionProbeTest {
 
     private static int failed;
+    /** DebugLog 初始化後會把 System.out 換成自己的 log stream（W78 擷取 log 時一起被收走）：結果行寫到原本的 stdout。 */
+    private static final java.io.PrintStream OUT = System.out;
 
     public static void main(String[] args) throws Exception {
         // W14 坑解：GameTime.getServerTimeMills → GameClient → ServerOptions → Rand 靜態鏈
@@ -43,9 +45,13 @@ public final class MdcTimedActionProbeTest {
             default -> MdcTimedActionProbe.MODE_OBSERVE;
         };
         expect("property 與測試模式一致（" + want + "）", MdcTimedActionProbe.MODE == wantMode);
-        boolean wantOwnerCheck = !(args.length > 1 && "owner-off".equals(args[1]));
+        java.util.List<String> argv = java.util.Arrays.asList(args);
+        boolean wantOwnerCheck = !argv.contains("owner-off");
         expect("actionOwnerCheck 與 argv 一致（" + (wantOwnerCheck ? "on" : "off") + "）",
                 MdcTimedActionProbe.OWNER_CHECK == wantOwnerCheck);
+        boolean wantExecutorCheck = !argv.contains("executor-off");
+        expect("actionExecutorCheck 與 argv 一致（" + (wantExecutorCheck ? "on" : "off") + "）",
+                MdcTimedActionProbe.EXECUTOR_CHECK == wantExecutorCheck);
 
         testInterrupt(wantMode);
         testDispatchBinding();
@@ -56,13 +62,15 @@ public final class MdcTimedActionProbeTest {
         if (MdcTimedActionProbe.OWNER_CHECK) {
             testConnectionMembership(wantMode);
         }
+        testExecutor(wantMode);
 
         if (failed != 0) {
-            System.out.println("timed-action-probe FAIL " + failed + " 項");
+            OUT.println("timed-action-probe FAIL " + failed + " 項");
             System.exit(1);
         }
-        System.out.println("timed-action-probe OK mode=" + MdcTimedActionProbe.MODE
-                + " ownerCheck=" + (MdcTimedActionProbe.OWNER_CHECK ? "on" : "off"));
+        OUT.println("timed-action-probe OK mode=" + MdcTimedActionProbe.MODE
+                + " ownerCheck=" + (MdcTimedActionProbe.OWNER_CHECK ? "on" : "off")
+                + " executorCheck=" + (MdcTimedActionProbe.EXECUTOR_CHECK ? "on" : "off"));
     }
 
     private static byte nextId = 10;
@@ -405,6 +413,81 @@ public final class MdcTimedActionProbeTest {
         expect("身分檢查路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
     }
 
+    /**
+     * W78：Request 重建出的動作表 {@code character} 必須是 owner。合法（自己、替別人包紮時病人在別的參數、nil、
+     * 非 Request 狀態）照原版派送且動作表不動；{@code character} 是別的玩家或不是玩家時，派送前把 action 設成 null
+     * （原版 processServer 因此回 Reject，見 NetTimedActionGuardTest 的 Reject bytes），記 executorMismatch。
+     */
+    private static void testExecutor(int mode) throws Exception {
+        java.io.ByteArrayOutputStream log = new java.io.ByteArrayOutputStream();
+        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
+        zombie.debug.DebugLog.getInstance().setStdOut(log);
+        IsoPlayer bob = player((short) 7, "bob");
+        IsoPlayer alice = player((short) 5, "alice");
+        UdpConnection bobConn = conn(bob);
+        long refused0 = MdcTimedActionProbe.executorRefusedForTest();
+
+        expectExecutor(true, "character＝owner（一般動作）", bobConn, bob, request(bob, bob, null));
+        expectExecutor(true, "替別人包紮：character＝owner、病人是別的參數", bobConn, bob, request(bob, bob, alice));
+        expectExecutor(true, "character 是 nil（無從判斷，照原版）", bobConn, bob, request(bob, null, null));
+        RecordingRequest accepted = request(bob, alice, null);
+        accepted.state = Transaction.TransactionState.Accept;
+        expectExecutor(true, "非 Request 狀態不檢查", bobConn, bob, accepted);
+
+        boolean check = MdcTimedActionProbe.EXECUTOR_CHECK;
+        expectExecutor(!check, "character 指向別的在線玩家", bobConn, bob, request(bob, alice, null));
+        expectExecutor(!check, "character 不是玩家", bobConn, bob, request(bob, "notAPlayer", null));
+        long refused = MdcTimedActionProbe.executorRefusedForTest() - refused0;
+        boolean logged = log.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
+                "executorMismatch#" + (refused0 + 1) + " id=");
+        if (!check) {
+            expect("executor-off：零計數、零 log", refused == 0 && !logged);
+        } else if (mode == MdcTimedActionProbe.MODE_OFF) {
+            expect("MODE_OFF：照樣拒絕但零計數、零 log（同 owner 檢查）", refused == 0 && !logged);
+        } else {
+            expect("W78 計數恰 +2 且寫 executorMismatch log（帶 type、owner、character）", refused == 2 && logged
+                    && log.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
+                            " type=ISTestAction owner=7:bob character=5:alice connectionPlayers=7:bob action=rejected"));
+        }
+        expect("W78 路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
+    }
+
+    private static void expectExecutor(boolean keep, String what, UdpConnection connection, IsoPlayer owner,
+            RecordingRequest r) {
+        se.krka.kahlua.vm.KahluaTable table = r.action;
+        MdcTimedActionProbe.processServer(r, null, connection);
+        if (keep) {
+            expect("W78 照原版：" + what + "（派送、動作表不動）", r.dispatched && r.actionAtDispatch == table);
+        } else {
+            expect("W78 拒絕：" + what + "（仍交給原版派送，但 action=null → 原版回 Reject）",
+                    r.dispatched && r.actionAtDispatch == null);
+        }
+    }
+
+    /** 伺服器 parse 完的 Request：owner 標頭＋重建出的動作表（character／otherPlayer 是 actionArgs 解析出的物件）。 */
+    private static RecordingRequest request(IsoPlayer owner, Object character, IsoPlayer otherPlayer) throws Exception {
+        RecordingRequest r = own(new RecordingRequest(), owner);
+        r.id = nextId++;
+        r.state = Transaction.TransactionState.Request;
+        r.type = "ISTestAction";
+        r.action = new KahluaTableImpl(new HashMap<>());
+        r.action.rawset("character", character);
+        r.action.rawset("otherPlayer", otherPlayer);
+        return r;
+    }
+
+    /** 只記錄派送當下的動作表（W78 在派送前改它）。 */
+    private static final class RecordingRequest extends NetTimedActionPacket {
+        boolean dispatched;
+        se.krka.kahlua.vm.KahluaTable actionAtDispatch;
+
+        @Override
+        public void processServer(PacketTypes.PacketType type, UdpConnection connection) {
+            this.dispatched = true;
+            this.actionAtDispatch = this.action;
+        }
+    }
+
     // ---- fixture ----
 
     /** client 端建出 owner 的 Reject 封包，走真 write，再以 server 端同型別真 parse 解回。 */
@@ -534,7 +617,7 @@ public final class MdcTimedActionProbeTest {
     }
 
     private static void expect(String what, boolean ok) {
-        System.out.println((ok ? "tap pass  " : "tap FAIL  ") + what);
+        OUT.println((ok ? "tap pass  " : "tap FAIL  ") + what);
         if (!ok) failed++;
     }
 

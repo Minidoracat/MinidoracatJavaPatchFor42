@@ -3912,6 +3912,7 @@ public final class SmokeCheck {
                 countExactCalls(method(distJava, w70Guard, "floor", "(D)D"), Opcodes.INVOKESTATIC, "java/lang/Math", "floor", "(D)D") == 1);
         failed += checkIsoObjectGate(jar, distJava);
         failed += checkIsoObjectRemoveDefer(jar, distJava);
+        failed += checkActionValidation(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -6990,6 +6991,103 @@ public final class SmokeCheck {
         });
         failed += check("W75-2 手術後：IsoButcherHook 三個方法除了 addToProcessIsoObject 同形改道 IsoObjectRemoveDefer，文字與 frames 不變；其餘方法不變",
                 same && othersSame);
+        return failed;
+    }
+
+    /**
+     * W76–W79 伺服器端請求驗證（docs/patches.md 2cl–2cn）：掛點語境與上游指紋（任一項變了＝重驗或重評撤刀）、
+     * 同形手術、helper 契約。
+     */
+    static int checkActionValidation(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String ba = "zombie/core/BuildAction";
+        String bag = "zombie/core/MdcBuildActionGuard";
+        String luaCaller = "se/krka/kahlua/integration/LuaCaller";
+        String pcDesc = "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)Lse/krka/kahlua/integration/LuaReturn;";
+        String pcHelperDesc = "(L" + luaCaller + ";" + pcDesc.substring(1);
+        String parseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        MethodNode vParse = methodFromJar(jar, ba, "parse", parseDesc);
+        java.util.Set<String> baFields = new java.util.HashSet<>();
+        for (org.objectweb.asm.tree.FieldNode f : classNodeFromJar(jar, ba).fields) baFields.add(f.name + f.desc);
+        failed += check("W76/W77 上游指紋：BuildAction.parse 恰 1 個 LuaCaller.protectedCall 且在 getFunctionObject 之後，"
+                        + "之後 getFirst()==null 時 item=null；x/y/z（F）與 objectType 欄位存在；isValid 的全 jar 呼叫點數仍為 0",
+                countExactCalls(vParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 1
+                && firstCallIndex(vParse, Opcodes.INVOKESTATIC, "zombie/Lua/LuaManager", "getFunctionObject", "(Ljava/lang/String;)Ljava/lang/Object;")
+                        < firstCallIndex(vParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc)
+                && methodText(vParse).contains("INVOKEVIRTUAL se/krka/kahlua/integration/LuaReturn.getFirst ()Ljava/lang/Object;\n    IFNONNULL")
+                && methodText(vParse).contains("ACONST_NULL\n    PUTFIELD " + ba + ".item : Lse/krka/kahlua/vm/KahluaTable;")
+                && baFields.containsAll(java.util.List.of("xF", "yF", "zF", "objectTypeLjava/lang/String;"))
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, ba, "isValid", "()Z").isEmpty()
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/network/packets/BuildActionPacket", "isValid", "()Z").isEmpty()
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "isValid", "()Z").isEmpty());
+        MethodNode pParse = method(distJava, ba, "parse", parseDesc);
+        boolean baOthersSame = classNodeFromJar(jar, ba).methods.stream()
+                .filter(m -> !(m.name.equals("parse") && m.desc.equals(parseDesc))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, ba, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W76/W77 手術後：頭部 aload_0／beginParse、唯一 protectedCall 同形改道 MdcBuildActionGuard，其餘指令與 frames 不變；"
+                        + "BuildAction 其餘方法不變",
+                headCallOk(pParse, bag, "beginParse", "(L" + ba + ";)V")
+                && methodText(pParse).equals("    ALOAD 0\n    INVOKESTATIC " + bag + ".beginParse (L" + ba + ";)V\n"
+                        + methodText(vParse).replace("INVOKEVIRTUAL " + luaCaller + ".protectedCall " + pcDesc,
+                                "INVOKESTATIC " + bag + ".protectedCall " + pcHelperDesc))
+                && baOthersSame);
+        MethodNode gCall = method(distJava, bag, "protectedCall", pcHelperDesc);
+        failed += check("W76/W77 helper 契約：protectedCall 委派原呼叫恰 2 處（無 parse 上下文＋檢查通過），catch 只有 RuntimeException",
+                countExactCalls(gCall, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 2
+                && gCall.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+
+        // W78：派送 bridge 在 NetTimedAction 封包交回原版前檢查 character；原版 processServer 在 action==null 時走 Reject。
+        String probe = "zombie/core/MdcTimedActionProbe";
+        String psDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        MethodNode vNtaProcess = methodFromJar(jar, "zombie/network/packets/NetTimedActionPacket", "processServer", psDesc);
+        failed += check("W78 vanilla 前提：NetTimedActionPacket.processServer 讀 action、null 時跳 Reject 分支",
+                methodText(vNtaProcess).contains(".action : Lse/krka/kahlua/vm/KahluaTable;\n    IFNULL"));
+        MethodNode bridge = method(distJava, probe, "processServer",
+                "(Lzombie/network/packets/INetworkPacket;" + psDesc.substring(1));
+        String execDesc = "(Lzombie/network/packets/NetTimedActionPacket;Lzombie/core/raknet/UdpConnection;)V";
+        MethodNode exec = method(distJava, probe, "checkExecutor", execDesc);
+        failed += check("W78 helper 契約：bridge 在第一次交回原版 processServer 之前呼叫 checkExecutor；checkExecutor 讀 character、"
+                        + "不符時寫 action=null，不自行派送",
+                countExactCalls(bridge, Opcodes.INVOKESTATIC, probe, "checkExecutor", execDesc) == 1
+                && firstCallIndex(bridge, Opcodes.INVOKESTATIC, probe, "checkExecutor", execDesc)
+                        < firstCallIndex(bridge, Opcodes.INVOKEINTERFACE, "zombie/network/packets/INetworkPacket", "processServer", psDesc)
+                && methodText(exec).contains("LDC \"character\"")
+                && methodText(exec).contains("ACONST_NULL\n    PUTFIELD zombie/network/packets/NetTimedActionPacket.action : Lse/krka/kahlua/vm/KahluaTable;")
+                && countCalls(exec, "zombie/network/packets/INetworkPacket", "processServer") == 0);
+
+        // W79：receiveUpdateItemSprite 唯一 getGridSquare(III) 之後 null 就 return；頭部綁連線、改道 SpriteUpdateGuard。
+        String gs = "zombie/network/GameServer";
+        String sug = "zombie/mdc/SpriteUpdateGuard";
+        String cell = "zombie/iso/IsoCell";
+        String gsqDesc = "(III)Lzombie/iso/IsoGridSquare;";
+        String recvDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V";
+        MethodNode vRecv = methodFromJar(jar, gs, "receiveUpdateItemSprite", recvDesc);
+        AbstractInsnNode gsq = firstCall(vRecv, Opcodes.INVOKEVIRTUAL, cell, "getGridSquare", gsqDesc);
+        failed += check("W79 上游指紋：receiveUpdateItemSprite 恰 1 個 IsoCell.getGridSquare(III)，存起來後 null 就跳過；"
+                        + "方法內沒有讀 UdpConnection.players",
+                countExactCalls(vRecv, Opcodes.INVOKEVIRTUAL, cell, "getGridSquare", gsqDesc) == 1
+                && gsq != null && nextReal(gsq) instanceof VarInsnNode st && st.getOpcode() == Opcodes.ASTORE
+                && nextReal(nextReal(gsq)) instanceof VarInsnNode ld && ld.var == st.var
+                && nextReal(nextReal(nextReal(gsq))) instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IFNULL
+                && !methodText(vRecv).contains("UdpConnection.players"));
+        MethodNode pRecv = method(distJava, gs, "receiveUpdateItemSprite", recvDesc);
+        String vRecvText = methodText(vRecv).replace("INVOKEVIRTUAL " + cell + ".getGridSquare " + gsqDesc,
+                "INVOKESTATIC " + sug + ".getGridSquare (L" + cell + ";III)Lzombie/iso/IsoGridSquare;");
+        int recvHead = 0;   // Textifier 先印 TRYCATCHBLOCK 宣告，頭部插入的指令接在它們之後
+        while (vRecvText.startsWith("    TRYCATCHBLOCK", recvHead)) recvHead = vRecvText.indexOf('\n', recvHead) + 1;
+        failed += check("W79 手術後：頭部 aload_1／begin、唯一 getGridSquare 同形改道 SpriteUpdateGuard，其餘指令與 frames 不變",
+                headCallSlotsOk(pRecv, sug, "begin", "(Lzombie/core/raknet/UdpConnection;)V", 1)
+                && methodText(pRecv).equals(vRecvText.substring(0, recvHead)
+                        + "    ALOAD 1\n    INVOKESTATIC " + sug + ".begin (Lzombie/core/raknet/UdpConnection;)V\n"
+                        + vRecvText.substring(recvHead)));
+        failed += check("W79 helper 契約：getGridSquare 恰一次呼叫原版 IsoCell.getGridSquare(III)",
+                countExactCalls(method(distJava, sug, "getGridSquare", "(L" + cell + ";III)Lzombie/iso/IsoGridSquare;"),
+                        Opcodes.INVOKEVIRTUAL, cell, "getGridSquare", gsqDesc) == 1);
         return failed;
     }
 

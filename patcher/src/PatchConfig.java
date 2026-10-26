@@ -682,6 +682,25 @@ public final class PatchConfig {
                 taProbe, "processServer"));
         dispatch.expectedHits = 1;
         patches.add(packetDispatch);
+        // W78（docs/patches.md 2cm）也在上面這個派送 bridge 裡（MdcTimedActionProbe.checkExecutor），不另加手術。
+
+        // ---- W76 建造類別白名單＋W77 建造距離（docs/patches.md 2cl）----
+        // 頭部 beginParse(this) 綁定本次 parse，唯一 LuaCaller.protectedCall（javap offset 221，建造物件建構子；之後 getFirst()==null
+        // 時 item=null）改道 MdcBuildActionGuard：類別不是 ISBuildingObject 子類或位置離 owner 太遠時不呼叫建構子、回 nil，
+        // 原版 processServer 回 Reject。helper 放 zombie.core 才讀得到 Action.playerId。
+        // kill switch -Dmdc.buildTypeCheck=0|off（W76）、-Dmdc.buildRangeCheck=0|off（W77）。
+        String buildGuard = "zombie/core/MdcBuildActionGuard";
+        Patcher.ClassPatch buildAction = new Patcher.ClassPatch("zombie/core/BuildAction");
+        Patcher.MethodOps buildParse = buildAction.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        buildParse.headCall = new Patcher.HeadCall(buildGuard, "beginParse", "(Lzombie/core/BuildAction;)V");
+        buildParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "se/krka/kahlua/integration/LuaCaller", "protectedCall",
+                "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
+                        + "Lse/krka/kahlua/integration/LuaReturn;",
+                buildGuard, "protectedCall"));
+        buildParse.expectedHits = 2;   // beginParse＋protectedCall
+        patches.add(buildAction);
 
         // ---- W11 動物聲音排序活鎖捕手（2026-08-23 晚間事故；docs/patches.md 2y）----
         // BaseAnimalSoundManager 的比較器每次 compare 現場重算 listener 距離，且手寫 >/< 三態
@@ -989,6 +1008,19 @@ public final class PatchConfig {
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V");
         wmFullData.redirects.add(wmChangeCount);
         wmFullData.expectedHits = 1;
+
+        // W79：UpdateItemSprite 距離檢查（docs/patches.md 2cn）。頭部 begin(connection)（slot 1）綁定連線，方法內唯一
+        // IsoCell.getGridSquare(III)（javap offset 47，之後 ifnull 跳 return）改道 SpriteUpdateGuard：連線上沒有玩家在範圍內時
+        // 回 null，原版什麼都不做。kill switch -Dmdc.spriteUpdateRange=0|off。
+        String spriteGuard = "zombie/mdc/SpriteUpdateGuard";
+        Patcher.MethodOps spriteIngress = gameServer.method("receiveUpdateItemSprite",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V");
+        spriteIngress.headCall = new Patcher.HeadCall(spriteGuard, "begin",
+                "(Lzombie/core/raknet/UdpConnection;)V", new int[]{1});
+        spriteIngress.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoCell", "getGridSquare", "(III)Lzombie/iso/IsoGridSquare;",
+                spriteGuard, "getGridSquare"));
+        spriteIngress.expectedHits = 2;   // begin＋getGridSquare
 
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");

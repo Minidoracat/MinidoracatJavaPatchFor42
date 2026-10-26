@@ -136,6 +136,8 @@ $helperEntries = @(
     'zombie/mdc/IsoObjectRemoveDefer.class',
     'zombie/mdc/IsoObjectRemoveDefer$Entry.class',
     'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
+    'zombie/core/MdcBuildActionGuard.class',
+    'zombie/mdc/SpriteUpdateGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -467,8 +469,9 @@ Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
 java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest nodefer
 Assert-Ok "ProcessItemsGuardTest（processItemsDefer=0，W41 回原版直接寫）"
 
-Write-Host "[9s/10] W10-C 打斷觀測＋動作封包 owner 檢查回歸（獨立 JVM）..."
-# 觀測模式不控制 owner 檢查；涵蓋真 wire 偽造取消／Request、合法取消交回原版（含 Fishing 後續事件）與上下文收尾。
+Write-Host "[9s/10] W10-C 打斷觀測＋動作封包 owner 檢查＋W78 執行者檢查回歸（獨立 JVM）..."
+# 觀測模式不控制 owner／執行者檢查；涵蓋真 wire 偽造取消／Request、合法取消交回原版（含 Fishing 後續事件）與上下文收尾；
+# W78：character＝owner、替別人包紮、nil、非 Request 照原版，character 是別人或不是玩家時 action=null 交回原版 Reject。
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe
 Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
 java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest enforce
@@ -477,6 +480,8 @@ java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectz
 Assert-Ok "MdcTimedActionProbeTest（觀測 off，owner 檢查仍有效）"
 java "-Dmdc.actionOwnerCheck=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe owner-off
 Assert-Ok "MdcTimedActionProbeTest（actionOwnerCheck=0，原版信任邊界負對照）"
+java "-Dmdc.actionExecutorCheck=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe executor-off
+Assert-Ok "MdcTimedActionProbeTest（actionExecutorCheck=0，W78 原版負對照）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、
@@ -675,6 +680,20 @@ java -Xverify:all "-Dmdc.isoObjectAddDefer=off" -cp "$R\work\out;$R\dist\java;$R
 Assert-Ok "IsoObjectAddDeferTest（off，原版負對照）"
 java -Xverify:all "-Dmdc.isoObjectRemoveDefer=0" "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest on-removeoff
 Assert-Ok "IsoObjectAddDeferTest（on，W75 與 W73 off 時照常）"
+
+Write-Host "[9zs/10] 建造請求類別白名單（W76）與距離（W77）：真 BuildAction.parse＋真 wire，原版建造類別（含二層 derive）、雙門原點、8 格邊界、樓層差 1、管理員遠距照常建造；非建造全域、ISBuildingObject 本身、metatable 循環、不存在的 Type、9 格、樓層差 2、NaN 不呼叫建構子並記 log，原版 processServer 回 Reject；兩個開關各自 off 為原版負對照..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest both
+Assert-Ok "MdcBuildActionGuardTest（兩個開關都開，出貨組態）"
+java -Xverify:all "-Dmdc.buildTypeCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest type-off
+Assert-Ok "MdcBuildActionGuardTest（buildTypeCheck=off，W76 原版負對照）"
+java -Xverify:all "-Dmdc.buildRangeCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest range-off
+Assert-Ok "MdcBuildActionGuardTest（buildRangeCheck=off，W77 原版負對照）"
+
+Write-Host "[9zt/10] UpdateItemSprite 距離（W79）：真 receiveUpdateItemSprite＋真 wire，玩家身旁、20 格邊界、樓層差 1、同機多人任一位在範圍內照原版取格子；21 格、遠處、樓層差 2、都不在範圍內、連線沒有玩家不取格子並記 log；off 原版負對照..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest on
+Assert-Ok "SpriteUpdateGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.spriteUpdateRange=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest off
+Assert-Ok "SpriteUpdateGuardTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

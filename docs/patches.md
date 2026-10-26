@@ -4384,6 +4384,102 @@ console（前 20 次延後與之後每 1000 次各一行附來源；首次生效
 
 ---
 
+<a id="2cl"></a>
+## 2cl. 建造請求的類別與距離驗證（W76、W77，server，預設 on）
+
+強化伺服器端的建造請求驗證：不通過的請求在呼叫建造物件的建構子之前拒絕，原版照常回 Reject，客戶端不會卡住；正常建造的授權、解析與處理流程不變。缺口細節不在公開文件描述。
+
+**檢查**：
+- **W76 類別**：請求指名的全域類別表，沿 metatable 鏈（最多 16 層）必須找得到全域 `ISBuildingObject`；`ISBuildingObject` 本身、找不到的全域、鏈上有循環的都拒絕。不寫死名單：原版所有建造類別（舊式 `ISWoodenWall` 等與 B42 的 `ISBuildIsoEntity`）都是 `ISBuildingObject:derive(...)`，原版唯一的二層 derive `ISAnimalPickMateCursor` 也通過；MOD 的建造類別只要也 derive 就能過。
+- **W77 距離**：建造位置與 owner 的位置每軸差 ≤ 8 格、樓層差 ≤ 1.5；座標不是有限數一律拒絕。原版游標的 z 就是玩家所在樓層，`tryBuild` 先走到旁邊才送出；合法最遠是 4 格寬雙門、雙柵欄門的原點格（約 5.1 格），8 格是加上伺服器端位置落後的餘量，1.5 是爬梯時玩家 z 是小數。role 有 `UseBuildCheat` 的管理員不限（作弊建造跳過走路；管理面板的建造作弊鈕只改客戶端旗標，所以看伺服器端的 role，不看 `isBuildCheat()`）。
+
+**合法來源調查**：正式服 2026-10-25 的 MOD 清單裡，本機有副本的 MOD 都沒有自己送建造請求或另做不經 `ISBuildingObject` 的建造類別；Neat_Building、TheShortcut 走原版 `ISBuildIsoEntity`，AreaTasks 要求玩家站在該格，SMB_steps 梯子站位距離小於 1、z 是小數。
+
+**手術**：`BuildAction.parse` 頭部 `MdcBuildActionGuard.beginParse(this)`（HeadCall），唯一 `LuaCaller.protectedCall`（javap offset 221，建造物件的建構子）1:1 改道 `MdcBuildActionGuard.protectedCall`（新 ClassPatch，命中 2）。不通過時不呼叫建構子，回只帶一個 nil 的 `LuaSuccess`，原版 `getFirst() == null` 分支設 `item = null`，之後 `processServer` 照原版回 Reject。x、y、z 與 `objectType` 是 `BuildAction` 的 private 欄位，helper 在 class init 時反射取得（找不到就 class init 失敗＝fail-fast）；helper 放 `zombie.core` 才讀得到 `Action.playerId`。檢查本身拋 `RuntimeException` 時計 anomalies、照原版呼叫建構子。
+
+console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20 行）：
+
+```text
+[MinidoracatJavaPatch][BuildActionGuard] 首次生效 typeCheck=on rangeCheck=on maxRange=8.0 maxDz=1.5（…）.
+[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<請求的類別名> owner=<onlineID>:<名稱> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**驗收**：上線後正常建造（舊式木牆、B42 建造選單、多格家具、雙門、樓梯、梯子上）照常完成、沒有 `refused` 行；有 `refused` 行時以 `type=`、`at=`、`target=` 判斷是誤擋還是異常請求。
+
+**kill switch**：`-Dmdc.buildTypeCheck=0|off`（W76）、`-Dmdc.buildRangeCheck=0|off`（W77），各自獨立，需重啟。
+
+**部署**：manifest 新增 `zombie/core/MdcBuildActionGuard.class` 與 patched `zombie/core/BuildAction.class`。
+
+**守門與驗證**：
+- SmokeCheck：上游指紋——`parse` 恰 1 個 `protectedCall` 且在 `getFunctionObject` 之後、之後 `getFirst()==null` 時 `item=null`，x/y/z/`objectType` 欄位存在，`isValid` 的全 jar 呼叫點數仍為 0；手術後頭部 `aload_0; beginParse`、唯一 `protectedCall` 同形改道，其餘指令與 frames 不變，`BuildAction` 其餘方法不變；helper 委派原呼叫恰 2 處、catch 只有 `RuntimeException`。
+- `MdcBuildActionGuardTest`（`build.ps1` [9zs/10]，both、type-off、range-off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `BuildAction.parse`＋真 wire（Action 標頭、座標、sprite、`PZNetKahluaTableImpl.save` 的類別與參數表），Lua 環境換成最小替身（`LuaManager.env` 放原版 derive 形狀的類別表，`LuaManager.caller` 計次）。照常建造：原版類別相鄰格、二層 derive、雙門原點格、每軸差恰 8 格、樓層差 1、`UseBuildCheat` 管理員遠距；拒絕（不呼叫建構子、`item=null`、計數與 log）：非建造類別、`ISBuildingObject` 本身、metatable 循環、找不到的類別、單軸 9 格（兩軸各一）、遠處、樓層差 2、NaN；拒絕後跑原版 `processServer`，恰送 1 包 Reject 給送封包的人；off 組態照原版呼叫建構子。
+
+**退場**：官方在伺服器端驗證建造類別與位置時撤刀。
+
+---
+
+<a id="2cm"></a>
+## 2cm. timed action 的執行者驗證（W78，server，預設 on）
+
+強化伺服器端的 timed action 驗證：NetTimedAction 請求重建出的動作，執行者（動作表的 `character`，`ISBaseTimedAction.new(self, character)` 設的）必須是送封包的玩家本人，否則回 Reject。缺口細節不在公開文件描述。
+
+**檢查**：沒有新的 bytecode 手術。既有派送 bridge `MdcTimedActionProbe.processServer`（[2aj](#2aj) 的 owner 檢查所在）在 owner 檢查通過之後、交回原版之前，對 Request 狀態且 `action` 不是 null 的 NetTimedAction 讀 `character`：不是 nil 也不是 owner 物件時把 `action` 設成 null，原版 `processServer` 走 `action == null` 的 Reject 分支（與 parse 失敗相同），客戶端收到 Reject。`character` 是 nil 時照原版（無從判斷）。其他 IsoPlayer 參數不看：替別人包紮（`ISApplyBandage` 等）的病人在別的參數，`character` 仍是排隊的人。
+
+**合法來源調查**：原版客戶端以動作表的 `character` 本人送出動作，同機多人時兩者也解析成同一個物件，合法請求恆相等。原版與正式服 MOD 的 `ISBaseTimedAction.new(self, X)`，X 都是排隊的角色；替別人處理的醫療動作、`ISMedicalCheckAction`、`ISWakeOtherPlayer` 的 `character` 都是排隊者。
+
+console（與 owner 檢查共用 TimedActionProbe 的時間窗；首次生效與心跳行多了 `executorCheck=`、`executorRefused=`）：
+
+```text
+[MinidoracatJavaPatch][TimedActionProbe] executorMismatch#<n> id=<id> type=<動作類別> owner=<onlineID>:<名稱> character=<onlineID>:<名稱>|<類別> connectionPlayers=<…> action=rejected suppressed=<n>.
+```
+
+`-Dmdc.timedActionProbe=0|off` 時照樣拒絕，只是不計數、不記錄（同 owner 檢查）。
+
+**驗收**：上線後一般動作與替別人包紮照常完成，沒有 `executorMismatch` 行。
+
+**kill switch**：`-Dmdc.actionExecutorCheck=0|off`，需重啟。
+
+**部署**：`zombie/core/MdcTimedActionProbe.class` 換新，沒有新 class。
+
+**守門與驗證**：
+- SmokeCheck：原版 `NetTimedActionPacket.processServer` 讀 `action`、null 時跳 Reject 分支；bridge 在第一次交回原版之前呼叫 `checkExecutor`，`checkExecutor` 讀 `character`、不符時寫 `action=null`，不自行派送。
+- `MdcTimedActionProbeTest`（`build.ps1` [9s/10]，既有四組態＋`actionExecutorCheck=0`，自驗 argv）：`character`＝owner、替別人包紮（病人在別的參數）、nil、非 Request 狀態都照原版派送且動作表不動；`character` 是別的玩家或不是玩家時，仍交給原版派送但 `action=null`（原版 Reject 的 bytes 由 `NetTimedActionGuardTest` 驗），計數並記 `executorMismatch`；`MODE_OFF` 照樣拒絕、零計數零 log；off 組態照原版。
+
+**退場**：官方在伺服器端比對動作執行者與封包發送者時撤刀。
+
+---
+
+<a id="2cn"></a>
+## 2cn. 物件外觀更新的距離驗證（W79，server，預設 on）
+
+強化伺服器端的 `UpdateItemSprite` 驗證：送封包的連線上必須有玩家在該物件附近，否則不改、不轉發。缺口細節不在公開文件描述。
+
+**合法來源**：只有客戶端 `IsoObject.transmitUpdatedSprite()` 的客戶端分支會送。呼叫者是 `ISMoveablesAction` 的 scrap／repair（玩家身旁）與 `BentFences.smashFence`／`BrokenFences.destroyFence`（駕駛撞圍籬，車旁、沿圍籬幾格）；其他搬運、拆解的 sprite 更新在伺服器 `complete()` 裡進行。正式服 MOD 沒有在客戶端送這個封包。
+
+**檢查**：每軸差 ≤ 20 格、樓層差 ≤ 1.5；封包不帶玩家，同機多人時任一位在範圍內就放行。20 格是撞圍籬時駕駛離撞擊點、`smashFence` 沿圍籬改幾格、長拖車與伺服器位置落後的餘量（估計值，沒有實機量）。安全屋沒有加：本服的安全屋權限在家族 Safehouse MOD（Lua），原版 `SafeHouse` 以名字判斷，合法撞圍籬也可能發生在別人的安全屋旁。
+
+**手術**：`GameServer.receiveUpdateItemSprite` 頭部 `SpriteUpdateGuard.begin(connection)`（HeadCall slot 1），唯一 `IsoCell.getGridSquare(III)`（javap offset 47，之後存起來、`ifnull` 跳到 return）1:1 改道 `SpriteUpdateGuard.getGridSquare`（在既有 GameServer ClassPatch 上，命中 2）。不通過時回 null，原版什麼都不做。
+
+console（拒絕時每 10 秒最多 20 行）：
+
+```text
+[MinidoracatJavaPatch][SpriteUpdateGuard] refused target=<x>,<y>,<z> connectionPlayers=<…> at=<各玩家位置> maxRange=20.0 refused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**驗收**：上線後拆物件、修理、開車撞圍籬照常；出現 `refused` 行時看 `at=` 與 `target=` 的距離，正常操作被擋就放寬門檻。
+
+**kill switch**：`-Dmdc.spriteUpdateRange=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/SpriteUpdateGuard.class`，`zombie/network/GameServer.class` 換新（連同 W76、W77：156 → 159 個 class）。
+
+**守門與驗證**：
+- SmokeCheck：上游指紋——`receiveUpdateItemSprite` 恰 1 個 `getGridSquare(III)`，存起來後 null 就跳過，方法內沒有讀 `UdpConnection.players`；手術後頭部 `aload_1; begin`、唯一 `getGridSquare` 同形改道，其餘指令與 frames 不變；helper 恰一次呼叫原版。
+- `SpriteUpdateGuardTest`（`build.ps1` [9zt/10]，on、off 兩個 JVM，自驗 argv）：走 dist 內手術後的真 `receiveUpdateItemSprite`＋真 wire，真 `IsoCell` 的伺服器分支轉給記錄呼叫的 `ServerMap` 子類。照原版取格子：玩家身旁、每軸恰 20 格、樓層差 1、同機多人任一位在範圍內；不取格子並記 log：21 格、遠處、樓層差 2、同機多人都不在範圍內、連線上沒有玩家；off 照原版。
+
+**退場**：官方在伺服器端驗證 `UpdateItemSprite` 的距離，或改成伺服器權威時撤刀。
+
+---
+
 <a id="3"></a>
 ## 3. 部署後驗證清單
 

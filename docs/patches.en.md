@@ -4785,6 +4785,102 @@ thread-safe.
 
 ---
 
+<a id="2cl"></a>
+## 2cl. Build request class and distance checks (W76, W77, server, default on)
+
+Hardens server-side validation of build requests: a request that fails is rejected before the build object's constructor runs, and vanilla still sends the Reject, so the client does not get stuck. Authorisation, parsing and handling of normal builds are unchanged. The details of the gap are not described in public documents.
+
+**Checks**:
+- **W76 class**: walking the metatable chain (at most 16 levels) of the global class table named in the request must reach the global `ISBuildingObject`. `ISBuildingObject` itself, a missing global and a chain with a cycle are rejected. No hard-coded list: every vanilla build class (the old `ISWoodenWall` and friends, and B42's `ISBuildIsoEntity`) is `ISBuildingObject:derive(...)`, the only vanilla two-level derive `ISAnimalPickMateCursor` passes, and mod build classes pass as long as they derive too.
+- **W77 distance**: the build position must be within 8 tiles of the owner on each axis and within 1.5 floors; non-finite coordinates are always rejected. The vanilla cursor's z is the player's own floor, and `tryBuild` walks next to the target before sending. The farthest legal case is the origin tile of the 4-tile double door and double gate (about 5.1 tiles); 8 adds room for the server-side position lagging behind, and 1.5 covers a fractional z while climbing a ladder. Admins whose role has `UseBuildCheat` are exempt (cheat building skips the walk; the admin panel's build cheat button only changes a client flag, so the check reads the server-side role, not `isBuildCheat()`).
+
+**Legitimate sources**: in our server's mod list of 2026-10-25, no mod with a local copy sends build requests itself or defines a build class outside `ISBuildingObject`. Neat_Building and TheShortcut go through vanilla `ISBuildIsoEntity`, AreaTasks requires the player to stand on the tile, and SMB_steps ladders keep the player within 1 tile with a fractional z.
+
+**Surgery**: a HeadCall `MdcBuildActionGuard.beginParse(this)` at the head of `BuildAction.parse`, and a 1:1 redirect of its only `LuaCaller.protectedCall` (javap offset 221, the build object's constructor) to `MdcBuildActionGuard.protectedCall` (new ClassPatch, 2 hits). On failure the constructor is not called and a `LuaSuccess` carrying one nil is returned, so vanilla's `getFirst() == null` branch sets `item = null` and `processServer` sends the usual Reject. x, y, z and `objectType` are private fields of `BuildAction`; the helper resolves them by reflection at class init (missing fields fail class init, fail-fast). The helper lives in `zombie.core` to read `Action.playerId`. If the check itself throws a `RuntimeException`, it counts an anomaly and calls the constructor as vanilla does.
+
+Console (one first-use line on the first build request; rejections at most 20 lines per 10 seconds):
+
+```text
+[MinidoracatJavaPatch][BuildActionGuard] 首次生效 typeCheck=on rangeCheck=on maxRange=8.0 maxDz=1.5（…）.
+[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<requested class> owner=<onlineID>:<name> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**Acceptance**: after deployment, normal builds (old wooden walls, the B42 build menu, multi-tile furniture, double doors, stairs, building from a ladder) complete and no `refused` line appears; for any `refused` line, use `type=`, `at=` and `target=` to tell a false positive from an abnormal request.
+
+**Kill switches**: `-Dmdc.buildTypeCheck=0|off` (W76) and `-Dmdc.buildRangeCheck=0|off` (W77), independent, restart required.
+
+**Deployment**: the manifest adds `zombie/core/MdcBuildActionGuard.class` and a patched `zombie/core/BuildAction.class`.
+
+**Guards and verification**:
+- SmokeCheck: upstream fingerprint (`parse` has exactly one `protectedCall`, after `getFunctionObject`, followed by `item=null` when `getFirst()==null`; the x/y/z/`objectType` fields exist; `isValid` still has zero call sites in the jar); after surgery the head is `aload_0; beginParse`, the only `protectedCall` is redirected 1:1 and every other instruction and frame is unchanged, as are all other `BuildAction` methods; the helper calls the original exactly twice and catches only `RuntimeException`.
+- `MdcBuildActionGuardTest` (`build.ps1` [9zs/10], three JVMs: both, type-off, range-off, each checking that argv matches the actual switches): runs the real patched `BuildAction.parse` from dist on a real wire (Action header, coordinates, sprite, class and argument tables from `PZNetKahluaTableImpl.save`) with a minimal Lua stand-in (`LuaManager.env` holds class tables shaped like vanilla derive, `LuaManager.caller` counts calls). Builds as before: vanilla class on an adjacent tile, two-level derive, double door origin, exactly 8 tiles per axis, one floor apart, a `UseBuildCheat` admin far away. Rejected (constructor not called, `item=null`, counted and logged): a non-build class, `ISBuildingObject` itself, a metatable cycle, a missing class, 9 tiles on one axis (each axis), far away, two floors apart, NaN. After a rejection the vanilla `processServer` sends exactly one Reject to the sender; the off configurations call the constructor as vanilla does.
+
+**Retirement**: remove the patch when TIS validates build classes and positions on the server.
+
+---
+
+<a id="2cm"></a>
+## 2cm. Timed action performer check (W78, server, default on)
+
+Hardens server-side validation of timed actions: in an action rebuilt from a NetTimedAction request, the performer (the action table's `character`, set by `ISBaseTimedAction.new(self, character)`) must be the player who sent the packet; otherwise the server sends a Reject. The details of the gap are not described in public documents.
+
+**Check**: no new bytecode surgery. The existing dispatch bridge `MdcTimedActionProbe.processServer` (home of the owner check in [2aj](#2aj)), after the owner check passes and before handing back to vanilla, reads `character` for a NetTimedAction in Request state whose `action` is not null. If it is neither nil nor the owner object, `action` is set to null and vanilla `processServer` takes its `action == null` Reject branch (the same as a parse failure), so the client receives a Reject. A nil `character` is left to vanilla (nothing to compare). Other IsoPlayer arguments are not checked: when bandaging someone else (`ISApplyBandage` and friends) the patient is another argument and `character` is still the player who queued the action.
+
+**Legitimate sources**: the vanilla client sends an action as its own `character`, and with split screen both sides resolve to the same object, so legitimate requests always match. In vanilla and in our server's mods, X in `ISBaseTimedAction.new(self, X)` is always the queuing character; for medical actions on others, `ISMedicalCheckAction` and `ISWakeOtherPlayer`, `character` is the queuing player.
+
+Console (shares the TimedActionProbe rate window with the owner check; the first-use and heartbeat lines gain `executorCheck=` and `executorRefused=`):
+
+```text
+[MinidoracatJavaPatch][TimedActionProbe] executorMismatch#<n> id=<id> type=<action class> owner=<onlineID>:<name> character=<onlineID>:<name>|<class> connectionPlayers=<…> action=rejected suppressed=<n>.
+```
+
+With `-Dmdc.timedActionProbe=0|off` the request is still rejected, just not counted or logged (as for the owner check).
+
+**Acceptance**: after deployment, ordinary actions and bandaging someone else complete as before, and no `executorMismatch` line appears.
+
+**Kill switch**: `-Dmdc.actionExecutorCheck=0|off`, restart required.
+
+**Deployment**: `zombie/core/MdcTimedActionProbe.class` is replaced; no new class.
+
+**Guards and verification**:
+- SmokeCheck: vanilla `NetTimedActionPacket.processServer` reads `action` and jumps to the Reject branch on null; the bridge calls `checkExecutor` before its first hand-back to vanilla, and `checkExecutor` reads `character`, writes `action=null` on a mismatch and never dispatches itself.
+- `MdcTimedActionProbeTest` (`build.ps1` [9s/10], the existing four configurations plus `actionExecutorCheck=0`, each checking argv): `character` equal to the owner, bandaging someone else (patient in another argument), nil and a non-Request state are dispatched as vanilla with the action table untouched; when `character` is another player or not a player, the request is still dispatched to vanilla but with `action=null` (the vanilla Reject bytes are checked in `NetTimedActionGuardTest`), counted and logged as `executorMismatch`; `MODE_OFF` still rejects with zero counts and no log; the off configuration behaves as vanilla.
+
+**Retirement**: remove the patch when TIS compares the action performer with the packet sender on the server.
+
+---
+
+<a id="2cn"></a>
+## 2cn. Object sprite update distance check (W79, server, default on)
+
+Hardens server-side validation of `UpdateItemSprite`: a player on the sending connection must be near the object; otherwise the server neither changes nor forwards it. The details of the gap are not described in public documents.
+
+**Legitimate sources**: only the client branch of `IsoObject.transmitUpdatedSprite()` sends it. Its callers are the scrap/repair modes of `ISMoveablesAction` (next to the player) and `BentFences.smashFence`/`BrokenFences.destroyFence` (driving into fences, next to the vehicle and a few tiles along the fence); other moveable and dismantle sprite updates happen inside the server-side `complete()`. None of our server's mods send this packet from the client.
+
+**Check**: within 20 tiles per axis and 1.5 floors; the packet carries no player, so with split screen any one player in range is enough. 20 tiles covers the driver's distance from the impact, `smashFence` changing a few tiles along the fence, long trailers and the server-side position lagging behind (an estimate, not measured in game). No safehouse check: our server's safehouse permissions live in the family Safehouse mod (Lua), vanilla `SafeHouse` matches by name, and a legitimate fence crash can happen next to someone else's safehouse.
+
+**Surgery**: a HeadCall `SpriteUpdateGuard.begin(connection)` (slot 1) at the head of `GameServer.receiveUpdateItemSprite`, and a 1:1 redirect of its only `IsoCell.getGridSquare(III)` (javap offset 47, stored and followed by `ifnull` to the return) to `SpriteUpdateGuard.getGridSquare` (on the existing GameServer ClassPatch, 2 hits). On failure it returns null and vanilla does nothing.
+
+Console (rejections at most 20 lines per 10 seconds):
+
+```text
+[MinidoracatJavaPatch][SpriteUpdateGuard] refused target=<x>,<y>,<z> connectionPlayers=<…> at=<each player's position> maxRange=20.0 refused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**Acceptance**: after deployment, dismantling, repairing and driving into fences work as before; for any `refused` line, compare `at=` with `target=` and widen the limit if a normal operation was blocked.
+
+**Kill switch**: `-Dmdc.spriteUpdateRange=0|off`, restart required.
+
+**Deployment**: the manifest adds `zombie/mdc/SpriteUpdateGuard.class` and replaces `zombie/network/GameServer.class` (with W76 and W77: 156 → 159 classes).
+
+**Guards and verification**:
+- SmokeCheck: upstream fingerprint (`receiveUpdateItemSprite` has exactly one `getGridSquare(III)`, stored and skipped on null, and the method does not read `UdpConnection.players`); after surgery the head is `aload_1; begin`, the only `getGridSquare` is redirected 1:1 and every other instruction and frame is unchanged; the helper calls the original exactly once.
+- `SpriteUpdateGuardTest` (`build.ps1` [9zt/10], two JVMs: on, off, each checking argv): runs the real patched `receiveUpdateItemSprite` from dist on a real wire; the server branch of a real `IsoCell` goes to a `ServerMap` subclass that records calls. Fetches the square as vanilla: next to the player, exactly 20 tiles per axis, one floor apart, any split-screen player in range. Does not fetch it and logs: 21 tiles, far away, two floors apart, no split-screen player in range, no player on the connection. Off behaves as vanilla.
+
+**Retirement**: remove the patch when TIS validates the `UpdateItemSprite` distance on the server or makes it server-authoritative.
+
+---
+
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 

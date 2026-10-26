@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 75 個 patched class、220 個命中點、81 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 76 個 patched class、224 個命中點、83 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -139,6 +139,10 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W23 每個 Steam ID 帳號上限（[2ak](docs/patches.md#2ak)） | `MaxAccountsPerUser` 只在建立新帳號時檢查，既有帳號從不受限。 | 在登入時執行上限，保留最近使用的帳號。屬伺服器政策。 | 未回報 |
 | W52 分割畫面與重生名稱（[2bp](docs/patches.md#2bp)） | `ConnectCoopPacket` 採用封包裡的名稱，只擋空字串與在線同名。分割畫面玩家（原版介面）或重生的主玩家（改過的客戶端 Lua，不受 `AllowCoop` 影響）能換成離線玩家的名字，通過以名字認人的安全屋、陣營與 MOD 檢查，期間本人登不進來。 | 0 號一律用連線登入的帳號；1–3 號分割畫面玩家不能用任何已有帳號的名稱（在任何狀態改變前拒絕）。 | 草稿 |
 | W67 安全屋內的畜牧區（[2cc](docs/patches.md#2cc)） | 任何玩家都能刪任何一塊畜牧區，連同相連的一起刪，別人安全屋裡的也一樣。 | 要刪的整組壓到安全屋時，只接受那間的屋主、成員或管理員（`CanSetupSafehouses`）；其他人刪的話，伺服器保留這些畜牧區、補回刪除者的畫面並告訴他原因。伺服器政策。 | 未回報 |
+| W76 建造請求的類別驗證（[2cl](docs/patches.md#2cl)） | 建造請求的伺服器端驗證有缺口；細節不在此公開。 | 請求指名的建造類別必須是 `ISBuildingObject` 的子類（沿 metatable 鏈找，不寫死名單，原版與 MOD 的建造類別都能過），否則回 Reject 並記錄。 | 未回報 |
+| W77 建造距離驗證（[2cl](docs/patches.md#2cl)） | 同上。 | 建造位置與玩家每軸差超過 8 格或樓層差超過 1 時回 Reject 並記錄；有作弊建造權限的管理員不限。 | 未回報 |
+| W78 timed action 執行者驗證（[2cm](docs/patches.md#2cm)） | timed action 的伺服器端驗證有缺口；細節不在此公開。 | 動作的執行者（`character`）必須是送封包的玩家，否則回 Reject 並記錄；其他玩家參數（例如替別人包紮的病人）照原版。 | 未回報 |
+| W79 物件外觀更新距離驗證（[2cn](docs/patches.md#2cn)） | 物件外觀更新的伺服器端驗證有缺口；細節不在此公開。 | 送封包的連線上必須有玩家在該物件 20 格內，否則不改、不轉發並記錄；拆解、修理、開車撞圍籬照常。 | 未回報 |
 | W29 動物同步驗證（[2aq](docs/patches.md#2aq)） | client 送往伺服器的動物同步封包有驗證缺口；細節會私下回報 TIS，不在此公開。 | 在任何遊戲狀態改變前驗證並丟棄不合法封包。 | 將私下回報 |
 | W19 車輛永久移除帳本（[2ag](docs/patches.md#2ag)） | 好幾條 Lua 路徑都能永久刪除車輛，卻沒有任何稽核紀錄。 | 每次永久移除都記錄呼叫來源與認領狀態（純觀測）。 | 未回報 |
 

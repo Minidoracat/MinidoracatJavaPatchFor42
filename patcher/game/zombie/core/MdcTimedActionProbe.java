@@ -34,6 +34,12 @@ import zombie.network.packets.sound.WorldSoundPacket;
  * 其餘一律交回原版 {@code processServer}（取消、Reject 後續、Fishing 事件都照原版）。
  * {@code -Dmdc.actionOwnerCheck=0|off} 回原版直通；與 MODE 獨立（MODE_OFF 時照樣檢查，只是不記錄）。
  *
+ * <p><b>W78 執行者檢查</b>（docs/patches.md 2cm）：owner 檢查通過後，NetTimedAction Request 重建出的動作表
+ * {@code character}（{@code ISBaseTimedAction.new(self, character)} 設的執行者）不是 nil 也不是 owner 本人時，
+ * 把 {@code action} 設成 null 交回原版 {@code processServer} 的 Reject 分支（客戶端收到 Reject）。
+ * 其他 IsoPlayer 參數（替別人包紮的病人）不看。
+ * {@code -Dmdc.actionExecutorCheck=0|off} 關閉；記錄同樣受 MODE_OFF 抑制。
+ *
  * <p>例外紀律：簿記 catch RuntimeException（anomalies++，不擋 vanilla）；vanilla 委派原樣上拋；
  * LinkageError 外逃 fail-fast。
  */
@@ -46,7 +52,9 @@ public final class MdcTimedActionProbe {
 
     static final int MODE = parseMode();
     /** 動作封包 owner 必須屬於送封包的連線；{@code -Dmdc.actionOwnerCheck=0|off} 才回原版直通。 */
-    static final boolean OWNER_CHECK = parseOwnerCheck();
+    static final boolean OWNER_CHECK = parseFlag("mdc.actionOwnerCheck");
+    /** W78：NetTimedAction 的 {@code character} 必須是 owner；{@code -Dmdc.actionExecutorCheck=0|off} 關閉。 */
+    static final boolean EXECUTOR_CHECK = parseFlag("mdc.actionExecutorCheck");
 
     private static final long WINDOW_NS = 10_000_000_000L;
     private static final int WINDOW_CAP = 20;
@@ -66,6 +74,8 @@ public final class MdcTimedActionProbe {
     private static long rejectsSkippedNoConn;
     /** owner 不屬於本連線或 wire onlineID 不符而拒絕派送的動作封包數。 */
     private static long unknownRefused;
+    /** W78：{@code character} 不是 owner 而改走原版 Reject 的 NetTimedAction Request 數。 */
+    private static long executorRefused;
     private static long logged;
     private static long suppressed;
     private static long anomalies;
@@ -159,6 +169,9 @@ public final class MdcTimedActionProbe {
                 return;
             }
             if (packet instanceof NetTimedActionPacket request) {
+                if (EXECUTOR_CHECK && request.state == Transaction.TransactionState.Request && request.action != null) {
+                    checkExecutor(request, connection);
+                }
                 NetTimedActionPacket previous = CURRENT_REQUEST.get();
                 CURRENT_REQUEST.set(request);
                 try {
@@ -191,6 +204,49 @@ public final class MdcTimedActionProbe {
             if (player == owner) return true;
         }
         return false;
+    }
+
+    /**
+     * W78：Request 重建出的動作表 {@code character} 不是 nil 也不是 owner 物件時，{@code action} 設成 null，
+     * 原版 {@code processServer} 走 Reject 分支（同 parse 失敗）。原版客戶端以 {@code character} 本人送出動作，
+     * 合法請求恆相等。檢查自身拋例外時照原版（anomalies++）。
+     */
+    private static void checkExecutor(NetTimedActionPacket request, UdpConnection connection) {
+        Object character;
+        try {
+            character = request.action.rawget("character");
+        } catch (RuntimeException e) {
+            anomalies++;
+            return;
+        }
+        if (character == null || character == request.playerId.getPlayer()) {
+            return;
+        }
+        request.action = null;
+        if (MODE == MODE_OFF) {
+            return;
+        }
+        executorRefused++;
+        try {
+            if (!bannerShown) {
+                showBanner();
+            }
+            if (!allowLine()) return;
+            DebugLog.log(TAG + " executorMismatch#" + executorRefused
+                    + " id=" + request.id
+                    + " type=" + safeName(request.type)
+                    + " owner=" + playerName(request)
+                    + " character=" + describe(character)
+                    + " connectionPlayers=" + connectionPlayers(connection)
+                    + " action=rejected suppressed=" + suppressed + ".");
+        } catch (RuntimeException e) {
+            anomalies++;
+        }
+    }
+
+    private static String describe(Object character) {
+        return character instanceof IsoPlayer p ? p.getOnlineID() + ":" + safeName(p.getUsername())
+                : safeName(character.getClass().getSimpleName());
     }
 
     private static void refuseUntrusted(Action action, UdpConnection connection) {
@@ -299,8 +355,10 @@ public final class MdcTimedActionProbe {
     private static void showBanner() {
         bannerShown = true;
         DebugLog.log(TAG + " 首次生效 mode=" + MODE + " ownerCheck=" + (OWNER_CHECK ? "on" : "off")
+                + " executorCheck=" + (EXECUTOR_CHECK ? "on" : "off")
                 + "（-Dmdc.timedActionProbe=0|off/1|enforce(打斷時補送 Reject)/2|observe 預設；"
-                + "-Dmdc.actionOwnerCheck=0|off 關閉動作封包 owner 檢查；觀測 interrupted/untrustedAction）.");
+                + "-Dmdc.actionOwnerCheck=0|off 關閉動作封包 owner 檢查；-Dmdc.actionExecutorCheck=0|off 關閉 W78；"
+                + "觀測 interrupted/untrustedAction/executorMismatch）.");
     }
 
     /** heartbeat：每 256 次 stopPlayerActions 檢查一次時鐘、300s 一行。 */
@@ -317,16 +375,17 @@ public final class MdcTimedActionProbe {
             DebugLog.log(TAG + " beat interruptCalls=" + interruptCalls + " interruptedAccepted=" + interruptedAccepted
                     + " sameIdResend=" + sameIdResend + " rejectsSent=" + rejectsSent
                     + " rejectsSkippedNoConn=" + rejectsSkippedNoConn
-                    + " unknownRefused=" + unknownRefused
+                    + " unknownRefused=" + unknownRefused + " executorRefused=" + executorRefused
                     + " logged=" + logged + " suppressed=" + suppressed
-                    + " anomalies=" + anomalies + " mode=" + MODE + " ownerCheck=" + (OWNER_CHECK ? "on" : "off") + ".");
+                    + " anomalies=" + anomalies + " mode=" + MODE + " ownerCheck=" + (OWNER_CHECK ? "on" : "off")
+                    + " executorCheck=" + (EXECUTOR_CHECK ? "on" : "off") + ".");
         } catch (RuntimeException e) {
             anomalies++;
         }
     }
 
-    private static boolean parseOwnerCheck() {
-        String raw = System.getProperty("mdc.actionOwnerCheck");
+    private static boolean parseFlag(String name) {
+        String raw = System.getProperty(name);
         if (raw == null) {
             return true;
         }
@@ -377,6 +436,10 @@ public final class MdcTimedActionProbe {
 
     static long unknownRefusedForTest() {
         return unknownRefused;
+    }
+
+    static long executorRefusedForTest() {
+        return executorRefused;
     }
 
     static long anomaliesForTest() {
