@@ -1547,15 +1547,20 @@ public final class PatchConfig {
         // chunk／格子／載具任務）＋唯一 INVOKESTATIC PathfindNative.update()V（offset 192，輪次邊界與每分鐘一行）；
         // findPath(PathFindRequest) 唯一 PathfindNative.findPath（offset 20，計時、成敗、請求者、排隊時間）；
         // PathRequestTask.execute 唯一 addRequest（offset 11，入隊時間）。回傳值、例外、呼叫次數與順序同原版。
-        // -Dmdc.pathfindProbe=0|off 只委派。
+        // -Dmdc.pathfindProbe=0|off 只委派。W81 起 updateThread 的 poll／update 先經 MdcPathfindGate 再到探針。
+        // ---- W81 尋路世界變動批次化閘門（docs/patches.md 2cp）----
+        // 同一個 ClassPatch：updateThread 的 8 個 poll 與 update 改道到 MdcPathfindGate，它再呼叫 W74 探針。閘門關閉的輪次
+        // chunk／格子／載具佇列 poll 回 null（請求佇列直通），每 T ms 開一輪並一次排空 chunk 佇列（不受原版每輪 10 個上限）。
+        // -Dmdc.pathfindGateMs=<T>，未設 1000，0|off 只委派探針（與原版逐指令等價）。
         String pfProbe = "zombie/pathfind/nativeCode/MdcPathfindProbe";
+        String pfGate = "zombie/pathfind/nativeCode/MdcPathfindGate";
         String pfNative = "zombie/pathfind/nativeCode/PathfindNative";
         String pfRequest = "Lzombie/pathfind/nativeCode/PathFindRequest;";
         Patcher.ClassPatch pfThread = new Patcher.ClassPatch("zombie/pathfind/nativeCode/PathfindNativeThread");
         Patcher.MethodOps pfUpdate = pfThread.method("updateThread", "()V");
         pfUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/concurrent/ConcurrentLinkedQueue",
-                "poll", "()Ljava/lang/Object;", pfProbe, "poll"));
-        pfUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, pfNative, "update", "()V", pfProbe, "update"));
+                "poll", "()Ljava/lang/Object;", pfGate, "poll"));
+        pfUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, pfNative, "update", "()V", pfGate, "update"));
         pfUpdate.expectedHits = 9;
         Patcher.MethodOps pfFind = pfThread.method("findPath", "(" + pfRequest + ")V");
         pfFind.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, pfNative, "findPath",

@@ -4559,7 +4559,8 @@ the cost of saturation is the pathfinding queue: zombies and animals stand still
 package so it can read the package-private request fields and task classes):
 - `PathfindNativeThread.updateThread()V`: the 8 `INVOKEVIRTUAL ConcurrentLinkedQueue.poll` → `poll(ConcurrentLinkedQueue)`, which counts chunk
   (update and remove), square and vehicle tasks by the class of the polled task; `INVOKESTATIC PathfindNative.update()V` → `update()`, which closes
-  the round and then calls vanilla. `expectedHits` 9.
+  the round and then calls vanilla. `expectedHits` 9. Since W81 these 9 sites redirect to `MdcPathfindGate`, which calls these two entry points
+  ([2cp](#2cp)).
 - `PathfindNativeThread.findPath(PathFindRequest)V`: the `INVOKEVIRTUAL PathfindNative.findPath(PathFindRequest,ByteBuffer,Z)I` at offset 20 →
   `findPath(PathfindNative,…)`: timing, result (a native result other than 1 counts as a failure), requester and queue wait. `expectedHits` 1.
 - `PathRequestTask.execute()V`: the `INVOKEVIRTUAL PathfindNativeThread.addRequest(PathFindRequest,I)V` at offset 11 → `addRequest(PathfindNativeThread,…)`,
@@ -4878,6 +4879,113 @@ Console (rejections at most 20 lines per 10 seconds):
 - `SpriteUpdateGuardTest` (`build.ps1` [9zt/10], two JVMs: on, off, each checking argv): runs the real patched `receiveUpdateItemSprite` from dist on a real wire; the server branch of a real `IsoCell` goes to a `ServerMap` subclass that records calls. Fetches the square as vanilla: next to the player, exactly 20 tiles per axis, one floor apart, any split-screen player in range. Does not fetch it and logs: 21 tiles, far away, two floors apart, no split-screen player in range, no player on the connection. Off behaves as vanilla.
 
 **Retirement**: remove the patch when TIS validates the `UpdateItemSprite` distance on the server or makes it server-authoritative.
+
+---
+
+<a id="2cp"></a>
+## 2cp. Pathfinding world-change batching gate (W81, server, default 1000 ms)
+
+**Symptom** (production, 2026-10-26, W74 probe `beat` lines, 41–45 players): 11 minutes after boot `PathfindNativeThread` was 100% busy, and
+the average time an animal waited for a path climbed to 89–106 seconds; the previous session was congested from 40 minutes after boot until the
+restart, with average waits of 25–77 seconds. When saturated, every round rebuilds: 179 rounds in one minute, `rb=179` (316 ms average),
+`nr=179` (19 ms average), `rebuildPct` 88–93%. Each round took about 335 ms and served only 2 requests, about 6 req/s, against 21–26 req/s
+entering `otherQ`. Every request came from an animal (players and zombies with or without a target were all 0), and 62–80% of them failed.
+
+**Vanilla mechanism** (see [2ci](#2ci)): the six native write JNI entry points (`updateChunk`/`removeChunk`/`updateSquare`/`addVehicle`/
+`removeVehicle`/`teleportVehicle`) all set one global dirty flag, and the next `findPath` releases every visibility graph, rebuilds every
+vehicle cluster and invalidates the high-level region caches on entry. `updateThread` applies all world tasks before it serves requests, so
+with 45 players some vehicle is moving or some chunk is loading in almost every round, and the first request of every round pays a global
+rebuild (about 300 ms), leaving the round's budget of 2 requests. The chunk queue also has a cap of 10 `ChunkUpdateTask`s per round (javap
+`updateThread` offset 0 `bipush 10`/`istore_1`, `iinc 1 -1` on `instanceof ChunkUpdateTask` inside the loop).
+
+**Surgery** (on W74's `PathfindNativeThread` ClassPatch: the redirect target of `updateThread`'s 8 `ConcurrentLinkedQueue.poll` calls and its
+only `PathfindNative.update()` changes from `MdcPathfindProbe` to `zombie/pathfind/nativeCode/MdcPathfindGate`, same-shape 1:1, `expectedHits`
+still 9; the gate calls W74's `poll`/`update`, so the probe keeps counting as before):
+- Rounds with the gate closed: `poll` on the chunk, square and vehicle queues returns null, so the tasks stay queued in FIFO order;
+  `requestTaskQueue` always passes through, so requests are never delayed. Queues are matched by identity (the helper is in the same package and
+  can read the protected fields).
+- Rounds with the gate open: on the first poll of the chunk queue the helper drains the whole queue with vanilla's loop body (offsets 18–29:
+  `execute()`, `taskReturnQueue.add`) and then returns null, so the 10-per-round cap does not apply; the square and vehicle loops already drain
+  their queues in vanilla and pass through. Otherwise an open round every T taking only 10 chunk tasks would let the chunk backlog grow without
+  bound. This needs no `constChange`, which would have no runtime switch.
+- When `execute()` throws, the result matches vanilla: the task has been taken, it does not enter `taskReturnQueue`, the exception propagates
+  unchanged (the helper has no catch) and the remaining tasks stay queued; `update` is not reached, so the next round is still open and drains
+  them.
+- `update()` closes the round, decides whether the next round is open with `now − lastOpen ≥ T` (recording `lastOpen` when it opens), then
+  hands over to W74's `update` (which calls vanilla `PathfindNative.update()`). The first round after boot is open.
+- With the gate closed, tasks queued and no requests, vanilla `shouldWait()` returns false and the thread spins at `Sync`'s 20 Hz (only polls
+  and the empty native `update`); `shouldWait` is not changed.
+- All state is read and written on the pathfinding thread only (single writer).
+
+**Estimate** (R≈297 ms rebuild, S≈19 ms search, 50 ms `Sync` period, 2 requests per round): about 17 req/s at T=500 and 28 req/s at T=1000
+(about 6 req/s today) against a demand of 21–26 req/s, hence the T=1000 default. The main thread never waits for pathfinding ([2ci](#2ci)), so
+FPS is expected to stay the same.
+
+**Switch**: `-Dmdc.pathfindGateMs=<T>`, restart required. Unset = 1000; `0`/`off` = every round open, both entry points only delegate to the W74
+probe, instruction-for-instruction equivalent to vanilla (vanilla's cap of 10 included); 0–5000 is used as given, anything else or an
+unparsable value falls back to 1000. Independent of `-Dmdc.pathfindProbe`: with the probe off the gate still works (but there is no heartbeat),
+and with the gate off the probe still works.
+
+Console (one line at the first round; the heartbeat is appended to W74's `beat` line, every 60 seconds):
+
+```text
+[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）
+[MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n>
+```
+
+(`首次生效（世界變動每 1000 ms 最多套用一次；…；0|off 每輪都套用＝原版）` = active (world changes applied at most once every 1000 ms; …; 0|off
+applies them every round = vanilla).)
+
+Fields: `drained` counts the world tasks (chunk + square + vehicle) applied in open rounds. `staleMsMax` is how long the oldest queued task had
+waited when the gate opened, approximating its enqueue time by the start of the first held round (at most one round short); in steady state it
+is about T to T plus one round. `chunkU` + `chunkR` equals W74's `chunk`. `refail` counts failures where a mover's target cell (`floor` of x, y,
+z) equals the target cell of its previous failure; it is recorded on the pathfinding thread only (an `IdentityHashMap` from mover to cell,
+cleared when it exceeds 10,000 entries; multi-target requests only count their first target) and measures how large the loop of animals
+retrying the same target right after a failure is. Observe only. At T=0 all gate fields are 0 (pure delegation counts nothing).
+
+**Behavior difference**: pathfinding sees world changes up to T (plus one round) late: a door that was just closed, a wall that was just built,
+a vehicle that just stopped or drove off, or a newly loaded chunk is planned against the old state for that long; a mover that bumps into it
+on its path is failed by vanilla's `walkingOnTheSpot` and paths again. This only affects server-side pathfinding (movers the server simulates
+itself), which on our server is currently only animals; clients do not recompute paths against the server's native world, so this cannot
+desync them. All three task types snapshot their data in `init` on the main thread, so a later `execute` never reads an unloaded chunk, and
+native `updateChunk` rejects stale data by `loadId` itself.
+
+**Acceptance** (a few evening-peak `beat` lines after it goes live): `rb` drops to about `opens` per minute (≤ 60), `calls` per minute rises,
+`waitMs` falls and the `fail` ratio does not rise; `staleMsMax` stays around T to T plus one round without growing; the `drained` maximum does
+not keep growing (the backlog is not snowballing); main-thread FPS is unchanged. `PathfindNativeThread` may still be at 100% CPU (it saturates
+whenever demand exceeds capacity), which is not a failure. pfguard's `cluster_alloc_calls`, `merge_calls` and `guard_alloc` rates dropping is
+expected, not an allowlist failure.
+
+**Deployment**: the manifest adds `zombie/pathfind/nativeCode/MdcPathfindGate.class`; `PathfindNativeThread.class`, `MdcPathfindProbe.class`,
+`MdcPathfindProbe$Hist.class` and `PatchInfo.class` are replaced (159 → 160 classes). After it goes live, check for the `PathfindGate`
+first-run line and for `gate=1000` at the end of the `beat` line.
+
+**Not handled**: `requestsPerUpdate` (2 per round), a negative cache for failed requests and the animal retry AI stay unchanged; they wait for
+the `refail` numbers.
+
+**Checks**:
+- SmokeCheck: vanilla premises — `updateThread` has exactly 8 `ConcurrentLinkedQueue.poll` and 1 `PathfindNative.update` (already locked by
+  W74); offset 0 is `bipush 10`/`istore_1`, and the chunk loop has exactly 1 `instanceof ChunkUpdateTask` and 1 `iinc 1 -1`; the request loop's
+  `iconst_2`/`istore_2` is still there; `PathfindNativeThread$Sync.period` is still `50000000L`; `shouldWait` has exactly 4 `isEmpty`. After
+  surgery `updateThread` is identical to vanilla (frames included) except the 9 calls redirected to `MdcPathfindGate`; helper contract: `poll`
+  never calls `ConcurrentLinkedQueue.poll` directly and takes tasks only through the probe, the drain has exactly 1 `execute` and 1 `add` and no
+  catch; `update` calls the probe's `update` exactly once and never calls native directly.
+- `MdcPathfindGateTest` (`build.ps1` [9zv/10], three JVMs: T=1000 with the probe on (shipping configuration), T=0 with the probe on (vanilla
+  control) and T=1000 with the probe off, each checking argv): runs the patched `updateThread` from dist (native `update` throws
+  `UnsatisfiedLinkError` as in the W74 test; the gate closes the round before that). Four rounds in a row: the first round after boot is open
+  and applies 16 chunk tasks (including a removal) plus the square and vehicle tasks in one go, in order; the second is closed, world tasks stay
+  queued and requests still reach `otherQ`; the round in which T expires is still closed and opens the next one; the open round applies the
+  backlog chunk → square → vehicle, FIFO within each, with `taskReturnQueue` in the same order; W74's counters, `worldRounds`, the `rb`/`nr`
+  split and the heartbeat fields are correct. `decide`'s boundary: 1 ns short stays closed, exactly T opens. Three scenarios (open gate with 15
+  `ChunkUpdateTask`s, closed gate, `execute` throwing) give the expected results; at T=0 they match vanilla round for round (cap of 10,
+  exception semantics). `refail`: counted only for the same cell, not reset by a success in between, not counted for the 2nd target of a
+  multi-target request, negative coordinates, cleared at 10,000 entries; nothing counted with the probe off. Mutants (run through a model of
+  vanilla's loops transcribed from javap, which is first checked against the real `updateThread`): still capped at 10 when open, blocking the
+  request queue when closed, swallowing the exception while draining; all three are caught.
+
+**Retirement**: remove the patch when TIS makes invalidation local (the native write entry points no longer set a global flag, or `findPath` no
+longer rebuilds every visibility graph and vehicle cluster in bulk). When the PathFind native library changes, re-check with objdump that the six
+write entry points still set `PolygonalMap2::instance+0x80` and that `findPath` still checks it and calls `createVisibilityGraphs` on entry.
 
 ---
 

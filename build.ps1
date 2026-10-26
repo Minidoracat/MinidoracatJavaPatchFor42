@@ -133,6 +133,7 @@ $helperEntries = @(
     'zombie/mdc/IsoObjectUpdateGate.class',
     'zombie/pathfind/nativeCode/MdcPathfindProbe.class',
     'zombie/pathfind/nativeCode/MdcPathfindProbe$Hist.class',
+    'zombie/pathfind/nativeCode/MdcPathfindGate.class',
     'zombie/mdc/IsoObjectRemoveDefer.class',
     'zombie/mdc/IsoObjectRemoveDefer$Entry.class',
     'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
@@ -694,6 +695,15 @@ java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zomb
 Assert-Ok "SpriteUpdateGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.spriteUpdateRange=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest off
 Assert-Ok "SpriteUpdateGuardTest（off，原版負對照）"
+
+Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、三個 mutant..."
+# gate-on＝出貨組態（T=1000、探針 on）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常。測試自驗 argv 與實際開關相符。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-on
+Assert-Ok "MdcPathfindGateTest（T=1000＋探針 on，出貨組態）"
+java -Xverify:all "-Dmdc.pathfindGateMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-off
+Assert-Ok "MdcPathfindGateTest（T=0＋探針 on，原版負對照）"
+java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest probe-off
+Assert-Ok "MdcPathfindGateTest（T=1000＋探針 off）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

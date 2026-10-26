@@ -3946,7 +3946,8 @@ public final class SmokeCheck {
                 countExactCalls(w74FindVanilla, Opcodes.INVOKEVIRTUAL, w74Native, "findPath", w74FindDesc) == 1
                         && countExactCalls(w74ExecVanilla, Opcodes.INVOKEVIRTUAL, w74Thread, "addRequest", w74AddDesc) == 1);
         String w74PollVanilla = "INVOKEVIRTUAL " + w74Clq + ".poll ()Ljava/lang/Object;";
-        String w74PollProbe = "INVOKESTATIC " + w74Probe + ".poll (L" + w74Clq + ";)Ljava/lang/Object;";
+        String w81Gate = w74Pkg + "MdcPathfindGate";
+        String w74PollGate = "INVOKESTATIC " + w81Gate + ".poll (L" + w74Clq + ";)Ljava/lang/Object;";
         Set<String> w74Touched = Set.of(w74Thread + ".updateThread()V", w74Thread + ".findPath(" + w74Req + ")V",
                 w74Task + ".execute()V");
         boolean w74OthersSame = true;
@@ -3957,10 +3958,10 @@ public final class SmokeCheck {
                 }
             }
         }
-        failed += check("W74 手術後：updateThread 8 個 poll 與 update、findPath 的 native findPath、execute 的 addRequest 同形改道 MdcPathfindProbe，"
-                        + "其餘指令與 frames 保留；兩個 class 其餘方法不變",
-                methodText(w74UpdateVanilla).replace(w74PollVanilla, w74PollProbe)
-                        .replace("INVOKESTATIC " + w74Native + ".update ()V", "INVOKESTATIC " + w74Probe + ".update ()V")
+        failed += check("W74／W81 手術後：updateThread 8 個 poll 與 update 同形改道 MdcPathfindGate，findPath 的 native findPath、"
+                        + "execute 的 addRequest 同形改道 MdcPathfindProbe，其餘指令與 frames 保留；兩個 class 其餘方法不變",
+                methodText(w74UpdateVanilla).replace(w74PollVanilla, w74PollGate)
+                        .replace("INVOKESTATIC " + w74Native + ".update ()V", "INVOKESTATIC " + w81Gate + ".update ()V")
                         .equals(methodText(method(distJava, w74Thread, "updateThread", "()V")))
                         && methodText(w74FindVanilla).replace("INVOKEVIRTUAL " + w74Native + ".findPath " + w74FindDesc,
                                 "INVOKESTATIC " + w74Probe + ".findPath (L" + w74Native + ";" + w74FindDesc.substring(1))
@@ -3977,6 +3978,44 @@ public final class SmokeCheck {
                                 Opcodes.INVOKEVIRTUAL, w74Native, "findPath", w74FindDesc) == 2
                         && countExactCalls(method(distJava, w74Probe, "addRequest", "(L" + w74Thread + ";" + w74AddDesc.substring(1)),
                                 Opcodes.INVOKEVIRTUAL, w74Thread, "addRequest", w74AddDesc) == 1);
+
+        // ---- W81 尋路世界變動批次化閘門（docs/patches.md 2cp）----
+        // 存在理由：閘門開的輪次在 helper 裡照原版 chunk 迴圈本體（execute、taskReturnQueue.add）排空、拿掉每輪 10 個
+        // ChunkUpdateTask 的上限；關閉時讓 shouldWait 回 false、以 Sync 20 Hz 空轉。任一前提變了，排空與空轉成本要重估。
+        AbstractInsnNode[] w81Head = firstReal(w74UpdateVanilla, 2);
+        AbstractInsnNode w81Store2 = w74Store;
+        failed += check("W81 vanilla 前提：updateThread offset 0 是 bipush 10／istore_1（每輪 10 個 ChunkUpdateTask），"
+                        + "chunk 迴圈恰 1 個 instanceof ChunkUpdateTask 與 iinc 1 -1；請求迴圈 iconst_2／istore_2",
+                w81Head[0] instanceof IntInsnNode w81B && w81B.getOpcode() == Opcodes.BIPUSH && w81B.operand == 10
+                        && w81Head[1] instanceof VarInsnNode w81S1 && w81S1.getOpcode() == Opcodes.ISTORE && w81S1.var == 1
+                        && countInsns(w74UpdateVanilla, in -> in instanceof TypeInsnNode t && t.getOpcode() == Opcodes.INSTANCEOF
+                                && t.desc.equals(w74Pkg + "ChunkUpdateTask")) == 1
+                        && countInsns(w74UpdateVanilla, in -> in instanceof org.objectweb.asm.tree.IincInsnNode ii
+                                && ii.var == 1 && ii.incr == -1) == 1
+                        && w81Store2 instanceof VarInsnNode w81S2 && w81S2.var == 2);
+        MethodNode w81SyncInit = methodFromJar(jar, w74Thread + "$Sync", "<init>", "()V");
+        AbstractInsnNode w81Period = null;
+        for (AbstractInsnNode in = w81SyncInit.instructions.getFirst(); in != null; in = in.getNext()) {
+            if (in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD && f.name.equals("period")) {
+                w81Period = prevReal(in);
+            }
+        }
+        failed += check("W81 vanilla 前提：PathfindNativeThread$Sync.period 仍是 50000000L（閘門關閉時空轉 20 Hz）",
+                w81Period instanceof LdcInsnNode w81L && Long.valueOf(50_000_000L).equals(w81L.cst));
+        failed += check("W81 vanilla 前提：shouldWait 只看 stop、四個任務佇列與 RequestQueue（閘門關閉而佇列非空時不睡）",
+                countExactCalls(methodFromJar(jar, w74Thread, "shouldWait", "()Z"), Opcodes.INVOKEVIRTUAL, w74Clq, "isEmpty", "()Z") == 4);
+        String w81PollDesc = "(L" + w74Clq + ";)Ljava/lang/Object;";
+        MethodNode w81Poll = method(distJava, w81Gate, "poll", w81PollDesc);
+        MethodNode w81Update = method(distJava, w81Gate, "update", "()V");
+        failed += check("W81 helper 契約：gate.poll 只經 MdcPathfindProbe.poll 取任務（不直接 CLQ.poll）、排空恰 1 個 execute＋1 個 add，"
+                        + "沒有 catch；gate.update 恰 1 次 MdcPathfindProbe.update、不直接呼叫 native update",
+                countExactCalls(w81Poll, Opcodes.INVOKEVIRTUAL, w74Clq, "poll", "()Ljava/lang/Object;") == 0
+                        && countExactCalls(w81Poll, Opcodes.INVOKESTATIC, w74Probe, "poll", w81PollDesc) == 4
+                        && countExactCalls(w81Poll, Opcodes.INVOKEINTERFACE, w74Pkg + "IPathfindTask", "execute", "()V") == 1
+                        && countExactCalls(w81Poll, Opcodes.INVOKEVIRTUAL, w74Clq, "add", "(Ljava/lang/Object;)Z") == 1
+                        && w81Poll.tryCatchBlocks.isEmpty()
+                        && countExactCalls(w81Update, Opcodes.INVOKESTATIC, w74Probe, "update", "()V") == 1
+                        && countExactCalls(w81Update, Opcodes.INVOKESTATIC, w74Native, "update", "()V") == 0);
 
         if (failed > 0) {
             System.exit(1);
@@ -6090,6 +6129,16 @@ public final class SmokeCheck {
         int count = 0;
         for (AbstractInsnNode in : m.instructions) {
             if (in.getOpcode() == opcode) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static int countInsns(MethodNode m, java.util.function.Predicate<AbstractInsnNode> match) {
+        int count = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (match.test(in)) {
                 count++;
             }
         }

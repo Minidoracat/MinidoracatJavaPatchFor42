@@ -20,9 +20,11 @@ import zombie.debug.DebugLog;
  * 正式服這條執行緒 99–100% CPU，但不知道每次尋路多貴、重建佔多少、誰在排隊、等多久。
  *
  * <p><b>手術</b>（全在 {@code zombie.pathfind.nativeCode}，同形 1:1 改道，receiver 前置）：
- * {@code PathfindNativeThread.updateThread} 的 8 個 {@code ConcurrentLinkedQueue.poll} → {@link #poll}（依取出的
- * 任務類別計 chunk／格子／載具）、唯一 {@code PathfindNative.update()} → {@link #update}（輪次邊界、每分鐘一行）；
- * {@code PathfindNativeThread.findPath(PathFindRequest)} 唯一 native 入口 → {@link #findPath}（計時、成敗、請求者、排隊時間）；
+ * {@code PathfindNativeThread.updateThread} 的 8 個 {@code ConcurrentLinkedQueue.poll} 與唯一 {@code PathfindNative.update()}
+ * 改道到 W81 {@link MdcPathfindGate}，再由它呼叫 {@link #poll}（依取出的任務類別計 chunk／格子／載具）與 {@link #update}
+ * （輪次邊界、每分鐘一行，行尾併 W81 欄位）；
+ * {@code PathfindNativeThread.findPath(PathFindRequest)} 唯一 native 入口 → {@link #findPath}（計時、成敗、請求者、排隊時間、
+ * 同一個 mover 對同一目標格連續失敗 {@code refail}）；
  * {@code PathRequestTask.execute} 唯一 {@code addRequest} → {@link #addRequest}（入隊時間）。
  *
  * <p><b>重建分組</b>：native 旗標在任何世界變動任務後成立、下一次 native findPath 後清除。本類以「上次 native findPath
@@ -40,6 +42,8 @@ public final class MdcPathfindProbe {
     private static final String TAG = "[MinidoracatJavaPatch][PathfindProbe] ";
     /** 入隊時間表上限；被取消、永遠輪不到 native 的請求會留在表裡，滿了整表清掉並計 {@code waitDropped}。 */
     static final int WAIT_CAP = 8192;
+    /** {@code refail} 的 mover → 上次失敗目標格表上限；滿了整表清掉。 */
+    static final int REFAIL_CAP = 10_000;
 
     static final int CAT_PLAYER = 0;
     static final int CAT_AGGRO_ZOMBIE = 1;
@@ -50,6 +54,7 @@ public final class MdcPathfindProbe {
 
     // ---- 尋路執行緒單寫 ----
     private static final IdentityHashMap<PathFindRequest, Long> ENQUEUED = new IdentityHashMap<>();
+    private static final IdentityHashMap<Mover, Long> LAST_FAIL = new IdentityHashMap<>();
     private static PathFindRequest lastRequest;
     private static boolean pendingWorld;
     private static int roundChunk;
@@ -68,6 +73,9 @@ public final class MdcPathfindProbe {
     private static long chunkTasks;
     private static long squareTasks;
     private static long vehicleTasks;
+    private static long chunkUTasks;
+    private static long chunkRTasks;
+    private static long refails;
     private static long requestTasks;
     private static long otherTasks;
     private static final long[] ENQ = new long[3];
@@ -105,8 +113,12 @@ public final class MdcPathfindProbe {
     public static Object poll(ConcurrentLinkedQueue<?> queue) {
         Object task = queue.poll();
         if (ENABLED && task != null) {
-            if (task instanceof ChunkUpdateTask || task instanceof ChunkRemoveTask) {
+            if (task instanceof ChunkUpdateTask) {
                 roundChunk++;
+                chunkUTasks++;
+            } else if (task instanceof ChunkRemoveTask) {
+                roundChunk++;
+                chunkRTasks++;
             } else if (task instanceof SquareUpdateTask) {
                 roundSquare++;
             } else if (task instanceof VehicleUpdateTask || task instanceof VehicleAddTask
@@ -203,6 +215,9 @@ public final class MdcPathfindProbe {
             return;
         }
         lastRequest = request;
+        if (failed) {
+            countRefail(request);
+        }
         int cat = category(request.mover);
         CAT_N[cat]++;
         CAT_NS[cat] += ns;
@@ -217,6 +232,20 @@ public final class MdcPathfindProbe {
             if (wait > waitMax) {
                 waitMax = wait;
             }
+        }
+    }
+
+    /** 同一個 mover 這次失敗的目標格與它上一次失敗的目標格相同就計一次（只觀測，W81）。 */
+    private static void countRefail(PathFindRequest request) {
+        long cell = ((long) (int) Math.floor(request.targetX) << 40)
+                ^ ((long) ((int) Math.floor(request.targetY) & 0xFFFFFF) << 16)
+                ^ ((int) Math.floor(request.targetZ) & 0xFFFF);
+        if (LAST_FAIL.size() >= REFAIL_CAP) {
+            LAST_FAIL.clear();
+        }
+        Long previous = LAST_FAIL.put(request.mover, cell);
+        if (previous != null && previous == cell) {
+            refails++;
         }
     }
 
@@ -312,6 +341,10 @@ public final class MdcPathfindProbe {
                 .append(" waitDropped=").append(waitDropped)
                 .append(" anomalies=").append(anomalies)
                 .append(" total=").append(totalCalls);
+        MdcPathfindGate.appendBeat(sb);
+        sb.append(" chunkU=").append(chunkUTasks)
+                .append(" chunkR=").append(chunkRTasks)
+                .append(" refail=").append(refails);
         return sb.toString();
     }
 
@@ -345,6 +378,10 @@ public final class MdcPathfindProbe {
         chunkTasks = 0L;
         squareTasks = 0L;
         vehicleTasks = 0L;
+        chunkUTasks = 0L;
+        chunkRTasks = 0L;
+        refails = 0L;
+        MdcPathfindGate.resetWindow();
         requestTasks = 0L;
         otherTasks = 0L;
         java.util.Arrays.fill(ENQ, 0L);
@@ -457,6 +494,18 @@ public final class MdcPathfindProbe {
 
     static long[] worldTasksForTest() {
         return new long[] {chunkTasks, squareTasks, vehicleTasks, requestTasks, otherTasks};
+    }
+
+    static long[] chunkSplitForTest() {
+        return new long[] {chunkUTasks, chunkRTasks};
+    }
+
+    static long refailsForTest() {
+        return refails;
+    }
+
+    static int refailMapSizeForTest() {
+        return LAST_FAIL.size();
     }
 
     static long[] enqForTest() {
