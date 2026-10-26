@@ -4269,7 +4269,7 @@ console（第一幀一行首次生效，之後每 5 分鐘一行；frames／pass
 - native 端 `updateChunk`／`removeChunk`／`updateSquare`／`addVehicle`／`removeVehicle`／`teleportVehicle` 六個 JNI 都會設起一個全域旗標；`findPath` 一進門看到旗標就釋放全部可見圖、`createVisibilityGraphs`（含 `createVehicleClusters`）、遞增 `HLAStar::ModificationCount`（每個 chunk level 的高階區域在之後的搜尋中重算）。所以每輪只要有任何世界變動任務，下一次 native `findPath` 就要付一次全域重建。重建佔每次尋路多少，在這刀之前量不到。
 
 **手術**（全部同形 1:1 改道到 `zombie/pathfind/nativeCode/MdcPathfindProbe`，receiver 前置；helper 放在目標 package，才讀得到 package-private 的請求欄位與任務類別）：
-- `PathfindNativeThread.updateThread()V`：8 個 `INVOKEVIRTUAL ConcurrentLinkedQueue.poll` → `poll(ConcurrentLinkedQueue)`，依取出的任務類別計 chunk（更新與移除）、格子、載具；`INVOKESTATIC PathfindNative.update()V` → `update()`，先結算這一輪再呼叫原版。`expectedHits` 9。
+- `PathfindNativeThread.updateThread()V`：8 個 `INVOKEVIRTUAL ConcurrentLinkedQueue.poll` → `poll(ConcurrentLinkedQueue)`，依取出的任務類別計 chunk（更新與移除）、格子、載具；`INVOKESTATIC PathfindNative.update()V` → `update()`，先結算這一輪再呼叫原版。`expectedHits` 9。W81 起這 9 個點改道到 `MdcPathfindGate`，再由它呼叫這兩個入口（[2cp](#2cp)）。
 - `PathfindNativeThread.findPath(PathFindRequest)V`：offset 20 的 `INVOKEVIRTUAL PathfindNative.findPath(PathFindRequest,ByteBuffer,Z)I` → `findPath(PathfindNative,…)`，計時、記成敗（native 回傳不是 1 算失敗）、請求者、排隊時間。`expectedHits` 1。
 - `PathRequestTask.execute()V`：offset 11 的 `INVOKEVIRTUAL PathfindNativeThread.addRequest(PathFindRequest,I)V` → `addRequest(PathfindNativeThread,…)`，記入隊時刻。`expectedHits` 1。
 - 入隊與輪次的簿記在原版呼叫之前，`findPath` 的計時包住原版呼叫、記帳在之後；原版呼叫只有一次、參數原樣、回傳值原樣、例外原樣上拋（不計入 `calls`，另計 `thrown`）；簿記自己的 RuntimeException 只計 `anomalies`。所有簿記都在尋路執行緒上（單寫者），log 也在同一執行緒用 `DebugLog.log` 寫，與 ChunkSaveIsolation、ChunkWriteGuard 等非主執行緒 helper 相同。
@@ -4520,6 +4520,50 @@ console（第一次回收一行首次生效，之後每 30 分鐘一行，數值
 **退場**：官方在回收或出生時清擁有者（SmokeCheck 存在理由變紅）時撤刀。
 
 **官方回報**：[report/2026-10-26-zombie-reuse-stale-owner-tis.md](report/2026-10-26-zombie-reuse-stale-owner-tis.md)（草稿，未送出）。
+
+---
+
+<a id="2cp"></a>
+## 2cp. 尋路世界變動批次化閘門（W81，server，預設 1000 ms）
+
+**症狀**（2026-10-26 正式服，W74 探針 `beat`，41–45 人）：開服 11 分鐘後 `PathfindNativeThread` 就 100% 忙，動物等路徑的平均時間一路升到 89–106 秒；前一場也從開服 40 分鐘一直塞到重啟，平均等 25–77 秒。飽和時每一輪都在重建：一分鐘 179 輪，`rb=179`（平均 316 ms）、`nr=179`（平均 19 ms），`rebuildPct` 88–93%。每輪約 335 ms、只處理 2 個請求，約 6 req/s；排進 `otherQ` 的需求約 21–26 req/s。請求全是動物（玩家、有目標與沒目標的殭屍都是 0），62–80% 失敗。
+
+**原版機制**（見 [2ci](#2ci)）：native 的六個寫入 JNI（`updateChunk`／`removeChunk`／`updateSquare`／`addVehicle`／`removeVehicle`／`teleportVehicle`）都設同一個全域 dirty 旗標，下一次 `findPath` 一進門就釋放全部可見圖、重建所有載具 cluster，並讓高階區域快取失效。`updateThread` 每輪先套用所有世界任務再處理請求，所以 45 人時幾乎每輪都有載具在動、chunk 在載，每一輪的第一個請求都要付一次全域重建（約 300 ms），每輪只剩 2 個請求的額度。chunk 佇列另有每輪最多 10 個 `ChunkUpdateTask` 的上限（javap `updateThread` offset 0 `bipush 10`／`istore_1`，迴圈內 `instanceof ChunkUpdateTask` 時 `iinc 1 -1`）。
+
+**手術**（在 W74 同一個 `PathfindNativeThread` ClassPatch 上，`updateThread` 的 8 個 `ConcurrentLinkedQueue.poll` 與唯一 `PathfindNative.update()` 改道目標由 `MdcPathfindProbe` 換成 `zombie/pathfind/nativeCode/MdcPathfindGate`，同形 1:1，`expectedHits` 仍是 9；閘門再呼叫 W74 探針的 `poll`／`update`，探針的帳照舊）：
+- 閘門關閉的輪次：chunk、格子、載具三個佇列的 `poll` 回 null，任務留在佇列裡，FIFO 不變；`requestTaskQueue` 永遠直通，請求不延遲。佇列以物件身分比對（同 package 讀得到 protected 欄位）。
+- 閘門開的輪次：第一次 poll chunk 佇列時，helper 照原版迴圈本體（offset 18–29：`execute()`、`taskReturnQueue.add`）把整個佇列排空再回 null，不受每輪 10 個的上限；格子、載具迴圈原版本來就排空，直通即可。否則每 T 才開一次、每次只吃 10 個，chunk 任務會無限積壓。這樣不需要沒有 runtime 開關的 `constChange`。
+- `execute()` 丟例外時與原版相同：該任務已取出、不進 `taskReturnQueue`、例外原樣上拋（helper 沒有 catch），剩下的留在佇列；`update` 沒被呼叫，下一輪仍是開的，接著排空。
+- `update()`：先結算這一輪，再以 `now − lastOpen ≥ T` 決定下一輪開不開（開就記 `lastOpen`），最後交給 W74 的 `update`（再呼叫原版 `PathfindNative.update()`）。開服第一輪開。
+- 閘門關而佇列有任務、又沒有請求時，原版 `shouldWait()` 回 false，執行緒以 `Sync` 的 20 Hz 空轉（只有輪詢與空的 native `update`）；不改 `shouldWait`。
+- 所有狀態只在尋路執行緒讀寫（單寫者）。
+
+**估算**（R≈297 ms 重建、S≈19 ms 搜尋、`Sync` 週期 50 ms、每輪 2 個請求）：T=500 約 17 req/s、T=1000 約 28 req/s（目前約 6 req/s），需求 21–26 req/s，所以預設 T=1000。主執行緒不等尋路（[2ci](#2ci)），FPS 預期不變。
+
+**開關**：`-Dmdc.pathfindGateMs=<T>`，需重啟。未設＝1000；`0`／`off`＝每一輪都開，兩個入口只委派 W74 探針，與原版逐指令等價（原版 10 個上限照舊）；0–5000 照用，其他值與無法解析落回 1000。與 `-Dmdc.pathfindProbe` 各自獨立：探針 off 時閘門照常（但沒有心跳），閘門 off 時探針照常。
+
+console（第一輪一行；心跳併在 W74 每 60 秒一行的 `beat` 行尾）：
+
+```text
+[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<原始值>；0|off 每輪都套用＝原版）
+[MinidoracatJavaPatch][PathfindProbe] beat sec=… （W74 欄位）… total=<n> gate=<T> opens=<開閘輪數> heldRounds=<有世界任務在排但閘門關著的輪數> drained=<開閘輪平均>/<最大> staleMsMax=<ms> chunkU=<ChunkUpdateTask 數> chunkR=<ChunkRemoveTask 數> refail=<n>
+```
+
+欄位說明：`drained` 是開閘輪次套用的世界任務數（chunk＋格子＋載具）。`staleMsMax` 是開閘時最舊積壓任務等了多久，以第一個被擋輪次的開頭近似它的入列時刻（最多少算一輪）；穩定時約為 T 到 T 加一輪。`chunkU`＋`chunkR` 等於 W74 的 `chunk`。`refail` 是同一個 mover 這次失敗的目標格（`floor` 後的 x、y、z）與它上一次失敗的目標格相同的次數，只在尋路執行緒記（mover → 目標格的 `IdentityHashMap`，超過 10,000 筆整表清空；多目標請求只看第一個目標），用來量動物失敗後立刻以同一目標重試的迴圈有多大，只觀測。T=0 時閘門欄位都是 0（純委派不計數）。
+
+**行為差異**：尋路對世界的認知最多晚 T（加一輪）：剛關上的門、剛蓋好的牆、剛停下或開走的載具、新載入的 chunk，在這段時間內仍以舊狀態規劃路徑；mover 照路徑碰撞後由原版 `walkingOnTheSpot` 判失敗再重新尋路。只影響伺服器端尋路（伺服器自己模擬的 mover），正式服目前只有動物在用；client 不用伺服器的 native 世界重算路徑，不會因此 desync。三種任務在主執行緒 `init` 時就快照好資料，延後 `execute` 不會讀到已卸載的 chunk；native `updateChunk` 自己用 `loadId` 擋過期資料。
+
+**驗收**（上線後看晚峰幾行 `beat`）：`rb` 次數降到每分鐘約 `opens`（≤ 60），`calls` 每分鐘上升、`waitMs` 下降，`fail` 比例不上升；`staleMsMax` 約 T 到 T 加一輪、不持續增長；`drained` 最大值不持續增長（積壓沒有越滾越大）；主執行緒 FPS 不變；`PathfindNativeThread` CPU 仍可能 100%（需求大於產能時本來就會吃滿），不算失敗。pfguard 的 `cluster_alloc_calls`、`merge_calls`、`guard_alloc` 速率跟著下降是預期結果，不是 allowlist 失效。
+
+**部署**：manifest 新增 `zombie/pathfind/nativeCode/MdcPathfindGate.class`，`PathfindNativeThread.class`、`MdcPathfindProbe.class`、`MdcPathfindProbe$Hist.class`、`PatchInfo.class` 換新（159 → 160 個 class）。上線後確認 console 有 `PathfindGate` 的「首次生效」一行，`beat` 行尾出現 `gate=1000`。
+
+**不處理**：`requestsPerUpdate`（每輪 2 個）、失敗請求負快取、動物失敗後重試的 AI 都不改；`refail` 的數字出來後再決定。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`updateThread` 恰 8 個 `ConcurrentLinkedQueue.poll`、1 個 `PathfindNative.update`（W74 已鎖）；offset 0 是 `bipush 10`／`istore_1`，chunk 迴圈恰 1 個 `instanceof ChunkUpdateTask` 與 `iinc 1 -1`；請求迴圈的 `iconst_2`／`istore_2` 仍在；`PathfindNativeThread$Sync` 的 `period` 仍是 `50000000L`；`shouldWait` 恰 4 個 `isEmpty`。手術後 `updateThread` 除了 9 個改道到 `MdcPathfindGate` 的呼叫，方法文字（含 frames）與原版相同；helper 契約：`poll` 不直接呼叫 `ConcurrentLinkedQueue.poll`、只經探針取任務，排空恰 1 個 `execute` 與 1 個 `add`、沒有 catch；`update` 恰 1 次探針 `update`、不直接呼叫 native。
+- `MdcPathfindGateTest`（`build.ps1` [9zv/10]，T=1000＋探針 on（出貨組態）、T=0＋探針 on（原版負對照）、T=1000＋探針 off 三個 JVM，自驗 argv）：走 dist 內手術後的真 `updateThread`（native `update` 照 W74 丟 `UnsatisfiedLinkError`，閘門在那之前就結算）。連跑四輪：開服第一輪開，一次套完 16 個 chunk（含移除）與格子、載具，順序不變；第二輪關，世界任務留在佇列、請求照常進 `otherQ`；到期那輪仍關、結算後下一輪開；開閘一輪照 chunk→格子→載具各自 FIFO 套完積壓，`taskReturnQueue` 同順序；W74 計數、`worldRounds`、`rb`／`nr` 分組與心跳欄位正確。`decide` 的邊界：差 1 ns 不開、恰滿 T 開。三個情境（開閘 15 個 `ChunkUpdateTask`、閘門關、`execute` 丟例外）的結果與預期相同；T=0 時與原版逐輪相同（10 個上限、例外語意）。`refail`：同格才計、中間成功不重置、多目標第 2 次不計、負座標、滿 10,000 筆清空；探針 off 不計。mutant（測試內照 javap 抄的原版迴圈模型，先自驗模型與真 `updateThread` 相同）：開閘時仍受 10 個上限、閘門關時擋到請求佇列、排空時吞掉例外，三個都被抓到。
+
+**退場**：TIS 改成局部失效（native 寫入 JNI 不再設全域旗標，或 `findPath` 不再整批重建可見圖與載具 cluster）時撤刀。PathFind native lib 換版時用 objdump 重驗六個寫入 JNI 仍設 `PolygonalMap2::instance+0x80`、`findPath` 開頭仍檢查並呼叫 `createVisibilityGraphs`。
 
 ---
 

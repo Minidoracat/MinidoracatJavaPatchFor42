@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 77 個 patched class、225 個命中點、84 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 77 個 patched class、225 個命中點、85 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -108,6 +108,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W53 步行時縮小車輛相關範圍（[2bq](docs/patches.md#2bq)） | client 對每台已載入的車每幀重算所有蒙皮零件的骨架（KI5／rSemiTruck 系每台 22–47 µs），而伺服器的車輛相關範圍（1080p ±88 格）比 client 自己的 chunk map 還寬，車多的地方載入上百台、每幀數毫秒。 | 步行時只送、只留圓形 R 格內的車（預設 64，結果一律是原版的子集）；有人在車內或加入中照原版。預設 observe 只計數；正式服快照中 107 台的地點，R=64／48 剩 57／28 台。另外計數坐在停著的車裡的情況，評估停車時是否也照步行算。 | 未回報 |
 | W73 IsoObject 每幀更新閘（[2ch](docs/patches.md#2ch)） | `IsoCell.ProcessIsoObject` 每幀對已載入範圍內每座爐子、洗衣機、發電機與玩家建造的 `IsoThumpable` 呼叫 `update()`。伺服器上一般建造物的 update 只在所在格子做一次線性 `indexOf` 就返回，不寫任何東西；晚峰 dump 中這個迴圈本身約佔主執行緒 8%。 | 預設 observe：量清單大小、組成、每 5 分鐘一幀的各類別逐件成本與非主執行緒寫入。on 模式跳過 `lifeLeft` 不大於 -1 的 `IsoThumpable`（有燃料的燈以外全部）；每 4096 次跳過抽一次照原版跑、逐欄位比對，不一致就本次回原版。 | 未回報 |
 | W74 尋路執行緒觀測（[2ci](docs/patches.md#2ci)） | `PathfindNativeThread`（獨立執行緒，不是主迴圈）在本服 99–100% CPU，取樣全在 native `findPath`。每 50 ms 一輪最多處理 2 個請求，而任何 chunk、格子、載具變動都讓下一次 native `findPath` 重建全部可見圖與載具 cluster；但看不到每次尋路多貴、重建佔多少、誰在排隊、等多久。 | 純觀測（回傳值、例外、呼叫次數與順序都不變）：每分鐘一行，記尋路次數、失敗數、平均／p95／最大耗時、依「之前有沒有世界變動」分組的耗時（可直接算出重建佔比）、各類請求者（玩家、有目標與沒目標的殭屍、動物）的次數與排隊時間。 | 未回報 |
+| W81 尋路世界變動批次化閘門（[2cp](docs/patches.md#2cp)） | 任何 chunk、格子、載具變動都會在 native 尋路設起一個全域旗標，下一次搜尋就重建全部可見圖與載具 cluster。本服 41–45 人時每一輪都在重建：每輪約 335 ms 只處理 2 個請求（約 6 req/s，需求 21–26 req/s，全是動物），動物平均要等 25–106 秒才拿到路徑。 | 世界變動每 T ms 最多套用一次（`-Dmdc.pathfindGateMs`，預設 1000，`0`＝原版）：中間這些任務照順序留在佇列，尋路請求照常處理；開閘的那一輪一次套完全部積壓，不受原版每輪 10 個 chunk 的上限。伺服器端尋路看到的世界最多晚 T。估計 T=1000 約 28 req/s；主執行緒耗時不變。 | 未回報 |
 
 ### 網路：頻寬與重送迴圈
 
