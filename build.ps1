@@ -704,14 +704,16 @@ Assert-Ok "ZombieReuseOwnerTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" off
 Assert-Ok "ZombieReuseOwnerTest（off，原版負對照）"
 
-Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、staleMsMax 不含閒置且穩定狀態約 T、chunk 移除後又載入的 reload10／reload60、三個 mutant..."
-# gate-on＝出貨組態（T=1000、探針 on）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常。測試自驗 argv 與實際開關相符。
+Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、staleMsMax 不含閒置且穩定狀態約 T、chunk 移除後又載入的 reload10／reload60、自適應計時（開閘輪結束才起算、hold=max(T, 2×開閘輪耗時)、不連續開閘）與 fixed 負對照、holdMsMax、三個 mutant..."
+# gate-on＝出貨組態（T=1000、探針 on、adaptive）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常；adaptive-off＝v1 計時負對照。測試自驗 argv 與實際開關相符。
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-on
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 on，出貨組態）"
 java -Xverify:all "-Dmdc.pathfindGateMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-off
 Assert-Ok "MdcPathfindGateTest（T=0＋探針 on，原版負對照）"
 java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest probe-off
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 off）"
+java -Xverify:all "-Dmdc.pathfindGateAdaptive=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest adaptive-off
+Assert-Ok "MdcPathfindGateTest（T=1000＋adaptive off，v1 計時負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

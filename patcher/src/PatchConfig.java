@@ -1553,7 +1553,8 @@ public final class PatchConfig {
         // ---- W81 尋路世界變動批次化閘門（docs/patches.md 2cp）----
         // 同一個 ClassPatch：updateThread 的 8 個 poll 與 update 改道到 MdcPathfindGate，它再呼叫 W74 探針。閘門關閉的輪次
         // chunk／格子／載具佇列 poll 回 null（請求佇列直通），每 T ms 開一輪並一次排空 chunk 佇列（不受原版每輪 10 個上限）。
-        // -Dmdc.pathfindGateMs=<T>，未設 1000，0|off 只委派探針（與原版逐指令等價）。
+        // -Dmdc.pathfindGateMs=<T>，未設 1000，0|off 只委派探針（與原版逐指令等價）。v2 起關閘從開閘輪結束才起算、長度
+        // max(T, 2×開閘輪耗時)；-Dmdc.pathfindGateAdaptive=0|off 回到 v1（從決定開閘起算、長度 T）。
         String pfProbe = "zombie/pathfind/nativeCode/MdcPathfindProbe";
         String pfGate = "zombie/pathfind/nativeCode/MdcPathfindGate";
         String pfNative = "zombie/pathfind/nativeCode/PathfindNative";

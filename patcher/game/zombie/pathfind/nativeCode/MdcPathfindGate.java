@@ -19,23 +19,33 @@ import zombie.debug.DebugLog;
  *   <li>開的輪次：第一次 poll chunk 佇列時在這裡把整個佇列照原版迴圈本體（{@code execute}、{@code taskReturnQueue.add}）
  *       排空再回 null，不受原版每輪 10 個的上限；格子與載具原版本來就排空。{@code execute} 丟例外時與原版相同：
  *       該任務已取出、不進 {@code taskReturnQueue}、例外原樣上拋、剩下的留在佇列。</li>
- *   <li>{@link #update} 結算這一輪，再以 {@code now - lastOpen >= T} 決定下一輪開不開；開服第一輪開。</li>
+ *   <li>{@link #update} 結算這一輪，再以 {@code now - lastOpen >= hold} 決定下一輪開不開；開服第一輪開。</li>
  * </ul>
  *
+ * <p><b>自適應計時（預設）</b>：開閘那輪的重建 {@code findPath} 在 {@link #update} 之後才跑，所以關閘時間從開閘輪結束
+ * （下一次結算）才起算，長度 {@code hold = max(T, 2 × 開閘輪耗時)}；開閘輪耗時＝開閘輪結算到下一次結算之間 W74 量到的 native
+ * {@code findPath} 累計耗時（含重建，不含輪間 {@code notifier.wait()} 閒置；用牆鐘的話閒置 47 秒就把 hold 撐到 95 秒）。
+ * 探針 off 時量不到，hold 固定為 T（仍從開閘輪結束起算）。{@code -Dmdc.pathfindGateAdaptive=0|off}：回到 v1，
+ * {@code hold = T}、從決定開閘那一刻起算。
+ *
  * <p>只有尋路執行緒呼叫 {@link #poll}／{@link #update}，狀態單寫者。佇列以物件身分比對（同 package 讀得到 protected 欄位）。
- * {@code -Dmdc.pathfindGateMs=<T>}：未設＝1000；{@code 0|off}＝每輪都開，兩個入口只委派 W74 探針（與原版逐指令等價）；
- * 0–5000 以外或無法解析＝1000。與 {@code -Dmdc.pathfindProbe} 各自獨立。
+ * {@code -Dmdc.pathfindGateMs=<T>}：未設＝1000；{@code 0|off}＝每輪都開，兩個入口只委派 W74 探針（與原版逐指令等價，
+ * 自適應開關不起作用）；0–5000 以外或無法解析＝1000。與 {@code -Dmdc.pathfindProbe} 各自獨立。
  */
 public final class MdcPathfindGate {
     static final long DEFAULT_MS = 1000L;
     static final String RAW = System.getProperty("mdc.pathfindGateMs");
     static final long GATE_MS = parseMs(RAW);
     static final long GATE_NS = GATE_MS * 1_000_000L;
+    static final boolean ADAPTIVE = MdcPathfindProbe.parseEnabled(System.getProperty("mdc.pathfindGateAdaptive"));
     private static final String TAG = "[MinidoracatJavaPatch][PathfindGate] ";
 
     // ---- 尋路執行緒單寫 ----
     static boolean open = true;
     static long lastOpenNs = System.nanoTime();
+    static long holdNs = GATE_NS;
+    static boolean lastRoundOpen;
+    private static long lastCloseBusyNs;
     static boolean announced;
     private static boolean roundPolled;
     private static long roundStartNs;
@@ -50,6 +60,7 @@ public final class MdcPathfindGate {
     private static long drainedSum;
     private static long drainedMax;
     private static long staleNsMax;
+    static long holdNsMax;
 
     private MdcPathfindGate() {
     }
@@ -110,9 +121,23 @@ public final class MdcPathfindGate {
         MdcPathfindProbe.update();
     }
 
-    private static void closeRound(long now) {
+    static void closeRound(long now) {
         long roundStart = roundPolled ? roundStartNs : now;
         roundPolled = false;
+        if (lastRoundOpen) {
+            // 上一輪開閘：它在 update() 之後跑的 findPath（含重建）到這裡已結束
+            if (ADAPTIVE) {
+                // ponytail: k=2 寫死，重建佔 findPath 時間上限約 1/3；代價是地圖更新間隔 rb＋max(T, 2rb) 跟著 rb 無上限地拉長
+                // （rb 10 s → 30 s）。要調 k 或給 hold 封頂，等正式服 holdMsMax 常態超過 20 s 或有「動物反應慢」回報再開參數。
+                lastOpenNs = now;
+                holdNs = Math.max(GATE_NS, 2L * (MdcPathfindProbe.busyNsTotal - lastCloseBusyNs));
+            }
+            if (holdNs > holdNsMax) {
+                holdNsMax = holdNs;
+            }
+        }
+        lastRoundOpen = open;
+        lastCloseBusyNs = MdcPathfindProbe.busyNsTotal;
         if (open) {
             opens++;
             drainedSum += roundDrained;
@@ -133,16 +158,18 @@ public final class MdcPathfindGate {
         }
         roundDrained = 0;
         roundHeld = false;
-        open = decide(now);
+        open = (!ADAPTIVE || !lastRoundOpen) && decide(now);
         if (!announced) {
             announced = true;
             DebugLog.log(TAG + "首次生效（世界變動每 " + GATE_MS + " ms 最多套用一次；-Dmdc.pathfindGateMs=" + RAW
-                    + "；0|off 每輪都套用＝原版）");
+                    + "；0|off 每輪都套用＝原版）；計時 " + (ADAPTIVE
+                    ? "adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）"
+                    : "fixed（關閘 T，從決定開閘起算＝v1）") + "；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed");
         }
     }
 
     static boolean decide(long now) {
-        if (now - lastOpenNs >= GATE_NS) {
+        if (now - lastOpenNs >= holdNs) {
             lastOpenNs = now;
             return true;
         }
@@ -164,6 +191,7 @@ public final class MdcPathfindGate {
         drainedSum = 0L;
         drainedMax = 0L;
         staleNsMax = 0L;
+        holdNsMax = 0L;
     }
 
     // ---- 測試存取器 ----

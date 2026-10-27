@@ -264,6 +264,9 @@ public final class MdcPathfindProbeTest {
         }
         expect("直方圖桶上界單調不減", monotonic);
 
+        if (on) {
+            rebuildBreakdown();
+        }
         bench(on);
 
         if (failed > 0) {
@@ -271,6 +274,38 @@ public final class MdcPathfindProbeTest {
             System.exit(1);
         }
         System.out.println("MdcPathfindProbeTest OK (" + (on ? "on" : "off") + ")");
+    }
+
+    /**
+     * W81 v2 行尾欄位（合成耗時）：錨點 rb 之後 19 個 nr（序位 2–5 失敗 4 ms、6–20 成功 8 ms），rb 3000 ms 成功（前一週期 20 個
+     * 呼叫），緊接 rb 500 ms 失敗（1 個），59 個 nr 成功（序位 2–5 1 ms、6–20 2 ms、21–60 3 ms），rb 2000 ms 失敗（60 個）。
+     * 會抓到：rbMin 沒隨視窗歸零（錨點 100）、成敗或 rb／nr 交叉、序位與分桶邊界差一（5/6、20/21、20、60）、新欄位沒歸零。
+     */
+    private static void rebuildBreakdown() {
+        long ms = 1_000_000L;
+        MdcPathfindProbe.recordForTest(true, 1, 100 * ms);
+        MdcPathfindProbe.resetWindowForTest();
+        for (int pos = 2; pos <= 20; pos++) {
+            MdcPathfindProbe.recordForTest(false, pos <= 5 ? 0 : 1, (pos <= 5 ? 4 : 8) * ms);
+        }
+        MdcPathfindProbe.recordForTest(true, 1, 3000 * ms);
+        MdcPathfindProbe.recordForTest(true, 0, 500 * ms);
+        for (int pos = 2; pos <= 60; pos++) {
+            MdcPathfindProbe.recordForTest(false, 1, (pos <= 5 ? 1 : pos <= 20 ? 2 : 3) * ms);
+        }
+        MdcPathfindProbe.recordForTest(true, 0, 2000 * ms);
+        String window = MdcPathfindProbe.windowForTest();
+        String tail = window.substring(window.indexOf(" rbMin="));
+        // nrOk (15×8 + 4×1 + 15×2 + 40×3) / 74 = 3.70；nrPos (16+4)/8、(120+30)/30、120/40
+        String want = " rbMin=500 rbOk=1/3000.0 rbFail=2/1250.0 nrOk=74/3.7 nrFail=4/4.0 nrPos=2.5/5.0/3.0"
+                + " rbGap=500.0/3000.0/2000.0";
+        expect("W81 v2 rb／nr 拆分欄位（實際" + tail + "）", tail.equals(want)
+                && window.indexOf(" reload60=") < window.indexOf(" holdMsMax=")
+                && window.indexOf(" holdMsMax=") < window.indexOf(" rbMin="));
+        MdcPathfindProbe.resetWindowForTest();
+        String cleared = MdcPathfindProbe.windowForTest();
+        expect("W81 v2 欄位隨視窗歸零", cleared.endsWith(" rbMin=0 rbOk=0/0.0 rbFail=0/0.0 nrOk=0/0.0 nrFail=0/0.0"
+                + " nrPos=0.0/0.0/0.0 rbGap=0.0/0.0/0.0"));
     }
 
     /** 每個請求一次 addRequest＋一次 findPath（native 換成立即回傳的替身），量探針多花的 ns。 */

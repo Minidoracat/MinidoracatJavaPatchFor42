@@ -4954,8 +4954,9 @@ still 9; the gate calls W74's `poll`/`update`, so the probe keeps counting as be
 - When `execute()` throws, the result matches vanilla: the task has been taken, it does not enter `taskReturnQueue`, the exception propagates
   unchanged (the helper has no catch) and the remaining tasks stay queued; `update` is not reached, so the next round is still open and drains
   them.
-- `update()` closes the round, decides whether the next round is open with `now − lastOpen ≥ T` (recording `lastOpen` when it opens), then
-  hands over to W74's `update` (which calls vanilla `PathfindNative.update()`). The first round after boot is open.
+- `update()` closes the round, decides whether the next round is open with `now − lastOpen ≥ hold`, then hands over to W74's `update` (which
+  calls vanilla `PathfindNative.update()`). The first round after boot is open. How `hold` and `lastOpen` are computed is under "v2 timing"
+  below; v1 (`-Dmdc.pathfindGateAdaptive=off`) uses `hold = T` and records `lastOpen` at the moment it decides to open.
 - With the gate closed, tasks queued and no requests, vanilla `shouldWait()` returns false and the thread spins at `Sync`'s 20 Hz (only polls
   and the empty native `update`); `shouldWait` is not changed.
 - All state is read and written on the pathfinding thread only (single writer).
@@ -4964,20 +4965,50 @@ still 9; the gate calls W74's `poll`/`update`, so the probe keeps counting as be
 (about 6 req/s today) against a demand of 21–26 req/s, hence the T=1000 default. The main thread never waits for pathfinding ([2ci](#2ci)), so
 FPS is expected to stay the same.
 
+**v2 timing (2026-10-28, default)**: v1 records `lastOpen` at the moment it decides to open, but the open round's rebuilding `findPath` runs
+after `update()` (`updateThread` polls, then calls `update()`, then serves requests), so the whole 2–10 s rebuild is counted inside T. On
+production with T=3000 and 47–49 players, a saturated cycle had a median of 4.04 s, of which the rebuild took 2.9 s and ordinary
+pathfinding only 1.09 s; rebuilds were 72% of findPath time. v2 changes two things: (1) the closed period starts only when the open round
+has finished: `lastOpen` is recorded at the settlement after the open round; (2) the closed period is `hold = max(T, 2 × open-round duration)`,
+where the open-round duration is the native `findPath` time the W74 probe measured between the open round's settlement and the next
+settlement (the rebuilding call and the round's other request; not the `Sync` sleep or the `notifier.wait()` idle). The research proposal
+used wall-clock time between the two settlements; in the local smoke run the thread idled 47 s after the first open round at boot, which
+stretched `hold` to 95 s and made queued world tasks wait 95 s (`holdMsMax=94735`, `staleMsMax=94800`), so findPath time is measured
+instead. With the probe off (`-Dmdc.pathfindProbe=off`) there is nothing to measure and `hold` stays T, still counted from the end of the
+open round. The open round's own settlement always keeps the next round closed, so rounds never open back to back. k=2 is hard-coded:
+ordinary pathfinding between two rebuilds gets at least twice the rebuild time, capping the rebuild share at about 1/3. Only the helper
+changes; there is no new redirect and `expectedHits` stays 9.
+
+**v2 expectations and risks** (research model, 47–49 players; v1 today: busy 98.8%, 37 s average wait): if per-call cost returns to the
+10-27 22:40–22:59 level (rb 2.0 s, nr 30 ms, 780 requests/min), busy is about 70–74% with average waits under 0.5 s; at saturated per-call
+cost (rb 3.24 s, nr 43.7 ms, 600 requests/min) busy is 76–79% with about 0.5 s; the same at 733 requests/min gives 85–89% with about 1–5 s.
+The cost is the pathfinding map update interval = rb + max(T, 2rb): about 6.4 s at medium load and 10 s when saturated (v1: 3.4–4.2 s), and it
+grows with rb without bound (30 s at rb = 10 s). Animals learn about newly loaded chunks, doors just opened or closed and vehicles that just
+stopped or drove off that much later; animals spawned on a new chunk fail fast and retry first (`refail` may rise; each retry is cheap). Each
+batch gets bigger (about 3,000–6,000 tasks when saturated); the `ChunkUpdateTask` pool holds 2,048, and beyond that the main thread allocates
+more direct buffers (not measured). The global square→Node map accumulates longer between rebuilds; the sensitivity estimate adds 2–4
+percentage points of busy. After it goes live, at 47–49 players: `opens` should fall to about 6–9 per minute, `holdMsMax` should sit between T
+and about 20 s, busy and `waitMs` should drop, and `fail`/`refail` should not rise noticeably. Rollback: `-Dmdc.pathfindGateAdaptive=off`
+(back to v1) or `-Dmdc.pathfindGateMs=0` (vanilla), both need a restart.
+
 **Switch**: `-Dmdc.pathfindGateMs=<T>`, restart required. Unset = 1000; `0`/`off` = every round open, both entry points only delegate to the W74
 probe, instruction-for-instruction equivalent to vanilla (vanilla's cap of 10 included); 0–5000 is used as given, anything else or an
-unparsable value falls back to 1000. Independent of `-Dmdc.pathfindProbe`: with the probe off the gate still works (but there is no heartbeat),
-and with the gate off the probe still works.
+unparsable value falls back to 1000. `-Dmdc.pathfindGateAdaptive=0|off` returns the timing to v1 (`hold = T`, counted from the decision to
+open); unset or any other value = v2; it has no effect at T=0; the first-run line says whether the timing is `adaptive` or `fixed`. Both are
+independent of `-Dmdc.pathfindProbe`: with the probe off the gate still works (but there is no heartbeat, and the v2 `hold` stays T), and with
+the gate off the probe still works.
 
 Console (one line at the first round; the heartbeat is appended to W74's `beat` line, every 60 seconds):
 
 ```text
-[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）
-[MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n> reload10=<reloaded within 10 s of removal> reload60=<reloaded within 60 s of removal>
+[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）；計時 adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed
+[MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n> reload10=<reloaded within 10 s of removal> reload60=<reloaded within 60 s of removal> holdMsMax=<ms> rbMin=<ms> rbOk=<n>/<avg ms> rbFail=<n>/<avg ms> nrOk=<n>/<avg ms> nrFail=<n>/<avg ms> nrPos=<2–5>/<6–20>/<21+ avg ms> rbGap=<under 20>/<20–59>/<60+ avg ms>
 ```
 
 (`首次生效（世界變動每 1000 ms 最多套用一次；…；0|off 每輪都套用＝原版）` = active (world changes applied at most once every 1000 ms; …; 0|off
-applies them every round = vanilla).)
+applies them every round = vanilla); `計時 adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）` = timing adaptive (closed for max(T, 2 ×
+open-round duration), counted from the end of the open round), or `計時 fixed（關閘 T，從決定開閘起算＝v1）` = timing fixed (closed for T,
+counted from the decision to open = v1); `回到 fixed` = back to fixed.)
 
 Fields: `drained` counts the world tasks (chunk + square + vehicle) applied in open rounds. `staleMsMax` is how long the oldest queued task had
 waited when the gate opened: measured from the start of the first held round to the start of the open round, where a round starts at its first
@@ -4996,9 +5027,28 @@ entries (which can only undercount). Pathfinding thread only, observe only. Whet
 not worth it; `reload10` making up most of `reload60` means most chunks come back within 10 seconds, so a short delay is enough. At T=0 all gate
 fields are 0 (pure delegation counts nothing); `reload10`/`reload60` belong to the probe, keep counting at T=0, and are 0 with the probe off.
 
-**Behavior difference**: pathfinding sees world changes up to T (plus one round) late: a door that was just closed, a wall that was just built,
-a vehicle that just stopped or drove off, or a newly loaded chunk is planned against the old state for that long; a mover that bumps into it
-on its path is failed by vanilla's `walkingOnTheSpot` and paths again. This only affects server-side pathfinding (movers the server simulates
+v2 fields (after `reload60`; the names, order and format of the existing fields are unchanged; times in ms, averages with one decimal, `0.0`
+for an empty bucket): `holdMsMax` is the longest closed period in the window (always T when fixed; 0 when no open round finished), and half of
+it is roughly this minute's slowest open round; if it routinely exceeds 20 s on production, consider capping `hold`. Under v2 `staleMsMax`
+settles around `hold` plus one round instead of T. `rbMin` is the fastest rb call (0 without rb): when the first request after a rebuild fails
+quickly, rb is roughly the rebuild itself plus `VGAStar::init2`, so it bounds the request-independent rebuild cost from above.
+`rbOk`/`rbFail`/`nrOk`/`nrFail` are `n/average ms`, where failure means native returned something other than 1 (same basis as `fail`,
+including the 2nd and later targets of multi-target requests); the four counts add up to `calls`. They show whether the expensive calls are
+long successful paths or failed searches that sweep a whole region. `nrPos=a/b/c` is the nr average by position after the rebuild (the
+rebuild call = 1), in buckets 2–5, 6–20 and 21+: decreasing = deferred initialization after the rebuild dominates (caches warming up),
+increasing = the global map accumulated between rebuilds makes every call more expensive, flat = the rebuild itself dominates; calls before
+the first rebuild after boot are not counted. `rbGap=a/b/c` is the rb average by the previous cycle's call count (calls from the previous
+rebuild up to this one), in buckets under 20, 20–59 and 60+; increasing = the accumulated map makes the release during the rebuild more
+expensive. All single-writer on the pathfinding thread, O(1) per call, observe only.
+
+**Reading note**: the third part of W74's `rb=n/avg/x` and `nr=n/avg/x` is the **p95**, not the maximum (`MdcPathfindProbe.formatWindow`
+writes `RB.p95Us(nsMax)`: the upper bound of a quarter-octave bucket, capped at the window's overall maximum `usMax`; in µs, as is the
+average in the second part). Analysis scripts that read it as `rbMaxUs` should rename it to p95.
+
+**Behavior difference**: pathfinding sees world changes up to T (plus one round; under v2 the open-round duration plus `hold`, see above) late:
+a door that was just closed, a wall that was just built, a vehicle that just stopped or drove off, or a newly loaded chunk is planned against
+the old state for that long; a mover that bumps into it on its path is failed by vanilla's `walkingOnTheSpot` and paths again. This only
+affects server-side pathfinding (movers the server simulates
 itself), which on our server is currently only animals; clients do not recompute paths against the server's native world, so this cannot
 desync them. All three task types snapshot their data in `init` on the main thread, so a later `execute` never reads an unloaded chunk, and
 native `updateChunk` rejects stale data by `loadId` itself.
@@ -5011,7 +5061,9 @@ expected, not an allowlist failure.
 
 **Deployment**: the manifest adds `zombie/pathfind/nativeCode/MdcPathfindGate.class`; `PathfindNativeThread.class`, `MdcPathfindProbe.class`,
 `MdcPathfindProbe$Hist.class` and `PatchInfo.class` are replaced (159 → 160 classes). After it goes live, check for the `PathfindGate`
-first-run line and for `gate=1000` at the end of the `beat` line.
+first-run line and for `gate=1000` at the end of the `beat` line. v2 adds or removes no class (`MdcPathfindGate.class` and
+`MdcPathfindProbe.class` are replaced); after it goes live, check that the first-run line says `計時 adaptive` and that `beat` carries
+`holdMsMax=`.
 
 **Not handled**: `requestsPerUpdate` (2 per round), a negative cache for failed requests and the animal retry AI stay unchanged; they wait for
 the `refail` numbers.
@@ -5040,6 +5092,15 @@ the `refail` numbers.
   counts; the table is cleared at 65,536 entries; nothing counted and the table stays empty with the probe off. Mutants (run through a model of
   vanilla's loops transcribed from javap, which is first checked against the real `updateThread`): still capped at 10 when open, blocking the
   request queue when closed, swallowing the exception while draining; all three are caught.
+- v2 timing and fields (a fourth JVM in `build.ps1` [9zv/10]: T=1000 with `-Dmdc.pathfindGateAdaptive=off`, checking argv): a synthetic clock
+  calls `closeRound` directly and the open round's findPath time is simulated through the probe's running total. Adaptive: with 3T of
+  findPath the next settlement stays closed and `hold` = 6T counted from the end of the open round, 1 ns short stays closed and exactly due
+  opens; T/4 of findPath followed by 100T of idle gives `hold` = T (idle not counted); the open round's own settlement never opens the next
+  round even when `hold` has long expired; `holdMsMax` = 6T. Adaptive off (v1 negative control): the same sequence opens at the
+  settlement right after the open round and `hold` stays T. The four-round main sequence and the steady-state test run under both timings;
+  the heartbeat's `holdMsMax` is 0 at T=0, exactly T when fixed and ≥ T when adaptive. `MdcPathfindProbeTest` feeds a series of rb/nr calls
+  with synthetic durations and compares `rbMin`, `rbOk`/`rbFail`/`nrOk`/`nrFail`, `nrPos` and `rbGap` verbatim (hitting the 5/6, 20/21, 20
+  and 60 bucket boundaries), and checks that the new fields reset with the window.
 
 **Retirement**: remove the patch when TIS makes invalidation local (the native write entry points no longer set a global flag, or `findPath` no
 longer rebuilds every visibility graph and vehicle cluster in bulk). When the PathFind native library changes, re-check with objdump that the six

@@ -34,6 +34,8 @@ import zombie.debug.DebugLog;
  * 之後是否執行過世界變動任務」把每次呼叫分成 {@code rb}（付重建）與 {@code nr}（不付）兩組；
  * {@code rebuildPct ≈ rb.n × (rb 平均 − nr 平均) ÷ 總耗時}。native 對過期 chunk（loadId 不符）不設旗標，所以 rb 次數是上界；
  * 高階區域在之後第一次被搜尋碰到時才重算、可能落在 nr，所以兩組平均的差是重建成本的下界。
+ * 行尾的 W81 v2 欄位把兩組再拆開（只觀測、每次呼叫 O(1)）：{@code rbMin}、rb／nr 各分成敗、nr 依重建後第幾個呼叫
+ * （{@code nrPos}）、rb 依前一週期呼叫數（{@code rbGap}）；判讀見 docs/patches.md 2cp。
  *
  * <p>所有簿記只在尋路執行緒（單寫者），log 在同一執行緒以 {@code DebugLog.log} 寫出（與 ChunkSaveIsolation、
  * ChunkWriteGuard 等非主執行緒 helper 相同）。簿記失敗只計 {@code anomalies}。
@@ -73,6 +75,10 @@ public final class MdcPathfindProbe {
     private static long lastUpdateNs;
     private static boolean announced;
     private static long windowStartNs;
+    /** 上次重建之後第幾個呼叫（重建那次＝1）；開服到第一次重建前是 0。不隨視窗歸零。 */
+    private static long sinceRb;
+    /** native findPath 累計耗時（不歸零）；W81 v2 以兩次結算之間的差當開閘輪耗時。 */
+    static long busyNsTotal;
 
     // 視窗（每次 beat 歸零）
     private static long rounds;
@@ -100,6 +106,16 @@ public final class MdcPathfindProbe {
     private static final Hist ALL = new Hist();
     private static final Hist RB = new Hist();
     private static final Hist NR = new Hist();
+    private static long rbNsMin = Long.MAX_VALUE;
+    /** rbOk、rbFail、nrOk、nrFail 的次數與耗時。 */
+    private static final long[] OUT_N = new long[4];
+    private static final long[] OUT_NS = new long[4];
+    /** nr 依重建後序位 2–5、6–20、21+。 */
+    private static final long[] POS_N = new long[3];
+    private static final long[] POS_NS = new long[3];
+    /** rb 依前一週期（上次重建起、到這次為止）的呼叫數 &lt;20、20–59、≥60。 */
+    private static final long[] GAP_N = new long[3];
+    private static final long[] GAP_NS = new long[3];
     private static long rbNs;
     private static long nrNs;
     private static final long[] CAT_N = new long[5];
@@ -228,6 +244,7 @@ public final class MdcPathfindProbe {
         boolean rebuild = pendingWorld;
         pendingWorld = false;
         totalCalls++;
+        busyNsTotal += ns;
         calls++;
         nsSum += ns;
         if (ns > nsMax) {
@@ -237,11 +254,29 @@ public final class MdcPathfindProbe {
         if (rebuild) {
             RB.add(ns);
             rbNs += ns;
+            if (ns < rbNsMin) {
+                rbNsMin = ns;
+            }
+            if (sinceRb > 0L) {
+                int g = sinceRb < 20L ? 0 : sinceRb < 60L ? 1 : 2;
+                GAP_N[g]++;
+                GAP_NS[g] += ns;
+            }
+            sinceRb = 1L;
         } else {
             NR.add(ns);
             nrNs += ns;
+            if (sinceRb > 0L) {
+                sinceRb++;
+                int p = sinceRb <= 5L ? 0 : sinceRb <= 20L ? 1 : 2;
+                POS_N[p]++;
+                POS_NS[p] += ns;
+            }
         }
         boolean failed = result != 1;
+        int outcome = (rebuild ? 0 : 2) + (failed ? 1 : 0);
+        OUT_N[outcome]++;
+        OUT_NS[outcome] += ns;
         if (failed) {
             fails++;
         }
@@ -382,7 +417,17 @@ public final class MdcPathfindProbe {
                 .append(" chunkR=").append(chunkRTasks)
                 .append(" refail=").append(refails)
                 .append(" reload10=").append(reload10)
-                .append(" reload60=").append(reload60);
+                .append(" reload60=").append(reload60)
+                .append(" holdMsMax=").append(MdcPathfindGate.holdNsMax / 1_000_000L)
+                .append(" rbMin=").append(RB.n == 0L ? 0L : rbNsMin / 1_000_000L)
+                .append(" rbOk=").append(OUT_N[0]).append('/').append(avgMs1(OUT_NS[0], OUT_N[0]))
+                .append(" rbFail=").append(OUT_N[1]).append('/').append(avgMs1(OUT_NS[1], OUT_N[1]))
+                .append(" nrOk=").append(OUT_N[2]).append('/').append(avgMs1(OUT_NS[2], OUT_N[2]))
+                .append(" nrFail=").append(OUT_N[3]).append('/').append(avgMs1(OUT_NS[3], OUT_N[3]))
+                .append(" nrPos=").append(avgMs1(POS_NS[0], POS_N[0])).append('/').append(avgMs1(POS_NS[1], POS_N[1]))
+                .append('/').append(avgMs1(POS_NS[2], POS_N[2]))
+                .append(" rbGap=").append(avgMs1(GAP_NS[0], GAP_N[0])).append('/').append(avgMs1(GAP_NS[1], GAP_N[1]))
+                .append('/').append(avgMs1(GAP_NS[2], GAP_N[2]));
         return sb.toString();
     }
 
@@ -400,6 +445,11 @@ public final class MdcPathfindProbe {
 
     private static long avgMs(long ns, long n) {
         return n == 0L ? 0L : ns / n / 1_000_000L;
+    }
+
+    /** 平均 ms 一位小數；沒有樣本是 0.0。 */
+    private static String avgMs1(long ns, long n) {
+        return fixed(n == 0L ? 0.0 : ns / 1e6 / n, 1);
     }
 
     private static String fixed(double v, int digits) {
@@ -437,6 +487,13 @@ public final class MdcPathfindProbe {
         NR.clear();
         rbNs = 0L;
         nrNs = 0L;
+        rbNsMin = Long.MAX_VALUE;
+        java.util.Arrays.fill(OUT_N, 0L);
+        java.util.Arrays.fill(OUT_NS, 0L);
+        java.util.Arrays.fill(POS_N, 0L);
+        java.util.Arrays.fill(POS_NS, 0L);
+        java.util.Arrays.fill(GAP_N, 0L);
+        java.util.Arrays.fill(GAP_NS, 0L);
         java.util.Arrays.fill(CAT_N, 0L);
         java.util.Arrays.fill(CAT_FAIL, 0L);
         java.util.Arrays.fill(CAT_NS, 0L);
@@ -560,6 +617,12 @@ public final class MdcPathfindProbe {
     /** 把「最近移除」表每筆紀錄往前推 {@code ns}（模擬時間過去）。 */
     static void ageRemovedForTest(long ns) {
         REMOVED.transformValues(removedNs -> removedNs - ns);
+    }
+
+    /** 以合成耗時記一次呼叫：{@code rebuild} 決定落在 rb 或 nr，{@code result} 是 native 回傳值。 */
+    static void recordForTest(boolean rebuild, int result, long ns) {
+        pendingWorld = rebuild;
+        record(new PathFindRequest(), result, 0L, ns);
     }
 
     static long[] enqForTest() {
