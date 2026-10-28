@@ -331,6 +331,14 @@ wrapper 讀同目錄 `pfguard.env`（root:pzserver 0640，**列入 manifest**；
 6. **平行**：向 TIS 回報兩個獨立缺陷（merge 洩漏＝有行號的確定 bug；rect pool 零驗證＋兩次同簽名
    `0x30`），不宣稱 writer 已知。
 
+### 9-5. 第四輪（2026-10-28）：allowlist 拿掉 4 個長命 caller
+
+1. **起因**：W81（尋路世界變動批次化閘門，`docs/patches.md#2cp`）上線後，`guard_live` 在開服約 2 小時就頂到 65,536，之後 `skip_capacity` 每秒增加約 300；W81 前同樣是晚峰的一場，開服 3 小時 41 分只到 40,800。帳本滿了以後，新的 cluster rect array（victim 族）也拿不到 guard page。
+2. **原因**：`HLChunkLevel::initRegions`／`initStairs`／`initSlopedSurfaces` 與 `HLAStar::setLowestCostSuccessor` 長出的陣列掛在 pool 物件（ChunkLevel、HLSearchNode）上；chunk 移除時只把 count 清 0，陣列跟物件一起回池，只有關服時的 `clearPool` 才釋放。所以它們不是 9-2 說的「有界診斷」：上限隨尋路碰到的 chunk level 數與單次搜尋規模變大。9/10 core 的 53,245 個 live block 裡，這幾類占 52,665 個，cluster 只有 580 個。W81 讓尋路地圖完整、搜尋範圍變大，上限跟著變大；這不是逐次洩漏。
+3. **改法**：`pfguard.env` 的 allowlist 拿掉這 4 個，剩 `createVehicleCluster`＋`merge`＋12 個 A\* caller，共 14；這 12 個長出的是每次搜尋的暫時 list，搜尋結束就釋放。`MDC_PFGUARD_MAXBLOCKS` 維持 65,536，shim 不改。估計帳本需求約 600–1,500 個 block（cluster 族的上限跟車輛數有關），pfguard 頁的常駐記憶體從約 256 MiB 降到 8 MiB 以下。
+4. **驗證**：`verify-preconditions.sh` 對正式服同版 `libPZPathFind64.so`（42.21.0）`RESULT: PASS`（80 checks；18 個 caller 時是 91）；`run-tests.sh` 133/133。同時修 verifier：它以前遇到 CRLF 的 `pfguard.env`（Windows checkout、`core.autocrlf=true`）解析不出 CALLERS 行，當成沒有 allowlist、只驗內建的 43 條就 PASS；現在照 wrapper 剝掉 CR，檔裡有 CALLERS 行卻解析不出來就 FAIL。
+5. **驗收（重啟後）**：橫幅 `callers=14`；`pfguard_ring.py --pid` 的 `guard_live` 遠低於 cap、`skip_capacity` 不增加、`merge_released`＝`merge_calls`、各異常計數 0。
+
 ## 10. Steam PseudoTCP 修復與 core 啟動保障
 
 `libmdcsteamfix.so` 是獨立的 **LD_AUDIT 冷載入修補**，不併入 pfguard、不改官方 `.so`

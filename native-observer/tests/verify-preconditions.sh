@@ -123,7 +123,11 @@ declare -A expected_calls=(
 callers=("${!expected_calls[@]}")
 env_file="${PFG_ENV:-${here}/deploy/pfguard.env}"
 if [[ -r "${env_file}" ]]; then
-    env_callers="$(sed -nE 's/^MDC_PFGUARD_CALLERS=([A-Za-z0-9_,]*)$/\1/p' "${env_file}" | tail -1)"
+    # Strip CR like run-with-pfguard.sh does: a CRLF checkout (core.autocrlf) must not read as "no allowlist".
+    env_callers="$(tr -d '\r' <"${env_file}" | sed -nE 's/^MDC_PFGUARD_CALLERS=([A-Za-z0-9_,]*)$/\1/p' | tail -1)"
+    if grep -q '^MDC_PFGUARD_CALLERS=' "${env_file}"; then
+        check "pfguard.env MDC_PFGUARD_CALLERS line parses" 1 "$(( ${#env_callers} > 0 ? 1 : 0 ))"
+    fi
     IFS=',' read -r -a env_list <<<"${env_callers}"
     check "pfguard.env caller count within PFG_MAX_CALLERS (32)" 1 "$(( ${#env_list[@]} <= 32 ? 1 : 0 ))"
     check "pfguard.env MDC_PFGUARD_CALLERS length within g_callers_env (2048)" 1 "$(( ${#env_callers} < 2048 ? 1 : 0 ))"
