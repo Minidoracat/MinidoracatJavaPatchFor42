@@ -79,6 +79,8 @@ public final class MdcPathfindProbe {
     private static long sinceRb;
     /** native findPath 累計耗時（不歸零）；W81 v2 以兩次結算之間的差當開閘輪耗時。 */
     static long busyNsTotal;
+    /** 第一次看到的非動物請求者類別（-1＝還沒看過）；尋路執行緒寫一次，W85 在主執行緒讀來決定回原版。 */
+    static volatile int nonAnimalCat = -1;
 
     // 視窗（每次 beat 歸零）
     private static long rounds;
@@ -290,6 +292,9 @@ public final class MdcPathfindProbe {
             countRefail(request);
         }
         int cat = category(request.mover);
+        if (cat != CAT_ANIMAL && nonAnimalCat < 0) {
+            nonAnimalCat = cat;
+        }
         CAT_N[cat]++;
         CAT_NS[cat] += ns;
         if (failed) {
@@ -427,7 +432,8 @@ public final class MdcPathfindProbe {
                 .append(" nrPos=").append(avgMs1(POS_NS[0], POS_N[0])).append('/').append(avgMs1(POS_NS[1], POS_N[1]))
                 .append('/').append(avgMs1(POS_NS[2], POS_N[2]))
                 .append(" rbGap=").append(avgMs1(GAP_NS[0], GAP_N[0])).append('/').append(avgMs1(GAP_NS[1], GAP_N[1]))
-                .append('/').append(avgMs1(GAP_NS[2], GAP_N[2]));
+                .append('/').append(avgMs1(GAP_NS[2], GAP_N[2]))
+                .append(" rbGapN=").append(GAP_N[0]).append('/').append(GAP_N[1]).append('/').append(GAP_N[2]);
         return sb.toString();
     }
 

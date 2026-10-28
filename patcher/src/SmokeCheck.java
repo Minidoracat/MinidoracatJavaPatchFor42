@@ -3916,6 +3916,7 @@ public final class SmokeCheck {
         failed += checkZombieReuseOwner(jar, distJava);
         failed += checkLightSettings(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
+        failed += checkVehicleScope(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7732,6 +7733,170 @@ public final class SmokeCheck {
                 && countCallsToOwner(pHas, iter) == 1 && countExactCalls(pHas, Opcodes.INVOKEINTERFACE, iter, "hasNext", "()Z") == 1
                 && countCallsToOwner(pNext, iter) == 1 && countExactCalls(pNext, Opcodes.INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;") == 1
                 && countCallsToOwner(pHas, los) + countCallsToOwner(pNext, los) == 0);
+        return failed;
+    }
+
+    /** W85：42.21 原版 PathfindNative.addVehicle／removeVehicle 本體（去 debug 的 methodText SHA-256），{name, sha}。 */
+    static final String[][] VEHICLE_SCOPE_LOCKED = {
+            {"addVehicle", "8cd7f6b175570cf59e274145f9510292df03a81298830b3ec7fce72bd7b267a5"},
+            {"removeVehicle", "03fa67e7408e4ebae8570b37df83c6b39f90cb02e1e9ffb865417ab55d365db2"},
+    };
+
+    /**
+     * W85 只把動物附近的載具送進 native（docs/patches.md 2ct）：原版前提（任一項變紅＝TIS 改了載具進出 native 的方式，
+     * 先重新分析，不改斷言讓它變綠）、同形手術、helper 契約。
+     */
+    static int checkVehicleScope(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String pkg = "zombie/pathfind/nativeCode/";
+        String pfn = pkg + "PathfindNative";
+        String helper = pkg + "MdcPathfindVehicleScope";
+        String veh = "zombie/vehicles/BaseVehicle";
+        String vehDesc = "(L" + veh + ";)V";
+        String cell = "zombie/iso/IsoCell";
+        String setDesc = "()Ljava/util/Set;";
+        int virt = Opcodes.INVOKEVIRTUAL;
+        MethodNode vReload = methodFromJar(jar, veh, "scriptReloaded", "(Z)V");
+        MethodNode vAdd = methodFromJar(jar, veh, "addToWorld", "(Z)V");
+        MethodNode vRemove = methodFromJar(jar, veh, "removeFromWorld", "()V");
+        MethodNode vCheck = methodFromJar(jar, pfn, "checkUseNativeCode", "()V");
+        MethodNode vMain = methodFromJar(jar, pfn, "updateMain", "()V");
+        // 呼叫點普查：全 jar 只有這 5 個 add／remove，每個方法恰一個，receiver 是 PathfindNative.instance（checkUseNativeCode 是 this）
+        AbstractInsnNode reRemove = firstCall(vReload, virt, pfn, "removeVehicle", vehDesc);
+        AbstractInsnNode reAdd = firstCall(vReload, virt, pfn, "addVehicle", vehDesc);
+        AbstractInsnNode[] instanceSites = {reRemove, reAdd, firstCall(vAdd, virt, pfn, "addVehicle", vehDesc),
+                firstCall(vRemove, virt, pfn, "removeVehicle", vehDesc)};
+        boolean receivers = true;
+        for (AbstractInsnNode site : instanceSites) {
+            AbstractInsnNode arg = site == null ? null : prevReal(site);
+            receivers &= isVar(arg, Opcodes.ALOAD, 0)
+                    && isField(prevReal(arg), Opcodes.GETSTATIC, pfn, "instance", "L" + pfn + ";");
+        }
+        AbstractInsnNode checkAdd = firstCall(vCheck, virt, pfn, "addVehicle", vehDesc);
+        AbstractInsnNode checkArg = checkAdd == null ? null : prevReal(checkAdd);
+        receivers &= checkArg instanceof VarInsnNode && checkArg.getOpcode() == Opcodes.ALOAD
+                && isVar(prevReal(checkArg), Opcodes.ALOAD, 0);
+        failed += check("W85 vanilla 前提：全 jar PathfindNative.addVehicle 恰 3 處（BaseVehicle.scriptReloaded／addToWorld、"
+                        + "PathfindNative.checkUseNativeCode 各 1）、removeVehicle 恰 2 處（scriptReloaded／removeFromWorld 各 1）；"
+                        + "BaseVehicle 的 receiver 是 PathfindNative.instance、參數 this，scriptReloaded 先 remove 緊接 add",
+                jarWideCallsiteCensus(jar, virt, pfn, "addVehicle", vehDesc) == 3
+                        && jarWideCallsiteCensus(jar, virt, pfn, "removeVehicle", vehDesc) == 2
+                        && countExactCalls(vReload, virt, pfn, "addVehicle", vehDesc) == 1
+                        && countExactCalls(vReload, virt, pfn, "removeVehicle", vehDesc) == 1
+                        && countExactCalls(vAdd, virt, pfn, "addVehicle", vehDesc) == 1
+                        && countExactCalls(vRemove, virt, pfn, "removeVehicle", vehDesc) == 1
+                        && countExactCalls(vCheck, virt, pfn, "addVehicle", vehDesc) == 1
+                        && receivers && reRemove != null && nextReal(nextReal(reRemove)) != null
+                        && nextReal(nextReal(nextReal(reRemove))) == reAdd);
+        // updateMain：唯一 getVehicles 接 Set.iterator；迴圈裡 vehicleState.get 為 null 或 check() 為 false 都跳過 updateVehicle
+        AbstractInsnNode getVehicles = firstCall(vMain, virt, cell, "getVehicles", setDesc);
+        AbstractInsnNode stateGet = firstCall(vMain, virt, "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+        AbstractInsnNode[] loop = new AbstractInsnNode[10];
+        AbstractInsnNode cur = stateGet;
+        for (int i = 0; i < loop.length && cur != null; i++) {
+            cur = nextReal(cur);
+            loop[i] = cur;
+        }
+        boolean skipsStateless = stateGet != null
+                && isField(prevReal(prevReal(stateGet)), Opcodes.GETFIELD, pfn, "vehicleState", "Ljava/util/HashMap;")
+                && loop[0] instanceof TypeInsnNode cast && cast.desc.equals(pkg + "VehicleState")
+                && loop[1] instanceof VarInsnNode store && store.getOpcode() == Opcodes.ASTORE
+                && isVar(loop[2], Opcodes.ALOAD, store.var)
+                && loop[3] instanceof JumpInsnNode ifNull && ifNull.getOpcode() == Opcodes.IFNULL
+                && isVar(loop[4], Opcodes.ALOAD, store.var)
+                && isCall(loop[5], virt, pkg + "VehicleState", "check", "()Z")
+                && loop[6] instanceof JumpInsnNode ifEq && ifEq.getOpcode() == Opcodes.IFEQ && ifEq.label == ifNull.label
+                && isVar(loop[7], Opcodes.ALOAD, 0)
+                && isCall(loop[9], virt, pfn, "updateVehicle", vehDesc);
+        failed += check("W85 vanilla 前提：updateMain 恰 1 個 IsoCell.getVehicles（緊接 Set.iterator）、1 個 vehicleState 讀取、"
+                        + "1 個 updateVehicle，沒有 native 狀態（get 回 null）的車跳過 updateVehicle",
+                countExactCalls(vMain, virt, cell, "getVehicles", setDesc) == 1 && getVehicles != null
+                        && isCall(nextReal(getVehicles), Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", "()Ljava/util/Iterator;")
+                        && countInsns(vMain, in -> isField(in, Opcodes.GETFIELD, pfn, "vehicleState", "Ljava/util/HashMap;")) == 1
+                        && countExactCalls(vMain, virt, pfn, "updateVehicle", vehDesc) == 1
+                        && skipsStateless);
+        // 原版 addVehicle／removeVehicle 本體 SHA 鎖：add 一定建狀態並送 VehicleAddTask；remove 一定丟狀態，執行緒在就送
+        // VehicleRemoveTask（沒有狀態也送）。vehNative 的鏡像與「沒送過的車不必 remove」都靠這兩個本體。
+        ClassNode vNative = new ClassNode();
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            new ClassReader(jf.getInputStream(jf.getJarEntry(pfn + ".class")).readAllBytes()).accept(vNative, ClassReader.SKIP_DEBUG);
+        }
+        for (String[] lock : VEHICLE_SCOPE_LOCKED) {
+            MethodNode body = declaredMethod(vNative, lock[0], vehDesc);
+            String got = sha256Hex(methodText(body));
+            failed += check("W85 vanilla 前提：PathfindNative." + lock[0] + " 本體（去 debug 的 methodText SHA-256）與 42.21 相同",
+                    got.equals(lock[1]));
+            if (!got.equals(lock[1])) {
+                System.out.println("  實際 SHA：" + got);
+            }
+            // 負對照：把本體第一個 null 判斷反過來（add：狀態已存在才新建；remove：沒有狀態才 release）→ SHA 鎖必須變紅
+            JumpInsnNode firstNullJump = null;
+            for (AbstractInsnNode in : body.instructions) {
+                if (firstNullJump == null && in instanceof JumpInsnNode j
+                        && (j.getOpcode() == Opcodes.IFNULL || j.getOpcode() == Opcodes.IFNONNULL)) {
+                    firstNullJump = j;
+                }
+            }
+            boolean flipped = firstNullJump != null;
+            if (flipped) {
+                body.instructions.set(firstNullJump, new JumpInsnNode(
+                        firstNullJump.getOpcode() == Opcodes.IFNULL ? Opcodes.IFNONNULL : Opcodes.IFNULL, firstNullJump.label));
+            }
+            failed += check("W85 SHA 鎖負對照：PathfindNative." + lock[0] + " 第一個 null 判斷反過來 → SHA 鎖變紅",
+                    got.equals(lock[1]) && flipped && !sha256Hex(methodText(body)).equals(lock[1]));
+        }
+        // 手術後：5 個 add／remove 與 getVehicles 同形改道，其餘指令與 frames 不變；兩個 class 其餘方法不變
+        String addOld = "INVOKEVIRTUAL " + pfn + ".addVehicle " + vehDesc;
+        String removeOld = "INVOKEVIRTUAL " + pfn + ".removeVehicle " + vehDesc;
+        String addNew = "INVOKESTATIC " + helper + ".addVehicle (L" + pfn + ";L" + veh + ";)V";
+        String removeNew = "INVOKESTATIC " + helper + ".removeVehicle (L" + pfn + ";L" + veh + ";)V";
+        String gvOld = "INVOKEVIRTUAL " + cell + ".getVehicles " + setDesc;
+        String gvNew = "INVOKESTATIC " + helper + ".getVehicles (L" + cell + ";)Ljava/util/Set;";
+        List<String> drift = new ArrayList<>();
+        for (MethodNode v : List.of(vReload, vAdd, vRemove)) {
+            String want = methodText(v).replace(addOld, addNew).replace(removeOld, removeNew);
+            if (want.equals(methodText(v)) || !want.equals(methodText(method(distJava, veh, v.name, v.desc)))) {
+                drift.add(veh + "." + v.name + v.desc);
+            }
+        }
+        // checkUseNativeCode 自己也有一個 getVehicles（offset 192，啟動迴圈的來源），只改 add；updateMain 只改 getVehicles
+        for (MethodNode v : List.of(vCheck, vMain)) {
+            String want = v == vCheck ? methodText(v).replace(addOld, addNew) : methodText(v).replace(gvOld, gvNew);
+            if (want.equals(methodText(v)) || !want.equals(methodText(method(distJava, pfn, v.name, v.desc)))) {
+                drift.add(pfn + "." + v.name + v.desc);
+            }
+        }
+        // 同一個 BaseVehicle ClassPatch 上的其他刀：W3-4 update、W19 permanentlyRemove 頭部、W64 setNetPlayerAuthorization 頭部
+        Set<String> touched = Set.of(veh + ".scriptReloaded(Z)V", veh + ".addToWorld(Z)V", veh + ".removeFromWorld()V",
+                veh + ".update()V", veh + ".permanentlyRemove()V",
+                veh + ".setNetPlayerAuthorization(L" + veh + "$Authorization;I)V",
+                pfn + ".checkUseNativeCode()V", pfn + ".updateMain()V");
+        for (String cls : List.of(veh, pfn)) {
+            ClassNode distNode = classNode(distJava, cls);
+            for (MethodNode m : classNodeFromJar(jar, cls).methods) {
+                if (!touched.contains(cls + "." + m.name + m.desc)) {
+                    MethodNode d = declaredMethod(distNode, m.name, m.desc);
+                    if (d == null || !methodText(m).equals(methodText(d))) {
+                        drift.add(cls + "." + m.name + m.desc);
+                    }
+                }
+            }
+        }
+        if (!drift.isEmpty()) {
+            System.out.println("  不符的方法：" + drift);
+        }
+        failed += check("W85 手術後：scriptReloaded／addToWorld／removeFromWorld／checkUseNativeCode 的 add／remove 與 updateMain 的 "
+                        + "getVehicles 同形改道 MdcPathfindVehicleScope，其餘指令與 frames 不變；BaseVehicle 其餘方法（W3-4、W19、W64 "
+                        + "的三個方法除外）與 PathfindNative 其餘方法不變",
+                drift.isEmpty());
+        MethodNode hAdd = method(distJava, helper, "addVehicle", "(L" + pfn + ";L" + veh + ";)V");
+        MethodNode hRemove = method(distJava, helper, "removeVehicle", "(L" + pfn + ";L" + veh + ";)V");
+        MethodNode hGet = method(distJava, helper, "getVehicles", "(L" + cell + ";)Ljava/util/Set;");
+        failed += check("W85 helper 契約：addVehicle／removeVehicle 各只有 1 處呼叫原版同名方法、不呼叫另一個；getVehicles 第一個呼叫"
+                        + "就是 IsoCell.getVehicles（恰 1 次）",
+                countExactCalls(hAdd, virt, pfn, "addVehicle", vehDesc) == 1 && countCalls(hAdd, pfn, "removeVehicle") == 0
+                        && countExactCalls(hRemove, virt, pfn, "removeVehicle", vehDesc) == 1 && countCalls(hRemove, pfn, "addVehicle") == 0
+                        && callNames(hGet).get(0).equals(cell + ".getVehicles") && countCalls(hGet, cell, "getVehicles") == 1);
         return failed;
     }
 

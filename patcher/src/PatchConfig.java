@@ -337,6 +337,26 @@ public final class PatchConfig {
                 "zombie/vehicles/BaseVehicle", "couldSeeIntersectedSquare", "(I)Z",
                 "zombie/mdc/VehicleCouldSeeGate", "couldSeeIntersectedSquare"));
         vehUpdate.expectedHits = 1;
+        // W85 只把動物附近的載具送進 native 尋路（docs/patches.md 2ct；BaseVehicle 只能有這一個 ClassPatch）：
+        // scriptReloaded(Z) 的 PathfindNative.removeVehicle（javap offset 236）＋addVehicle（243）、addToWorld(Z) 的 addVehicle（159）、
+        // removeFromWorld() 的 removeVehicle（362）同形改道 MdcPathfindVehicleScope（receiver＝PathfindNative.instance 前置）。
+        String vehScope = "zombie/pathfind/nativeCode/MdcPathfindVehicleScope";
+        String scopeNative = "zombie/pathfind/nativeCode/PathfindNative";
+        String scopeVehDesc = "(Lzombie/vehicles/BaseVehicle;)V";
+        Patcher.Site scopeAdd = new Patcher.Site(Opcodes.INVOKEVIRTUAL, scopeNative, "addVehicle", scopeVehDesc,
+                vehScope, "addVehicle");
+        Patcher.Site scopeRemove = new Patcher.Site(Opcodes.INVOKEVIRTUAL, scopeNative, "removeVehicle", scopeVehDesc,
+                vehScope, "removeVehicle");
+        Patcher.MethodOps vehReload = baseVeh.method("scriptReloaded", "(Z)V");
+        vehReload.redirects.add(scopeAdd);
+        vehReload.redirects.add(scopeRemove);
+        vehReload.expectedHits = 2;
+        Patcher.MethodOps vehAddWorld = baseVeh.method("addToWorld", "(Z)V");
+        vehAddWorld.redirects.add(scopeAdd);
+        vehAddWorld.expectedHits = 1;
+        Patcher.MethodOps vehRemoveWorld = baseVeh.method("removeFromWorld", "()V");
+        vehRemoveWorld.redirects.add(scopeRemove);
+        vehRemoveWorld.expectedHits = 1;
         patches.add(baseVeh);
 
         // W12 車輛 DB chunk 索引一致性：VehicleBuffer.set 原版把 wx/wy 取自
@@ -1625,6 +1645,20 @@ public final class PatchConfig {
                 "()Ljava/util/Iterator;", losFilter, "iterator"));
         playerLos.expectedHits = 2;
         patches.add(isoPlayer);
+
+        // ---- W85 只把動物附近的載具送進 native 尋路（docs/patches.md 2ct；BaseVehicle 三個方法併在上面 W3-4 的 ClassPatch）----
+        // PathfindNative 原本沒有 ClassPatch。checkUseNativeCode 啟動迴圈唯一的 this.addVehicle（offset 228）與 updateMain 唯一的
+        // IsoCell.getVehicles()（offset 42，主執行緒範圍更新器，回傳原版同一個 Set）改道 MdcPathfindVehicleScope。
+        // -Dmdc.pathfindVehicleScope=2|observe（預設）／1|on／0|off；-Dmdc.pathfindVehicleScopeR（格，預設 64）。
+        Patcher.ClassPatch pfNativePatch = new Patcher.ClassPatch(scopeNative);
+        Patcher.MethodOps pfCheck = pfNativePatch.method("checkUseNativeCode", "()V");
+        pfCheck.redirects.add(scopeAdd);
+        pfCheck.expectedHits = 1;
+        Patcher.MethodOps pfMain = pfNativePatch.method("updateMain", "()V");
+        pfMain.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getVehicles",
+                "()Ljava/util/Set;", vehScope, "getVehicles"));
+        pfMain.expectedHits = 1;
+        patches.add(pfNativePatch);
 
         return patches;
     }

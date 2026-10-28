@@ -298,14 +298,14 @@ public final class MdcPathfindProbeTest {
         String tail = window.substring(window.indexOf(" rbMin="));
         // nrOk (15×8 + 4×1 + 15×2 + 40×3) / 74 = 3.70；nrPos (16+4)/8、(120+30)/30、120/40
         String want = " rbMin=500 rbOk=1/3000.0 rbFail=2/1250.0 nrOk=74/3.7 nrFail=4/4.0 nrPos=2.5/5.0/3.0"
-                + " rbGap=500.0/3000.0/2000.0";
+                + " rbGap=500.0/3000.0/2000.0 rbGapN=1/1/1";
         expect("W81 v2 rb／nr 拆分欄位（實際" + tail + "）", tail.equals(want)
                 && window.indexOf(" reload60=") < window.indexOf(" holdMsMax=")
                 && window.indexOf(" holdMsMax=") < window.indexOf(" rbMin="));
         MdcPathfindProbe.resetWindowForTest();
         String cleared = MdcPathfindProbe.windowForTest();
         expect("W81 v2 欄位隨視窗歸零", cleared.endsWith(" rbMin=0 rbOk=0/0.0 rbFail=0/0.0 nrOk=0/0.0 nrFail=0/0.0"
-                + " nrPos=0.0/0.0/0.0 rbGap=0.0/0.0/0.0"));
+                + " nrPos=0.0/0.0/0.0 rbGap=0.0/0.0/0.0 rbGapN=0/0/0"));
     }
 
     /** 每個請求一次 addRequest＋一次 findPath（native 換成立即回傳的替身），量探針多花的 ns。 */

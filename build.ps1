@@ -134,6 +134,7 @@ $helperEntries = @(
     'zombie/pathfind/nativeCode/MdcPathfindProbe.class',
     'zombie/pathfind/nativeCode/MdcPathfindProbe$Hist.class',
     'zombie/pathfind/nativeCode/MdcPathfindGate.class',
+    'zombie/pathfind/nativeCode/MdcPathfindVehicleScope.class',
     'zombie/mdc/IsoObjectRemoveDefer.class',
     'zombie/mdc/IsoObjectRemoveDefer$Entry.class',
     'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
@@ -750,6 +751,21 @@ java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;
 Assert-Ok "PlayerLosFilterTest（phase50，50 人輪流不鎖相）"
 java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest phase64 $plfTrace
 Assert-Ok "PlayerLosFilterTest（phase64，64 人輪流不鎖相）"
+
+Write-Host "[9zy/10] 只把動物附近的載具送進 native 尋路（W85）：替身 native（只記 addVehicle／removeVehicle 序列、沒有 JNI）跑同一串呼叫——啟動迴圈、第一次更新補送、遲滯（進入 8／離開 12 chunk、1 秒限頻）、沒送過與送過的重新加入、移除沒送過的車、非主執行緒、探針看到非動物；observe／off／探針 off 與原版逐筆相同，observe 的 vehNative 鏡像與 M2 beat 欄位等於暴力列舉，off 零計數零 log；on 只送範圍內、回原版補送延後的車各一次；helper 例外與非主執行緒呼叫各自回原版；參數解析..."
+$pvsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all "-Dmdc.pathfindVehicleScopeR=abc" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest observe
+Assert-Ok "MdcPathfindVehicleScopeTest（observe，出貨組態；半徑亂碼落回 64）"
+java -Xverify:all "-Dmdc.pathfindVehicleScope=off" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest off
+Assert-Ok "MdcPathfindVehicleScopeTest（off，kill switch 與原版逐筆相同）"
+java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on
+Assert-Ok "MdcPathfindVehicleScopeTest（on，範圍＋遲滯＋探針回原版）"
+java -Xverify:all "-Dmdc.pathfindVehicleScope=1" "-Dmdc.pathfindProbe=off" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on-probeoff
+Assert-Ok "MdcPathfindVehicleScopeTest（on＋探針 off，從頭回原版）"
+java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on-throw
+Assert-Ok "MdcPathfindVehicleScopeTest（on，helper 例外回原版）"
+java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on-thread
+Assert-Ok "MdcPathfindVehicleScopeTest（on，非主執行緒呼叫回原版）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
