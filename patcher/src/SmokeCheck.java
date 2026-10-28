@@ -4041,6 +4041,7 @@ public final class SmokeCheck {
         failed += treeAndVehicleChecks(distJava, jar, compat);
         if (!compat) {
             failed += metaGridLockChecks(distJava, jar);
+            failed += bloodSplatChecks(distJava, jar);
         }
         return failed;
     }
@@ -4868,6 +4869,142 @@ public final class SmokeCheck {
                 && countExactCalls(gRebuild, Opcodes.INVOKEVIRTUAL, rebuildCls, "clientProcessBuildings", rebuildDesc) == 2
                 && countExactCalls(method(distJava, lockCls, "<clinit>", "()V"), Opcodes.INVOKESPECIAL,
                         "java/util/concurrent/locks/ReentrantLock", "<init>", "(Z)V") == 1);
+        return failed;
+    }
+
+    /** W84：42.21.0 原版 FBORenderCell.renderOneLevel_Blood 兩個多載的 debuglessMethodText SHA-256（候選等價性的依據；變了就重新核對）。 */
+    static final String W84_BLOOD6_SHA = "cdadbc4821d67d776d5a7d4bd345bd5349c8090700840281b2829be5a173ffb8";
+    static final String W84_BLOOD4_SHA = "8e2e806b683dc8fe4771c0b0c33f9952dbeaa0727b96e11cc06c49d96d9b81d6";
+    /** W84：42.21.0 原版 BoundedQueue 整類的 debuglessClassText SHA-256（SplatQueue 覆寫的四個方法是全部會改內容的路徑；變了就重新稽核）。 */
+    static final String W84_QUEUE_SHA = "806983e235c4608044ee5ad0d1b54ec94fdfeed58a83b9f500cbf28641cb5098";
+
+    /**
+     * W84 鄰居 chunk 血跡的位置索引（docs/patches.md 2cs；FBORenderCell 與 IsoChunk，PZ_Optimization 也換，相容版不裝）。
+     * 存在理由：renderOneLevel 每畫一層呼叫 6 參數多載 1 次（自己）、4 參數多載 8 次（鄰居），4 參數版只把範圍換成本 chunk
+     * 外擴 1 格再呼叫 6 參數版。TIS 改掉這個掃法時轉紅＝重估撤刀。
+     * 等價性依據：兩個多載的文字以 SHA 整個釘住（掃描迴圈以 size()／get(i) 依序走 fade 與 floorBloodSplats、範圍以
+     * i2f(cx)+b.x 比 i2f(min/max)、掃描時不改清單；這份文字變了就重新核對 BloodSplatIndex 的證明）；BoundedQueue 整類以 SHA
+     * 釘住，會改內容的方法正好是 SplatQueue 覆寫的四個；血跡的 x、y 只在 IsoFloorBloodSplat 建構子與 load 寫入，load 全 jar
+     * 只在 IsoChunk 讀檔時對剛建好的物件呼叫一次（放進清單前）；兩份清單只在 IsoChunk 兩個建構子以空的原版實作建立。
+     */
+    static int bloodSplatChecks(Path distJava, Path jar) throws Exception {
+        int failed = 0;
+        String cellCls = "zombie/iso/fboRenderChunk/FBORenderCell";
+        String chunkCls = "zombie/iso/IsoChunk";
+        String queueCls = "zombie/core/utils/BoundedQueue";
+        String splatCls = "zombie/iso/IsoFloorBloodSplat";
+        String index = "zombie/mdc/BloodSplatIndex";
+        String desc6 = "(L" + chunkCls + ";IIIII)V";
+        String desc4 = "(L" + chunkCls + ";III)V";
+        String levelDesc = "(L" + chunkCls + ";ILzombie/iso/IsoCell$PerPlayerRender;IJLzombie/core/opengl/Shader;Lzombie/core/opengl/Shader;)V";
+        MethodNode vLevel = methodFromJar(jar, cellCls, "renderOneLevel", levelDesc);
+        MethodNode v6 = methodFromJar(jar, cellCls, "renderOneLevel_Blood", desc6);
+        MethodNode v4 = methodFromJar(jar, cellCls, "renderOneLevel_Blood", desc4);
+        failed += check("W84 存在理由：renderOneLevel 每層呼叫 6 參數多載 1 次、4 參數（鄰居）8 次；4 參數版只呼叫 6 參數版 1 次",
+                countExactCalls(vLevel, Opcodes.INVOKEVIRTUAL, cellCls, "renderOneLevel_Blood", desc6) == 1
+                && countExactCalls(vLevel, Opcodes.INVOKEVIRTUAL, cellCls, "renderOneLevel_Blood", desc4) == 8
+                && countExactCalls(v4, Opcodes.INVOKEVIRTUAL, cellCls, "renderOneLevel_Blood", desc6) == 1
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, cellCls, "renderOneLevel_Blood", desc6).size() == 2);
+        failed += check("W84 等價性依據：原版兩個 renderOneLevel_Blood 的文字與核對過的 42.21.0 相同（SHA-256）",
+                sha256Hex(debuglessMethodText(jar, cellCls, "renderOneLevel_Blood", desc6)).equals(W84_BLOOD6_SHA)
+                && sha256Hex(debuglessMethodText(jar, cellCls, "renderOneLevel_Blood", desc4)).equals(W84_BLOOD4_SHA));
+        failed += check("W84 等價性依據：IsoFloorBloodSplat 的 x、y 只在建構子與 load 寫入",
+                jarWideFieldRefs(jar, Opcodes.PUTFIELD, splatCls, "x").equals(Map.of(splatCls + ".<init>", 1, splatCls + ".load", 1))
+                && jarWideFieldRefs(jar, Opcodes.PUTFIELD, splatCls, "y").equals(Map.of(splatCls + ".<init>", 1, splatCls + ".load", 1)));
+        String loadDesc = "(Ljava/nio/ByteBuffer;I)V";
+        String loaderDesc = "(Ljava/nio/ByteBuffer;)V";
+        String loaderText = debuglessMethodText(jar, chunkCls, "LoadFromDiskOrBufferInternal", loaderDesc);
+        java.util.regex.Matcher freshLoad = java.util.regex.Pattern.compile("    NEW " + splatCls + "\n    DUP\n    INVOKESPECIAL "
+                + splatCls + ".<init> \\(\\)V\n    ASTORE (\\d+)\n    ALOAD \\1\n    ALOAD \\d+\n    ILOAD \\d+\n    INVOKEVIRTUAL "
+                + splatCls + ".load \\(Ljava/nio/ByteBuffer;I\\)V\n").matcher(loaderText);
+        int freshLoads = 0;
+        while (freshLoad.find()) {
+            freshLoads++;
+        }
+        failed += check("W84 等價性依據：IsoFloorBloodSplat.load 全 jar 只有 IsoChunk.LoadFromDiskOrBufferInternal 呼叫一次，"
+                        + "對象是前一行 new 出來的物件（還沒放進清單）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, splatCls, "load", loadDesc)
+                        .equals(List.of(chunkCls + ".LoadFromDiskOrBufferInternal" + loaderDesc))
+                && freshLoads == 1);
+        String queuePut = "    PUTFIELD " + chunkCls + ".floorBloodSplats : L" + queueCls + ";\n";
+        String fadePut = "    PUTFIELD " + chunkCls + ".floorBloodSplatsFade : Ljava/util/ArrayList;\n";
+        String[] ctorDescs = {"(Lzombie/iso/IsoCell;)V", "(Lzombie/iso/WorldReuserThread;)V"};
+        boolean ctorsVanilla = jarWideFieldRefs(jar, Opcodes.PUTFIELD, chunkCls, "floorBloodSplats").equals(Map.of(chunkCls + ".<init>", 2))
+                && jarWideFieldRefs(jar, Opcodes.PUTFIELD, chunkCls, "floorBloodSplatsFade").equals(Map.of(chunkCls + ".<init>", 2));
+        boolean ctorsPatched = true;
+        for (String ctorDesc : ctorDescs) {
+            String vText = methodText(methodFromJar(jar, chunkCls, "<init>", ctorDesc));
+            ctorsVanilla &= vText.contains("    NEW " + queueCls + "\n    DUP\n    SIPUSH 1000\n    INVOKESPECIAL " + queueCls
+                    + ".<init> (I)V\n" + queuePut)
+                    && vText.contains("    NEW java/util/ArrayList\n    DUP\n    INVOKESPECIAL java/util/ArrayList.<init> ()V\n" + fadePut);
+            ctorsPatched &= methodText(method(distJava, chunkCls, "<init>", ctorDesc)).equals(vText
+                    .replace(queuePut, "    INVOKESTATIC " + index + ".wrapQueue (L" + queueCls + ";)L" + queueCls + ";\n" + queuePut)
+                    .replace(fadePut, "    INVOKESTATIC " + index + ".wrapFade (Ljava/util/ArrayList;)Ljava/util/ArrayList;\n" + fadePut));
+        }
+        failed += check("W84 等價性依據：兩份清單只在 IsoChunk 兩個建構子各寫一次，都是剛建好的空 BoundedQueue(1000)／ArrayList", ctorsVanilla);
+        ClassNode vQueue = classNodeFromJar(jar, queueCls);
+        List<String> mutators = new ArrayList<>();
+        for (MethodNode m : vQueue.methods) {
+            boolean writes = !m.name.equals("<init>") && (countOpcode(m, Opcodes.AASTORE) > 0 || countOpcode(m, Opcodes.PUTFIELD) > 0);
+            if (writes) {
+                mutators.add(m.name + m.desc);
+            }
+        }
+        java.util.Collections.sort(mutators);
+        ClassNode gQueue = classNode(distJava, index + "$SplatQueue");
+        boolean queueOverrides = mutators.stream().allMatch(sig -> gQueue.methods.stream().anyMatch(m -> (m.name + m.desc).equals(sig)));
+        failed += check("W84 等價性依據：BoundedQueue 整類與核對過的 42.21.0 相同（SHA-256），會改內容的方法正好是 add／clear／remove／"
+                        + "removeFirst，SplatQueue 全部覆寫（多記一次變動）",
+                sha256Hex(debuglessClassText(jar, queueCls)).equals(W84_QUEUE_SHA)
+                && (vQueue.access & Opcodes.ACC_FINAL) == 0
+                && mutators.equals(List.of("add(Ljava/lang/Object;)V", "clear()V", "remove(I)Ljava/lang/Object;", "removeFirst()Ljava/lang/Object;"))
+                && queueOverrides);
+        ClassNode gFade = classNode(distJava, index + "$FadeList");
+        failed += check("W84 helper：FadeList 記 set，replaceAll／sort／removeAll／retainAll／subList／reversed 呼叫前標成不可信",
+                List.of("set(ILjava/lang/Object;)Ljava/lang/Object;", "replaceAll(Ljava/util/function/UnaryOperator;)V",
+                        "sort(Ljava/util/Comparator;)V", "removeAll(Ljava/util/Collection;)Z", "retainAll(Ljava/util/Collection;)Z",
+                        "subList(II)Ljava/util/List;", "reversed()Ljava/util/List;").stream()
+                        .allMatch(sig -> gFade.methods.stream().anyMatch(m -> (m.name + m.desc).equals(sig))));
+
+        String v6Text = methodText(v6);
+        String expected6 = "    ALOAD 1\n    ILOAD 3\n    ILOAD 4\n    ILOAD 5\n    ILOAD 6\n    INVOKESTATIC " + index
+                + ".enter (L" + chunkCls + ";IIII)V\n"
+                + v6Text.replace("    INVOKEVIRTUAL java/util/ArrayList.size ()I\n",
+                                "    INVOKESTATIC " + index + ".listSize (Ljava/util/ArrayList;)I\n")
+                        .replace("    INVOKEVIRTUAL java/util/ArrayList.get (I)Ljava/lang/Object;\n",
+                                "    INVOKESTATIC " + index + ".listGet (Ljava/util/ArrayList;I)Ljava/lang/Object;\n")
+                        .replace("    INVOKEVIRTUAL " + queueCls + ".size ()I\n",
+                                "    INVOKESTATIC " + index + ".queueSize (L" + queueCls + ";)I\n")
+                        .replace("    INVOKEVIRTUAL " + queueCls + ".get (I)Ljava/lang/Object;\n",
+                                "    INVOKESTATIC " + index + ".queueGet (L" + queueCls + ";I)Ljava/lang/Object;\n");
+        boolean cellOthersSame = classNodeFromJar(jar, cellCls).methods.stream()
+                .filter(m -> !(m.name.equals("renderOneLevel_Blood") && m.desc.equals(desc6))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, cellCls, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W84 手術後：6 參數 renderOneLevel_Blood 頭部 enter(chunk, minX, minY, maxX, maxY)，6 個 ArrayList.get、3 個 size、"
+                        + "BoundedQueue.size／get 同形改道 BloodSplatIndex，其餘指令與 frames 不變；FBORenderCell 其餘方法不變",
+                countExactCalls(v6, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;") == 6
+                && countExactCalls(v6, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I") == 3
+                && countExactCalls(v6, Opcodes.INVOKEVIRTUAL, queueCls, "size", "()I") == 1
+                && countExactCalls(v6, Opcodes.INVOKEVIRTUAL, queueCls, "get", "(I)Ljava/lang/Object;") == 1
+                && methodText(method(distJava, cellCls, "renderOneLevel_Blood", desc6)).equals(expected6)
+                && cellOthersSame);
+        Set<String> chunkPatched = Set.of("loadInMainThread()V", "getRoom(J)Lzombie/iso/areas/IsoRoom;",
+                "<init>" + ctorDescs[0], "<init>" + ctorDescs[1]);
+        boolean chunkOthersSame = classNodeFromJar(jar, chunkCls).methods.stream()
+                .filter(m -> !chunkPatched.contains(m.name + m.desc)).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, chunkCls, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W84 手術後：IsoChunk 兩個建構子在 PUTFIELD floorBloodSplats／floorBloodSplatsFade 之前各插 wrapQueue／wrapFade，"
+                        + "其餘指令不變；IsoChunk 除了 W57、W68、W84 的四個方法都不變", ctorsPatched && chunkOthersSame);
         return failed;
     }
 

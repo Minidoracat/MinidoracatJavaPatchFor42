@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.21.0'
-$PACKAGE_VERSION = '0.2.10'
+$PACKAGE_VERSION = '0.2.11'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -72,10 +72,10 @@ Write-Host '[3/7] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.6($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.6-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.7($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.7-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
     # 相容版：只裝 PZ_Optimization 這類 MOD 不替換的 class（PatchConfig.clientCompat），helper 只帶這幾刀用到的
-    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛與樹的修補）'; nameEn='Client fixes - compatible (vehicle and tree fixes only)'; version="v3.6-compat($sourceRef)"; requires=@('core'); group='client-fixes';
+    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛與樹的修補）'; nameEn='Client fixes - compatible (vehicle and tree fixes only)'; version="v3.7-compat($sourceRef)"; requires=@('core'); group='client-fixes';
        helpers=@('zombie/mdc/PatchInfo.class', 'zombie/mdc/TreeRoomGuard.class', 'zombie/mdc/VehicleAnimGate.class', 'zombie/mdc/VehicleAnimGate$PoseState.class',
                  'zombie/mdc/VehicleClampGuard.class', 'zombie/mdc/VehicleOrphanGuard.class', 'zombie/vehicles/MdcVehicleSinkGuard.class') }
 )
@@ -213,6 +213,21 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-
             & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
             Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
         }
+        # W84：on、verify、off 各跑一次（手術後的 FBORenderCell 與 jar 原版在同一組替身下逐筆比對；off＝kill switch 實跑），
+        # 三次的 blood-digest 必須相同（原版跑在包過與沒包過的清單上結果一樣）
+        $bloodDigests = @{}
+        foreach ($run in @(@('on', @()), @('verify', @('-Dmdc.bloodSplatIndex=verify')), @('off', @('-Dmdc.bloodSplatIndex=off')))) {
+            $jvmArgs = @($run[1])
+            $runOutput = & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp "$cp;$ASM_CP" zombie.mdc.BloodSplatIndexBehaviorTest $run[0]
+            $code = $LASTEXITCODE
+            $runOutput | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) { throw "BloodSplatIndexBehaviorTest $($run[0]) $id 失敗 (exit=$code)" }
+            $bloodDigests[$run[0]] = @($runOutput | Where-Object { $_ -like 'blood-digest=*' })
+        }
+        if ($bloodDigests['on'].Count -ne 1 -or $bloodDigests['on'][0] -ne $bloodDigests['verify'][0] -or $bloodDigests['on'][0] -ne $bloodDigests['off'][0]) {
+            throw "W84 blood-digest on／verify／off 不一致 $id：$($bloodDigests['on']) / $($bloodDigests['verify']) / $($bloodDigests['off'])"
+        }
+        Write-Host "  W84 on／verify／off blood-digest 相同（$id）"
     }
 }
 $profilerTests = @(Get-ChildItem "$R\patcher\tests-profiler" -Recurse -Filter '*Test.java')
@@ -261,6 +276,10 @@ loose .class files placed next to projectzomboid.jar; the jar itself is not modi
 - Driving into a black area that has not loaded yet: the vehicle is suddenly thrown
   tens or hundreds of tiles away, into woods or water (a 42.21.0 bug). It is now
   pulled back into the loaded area right next to it, as the game intends.
+- After a big fight the floor is covered in blood and the frame rate drops: each time a
+  chunk is redrawn, the game scans the whole blood list of each of its 8 neighbours to
+  find the few splats near the shared edge. The neighbours' splats are now looked up by
+  which edge they are near (the picture stays the same).
 If you have never seen these problems, you do not need this package.
 
 INSTALL
@@ -341,15 +360,20 @@ Modules
   silent), and the server's old position no longer pulls the driver back when this client
   is driving it. Both also include the 42.21.0 room table race fix: the map-loading thread
   and a rebuild of nearby player-built buildings no longer change the same room tables at
-  the same time (vanilla can disconnect you with an error such as "isoRoom is null").
+  the same time (vanilla can disconnect you with an error such as "isoRoom is null"). Both
+  also include a floor blood speed-up that keeps the picture identical: drawing a chunk
+  only looks at the splats of its neighbours that lie near the shared edge instead of
+  scanning their whole lists (checked against a full scan now and then; any difference
+  switches it off for the session).
   JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
   -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
-  -Dmdc.driverRecallGuard=off and -Dmdc.metaGridLock=off turn them off.
+  -Dmdc.driverRecallGuard=off, -Dmdc.metaGridLock=off and -Dmdc.bloodSplatIndex=off turn
+  them off.
 - Client fixes, compatible version: only the fixes in classes that mods such as
   PZ_Optimization leave alone: the XL tree fix in player-built rooms and the vehicle fixes
   (unchanged pose skip, teleport, vehicle left on an unloaded chunk, vehicle under the
-  floor). The texture, room-disconnect, room-table and chunk-streaming fixes are not in
-  it. Choose it only when you use such a mod.
+  floor). The texture, room-disconnect, room-table, floor blood and chunk-streaming fixes
+  are not in it. Choose it only when you use such a mod.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
   MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
   this game session actually reached the hook.
@@ -371,7 +395,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 (English: README-INSTALL.txt)
 
 【這是什麼】
-只改你自己電腦上的遊戲，修四個問題、減輕一個效能問題：
+只改你自己電腦上的遊戲，修四個問題、減輕兩個效能問題：
 - 隊友、殭屍、車輛看不到，只剩影子和名牌。
 - 在預製房子旁邊或上面加蓋的封閉房間，一走進去家具、樹、圍籬就消失，
   右下角 ERROR 一直往上跳（42.21.0 官方 bug）。
@@ -381,6 +405,8 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   停著沒變的車不再重算（畫面不變）。
 - 開車開進還沒載入的黑色區域時，車突然被丟到幾十到幾百格外（樹林、水裡）（42.21.0 官方 bug）；
   改成照遊戲原意拉回旁邊已載入的地方。
+- 大戰之後地上滿是血跡、畫面變卡：每重畫一個 chunk，遊戲就把 8 個鄰居的血跡清單整份掃一遍，
+  只為了找出靠近交界的那幾筆；改成直接查靠那一邊的血跡（畫面不變）。
 沒遇過這些問題的人可以不用裝。
 
 【怎麼安裝】
@@ -447,11 +473,13 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
   以及你自己開的車不會再被伺服器的舊位置把駕駛拉回去。
   兩版也含 42.21.0 房間表同時寫入修補：背景載入地圖和重建附近的自建建築不再同時改同一份房間表
   （原版會跳出「isoRoom is null」這類錯誤並斷線）。
+  兩版也含地上血跡加速，畫面與原版相同：畫一個 chunk 時，鄰居的血跡只看靠交界那一邊的，不再整份掃過
+  （不定期抽查一次整份掃描，不一致就本次遊戲停用）。
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
   -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
-  -Dmdc.metaGridLock=off 可分別關閉。
+  -Dmdc.metaGridLock=off、-Dmdc.bloodSplatIndex=off 可分別關閉。
 - 客戶端修復・相容版：只含 PZ_Optimization 這類 MOD 不替換的 class 裡的修補：自建房間 XL 樹修補與車輛修補
-  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表與串流紀錄這幾項。
+  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表、地上血跡與串流紀錄這幾項。
   只在和這類 MOD 一起用時選它。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。

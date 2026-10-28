@@ -380,10 +380,10 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.10.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
+**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.11.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`／`client-fixes-compat`（後三者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：遊戲已更新而殘留時，安裝會換成新版，卸載會整組移除（0.2.4 起；之前因為綁舊 jar，遊戲一更新就認不出，玩家只能回頭找舊包 `uninstall.bat`）。認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
-**和其他替換遊戲 class 的 MOD 並存（client 包 0.2.10）**：PZ_Optimization（Workshop 3805285544）也替換 `AnimationPlayer`、`ImageData`、`TextureID`、`TextureIDAssetManager`、`WorldStreamer`、`IsoChunk`、`RoomDef`、`FBORenderCutaways`，同一個 class 只能載入一份。第三個互斥變體 `client-fixes-compat`（`PatchConfig.clientCompat()`，Patcher／LoadCheck／SmokeCheck 的 mode 是 `client-compat`）只含 IsoTree、BaseVehicle、VehiclePacket 三個 class 的手術（自建房間 XL 樹、W54、W61–W63、W65），ClassPatch 直接取自 `client(false)`，手術與完整版逐位相同；貼圖、串流、W55、W57 不在內，W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket 也不裝。安裝器另有三道檢查：(1) 完整版和遊戲資料夾裡別人的 class 衝突、相容版不衝突時，互動選單建議相容版，code 7 訊息也指向它，並要求玩家不要只刪列出的檔案。[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) 的玩家只刪了外層 class，留下的 PZ_Optimization `AnimationPlayer$L_*` 把暫存欄位改成每個實例一份，原版與本包的 `AnimationPlayer` 仍用 `getstatic` 讀，第一次更新角色動畫就丟 `IncompatibleClassChangeError`，主執行緒結束、遊戲直接關閉。(2) 要寫入的 class 在遊戲資料夾已有不屬於本包的同一 class 家族檔案（`X.class` 或 `X$*.class`）時，以 code 7 拒絕。(3) 只讀 `ProjectZomboid64.json`：classpath 沒有把 `.` 排在 `projectzomboid.jar` 前面時，安裝與卸載都拒絕並說明怎麼處理。PZ_Optimization 的 AOT 快取（預設開）把 classpath 換成 `pzopt/aot/pzopt.jar` 並把所有 loose class 打包進去，之後要重建 jar 時 Windows 不讓它覆寫使用中的 jar（`AccessDeniedException`），本包的安裝與卸載都不會生效。`MdcPatchRuntime` 從別人的 jar 載入時，往上找有 `projectzomboid.jar` 的資料夾讀安裝紀錄，不再誤報 `compatible=false`。
+**和其他替換遊戲 class 的 MOD 並存（client 包 0.2.10）**：PZ_Optimization（Workshop 3805285544）也替換 `AnimationPlayer`、`ImageData`、`TextureID`、`TextureIDAssetManager`、`WorldStreamer`、`IsoChunk`、`RoomDef`、`FBORenderCutaways`（2026-10-29 本機訂閱的版本另換 `FBORenderCell`），同一個 class 只能載入一份。第三個互斥變體 `client-fixes-compat`（`PatchConfig.clientCompat()`，Patcher／LoadCheck／SmokeCheck 的 mode 是 `client-compat`）只含 IsoTree、BaseVehicle、VehiclePacket 三個 class 的手術（自建房間 XL 樹、W54、W61–W63、W65），ClassPatch 直接取自 `client(false)`，手術與完整版逐位相同；貼圖、串流、W55、W57、W84 不在內，W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket 也不裝。安裝器另有三道檢查：(1) 完整版和遊戲資料夾裡別人的 class 衝突、相容版不衝突時，互動選單建議相容版，code 7 訊息也指向它，並要求玩家不要只刪列出的檔案。[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) 的玩家只刪了外層 class，留下的 PZ_Optimization `AnimationPlayer$L_*` 把暫存欄位改成每個實例一份，原版與本包的 `AnimationPlayer` 仍用 `getstatic` 讀，第一次更新角色動畫就丟 `IncompatibleClassChangeError`，主執行緒結束、遊戲直接關閉。(2) 要寫入的 class 在遊戲資料夾已有不屬於本包的同一 class 家族檔案（`X.class` 或 `X$*.class`）時，以 code 7 拒絕。(3) 只讀 `ProjectZomboid64.json`：classpath 沒有把 `.` 排在 `projectzomboid.jar` 前面時，安裝與卸載都拒絕並說明怎麼處理。PZ_Optimization 的 AOT 快取（預設開）把 classpath 換成 `pzopt/aot/pzopt.jar` 並把所有 loose class 打包進去，之後要重建 jar 時 Windows 不讓它覆寫使用中的 jar（`AccessDeniedException`），本包的安裝與卸載都不會生效。`MdcPatchRuntime` 從別人的 jar 載入時，往上找有 `projectzomboid.jar` 的資料夾讀安裝紀錄，不再誤報 `compatible=false`。
 
 舊版 v3.0 包登記的路徑裡有四個是原版 class（`TextureIDAssetManager`、`ImageData`、`TextureID`、`WorldStreamer`），PZ_Optimization 也換它們。只有自家 helper（`zombie/mdc/…`、`Minidoracat…`）或內容等於舊版那一份時，才把這些路徑上的檔案當成認不出的舊版包擋下；否則交給一般衝突檢查，不然相容版也會被誤擋（安裝器測試 57）。
 
@@ -4667,6 +4667,48 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行）：
 - `PlayerLosFilterTest`（`build.ps1` [9zx/10]，vanilla、observe、on、off、violation、phase50、phase64 七個 JVM，全部帶 `-XX:hashCode=2`（identity hash 固定，兩個 JVM 的 HashSet 迭代順序相同）與 `-XX:-OmitStackTraceInFastThrow`，手術後的六個另帶 `-Dmdc.playerLosFilter.seed=83`，測試用同一個 xorshift64* 照種子重算每次抽到什麼）：vanilla 的 classpath 不含 dist，跑 jar 原版 `updateLOS` 把每次呼叫寫成一行 trace，observe／on／off 跑 dist 手術後的版本、同一批世界逐行比對 1,105 次呼叫：例外類別與訊息、`TestZombieSpotPlayer`／`spotted` 呼叫序列、spottedList／lastSpotted、viewer 與 stats 的全部基本型別欄位、每個物件的全部基本型別欄位、GameTime 倍率。世界涵蓋視窗四邊 ±1 格與 z 上下界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物（含牽著的）、survivor、睡著、PlayerData 重複（同一位玩家兩筆：第一筆是真的視窗與 visible，第二筆視窗移開 300 格、visible 另一份全 false，所以取到第二筆就會略過看得見的目標；另有第一筆不是 `BusyInMain`、第二筆是的情況，必須 fallback notBusy）／缺少、status 不是 `BusyInMain`、`TestZombieSpotPlayer` 中加入元素／移除正在處理的元素／移除別的元素（CME，含被改的是最後一個元素）、null 與非 `IsoMovingObject` 元素、非主執行緒。替身只在出口：viewer 覆寫 `TestZombieSpotPlayer` 記錄（殭屍不往下呼叫，`IsoZombie` 是 final，真的 `spotted`／`ZombieControl` 要完整世界與網路）與 `getDetectionRange`（真的要 traits 與穿戴物品；伺服器上不影響分支），玩家與動物目標覆寫 `spotted` 記錄；測試 JVM 建不起 `SandboxOptions`（`isFakeDead`）與殭屍的 `StateMachineComponent`，所以同樓層 7 格內的殭屍一律 ghost、殭屍不設 target，近處分支裡 `ticksSinceSeenZombie` 那段與 music 的 target 分支沒有走到（它們都在視窗內，本刀原樣放行）。observe、on、off 都與原版逐行相同，notBusy／noData／thread 三種 fallback 都走過；observe 與 on 的 `audits`、`plains` 等於照種子重算的精確值（`engaged=899` 時 18 與 12），亂數狀態與測試的副本同步，`mismatches=0`，比對有實際呼叫 `isCouldSee`；off 計數全 0、不記 log。另外直接呼叫 `getCell`／`iterator` 640 次（視窗內外各 8 個殭屍），逐次照種子預測並驗證：原版計時那 15 次拿到 `Plain`、走完全部元素且 `isCouldSee` 計數不變，比對那 10 次對 8 個視窗外各呼叫一次，其餘 615 次 observe 拿到的就是原版迭代器本身（同一個物件）、on 拿到只交出自己與視窗內 8 個的過濾迭代器。violation（on）：`TestZombieSpotPlayer` 中把 PlayerData 往 +x 挪 30 格，讓建立迭代器時在視窗外的殭屍變成看得見；照種子預測，在看到漂移下的原版計時與過濾之前抽到比對的 5 次不漂移（零 mismatch），過濾的 244 次它被略過（前提被破壞時 on 與原版不同），1 次原版計時全部放行、原版處理到它但不比對，第 251 次是漂移下的第一次比對：全部放行、原版處理到它並記 mismatch、本次啟動停用、停用行帶玩家與座標，之後同樣的漂移下回到原版。phase50／phase64（on）：50 或 64 位玩家各有自己的 PlayerData，每輪照固定順序各跑一次 `updateLOS`，只有第 4 位（50 人）或第 5 位（64 人）在迴圈中漂移——舊的「序號 &63」抽樣在這兩個位置永遠抽不到比對；隨機抽樣下分別在第 164 輪與第 87 輪抓到並停用，停用行是那一位，其間其他玩家被比對 133 次與 83 次、零 mismatch。另外以 8 個手改的 helper（視窗 x 上下界、y 上界、z 上下界各縮一格，略過自己，略過 null，PlayerData 取最後一筆）跑 on，全部與原版不同（差 3–782 行）；跑 observe 時行為仍是原版（差 0），5 個視窗界 mutant 由比對抓到 mismatch，略過自己與略過 null 不影響 observe（observe 從不過濾、比對時全部放行），取最後一筆在 observe 下行為也是原版，這次的比對沒有落在重複 PlayerData 的呼叫上。
 
 **退場**：官方讓伺服器的 `updateLOS` 只走視窗內的物件（或有空間索引）時撤刀；SmokeCheck 的原版本體 SHA 鎖、覆寫普查或 `isCouldSee` 指紋變紅時先重新分析等價，不改 SHA 讓它變綠。
+
+---
+
+<a id="2cs"></a>
+## 2cs. 鄰居 chunk 的血跡逐筆掃描（W84，client，預設 on；client 包 0.2.11）
+
+**症狀**（2026-10-28 正式服約 48 人、屍潮打完後，不開 `-debug` 的 client 錄 JFR）：主執行緒樣本裡 `FBORenderCell.renderOneLevel_Blood` 佔 4.6–9.4%（兩段錄影，21648 與 52952 個樣本），屍潮越大越高。
+
+**根因**（javap 對 42.21.0 jar `e1a69eb7`）：
+- `renderOneLevel`（重畫一個 chunk 的一層）呼叫 6 參數的 `renderOneLevel_Blood(chunk, z, minX, minY, maxX, maxY)` 一次畫自己的血跡，再呼叫 4 參數版 8 次。4 參數版取得一個鄰居 chunk，用「本 chunk 的範圍往外 1 格」呼叫 6 參數版，把鄰居跨過交界的血跡也畫進這一塊。
+- 6 參數版逐筆讀 `chunk.floorBloodSplatsFade`（`ArrayList`）與 `chunk.floorBloodSplats`（`BoundedQueue`，上限 1000），用 `chunk 原點 + splat.x`（float）判斷在不在範圍內，再照 `IsoChunk.renderByIndex` 抽稀、看格子有沒有被遮、畫出。fade 清單的血跡每畫一次 fade 減一，減到 0 就移出清單。
+- 鄰居呼叫的範圍只有靠交界那一條，卻照樣讀整份清單。屍潮後每個 chunk 都有上千筆，每次重畫都被自己和 8 個鄰居各讀一次。52952 個樣本那段的細分：自己的呼叫 4.29%（畫血跡 2.39%、遮擋判斷 0.80%、掃描約 0.8%），鄰居呼叫 5.10%（掃描約 3.2%、畫血跡 1.11%）。
+- 同一段 JFR 裡 `ArrayList.grow` 也有 2–4%，但那是取樣歸錯 frame：頂端 frame 全是 `grow@52`（`anewarray`，只有從沒配置過的空清單才走到，方法內的分類清單每次都重用），這條路徑的配置樣本只有 7 筆、3.15 MB，鄰居呼叫幾乎不加元素，grow 樣本卻一樣多。成本在逐筆讀血跡物件。
+
+**手術**：helper `zombie/mdc/BloodSplatIndex`。
+- `IsoChunk` 兩個建構子（和 W57 同一個 ClassPatch）：`floorBloodSplats` 的 `new BoundedQueue(1000)` 與 `floorBloodSplatsFade` 的 `new ArrayList()` 在 PUTFIELD 前交給 `wrapQueue`／`wrapFade`，換成子類 `SplatQueue`／`FadeList`。子類用原版的實作，只在會改內容的方法多記一次變動（`BoundedQueue` 的 `add`、`removeFirst`、`remove`、`clear`；`ArrayList` 用 `modCount` 加上 `set` 的次數），並帶 8 個方向（東、西、南、北與四個角）的候選索引。`replaceAll`、`sort`、`removeAll`、`retainAll`、`subList`、`reversed` 沒辦法便宜地確認內容，用過的清單之後一律照原版掃描（jar 裡沒有人呼叫，只防 MOD）。
+- 6 參數 `renderOneLevel_Blood`：方法頭呼叫 `enter(chunk, minX, minY, maxX, maxY)`；方法內 6 個 `ArrayList.get`、3 個 `ArrayList.size`、`BoundedQueue.size` 與 `BoundedQueue.get` 改道，共 12 個命中點。範圍是鄰居靠交界的那一條時，第一次 `size()` 取這個方向的候選（清單變過就先重建索引），之後這兩份清單的 `size()` 回候選數、`get(i)` 回第 i 個候選。方法內暫存的分類清單與自己那一次呼叫照原版。
+- 原版的範圍判斷、抽稀、遮擋、畫法、fade 遞減與移出，照樣對每一個候選執行；候選照原清單的順序。
+
+**為什麼和原版逐筆相同**：
+- 候選包含原版會留下的每一筆。血跡的 x、y 在 0 到 8 之間（`IsoFloorBloodSplat` 只在建構子與 `load` 寫座標，SmokeCheck 釘住）。以西邊的鄰居為例（交界在鄰居的東緣）：範圍是 `minX = cx + 7`（cx 是鄰居 chunk 的原點），原版留下 `cx + x ≥ minX` 的血跡；索引的東緣候選收 `!(x < 6.5f)` 的血跡。`|cx| < 2^22` 時 `cx + 6.5` 是精確的 float，float 加法又是單調的，所以 `x < 6.5` 時 `cx + x ≤ cx + 6.5 < cx + 7`，原版一定不收。西緣、南緣、北緣用 `x > 1.5`、`y` 同理，四個角取兩邊的交集。座標超過 `2^22`、或範圍不是鄰居靠交界的那一條時，照原版。
+- 候選以外的血跡原版不畫，也不碰它的 fade；候選照原順序，原版判斷逐筆照做。所以畫出的血跡、順序、顏色、淡出，以及每幀之後兩份清單的內容都和原版相同。
+- 邊距用 6.5 與 1.5，不用 7 與 1：x 約 19200 的 chunk，`cx + 6.9999` 會捨入成 `cx + 7`，原版照畫。行為測試的邊距突變在第 0 幀就抓到這個差異。
+
+**執行時比對**：每 256 次鄰居呼叫抽 1 次，照原版算式把整份清單掃一次，確認原版會留下的每一筆都在候選裡、候選遞增而且都在清單內。不一致時在 console 記一行 `candidate mismatch`，本次啟動之後全部照原版。第一個呼叫的執行緒以外的呼叫也照原版。
+
+**kill switch**：`-Dmdc.bloodSplatIndex=off`（或 `0`）不換清單、不改道，和原版相同，需重啟；`verify` 每一次都比對。第一次呼叫時在 console.txt 記一行 `[MinidoracatJavaPatch][BloodSplatIndex] active mode=on sampleEvery=256`，之後最多每 5 分鐘一行計數（`neighborCalls`、`visited`／`scanned`、`rebuilds`、`sampled`、`mismatches`、`fallback`、`disabled`）。
+
+**不處理**：
+- 自己那一次呼叫（4.29%）：要畫的就是整份清單，沒有可以省的掃描；畫血跡本身和 `isBlackedOutBuildingSquare` 照原版。
+- fade 清單每移出一筆，下一次鄰居呼叫就整份重建索引（沒有做增量維護）：重建一次約等於原版掃描一次，只在清單變動後發生。
+- `client-fixes-compat`：PZ_Optimization 也換 `FBORenderCell` 與 `IsoChunk`，相容版不含 W84。
+
+**守門與驗證**：
+- Patcher：`IsoChunk` 兩個建構子各 2 個 PUTFIELD，`FBORenderCell` 6 參數方法 12 個命中點。
+- SmokeCheck（standard、lowmem）：存在理由與等價性前提——兩個多載的原版文字以 SHA 釘住（jar 換版轉紅就重核邊距證明）；`IsoFloorBloodSplat` 的 `x`、`y` 只在建構子與 `load` 寫，`load` 全 jar 只有 `IsoChunk.LoadFromDiskOrBufferInternal` 對前一行 `new` 出來、還沒放進清單的物件呼叫一次；兩份清單只在兩個建構子建立；`BoundedQueue` 整類以 SHA 釘住，會改內容的方法都被 `SplatQueue` 覆寫；`FadeList` 覆寫的方法清單完整。手術後文字只有預期的改道，`FBORenderCell` 與 `IsoChunk` 其他方法不變。
+- LoadCheck：helper 的七個簽名。
+- `BloodSplatIndexBehaviorTest`（standard、lowmem 各跑 on、verify、off）：隔離的 class loader 載入 jar 原版與手術後的 `FBORenderCell`，替身記下每一次 `renderBloodSplat`。兩組 4×4 chunk（一組在 x 約 19200）跑 30 幀，每幀加減血跡、讓 fade 到期，再照原版的順序重畫，座標含 6.9999、1.0001 這類邊界值。三個模式的 499840 次 `renderBloodSplat`（型別、座標、顏色、淡出）與每幀之後的兩份清單都和原版逐筆相同，`blood-digest` 也相同；on 模式鄰居呼叫只讀約 16% 的血跡（1705749／10578282）。突變對照：清空東邊的候選時，不抽樣的比對抓到不同；抽樣時偵測到並停用，畫出的結果和原版相同。只換內容的寫入：把 fade 清單中間的 8 筆換成貼東緣的血跡，`set` 與 `listIterator().set` 之後索引重建、`subList().set` 與換到一半拋出的 `replaceAll` 之後這份清單改回原版掃描，畫出都和原版相同；把 `set` 的計數扣回去（負對照）時，on 畫得和原版不同、verify 偵測到並停用。另一條執行緒插在主執行緒讀候選的途中時，它拿到整份清單，主執行緒接著讀到的仍是同一批候選。
+
+**量測**（本機 SP，`--no-debug --exclusive`，E2E 情境 `blood-sp`：起點周圍 9×9 個 chunk 各灑 1100 筆血跡，每 tick 輪流讓 9 個 chunk 的第 0 層重畫，GameProfiler 錄 20 秒；同一個裝了 client 包的遊戲複本，on 與 kill switch off 交錯各 3 輪）：每重畫一層的 `Blood` span 中位數 off 0.222 ms（0.213–0.246）、on 0.198 ms（0.198–0.211），少 11%，三組交錯的每一組都是 on 較低；每幀合計 off 0.616 ms、on 0.550 ms。幀時間中位數 off 3.85 ms、on 3.90 ms，差異在輪次之間的雜訊內。這個情境的血跡都在 CPU 快取裡（同樣 81 個 chunk 反覆重畫），省下的時間除以少讀的筆數，每筆只約 3 ns，所以本機省得不多；正式服的 JFR 裡鄰居掃描佔主執行緒約 3.2%，實際省多少要上線後用同樣的 JFR 再量。沒裝 client 包的複本（原版）兩輪是 0.286 ms（0.278–0.293），但那兩輪連無關的 `GameWindow.logic` 也高 12%（複本裡其他 client 修補的差別），所以不拿來比。
+
+**退場**：官方讓鄰居呼叫只讀靠交界的血跡（或改用空間索引）時撤刀；兩個多載的 SHA 轉紅時，先重核邊距證明再決定。
 
 ---
 

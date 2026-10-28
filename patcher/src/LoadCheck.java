@@ -161,6 +161,23 @@ public final class LoadCheck {
                     }
                     System.out.println("metagrid lock OK MetaGridLock.getRoomByID(IsoMetaGrid,long)、"
                             + "clientProcessBuildings(WorldRegionToMetaGrid,ArrayList) 簽名一致");
+                    Class<?> bloodIndex = Class.forName("zombie.mdc.BloodSplatIndex", false, cl);
+                    Class<?> bloodChunk = Class.forName("zombie.iso.IsoChunk", false, cl);
+                    Class<?> bloodQueue = Class.forName("zombie.core.utils.BoundedQueue", false, cl);
+                    for (var sig : new Object[][]{
+                            { "enter", new Class<?>[]{ bloodChunk, int.class, int.class, int.class, int.class }, void.class },
+                            { "listSize", new Class<?>[]{ java.util.ArrayList.class }, int.class },
+                            { "listGet", new Class<?>[]{ java.util.ArrayList.class, int.class }, Object.class },
+                            { "queueSize", new Class<?>[]{ bloodQueue }, int.class },
+                            { "queueGet", new Class<?>[]{ bloodQueue, int.class }, Object.class },
+                            { "wrapQueue", new Class<?>[]{ bloodQueue }, bloodQueue },
+                            { "wrapFade", new Class<?>[]{ java.util.ArrayList.class }, java.util.ArrayList.class } }) {
+                        var m = bloodIndex.getDeclaredMethod((String)sig[0], (Class<?>[])sig[1]);
+                        if (m.getReturnType() != sig[2] || (m.getModifiers() & psf) != psf) {
+                            throw new NoSuchMethodException("BloodSplatIndex." + sig[0] + " signature");
+                        }
+                    }
+                    System.out.println("blood splat index OK BloodSplatIndex 七個手術簽名一致");
                 }
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;

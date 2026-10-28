@@ -123,17 +123,34 @@ public final class Patcher {
 
     /**
      * 方法頭線性呼叫（v2.0 起，貼圖洩漏根治用）：visitCode 後插
-     * `aload &lt;slots...&gt;; invokestatic helperOwner.helperName helperDesc`（desc 依序收各
-     * slot 的 reference 型別、回 void）。預設 slots={0}＝原 receiver 版（instance 方法的
-     * this；static 方法的第一參數）。W20 起支援多 reference slot（如 ContainerID.set 雙參
-     * 的 slot 1+2）——仍純線性、無分支、無新 branch target，frames 完全不需增補；
-     * 堆疊峰值 = slots.length，visitMaxs 以其保底。slot 必須是方法簽名內的 reference
-     * 參數（頭部尚無任何 store，local 只有參數本身）。helper 對遊戲 jar 正常編譯，
-     * 內部自帶冪等與例外紀律。
+     * `[ai]load &lt;slots...&gt;; invokestatic helperOwner.helperName helperDesc`（desc 依序收各
+     * slot 的型別、回 void；載入指令依 desc 的參數型別選 aload 或 iload）。預設 slots={0}＝原 receiver 版
+     * （instance 方法的 this；static 方法的第一參數）。W20 起支援多 reference slot（如 ContainerID.set 雙參
+     * 的 slot 1+2），W84 起也收 int 參數（FBORenderCell.renderOneLevel_Blood 的 chunk 與範圍）——仍純線性、
+     * 無分支、無新 branch target，frames 完全不需增補；堆疊峰值 = slots.length，visitMaxs 以其保底。
+     * slot 必須是方法簽名內、型別與 desc 相符的 reference 或 int 參數（頭部尚無任何 store，local 只有參數本身）。
+     * helper 對遊戲 jar 正常編譯，內部自帶冪等與例外紀律。
      */
     record HeadCall(String helperOwner, String helperName, String helperDesc, int[] slots) {
         HeadCall(String helperOwner, String helperName, String helperDesc) {
             this(helperOwner, helperName, helperDesc, new int[]{0});
+        }
+        HeadCall {
+            org.objectweb.asm.Type[] args = org.objectweb.asm.Type.getArgumentTypes(helperDesc);
+            if (args.length != slots.length || !helperDesc.endsWith(")V")) {
+                throw new IllegalArgumentException("HeadCall desc 與 slots 不符：" + helperDesc);
+            }
+            for (org.objectweb.asm.Type t : args) {
+                int sort = t.getSort();
+                if (sort != org.objectweb.asm.Type.OBJECT && sort != org.objectweb.asm.Type.ARRAY
+                        && sort != org.objectweb.asm.Type.INT) {
+                    throw new IllegalArgumentException("HeadCall 只收 reference 與 int 參數：" + helperDesc);
+                }
+            }
+        }
+        /** 第 k 個 slot 的載入指令（ALOAD 或 ILOAD）。 */
+        int loadOpcode(int k) {
+            return org.objectweb.asm.Type.getArgumentTypes(helperDesc)[k].getOpcode(Opcodes.ILOAD);
         }
     }
 
@@ -233,8 +250,8 @@ public final class Patcher {
             }
             HeadCall hc = ops.headCall;
             if (hc != null) {
-                for (int slot : hc.slots()) {
-                    super.visitVarInsn(Opcodes.ALOAD, slot);
+                for (int k = 0; k < hc.slots().length; k++) {
+                    super.visitVarInsn(hc.loadOpcode(k), hc.slots()[k]);
                 }
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, hc.helperOwner(), hc.helperName(),
                         hc.helperDesc(), false);

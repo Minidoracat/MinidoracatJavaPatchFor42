@@ -1940,13 +1940,43 @@ public final class PatchConfig {
         rebuild.expectedHits = 1;
         patches.add(dataRoot);
 
+        // ---- W84 鄰居 chunk 血跡的位置索引（docs/patches.md 2cs）----
+        // renderOneLevel 每畫一個 chunk 的一層，對 8 個鄰居各呼叫一次 renderOneLevel_Blood(IsoChunk,IIIII)：鄰居的
+        // floorBloodSplatsFade 與 floorBloodSplats 整份逐筆掃過，只留下本 chunk 外擴 1 格內的。IsoChunk 兩個建構子在
+        // PUTFIELD 這兩個欄位之前包成多記結構變動、帶方向索引的子類（FieldPutWrap，掛在 W57／W68 的 IsoChunk ClassPatch）；
+        // 6 參數方法頭 headCall BloodSplatIndex.enter(chunk, minX, minY, maxX, maxY)，方法內 6 個 ArrayList.get、3 個
+        // ArrayList.size、BoundedQueue.size／get 各 1 同形改道：鄰居呼叫時這兩份清單只走那一邊的候選（原版判斷照樣逐筆再做），
+        // 其餘照原版。-Dmdc.bloodSplatIndex=on|verify|off。PZ_Optimization 也換 FBORenderCell 與 IsoChunk，相容版不裝。
+        String bloodIndex = "zombie/mdc/BloodSplatIndex";
+        for (String ctorDesc : new String[]{"(Lzombie/iso/IsoCell;)V", "(Lzombie/iso/WorldReuserThread;)V"}) {
+            Patcher.MethodOps ctor = chunk.method("<init>", ctorDesc);
+            ctor.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoChunk", "floorBloodSplats",
+                    "Lzombie/core/utils/BoundedQueue;", bloodIndex, "wrapQueue"));
+            ctor.fieldPutWraps.add(new Patcher.FieldPutWrap(Opcodes.PUTFIELD, "zombie/iso/IsoChunk", "floorBloodSplatsFade",
+                    "Ljava/util/ArrayList;", bloodIndex, "wrapFade"));
+            ctor.expectedHits = 2;
+        }
+        Patcher.ClassPatch fboCell = new Patcher.ClassPatch("zombie/iso/fboRenderChunk/FBORenderCell");
+        Patcher.MethodOps blood = fboCell.method("renderOneLevel_Blood", "(Lzombie/iso/IsoChunk;IIIII)V");
+        blood.headCall = new Patcher.HeadCall(bloodIndex, "enter", "(Lzombie/iso/IsoChunk;IIII)V", new int[]{1, 3, 4, 5, 6});
+        blood.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "size", "()I",
+                bloodIndex, "listSize"));
+        blood.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "get", "(I)Ljava/lang/Object;",
+                bloodIndex, "listGet"));
+        blood.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/utils/BoundedQueue", "size", "()I",
+                bloodIndex, "queueSize"));
+        blood.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/core/utils/BoundedQueue", "get",
+                "(I)Ljava/lang/Object;", bloodIndex, "queueGet"));
+        blood.expectedHits = 12;   // head 1＋ArrayList.get 6＋ArrayList.size 3＋BoundedQueue.size 1＋BoundedQueue.get 1
+        patches.add(fboCell);
+
         return patches;
     }
 
     /**
      * client-fixes-compat：client() 裡不碰 PZ_Optimization 這類替換遊戲 class 的 MOD 所換 class 的幾刀——IsoTree（自建房間
      * XL 樹）、BaseVehicle（W54、W61、W62、W65）、VehiclePacket（W63）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
-     * IsoChunk、RoomDef、FBORenderCutaways（W57、W68）不裝；W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket
+     * IsoChunk、RoomDef、FBORenderCutaways（W57、W68）與 FBORenderCell（W84，另含 IsoChunk 建構子）不裝；W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket
      * 也不裝。ClassPatch 直接取自 client(false)，手術與完整版逐位相同。
      */
     public static List<Patcher.ClassPatch> clientCompat() {
