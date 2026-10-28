@@ -1025,9 +1025,10 @@ public final class PatchConfig {
         spriteIngress.expectedHits = 2;   // begin＋getGridSquare
 
         // W82：燈具設定同步驗證（docs/patches.md 2cq）。SyncCustomLightSettingsPacket.parse 頭部 begin(connection)（slot 2），
-        // 唯一 GETFIELD activated（javap offset 35，緊接 setActivated）改道 activated(packet)：不接受 false→true 時把封包欄位
-        // 改回 false（之後轉發與 switchLight 都讀它）；九個 IsoLightSwitch setter（setBulbItemRaw 兩處）1:1 改道同名 helper，
-        // 只接受燈泡改成 null，其他欄位保留伺服器值。kill switch -Dmdc.lightSettingsCheck=0|off。
+        // 唯一 GETFIELD activated（javap offset 35，緊接 setActivated，parse 裡第一個 helper 呼叫）改道 activated(packet)：
+        // 先判連線上有沒有玩家在燈的水平每軸 MAX_RANGE 內（不比樓層），附近只接受 true→false、不在附近一律把封包欄位改回伺服器值（之後轉發與
+        // switchLight 都讀它）；九個 IsoLightSwitch setter（setBulbItemRaw 兩處）1:1 改道同名 helper，只接受附近的連線把燈泡改成
+        // null，其他欄位保留伺服器值。kill switch -Dmdc.lightSettingsCheck=0|off（距離一起關）。
         String lightGuard = "zombie/network/packets/MdcLightSettingsGuard";
         String lightSwitch = "zombie/iso/objects/IsoLightSwitch";
         Patcher.ClassPatch lightSettings = new Patcher.ClassPatch("zombie/network/packets/SyncCustomLightSettingsPacket");

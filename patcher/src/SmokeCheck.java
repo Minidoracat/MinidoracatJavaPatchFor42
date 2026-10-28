@@ -7268,7 +7268,7 @@ public final class SmokeCheck {
                     Opcodes.INVOKEVIRTUAL, ls, s[0], s[1]) == 1;
         }
         MethodNode gAct = method(distJava, guard, "activated", "(L" + pkt + ";)Z");
-        failed += check("W82 helper 契約：每個 setter helper 恰一次呼叫同名原 setter（off 與燈泡改 null 走它）；"
+        failed += check("W82 helper 契約：每個 setter helper 恰一次呼叫同名原 setter（off，以及燈泡改 null 且連線在燈附近時走它）；"
                         + "activated 只寫封包的 activated、不呼叫 setter",
                 delegates
                 && methodText(gAct).contains("PUTFIELD " + pkt + ".activated : Z")

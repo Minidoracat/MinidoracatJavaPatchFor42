@@ -1,5 +1,6 @@
 package zombie.network.packets;
 
+import zombie.characters.IsoPlayer;
 import zombie.core.MdcTimedActionProbe;
 import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
@@ -11,19 +12,27 @@ import zombie.network.IConnection;
  *
  * <p>客戶端送 {@code SyncCustomLightSettings} 的原版來源只有一個：子彈打掉燈泡（{@code CombatManager.shootPlacedItems}，
  * 燈泡改成 null）。電池、燈泡、顏色等其餘設定都由伺服器端動作改完再廣播。所以從客戶端來的這個封包只接受兩種改動：
- * {@code activated} true→false、燈泡 有→null；其他欄位保留伺服器現值。
+ * {@code activated} true→false、燈泡 有→null；其他欄位保留伺服器現值。這兩種改動還要送封包的連線上有玩家在燈的
+ * 水平每軸 {@link #MAX_RANGE} 內，否則同樣不接受。
  *
  * <p>掛點都在 {@code SyncCustomLightSettingsPacket.parse}：頭部 {@link #begin} 綁定連線；唯一的 {@code activated} 欄位讀取
- * 改道 {@link #activated}，不接受的 true 直接把封包欄位改回 false（之後原版轉發的 {@code write} 與 {@code processClient}
- * 的 {@code switchLight} 都讀這個欄位）；九個 {@code IsoLightSwitch} setter 改道同名 helper，不接受的值不寫入，原版
- * {@code write} 轉發的就是伺服器現值。最後一個 setter（{@link #setPrimaryB}）把本包被擋的欄位記成一行 log。
+ * 改道 {@link #activated}（parse 裡第一個 helper 呼叫，順便判距離），不接受的值直接把封包欄位改回伺服器值（之後原版轉發的
+ * {@code write} 與 {@code processClient} 的 {@code switchLight} 都讀這個欄位）；九個 {@code IsoLightSwitch} setter 改道同名
+ * helper，不接受的值不寫入，原版 {@code write} 轉發的就是伺服器現值。最後一個 setter（{@link #setPrimaryB}）把本包被擋的
+ * 欄位記成一行 log。
  *
- * <p>開關：{@code -Dmdc.lightSettingsCheck=0|off} 回原版，預設開，需重啟。
+ * <p>開關：{@code -Dmdc.lightSettingsCheck=0|off} 回原版（距離檢查一起關），預設開，需重啟。
  */
 public final class MdcLightSettingsGuard {
     private static final String TAG = "[MinidoracatJavaPatch][LightSettingsGuard]";
 
     static final boolean ENABLED = flag("mdc.lightSettingsCheck");
+    /**
+     * 開槍的客戶端打掉燈泡時燈離它最遠的距離：{@code HandWeapon.getMaxRange}＝MaxRange＋AimingPerkRangeModifier×瞄準/2，原版槍械
+     * MaxRange 最大 40、AimingPerkRangeModifier 全 0；武器零件只有霰彈槍的 choke tube 有 MaxRangeModifier（最多 +2），瞄準鏡不加射程。
+     * 再加上燈的格子座標取整與伺服器玩家位置落後的餘量。不比樓層：遠程武器可以打上下 3.3 層內的目標，子彈還會延伸過目標。
+     */
+    static final float MAX_RANGE = 50.0F;
     /** 伺服器扣電後才同步給客戶端，客戶端的電量會略落後；差在這以內不記 log。只影響要不要記 log，不影響擋不擋。 */
     private static final float POWER_TOLERANCE = 0.01F;
 
@@ -36,6 +45,7 @@ public final class MdcLightSettingsGuard {
 
     // 封包處理在主迴圈單執行緒；計數與時間窗容忍罕見交錯。
     private static IConnection connection;
+    private static boolean far;
     private static int refusedMask;
     private static long refused;
     private static long suppressed;
@@ -49,16 +59,43 @@ public final class MdcLightSettingsGuard {
     /** {@code parse} 頭部：綁定送封包的連線、清掉上一包的紀錄。 */
     public static void begin(IConnection c) {
         connection = c;
+        far = false;
         refusedMask = 0;
     }
 
-    /** {@code parse} 內唯一 {@code GETFIELD activated} 的改道（只在燈存在時執行）：只接受 true→false。 */
+    /**
+     * {@code parse} 內唯一 {@code GETFIELD activated} 的改道（只在燈存在時執行，是 parse 裡第一個 helper 呼叫）：先判送封包的
+     * 連線有沒有玩家在燈附近；附近只接受 true→false，不在附近什麼都不接受。
+     */
     public static boolean activated(SyncCustomLightSettingsPacket packet) {
-        if (ENABLED && packet.activated && !((IsoLightSwitch) packet.netObject.getObject()).isActivated()) {
-            packet.activated = false;
-            refusedMask |= 1;
+        if (ENABLED) {
+            IsoLightSwitch light = (IsoLightSwitch) packet.netObject.getObject();
+            try {
+                far = connection instanceof UdpConnection u && !nearAnyPlayer(u, light);
+            } catch (RuntimeException e) {
+                anomalies++;
+                far = true;   // 判不出距離就不接受：兩種改動都留伺服器值，代價只是這包沒生效
+            }
+            boolean current = light.isActivated();
+            if (packet.activated != current && (far || packet.activated)) {
+                packet.activated = current;
+                refusedMask |= 1;
+            }
         }
         return packet.activated;
+    }
+
+    /** 封包不帶玩家：同機多人時任一位在範圍內即算附近。 */
+    static boolean nearAnyPlayer(UdpConnection c, IsoLightSwitch light) {
+        if (c.players == null) {
+            return false;
+        }
+        for (IsoPlayer p : c.players) {
+            if (p != null && Math.abs(p.getX() - light.getX()) <= MAX_RANGE && Math.abs(p.getY() - light.getY()) <= MAX_RANGE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void setCanBeModified(IsoLightSwitch light, boolean value) {
@@ -86,16 +123,27 @@ public final class MdcLightSettingsGuard {
     }
 
     /**
-     * 兩個呼叫點（有燈泡字串／null）共用：只接受改成 null。燈泡改 null 的就是原版打燈封包：看到這發子彈的其他客戶端
-     * 也會重播曳光、各自送一包，晚到的那包燈已被伺服器關掉，帶的 activated=true 照樣被擋，但不算被擋欄位（不記 log）。
+     * 兩個呼叫點（有燈泡字串／null）共用：只接受附近的連線改成 null。燈泡改 null 的就是原版打燈封包：看到這發子彈的其他客戶端
+     * 也會重播曳光、各自送一包，晚到的那包燈已被伺服器關掉，帶的 activated=true 照樣被擋，但不算被擋欄位（不記 log）；離燈較遠的
+     * 旁觀者那包不寫入，伺服器已經沒燈泡時也不記。
      */
     public static void setBulbItemRaw(IsoLightSwitch light, String item) {
-        if (!ENABLED || item == null) {
-            light.setBulbItemRaw(item);
+        if (ENABLED) {
+            if (item != null) {
+                if (!item.equals(light.getBulbItem())) {
+                    refusedMask |= 1 << 4;
+                }
+                return;
+            }
             refusedMask &= ~1;
-        } else if (!item.equals(light.getBulbItem())) {
-            refusedMask |= 1 << 4;
+            if (far) {
+                if (light.getBulbItem() != null) {
+                    refusedMask |= 1 << 4;
+                }
+                return;
+            }
         }
+        light.setBulbItemRaw(item);
     }
 
     public static void setPower(IsoLightSwitch light, float value) {
@@ -144,6 +192,7 @@ public final class MdcLightSettingsGuard {
             report(light);
         }
         refusedMask = 0;
+        far = false;
         connection = null;
     }
 
@@ -161,13 +210,32 @@ public final class MdcLightSettingsGuard {
                     fields.append(FIELD_NAMES[i]);
                 }
             }
-            DebugLog.log(TAG + " refused fields=" + fields
-                    + " connectionPlayers=" + (connection instanceof UdpConnection u ? MdcTimedActionProbe.connectionPlayers(u) : "?")
+            UdpConnection u = connection instanceof UdpConnection c ? c : null;
+            DebugLog.log(TAG + " refused fields=" + fields + " outOfRange=" + far
+                    + " connectionPlayers=" + (u != null ? MdcTimedActionProbe.connectionPlayers(u) : "?")
                     + " at=" + light.getX() + "," + light.getY() + "," + light.getZ()
+                    + " players=" + (u != null ? positions(u) : "?")
                     + " refused=" + refused + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
         } catch (RuntimeException e) {
             anomalies++;
         }
+    }
+
+    private static String positions(UdpConnection c) {
+        if (c.players == null) {
+            return "?";
+        }
+        StringBuilder s = new StringBuilder();
+        for (IsoPlayer p : c.players) {
+            if (p == null) {
+                continue;
+            }
+            if (s.length() > 0) {
+                s.append('|');
+            }
+            s.append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
+        }
+        return s.length() == 0 ? "?" : s.toString();
     }
 
     private static boolean allowLine() {

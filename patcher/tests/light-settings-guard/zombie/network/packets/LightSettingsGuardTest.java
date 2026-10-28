@@ -116,16 +116,83 @@ public final class LightSettingsGuardTest {
         expectApplied("只有開燈（false→true）", sync(c, s), s, on ? before : state(c), !on);
         refusedCases++;
 
+        // ---- 距離：連線上沒有玩家在燈（10,20）每軸 50 內時，打燈與關燈也不接受；off 與 vanilla 照收（負對照）----
+        UdpConnection near = conn;
+        conn = conn(player((short) 8, "far", 61.0F, 20.0F, 0.0F));
+        s = light(true, true, true, true, "Base.LightBulb", 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        before = state(s);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("遠方連線打掉燈泡（x 差 51）", sync(c, s), s, on ? before : state(c), true);
+        refusedCases++;
+
+        s = light(true, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        before = state(s);
+        c = light(false, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        expectApplied("遠方連線關燈", sync(c, s), s, on ? before : state(c), on);
+        refusedCases++;
+
+        // 只有 y 超出、只有一位玩家在負方向超出：各自擋下。
+        conn = conn(player((short) 12, "farY", 10.0F, 71.0F, 0.0F));
+        s = light(true, true, true, true, "Base.LightBulb", 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        before = state(s);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("遠方連線打掉燈泡（y 差 51）", sync(c, s), s, on ? before : state(c), true);
+        refusedCases++;
+        conn = conn(player((short) 13, "farNegX", -41.0F, 20.0F, 0.0F));
+        s = light(true, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        before = state(s);
+        c = light(false, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        expectApplied("遠方連線關燈（x 差 -51）", sync(c, s), s, on ? before : state(c), on);
+        refusedCases++;
+        conn = conn(player((short) 14, "farNegY", 10.0F, -31.0F, 0.0F));
+        s = light(true, true, true, true, "Base.LightBulb", 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        before = state(s);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("遠方連線打掉燈泡（y 差 -51）", sync(c, s), s, on ? before : state(c), true);
+        refusedCases++;
+        conn = conn(player((short) 8, "far", 61.0F, 20.0F, 0.0F));
+
+        // 遠方旁觀者晚到的打燈封包：伺服器已關燈、沒燈泡，on 狀態不變、不記 log。
+        s = light(false, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        before = state(s);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("遠方旁觀者晚到的打燈封包", sync(c, s), s, on ? before : state(c), !on);
+
+        // 邊界與同機多人：每軸剛好 50（含對角）、另一層樓、同連線有一位在範圍內，三種模式都照收。
+        conn = conn(player((short) 9, "edge", 60.0F, 70.0F, 3.0F));
+        s = light(true, true, true, true, "Base.LightBulb", 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("每軸剛好 50、差 3 層打掉燈泡", sync(c, s), s, state(c), true);
+        conn = conn(player((short) 10, "far", -41.0F, 20.0F, 0.0F), player((short) 11, "near", 10.0F, -30.0F, 0.0F));
+        s = light(true, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        c = light(false, true, false, false, "Base.LightBulb", 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+        expectApplied("同連線一遠一近：關燈", sync(c, s), s, state(c), false);
+        conn = near;
+
+        // 判不出距離（燈沒有格子，getX 丟例外）：on 不接受、記 anomalies；log 也讀不到座標，這包不出 log 行。off 與 vanilla 照收。
+        s = light(true, true, true, true, "Base.LightBulb", 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        s.square = null;
+        before = state(s);
+        c = light(true, true, true, true, null, 0.5F, 0.002F, 1.0F, 0.9F, 0.8F);
+        expectApplied("判不出距離時打掉燈泡", sync(c, s), s, on ? before : state(c), true);
+        refusedCases++;
+
         List<String> rows = rows(log);
         if (on) {
-            expect("W82 計數恰 +" + refusedCases + "（每包一次）、零 anomalies",
-                    (long) accessor("refusedForTest") == refusedCases && (long) accessor("anomaliesForTest") == 0);
-            expect("W82 log：每個被擋的封包一行，合法來源與電量落後不記", rows.size() == refusedCases);
-            expect("W82 log：列出被擋欄位、連線玩家與位置",
+            expect("W82 計數恰 +" + refusedCases + "（每包一次）、anomalies 恰 2（判距離與 log 各一）",
+                    (long) accessor("refusedForTest") == refusedCases && (long) accessor("anomaliesForTest") == 2);
+            expect("W82 log：每個被擋的封包一行（判不出距離那包除外），合法來源與電量落後不記", rows.size() == refusedCases - 1);
+            expect("W82 log：列出被擋欄位、是否超出距離、連線玩家與位置",
                     rows.stream().anyMatch(r -> r.contains(TAG + " refused fields=activated,canBeModified,useBattery,hasBattery,"
-                            + "bulbItem,power,delta,primaryR,primaryG,primaryB connectionPlayers=7:tester at=10.0,20.0,0.0 refused=1 "))
-                    && rows.stream().anyMatch(r -> r.contains(" refused fields=bulbItem connectionPlayers="))
-                    && rows.stream().anyMatch(r -> r.contains(" refused fields=activated connectionPlayers=")));
+                            + "bulbItem,power,delta,primaryR,primaryG,primaryB outOfRange=false connectionPlayers=7:tester at=10.0,20.0,0.0 "
+                            + "players=0.0,0.0,0.0 refused=1 "))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=bulbItem outOfRange=false connectionPlayers="))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=activated outOfRange=false connectionPlayers="))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=bulbItem outOfRange=true connectionPlayers=8:far at=10.0,20.0,0.0 players=61.0,20.0,0.0 "))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=activated outOfRange=true connectionPlayers=8:far "))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=bulbItem outOfRange=true connectionPlayers=12:farY "))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=activated outOfRange=true connectionPlayers=13:farNegX "))
+                    && rows.stream().anyMatch(r -> r.contains(" refused fields=bulbItem outOfRange=true connectionPlayers=14:farNegY ")));
         } else {
             expect(mode + "：零 log", rows.isEmpty());
             if ("off".equals(mode)) {
@@ -253,6 +320,14 @@ public final class LightSettingsGuardTest {
         Field ecs = findField(p.getClass(), "ecsComponentMap");
         ecs.setAccessible(true);
         ecs.set(p, new HashMap<>());
+        return p;
+    }
+
+    private static IsoPlayer player(short id, String name, float x, float y, float z) throws Exception {
+        IsoPlayer p = player(id, name);
+        p.setX(x);
+        p.setY(y);
+        p.setZ(z);
         return p;
     }
 
