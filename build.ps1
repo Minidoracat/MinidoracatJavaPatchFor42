@@ -139,6 +139,7 @@ $helperEntries = @(
     'zombie/core/MdcBuildActionGuard.class',
     'zombie/mdc/SpriteUpdateGuard.class',
     'zombie/mdc/ZombieReuseOwner.class',
+    'zombie/network/packets/MdcLightSettingsGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -702,6 +703,15 @@ java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.j
 Assert-Ok "ZombieReuseOwnerTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" off
 Assert-Ok "ZombieReuseOwnerTest（off，原版負對照）"
+
+Write-Host "[9zw/10] 燈具設定同步驗證（W82）：客戶端真 write＋伺服器真 parse＋轉發用的真 write，打掉燈泡、關燈照原版，電量略落後與旁觀者晚到的打燈封包不記 log、讀壞的上一包不殘留；開燈、改可改裝、電池、裝或換燈泡、電量、耗電、顏色都不寫入伺服器、轉發伺服器值並每包記一行 log；off 與 jar 原版照收（負對照）..."
+# on＝出貨組態；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版 parse）。測試自驗 argv、開關與封包類別來源。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest on
+Assert-Ok "LightSettingsGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.lightSettingsCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest off
+Assert-Ok "LightSettingsGuardTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest vanilla
+Assert-Ok "LightSettingsGuardTest（vanilla，jar 原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

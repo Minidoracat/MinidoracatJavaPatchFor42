@@ -3914,6 +3914,7 @@ public final class SmokeCheck {
         failed += checkIsoObjectRemoveDefer(jar, distJava);
         failed += checkActionValidation(jar, distJava);
         failed += checkZombieReuseOwner(jar, distJava);
+        failed += checkLightSettings(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7197,6 +7198,82 @@ public final class SmokeCheck {
                 && prevReal(setOwner).getOpcode() == Opcodes.ACONST_NULL
                 && prevReal(setPlayer).getOpcode() == Opcodes.ACONST_NULL
                 && h.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+        return failed;
+    }
+
+    /**
+     * W82 燈具設定同步驗證（docs/patches.md 2cq）：存在理由（原版 parse 照收全部欄位、轉發與 switchLight 讀封包的
+     * activated、客戶端送出點只有打掉燈泡；任一項變紅＝官方行為變了，先重估撤刀或重驗合法來源，不改斷言）、同形手術、helper 契約。
+     */
+    static int checkLightSettings(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String pkt = "zombie/network/packets/SyncCustomLightSettingsPacket";
+        String guard = "zombie/network/packets/MdcLightSettingsGuard";
+        String ls = "zombie/iso/objects/IsoLightSwitch";
+        String parseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String[][] setters = {{"setCanBeModified", "(Z)V"}, {"setUseBatteryDirect", "(Z)V"}, {"setHasBattery", "(Z)V"},
+                {"setBulbItemRaw", "(Ljava/lang/String;)V"}, {"setPower", "(F)V"}, {"setDelta", "(F)V"},
+                {"setPrimaryR", "(F)V"}, {"setPrimaryG", "(F)V"}, {"setPrimaryB", "(F)V"}};
+        MethodNode vParse = methodFromJar(jar, pkt, "parse", parseDesc);
+        String activatedGet = "GETFIELD " + pkt + ".activated : Z";
+        String vText = methodText(vParse);
+        boolean settersOnce = true;
+        for (String[] s : setters) {
+            settersOnce &= countExactCalls(vParse, Opcodes.INVOKEVIRTUAL, ls, s[0], s[1]) == (s[0].equals("setBulbItemRaw") ? 2 : 1);
+        }
+        failed += check("W82 上游指紋：parse 照收全部欄位——九個 setter 各恰 1 次（setBulbItemRaw 2 次）、setPrimaryB 是最後一個呼叫、"
+                        + "唯一 activated 讀取緊接 setActivated；write 與 processClient 讀封包的 activated，processServer 先轉發再 processClient",
+                settersOnce
+                && vText.split(java.util.regex.Pattern.quote(activatedGet), -1).length == 2
+                && vText.contains(activatedGet + "\n    INVOKEVIRTUAL " + ls + ".setActivated (Z)V")
+                && vText.lastIndexOf("    INVOKE") == vText.lastIndexOf("    INVOKEVIRTUAL " + ls + ".setPrimaryB (F)V")
+                && methodText(methodFromJar(jar, pkt, "write", "(Lzombie/core/network/ByteBufferWriter;)V")).contains(activatedGet)
+                && methodText(methodFromJar(jar, pkt, "processClient", "(Lzombie/core/raknet/UdpConnection;)V"))
+                        .contains(activatedGet + "\n    INVOKEVIRTUAL " + ls + ".switchLight (Z)V")
+                && methodText(methodFromJar(jar, pkt, "processServer",
+                        "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"))
+                        .matches("(?s).*INVOKEVIRTUAL " + pkt + "\\.sendToClients .*INVOKEVIRTUAL " + pkt + "\\.processClient .*"));
+        failed += check("W82 合法來源清冊：全 jar 呼叫 IsoLightSwitch.syncCustomizedSettings 的只有 CombatManager.shootPlacedItems（客戶端打掉燈泡）"
+                        + "與 IsoLightSwitch 自己 6 處（伺服器分支）；多了新呼叫點＝重驗它是不是客戶端送出、會不會被擋",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, ls, "syncCustomizedSettings", "(Lzombie/core/raknet/UdpConnection;)V").equals(java.util.List.of(
+                        "zombie/CombatManager.shootPlacedItems(Lzombie/iso/IsoGridSquare;Lzombie/iso/Vector3;Lzombie/iso/objects/IsoBulletTracerEffects$Effect;)Z",
+                        ls + ".addBattery(Lzombie/characters/IsoGameCharacter;Lzombie/inventory/InventoryItem;)V",
+                        ls + ".addLightBulb(Lzombie/characters/IsoGameCharacter;Lzombie/inventory/InventoryItem;)V",
+                        ls + ".removeBattery(Lzombie/characters/IsoGameCharacter;)Lzombie/inventory/types/DrainableComboItem;",
+                        ls + ".removeLightBulb(Lzombie/characters/IsoGameCharacter;)Lzombie/inventory/InventoryItem;",
+                        ls + ".setUseBattery(Z)V",
+                        ls + ".update()V")));
+        String expected = vText.replace(activatedGet, "INVOKESTATIC " + guard + ".activated (L" + pkt + ";)Z");
+        for (String[] s : setters) {
+            expected = expected.replace("INVOKEVIRTUAL " + ls + "." + s[0] + " " + s[1],
+                    "INVOKESTATIC " + guard + "." + s[0] + " (L" + ls + ";" + s[1].substring(1));
+        }
+        MethodNode pParse = method(distJava, pkt, "parse", parseDesc);
+        boolean othersSame = classNodeFromJar(jar, pkt).methods.stream()
+                .filter(m -> !(m.name.equals("parse") && m.desc.equals(parseDesc))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, pkt, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W82 手術後：頭部 aload_2／begin、唯一 activated 讀取與九個 setter 同形改道 MdcLightSettingsGuard，"
+                        + "其餘指令與 frames 不變；SyncCustomLightSettingsPacket 其餘方法不變",
+                headCallSlotsOk(pParse, guard, "begin", "(Lzombie/network/IConnection;)V", 2)
+                && methodText(pParse).equals("    ALOAD 2\n    INVOKESTATIC " + guard + ".begin (Lzombie/network/IConnection;)V\n" + expected)
+                && othersSame);
+        boolean delegates = true;
+        for (String[] s : setters) {
+            delegates &= countExactCalls(method(distJava, guard, s[0], "(L" + ls + ";" + s[1].substring(1)),
+                    Opcodes.INVOKEVIRTUAL, ls, s[0], s[1]) == 1;
+        }
+        MethodNode gAct = method(distJava, guard, "activated", "(L" + pkt + ";)Z");
+        failed += check("W82 helper 契約：每個 setter helper 恰一次呼叫同名原 setter（off 與燈泡改 null 走它）；"
+                        + "activated 只寫封包的 activated、不呼叫 setter",
+                delegates
+                && methodText(gAct).contains("PUTFIELD " + pkt + ".activated : Z")
+                && countCallsToOwner(gAct, ls) == 1   // 只有 isActivated
+                && countExactCalls(gAct, Opcodes.INVOKEVIRTUAL, ls, "isActivated", "()Z") == 1);
         return failed;
     }
 

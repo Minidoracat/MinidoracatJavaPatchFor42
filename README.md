@@ -7,7 +7,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
-  actions and log noise. 77 patched classes, 225 patch sites and 84 helper classes on 42.21.0.
+  actions and log noise. 78 patched classes, 237 patch sites and 85 helper classes on 42.21.0.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; three 42.21.0
   player-built room bugs: vanishing objects, and two disconnects while chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -158,6 +158,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W77 Build distance check ([2cl](docs/patches.en.md#2cl)) | Same as above. | Rejects and logs a build more than 8 tiles from the player on either axis or more than one floor away; admins with the build cheat capability are exempt. | not reported |
 | W78 Timed action performer check ([2cm](docs/patches.en.md#2cm)) | A gap in server-side validation of timed actions. The details are not published here. | The action's performer (`character`) must be the player who sent the packet; otherwise the server rejects the request and logs it. Other player arguments (for example the patient when bandaging someone else) are unchanged. | not reported |
 | W79 Object sprite update distance check ([2cn](docs/patches.en.md#2cn)) | A gap in server-side validation of object sprite updates. The details are not published here. | A player on the sending connection must be within 20 tiles of the object; otherwise the server neither changes nor forwards it, and logs it. Dismantling, repairing and driving into fences work as before. | not reported |
+| W82 Light settings sync check ([2cq](docs/patches.en.md#2cq)) | A gap in server-side validation of light settings sync. The details are not published here. | The server ignores client light-setting fields it should not change: from a client it only accepts removing the bulb (a shot light) and turning the light off. Other clients get the server's values, and refused packets are logged. | not reported |
 | W29 Animal sync validation ([2aq](docs/patches.en.md#2aq)) | A validation gap in client-to-server animal sync packets. The details will be reported to TIS privately rather than published here. | Validates the packet and drops it before any game state changes. | to be reported privately |
 | W19 Vehicle removal ledger ([2ag](docs/patches.en.md#2ag)) | Vehicles can be deleted permanently from several Lua paths without an audit trail. | Logs every permanent removal with caller and ownership (observe only). | not reported |
 

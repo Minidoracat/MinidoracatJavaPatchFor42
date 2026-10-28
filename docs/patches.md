@@ -4523,6 +4523,37 @@ console（第一次回收一行首次生效，之後每 30 分鐘一行，數值
 
 ---
 
+<a id="2cq"></a>
+## 2cq. 燈具設定同步驗證（W82，server，預設 on）
+
+強化伺服器端的 `SyncCustomLightSettings` 驗證：伺服器不採用客戶端不該改的燈具設定欄位，只接受打掉燈泡（燈泡改成沒有）與關燈。缺口細節不在公開文件描述。
+
+**合法來源**：原版客戶端只在子彈打中裝了燈泡的燈（不是房間燈）時送這個封包（`CombatManager.shootPlacedItems`：燈泡設成 null 後同步，`activated` 維持原值）。開槍的人與看到這發子彈的其他客戶端（重播曳光時同樣呼叫 `shootPlacedItems`）都會送，晚到的那包到伺服器時燈通常已被關掉。裝卸燈泡與電池、改燈色、切換電池模式都在伺服器端 timed action 的 `complete` 裡改完、由伺服器廣播；開關燈走 `SyncIsoObject`，不經這個封包。`IsoLightSwitch` 其他 6 個同步呼叫都在伺服器分支，原版 Lua 不呼叫 `syncCustomizedSettings`；本機 Workshop 副本（463 個）裡唯一呼叫它的 MOD 只在伺服器端呼叫。
+
+**檢查**（只看客戶端送來的這個封包）：`activated` 只接受 true→false，伺服器的燈是關的、封包卻是開的，就把封包的 `activated` 改回 false；燈泡只接受改成沒有；可否改裝、使用電池、有電池、電量、耗電與 RGB 一律保留伺服器值。原版之後轉發給其他客戶端的內容（`write` 讀封包的 `activated` 與燈的現值）與伺服器 `switchLight` 的參數因此都是伺服器狀態。同一包裡的合法改動照收（例如打掉燈泡時順帶的其他欄位不採用，燈泡照樣拿掉）。
+
+**手術**：`SyncCustomLightSettingsPacket.parse` 頭部 `MdcLightSettingsGuard.begin(connection)`（HeadCall slot 2），唯一 `GETFIELD activated`（javap offset 35，緊接 `setActivated`）改道 `activated(packet)`（FieldGetRedirect），九個 `IsoLightSwitch` setter（`setCanBeModified`、`setUseBatteryDirect`、`setHasBattery`、`setBulbItemRaw` 兩處、`setPower`、`setDelta`、`setPrimaryR`／`G`／`B`）1:1 改道同名 helper（新 ClassPatch，命中 12）。helper 放 `zombie.network.packets` 才能直讀封包的 package-private 欄位；`processServer`、`write`、`processClient` 不動。
+
+console（每個被擋的封包一行，每 10 秒最多 20 行；值與伺服器相同的欄位不算，電量差 0.01 以內不算（伺服器扣電後才同步，客戶端的電量會略落後），燈泡改成沒有的封包裡被擋的 `activated` 也不算（上面晚到的打燈封包））：
+
+```text
+[MinidoracatJavaPatch][LightSettingsGuard] refused fields=<被擋欄位，逗號分隔> connectionPlayers=<onlineID>:<名稱> at=<x>,<y>,<z> refused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**驗收**：上線後開槍打燈、裝卸燈泡與電池、改燈色、開關燈照常；出現 `refused` 行時看 `fields=` 與位置。
+
+**kill switch**：`-Dmdc.lightSettingsCheck=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/network/packets/MdcLightSettingsGuard.class` 與 patched `zombie/network/packets/SyncCustomLightSettingsPacket.class`（161 → 163 個 class）。
+
+**守門與驗證**：
+- SmokeCheck：上游指紋——`parse` 九個 setter 各恰 1 次（`setBulbItemRaw` 2 次）、`setPrimaryB` 是最後一個呼叫、唯一 `activated` 讀取緊接 `setActivated`，`write` 與 `processClient` 讀封包的 `activated`，`processServer` 先轉發再 `processClient`；合法來源清冊——全 jar 呼叫 `syncCustomizedSettings` 的只有 `CombatManager.shootPlacedItems` 與 `IsoLightSwitch` 自己 6 處（多了新呼叫點＝重驗合法來源）；手術後頭部 `aload_2; begin`、其餘只有改道，指令與 frames 不變，類別其他方法不變；每個 setter helper 恰一次呼叫原 setter，`activated` 只寫封包欄位。
+- `LightSettingsGuardTest`（`build.ps1` [9zw/10]，on、off、vanilla 三個 JVM，自驗 argv、開關與封包類別來源；vanilla 的 classpath 不含 dist，跑 jar 原版 `parse`）：客戶端那盞燈用真 `write` 產生 wire，伺服器那盞燈走真 `parse`，轉發內容用同一封包的真 `write` 解回來比對，只有找燈的 `NetObject` 換成替身。三種模式都照原版：打掉燈泡（燈泡變 null、其餘不變）、關燈；客戶端電量落後 0.005 時 on 留伺服器值且不記 log；旁觀者晚到的打燈封包（伺服器燈已關、沒燈泡，封包仍是開的）on 不重新開燈、不記 log；上一包讀到一半截斷後，下一包合法打燈不記上一包的欄位。每個欄位都改、燈泡換成另一種、只有開燈：on 伺服器狀態不變、轉發伺服器值、`switchLight` 參數是伺服器的，每包記一行 log；off 與 vanilla 照收（負對照）。
+
+**退場**：官方在伺服器端驗證這個封包的客戶端欄位，或改成只由伺服器送出時撤刀。
+
+---
+
 <a id="3"></a>
 ## 3. 部署後驗證清單
 
