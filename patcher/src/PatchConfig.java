@@ -1611,6 +1611,21 @@ public final class PatchConfig {
         vzmReuse.expectedHits = 1;
         patches.add(vzm);
 
+        // ---- W83 伺服器端玩家 LOS 只走視窗內的物件（docs/patches.md 2cr）----
+        // updateLOS 內唯一 invokevirtual IsoPlayer.getCell()（javap offset 128）與唯一 invokeinterface Set.iterator()（offset 134，
+        // 5→3 bytes，同 W10-C 的 onServerPacket 改道）改道 PlayerLosFilter：getCell 記下待用玩家，iterator 照建原版迭代器，
+        // 在伺服器主執行緒、status=BusyInMain 時包成只放行自己、非 IsoMovingObject 與 ServerLOS 視窗內物件的過濾迭代器
+        // （原版迴圈不動）。IsoPlayer 原本沒有 ClassPatch。-Dmdc.playerLosFilter=2|observe（預設）／1|on／0|off。
+        String losFilter = "zombie/mdc/PlayerLosFilter";
+        Patcher.ClassPatch isoPlayer = new Patcher.ClassPatch("zombie/characters/IsoPlayer");
+        Patcher.MethodOps playerLos = isoPlayer.method("updateLOS", "()V");
+        playerLos.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "getCell",
+                "()Lzombie/iso/IsoCell;", losFilter, "getCell"));
+        playerLos.redirects.add(new Patcher.Site(Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator",
+                "()Ljava/util/Iterator;", losFilter, "iterator"));
+        playerLos.expectedHits = 2;
+        patches.add(isoPlayer);
+
         return patches;
     }
 

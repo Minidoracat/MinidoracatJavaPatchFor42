@@ -141,6 +141,9 @@ $helperEntries = @(
     'zombie/mdc/SpriteUpdateGuard.class',
     'zombie/mdc/ZombieReuseOwner.class',
     'zombie/network/packets/MdcLightSettingsGuard.class',
+    'zombie/mdc/PlayerLosFilter.class',
+    'zombie/mdc/PlayerLosFilter$Filter.class',
+    'zombie/mdc/PlayerLosFilter$Plain.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -726,6 +729,27 @@ java -Xverify:all "-Dmdc.lightSettingsCheck=off" -cp "$R\work\out;$R\dist\java;$
 Assert-Ok "LightSettingsGuardTest（off，kill switch）"
 java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest vanilla
 Assert-Ok "LightSettingsGuardTest（vanilla，jar 原版負對照）"
+
+Write-Host "[9zx/10] 伺服器端玩家 LOS 過濾迭代器（W83）：同一批世界先跑 jar 原版 updateLOS 寫 trace，再跑 dist 手術後的 observe／on／off 逐行比對（例外、TestZombieSpotPlayer／spotted 序列、spottedList／lastSpotted、viewer／stats／每個物件的全部基本型別欄位）；視窗邊界 ±1 格與 z 邊界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物、survivor、睡著、PlayerData 重複（互斥視窗、第一筆不是 BusyInMain）／缺少、status 不是 BusyInMain、迴圈中改清單（含最後一個元素）、null 與非 IsoMovingObject 元素、非主執行緒；私有亂數各 1/64 抽比對與原版計時（固定種子下的精確次數、原版計時不呼叫 isCouldSee、observe 其餘呼叫回原版迭代器本身）；violation：迴圈中位置漂移由比對抓到後本次啟動停用；phase50／phase64：固定順序輪流時非 0 位置的玩家漂移也會被抓到..."
+# 全部帶 -XX:hashCode=2（identity hash 固定，兩個 JVM 的 HashSet 迭代順序相同才能逐行比對）與 -XX:-OmitStackTraceInFastThrow（熱路徑 NPE 保留訊息）。
+# vanilla＝classpath 不含 dist（jar 原版負對照）。手術後的 JVM 都帶 -Dmdc.playerLosFilter.seed（只給測試重現抽樣，正式服不設）。
+$plfTrace = "$R\work\player-los-vanilla.txt"
+$plfHash = @("-XX:+UnlockExperimentalVMOptions", "-XX:hashCode=2", "-XX:-OmitStackTraceInFastThrow")
+$plfSeed = "-Dmdc.playerLosFilter.seed=83"
+java -Xverify:all @plfHash -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest vanilla $plfTrace
+Assert-Ok "PlayerLosFilterTest（vanilla，jar 原版寫 trace）"
+java -Xverify:all @plfHash $plfSeed -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest observe $plfTrace
+Assert-Ok "PlayerLosFilterTest（observe，出貨組態）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest on $plfTrace
+Assert-Ok "PlayerLosFilterTest（on，過濾）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest off $plfTrace
+Assert-Ok "PlayerLosFilterTest（off，kill switch）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest violation $plfTrace
+Assert-Ok "PlayerLosFilterTest（violation，比對發現不一致即停用）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest phase50 $plfTrace
+Assert-Ok "PlayerLosFilterTest（phase50，50 人輪流不鎖相）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest phase64 $plfTrace
+Assert-Ok "PlayerLosFilterTest（phase64，64 人輪流不鎖相）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

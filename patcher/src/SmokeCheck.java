@@ -3915,6 +3915,7 @@ public final class SmokeCheck {
         failed += checkActionValidation(jar, distJava);
         failed += checkZombieReuseOwner(jar, distJava);
         failed += checkLightSettings(jar, distJava);
+        failed += checkPlayerLosFilter(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7324,6 +7325,472 @@ public final class SmokeCheck {
                 && countCallsToOwner(gAct, ls) == 1   // 只有 isActivated
                 && countExactCalls(gAct, Opcodes.INVOKEVIRTUAL, ls, "isActivated", "()Z") == 1);
         return failed;
+    }
+
+    /**
+     * W83 原版本體 SHA 鎖（去 debug 的 methodText SHA-256，42.21）：{owner, name, desc, sha}。第一筆必須是 updateLOS（負對照用）。
+     * 範圍＝視窗外物件在原版迴圈裡實際會到達的方法（javap 42.21 逐分支對過）：迴圈本身、ServerLOS 的視窗判斷／找 PlayerData／BusyInMain 包夾、
+     * 迴圈頭的讀取（getX/Y/Z、DistanceTo、getCurrentSquare、tryCastTo）、isSeeEveryone、grapple-only 分支（isReanimatedForGrappleOnly、
+     * getGrappledBy 經 IGrappleableWrapper default → getWrappedGrappleable → BaseGrappleable）、目標是玩家時讀的 ServerOptions 布林選項、
+     * isAsleep、getDetectionRange 與它呼叫的三個讀取、getAttachedAnimals，以及遠處分支與 grapple-only 分支的 alpha 方法。
+     */
+    static final String[][] PLAYER_LOS_LOCKED = {
+        {"zombie/characters/IsoPlayer", "updateLOS", "()V", "854e9828a2204c752405152848b3c9e5e0c5e123009d5d191b4373f3c676f443"},
+        {"zombie/network/ServerLOS", "isCouldSee", "(Lzombie/characters/IsoPlayer;Lzombie/iso/IsoGridSquare;)Z", "7c2e5124596645d58413540f8a35d00fa356abede60b0139f564bddf7394a456"},
+        {"zombie/network/ServerLOS", "findData", "(Lzombie/characters/IsoPlayer;)Lzombie/network/ServerLOS$PlayerData;", "a37f7ed5bdff485ee61523be7c56aabc3286ea57ebc2fd8a3f6d632ca2525ff6"},
+        {"zombie/network/ServerLOS", "updateLOS", "(Lzombie/characters/IsoPlayer;)V", "a7fb1fa4bbcef56b23cb8f1b0b3159e15844e8ef67dd744210f6fa1b25338030"},
+        {"zombie/iso/IsoObject", "getCell", "()Lzombie/iso/IsoCell;", "d7e199011eb1c053db4fb34410ab4e7ed4534c41402ce9b160b399bd251f844c"},
+        {"zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;", "6249da7f730e2a7ff2b3e3519d98248fc69b18312a9666ce75eb2464a9075461"},
+        {"zombie/iso/IsoMovingObject", "getX", "()F", "edbc512096331d3265c0e040ca765aa6c20a7c70f3f1ff8f774ff854b0cd7b3c"},
+        {"zombie/iso/IsoMovingObject", "getY", "()F", "03571cdb95c00cdc51ab7b673869061dc23a0bd5c745e2e996055cca8331b2bb"},
+        {"zombie/iso/IsoMovingObject", "getZ", "()F", "028d6aafaa62a9a568ca08ea3ff8451fc3f7d53e5ba852f89b834f68912fca12"},
+        {"zombie/iso/IsoMovingObject", "getCurrentSquare", "()Lzombie/iso/IsoGridSquare;", "0a067d261e92752fd248a434b46b9d5e364d026db227d8b9beb86af3f26bcb20"},
+        {"zombie/iso/IsoUtils", "DistanceTo", "(FFFF)F", "320486c281cf7912407ef4fdf18bcd93db619e3735e58957ad27d3918b417525"},
+        {"zombie/util/Type", "tryCastTo", "(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;", "7da8245a0ef96bbe1a2305b783c95efe2ca0dc4402a563fac7b76e4684de0f34"},
+        {"zombie/characters/IsoPlayer", "isSeeEveryone", "()Z", "b478ec8eb6019eed035cc1bc9f41400172881efbbec96986eb209c8a6c146a6f"},
+        {"zombie/characters/IsoPlayer", "getAttachedAnimals", "()Ljava/util/List;", "adfad63f8089a305a49f9a6efa301660bd46bddbef64c3e525f867d2786c7cf8"},
+        {"zombie/characters/IsoPlayer", "getPlayerIndex", "()I", "9d52b10d0b82d967144351d75a29162126f00456565c1da587fb88e4c6a368b6"},
+        {"zombie/characters/IsoGameCharacter", "isAsleep", "()Z", "421df3d5f552be9ee70370d8da649432e6ca12d9f0c8d43995ce8625539c39cd"},
+        {"zombie/characters/IsoGameCharacter", "getDetectionRange", "()F", "d7ee1ff93517bba25e03930aeee9b0dc67739569c490359f5711030d0d5aafbf"},
+        {"zombie/characters/IsoGameCharacter", "getWornItemsHearingMultiplier", "()F", "38d562eb28f9f90f39b914c664547765de9b393ebc7a75e0f11a85bdf622077e"},
+        {"zombie/characters/traits/CharacterTraits", "get", "(Lzombie/scripting/objects/CharacterTrait;)Z", "a5f86fbbbb7f242d8b7d39340d2b3ee58429aec5aa79e103714f61b87efe7a26"},
+        {"zombie/characters/Stats", "get", "(Lzombie/characters/CharacterStat;)F", "3542a17f74d28483eb328bd3fa211f76be9bb880c5a90642721e7cf86ff75d16"},
+        {"zombie/characters/IsoZombie", "isReanimatedForGrappleOnly", "()Z", "de8ed6dcc1712907867193ab423eed868f919bd783701fee6dae7cc7b91b0197"},
+        {"zombie/core/skinnedmodel/IGrappleableWrapper", "getGrappledBy", "()Lzombie/core/skinnedmodel/IGrappleable;", "30ee0a7eeef585397e5a45c20193a34f56aceace3bbb089a5ed17e9290f05037"},
+        {"zombie/characters/IsoGameCharacter", "getWrappedGrappleable", "()Lzombie/core/skinnedmodel/IGrappleable;", "f1667e890f44701d4400c3afb9ab60e88a2f38cfc362b3d04a6ad63c4adffd72"},
+        {"zombie/characters/IsoGameCharacter", "getWrappedGrappleable", "()Lzombie/core/skinnedmodel/BaseGrappleable;", "fd8f80972f9500402e00a4a3344c012e18b2655fbe2b803082ce08da3f054bd2"},
+        {"zombie/core/skinnedmodel/BaseGrappleable", "getGrappledBy", "()Lzombie/core/skinnedmodel/IGrappleable;", "d6870eb809772ddd7002d4ac35b74b6566cea1aabf4fc1b73ea646bbf06083ba"},
+        {"zombie/network/ServerOptions", "getInstance", "()Lzombie/network/ServerOptions;", "ed1c9669aaaab3bcc2574d00de87743a014a9d73491d1db19875001ed619038b"},
+        {"zombie/config/BooleanConfigOption", "getValue", "()Z", "4266d7992c9660de67c01cad77064398d1cd32242cdb008275895899daa2a5da"},
+        {"zombie/iso/IsoObject", "setAlpha", "(IF)V", "cdc30e75a73b9d37c34b1088f90e245ecba69d833bdee1a23e92c916cdb25a43"},
+        {"zombie/iso/IsoObject", "setTargetAlpha", "(IF)V", "9a6de7749cd96465c91a68e17fbd7ea598c245469c3d9a9d4f41384dacc0d402"},
+        {"zombie/iso/IsoObject", "setAlphaAndTarget", "(IF)V", "d4fca46bfd25232dd2cdc2f44fd4b31b2ef1ea8869d4a99409ce4502333ec409"},
+        {"zombie/iso/IsoObject", "setAlphaAndTarget", "(F)V", "3fbff5c5a623ee2c07fb794125146b5059dbc16aafe867de649a89876ae81672"},
+        {"zombie/iso/IsoObject", "getTargetAlpha", "(I)F", "e67c9faf3ea90e3dc28a926cf06c8351b8ea1d594929886d816e4c2eb1ae606b"},
+        {"zombie/iso/IsoObject", "getTargetAlpha", "()F", "741df33d8771ab351d6d5290e5e35865a3c4abbfd6e694c99831bab38c91a402"},
+    };
+
+    /** W83 覆寫普查：IsoObject 子類（含 IsoObject 自己）中宣告這些方法的類別（42.21），{method, declarer}。 */
+    static final String[][] PLAYER_LOS_DECLARERS = {
+        {"getX()F", "zombie/iso/IsoObject"}, {"getX()F", "zombie/iso/IsoMovingObject"},
+        {"getY()F", "zombie/iso/IsoObject"}, {"getY()F", "zombie/iso/IsoMovingObject"},
+        {"getZ()F", "zombie/iso/IsoObject"}, {"getZ()F", "zombie/iso/IsoMovingObject"},
+        {"getCurrentSquare()Lzombie/iso/IsoGridSquare;", "zombie/iso/IsoMovingObject"},
+        {"setAlpha(IF)V", "zombie/iso/IsoObject"},
+        {"setTargetAlpha(IF)V", "zombie/iso/IsoObject"},
+        {"setAlphaAndTarget(IF)V", "zombie/iso/IsoObject"},
+        {"setAlphaAndTarget(F)V", "zombie/iso/IsoObject"},
+        {"getTargetAlpha(I)F", "zombie/iso/IsoObject"},
+        {"getTargetAlpha()F", "zombie/iso/IsoObject"},
+        {"getCell()Lzombie/iso/IsoCell;", "zombie/iso/IsoObject"},
+        {"isReanimatedForGrappleOnly()Z", "zombie/characters/IsoZombie"},
+        {"isAsleep()Z", "zombie/characters/IsoGameCharacter"},
+        {"getDetectionRange()F", "zombie/characters/IsoGameCharacter"},
+        {"getWornItemsHearingMultiplier()F", "zombie/characters/IsoGameCharacter"},
+        {"getWrappedGrappleable()Lzombie/core/skinnedmodel/IGrappleable;", "zombie/characters/IsoGameCharacter"},
+        // IsoDeadBody 也實作 IGrappleableWrapper，但 grapple-only 分支只對 tryCastTo(IsoZombie) 的結果呼叫 getGrappledBy（IsoZombie 是 final）
+        {"getWrappedGrappleable()Lzombie/core/skinnedmodel/IGrappleable;", "zombie/iso/objects/IsoDeadBody"},
+        {"isSeeEveryone()Z", "zombie/characters/IsoPlayer"},
+        {"getAttachedAnimals()Ljava/util/List;", "zombie/characters/IsoPlayer"},
+    };
+
+    /**
+     * W83：42.21 原版 updateLOS 迴圈本體（迭代器存入 slot 9 之後到迴圈出口）的呼叫多重集合（opcode 182 virtual／184 static／185 interface）。
+     * 只當診斷：本體由 {@link #PLAYER_LOS_LOCKED} 的 SHA 鎖住（呼叫集合不變、多一筆欄位寫入也會紅）。
+     */
+    static final String PLAYER_LOS_LOOP_INVOKES = """
+            182 java/util/Stack.add(Ljava/lang/Object;)Z
+            182 java/util/Stack.add(Ljava/lang/Object;)Z
+            182 java/util/Stack.contains(Ljava/lang/Object;)Z
+            182 zombie/GameTime.setMultiplier(F)V
+            182 zombie/characters/IsoGameCharacter.TestIfSeen(ILzombie/characters/IsoPlayer;)Z
+            182 zombie/characters/IsoGameCharacter.isInvisible()Z
+            182 zombie/characters/IsoGameCharacter.setAlphaAndTarget(IF)V
+            182 zombie/characters/IsoGameCharacter.setTargetAlpha(IF)V
+            182 zombie/characters/IsoPlayer.DistToProper(Lzombie/iso/IsoObject;)F
+            182 zombie/characters/IsoPlayer.DistToProper(Lzombie/iso/IsoObject;)F
+            182 zombie/characters/IsoPlayer.TestZombieSpotPlayer(Lzombie/iso/IsoMovingObject;)V
+            182 zombie/characters/IsoPlayer.TestZombieSpotPlayer(Lzombie/iso/IsoMovingObject;)V
+            182 zombie/characters/IsoPlayer.getAttachedAnimals()Ljava/util/List;
+            182 zombie/characters/IsoPlayer.getCurrentSquare()Lzombie/iso/IsoGridSquare;
+            182 zombie/characters/IsoPlayer.getDetectionRange()F
+            182 zombie/characters/IsoPlayer.getRole()Lzombie/characters/Role;
+            182 zombie/characters/IsoPlayer.isAsleep()Z
+            182 zombie/characters/IsoPlayer.isGhostMode()Z
+            182 zombie/characters/IsoPlayer.isSeeEveryone()Z
+            182 zombie/characters/IsoPlayer.setTargetAlpha(IF)V
+            182 zombie/characters/IsoZombie.canSeeHeadSquare(Lzombie/characters/IsoPlayer;)Z
+            182 zombie/characters/IsoZombie.couldSeeHeadSquare(Lzombie/characters/IsoPlayer;)Z
+            182 zombie/characters/IsoZombie.getGrappledBy()Lzombie/core/skinnedmodel/IGrappleable;
+            182 zombie/characters/IsoZombie.isCurrentState(Lzombie/ai/State;)Z
+            182 zombie/characters/IsoZombie.isCurrentState(Lzombie/ai/State;)Z
+            182 zombie/characters/IsoZombie.isCurrentState(Lzombie/ai/State;)Z
+            182 zombie/characters/IsoZombie.isFakeDead()Z
+            182 zombie/characters/IsoZombie.isReanimatedForGrappleOnly()Z
+            182 zombie/characters/IsoZombie.isSceneCulled()Z
+            182 zombie/characters/Role.hasCapability(Lzombie/characters/Capability;)Z
+            182 zombie/iso/IsoGridSquare.getCanSee(I)Z
+            182 zombie/iso/IsoGridSquare.getRoom()Lzombie/iso/areas/IsoRoom;
+            182 zombie/iso/IsoGridSquare.getRoom()Lzombie/iso/areas/IsoRoom;
+            182 zombie/iso/IsoGridSquare.isCanSee(I)Z
+            182 zombie/iso/IsoGridSquare.isCouldSee(I)Z
+            182 zombie/iso/IsoMovingObject.getCurrentSquare()Lzombie/iso/IsoGridSquare;
+            182 zombie/iso/IsoMovingObject.getTargetAlpha()F
+            182 zombie/iso/IsoMovingObject.getTargetAlpha(I)F
+            182 zombie/iso/IsoMovingObject.getX()F
+            182 zombie/iso/IsoMovingObject.getY()F
+            182 zombie/iso/IsoMovingObject.getZ()F
+            182 zombie/iso/IsoMovingObject.setAlpha(IF)V
+            182 zombie/iso/IsoMovingObject.setAlphaAndTarget(F)V
+            182 zombie/iso/IsoMovingObject.setAlphaAndTarget(IF)V
+            182 zombie/iso/IsoMovingObject.setTargetAlpha(IF)V
+            182 zombie/network/ServerLOS.isCouldSee(Lzombie/characters/IsoPlayer;Lzombie/iso/IsoGridSquare;)Z
+            182 zombie/network/ServerOptions$BooleanServerOption.getValue()Z
+            182 zombie/ui/SpeedControls.SetCurrentGameSpeed(I)V
+            184 zombie/ai/states/LungeState.instance()Lzombie/ai/states/LungeState;
+            184 zombie/ai/states/PathFindState.instance()Lzombie/ai/states/PathFindState;
+            184 zombie/ai/states/WalkTowardState.instance()Lzombie/ai/states/WalkTowardState;
+            184 zombie/core/math/PZMath.fastfloor(F)I
+            184 zombie/core/math/PZMath.fastfloor(F)I
+            184 zombie/core/math/PZMath.fastfloor(F)I
+            184 zombie/core/math/PZMath.fastfloor(F)I
+            184 zombie/iso/IsoUtils.DistanceTo(FFFF)F
+            184 zombie/network/ServerOptions.getInstance()Lzombie/network/ServerOptions;
+            184 zombie/ui/UIManager.getSpeedControls()Lzombie/ui/SpeedControls;
+            184 zombie/util/Type.tryCastTo(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;
+            184 zombie/util/Type.tryCastTo(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;
+            184 zombie/util/Type.tryCastTo(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;
+            184 zombie/util/Type.tryCastTo(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;
+            184 zombie/util/Type.tryCastTo(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;
+            185 java/util/Iterator.hasNext()Z
+            185 java/util/Iterator.next()Ljava/lang/Object;
+            185 java/util/List.contains(Ljava/lang/Object;)Z""";
+
+    /**
+     * W83 玩家 LOS 過濾迭代器（docs/patches.md 2cr）：原版前提（任一項變紅＝TIS 改了 updateLOS／ServerLOS 的語意，先重新分析
+     * 等價或撤刀，不改斷言讓它變綠）、同形手術、helper 契約。
+     */
+    static int checkPlayerLosFilter(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String player = "zombie/characters/IsoPlayer";
+        String los = "zombie/network/ServerLOS";
+        String pd = los + "$PlayerData";
+        String status = los + "$UpdateStatus";
+        String helper = "zombie/mdc/PlayerLosFilter";
+        String cellDesc = "()Lzombie/iso/IsoCell;";
+        String itDesc = "()Ljava/util/Iterator;";
+        String iter = "java/util/Iterator";
+        MethodNode v = methodFromJar(jar, player, "updateLOS", "()V");
+        AbstractInsnNode getCell = firstCall(v, Opcodes.INVOKEVIRTUAL, player, "getCell", cellDesc);
+        AbstractInsnNode objList = getCell == null ? null : nextReal(getCell);
+        AbstractInsnNode setIt = objList == null ? null : nextReal(objList);
+        AbstractInsnNode store9 = setIt == null ? null : nextReal(setIt);
+        int astore9 = 0;
+        boolean load9Ok = true;
+        for (AbstractInsnNode in : v.instructions) {
+            if (isVar(in, Opcodes.ASTORE, 9)) {
+                astore9++;
+            } else if (isVar(in, Opcodes.ALOAD, 9)) {
+                AbstractInsnNode use = nextReal(in);
+                load9Ok &= isCall(use, Opcodes.INVOKEINTERFACE, iter, "hasNext", "()Z")
+                        || isCall(use, Opcodes.INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;");
+            }
+        }
+        failed += check("W83 vanilla 前提：updateLOS 恰 1 個 IsoPlayer.getCell()、1 個 Set.iterator()，依序 aload_0→getCell→IsoCell.getObjectList"
+                        + "→Set.iterator→astore 9（直線、無分支）；迭代器只存 slot 9 一次，每個 aload 9 緊接 Iterator.hasNext／next",
+                countExactCalls(v, Opcodes.INVOKEVIRTUAL, player, "getCell", cellDesc) == 1
+                && countExactCalls(v, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 1
+                && isVar(prevRealOrNull(getCell), Opcodes.ALOAD, 0)
+                && isCall(objList, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;")
+                && isCall(setIt, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc)
+                && isVar(store9, Opcodes.ASTORE, 9) && astore9 == 1 && load9Ok);
+        // 迴圈本體的呼叫多重集合（診斷用：SHA 鎖紅時印出它，看是不是呼叫變了）
+        String loopText = playerLosLoopInvokes(v);
+        failed += check("W83 vanilla 前提（診斷）：迴圈本體的呼叫多重集合與 42.21 相同（" + loopText.lines().count() + " 個）",
+                loopText.equals(PLAYER_LOS_LOOP_INVOKES));
+        if (!loopText.equals(PLAYER_LOS_LOOP_INVOKES)) {
+            System.out.println("  實際迴圈呼叫：\n" + loopText);
+        }
+        // 原版本體 SHA 鎖：updateLOS 本身、ServerLOS 三個方法、略過路徑上會走到的讀取與 alpha 方法（去 debug 的 methodText）
+        StringBuilder shaDrift = new StringBuilder();
+        for (String[] m : PLAYER_LOS_LOCKED) {
+            String got = sha256Hex(debuglessMethodText(jar, m[0], m[1], m[2]));
+            if (!got.equals(m[3])) {
+                shaDrift.append("\n    {\"").append(m[0]).append("\", \"").append(m[1]).append("\", \"").append(m[2])
+                        .append("\", \"").append(got).append("\"},");
+            }
+        }
+        failed += check("W83 vanilla 前提：" + PLAYER_LOS_LOCKED.length + " 個原版方法本體（去 debug 的 methodText SHA-256）與 42.21 相同"
+                        + "（變了＝重新分析略過的物件是否仍只有純讀取與伺服器 no-op，不改 SHA 讓它變綠）",
+                shaDrift.length() == 0);
+        if (shaDrift.length() > 0) {
+            System.out.println("  漂移的方法（實際 SHA）：" + shaDrift);
+        }
+        // 負對照：在記憶體裡的原版 updateLOS 迴圈頭（astore 10 之後）插一筆欄位寫入，呼叫集合不變、SHA 鎖必須變紅
+        ClassNode vNode = new ClassNode();
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            new ClassReader(jf.getInputStream(jf.getJarEntry(player + ".class")).readAllBytes()).accept(vNode, ClassReader.SKIP_DEBUG);
+        }
+        MethodNode mutated = declaredMethod(vNode, "updateLOS", "()V");
+        String lockedSha = PLAYER_LOS_LOCKED[0][3];
+        boolean shaBefore = sha256Hex(methodText(mutated)).equals(lockedSha);
+        AbstractInsnNode store10 = null;
+        for (AbstractInsnNode in : mutated.instructions) {
+            if (isVar(in, Opcodes.ASTORE, 10) && store10 == null) {
+                store10 = in;
+            }
+        }
+        InsnList write = new InsnList();
+        write.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        write.add(new InsnNode(Opcodes.ICONST_1));
+        write.add(new FieldInsnNode(Opcodes.PUTFIELD, player, "ticksSinceSeenZombie", "I"));
+        if (store10 != null) {
+            mutated.instructions.insert(store10, write);
+        }
+        failed += check("W83 SHA 鎖負對照：原版 updateLOS 迴圈頭插一筆 putfield ticksSinceSeenZombie（呼叫多重集合照舊相同）→ SHA 鎖變紅",
+                PLAYER_LOS_LOCKED[0][1].equals("updateLOS") && shaBefore && store10 != null
+                        && playerLosLoopInvokes(mutated).equals(PLAYER_LOS_LOOP_INVOKES)
+                        && !sha256Hex(methodText(mutated)).equals(lockedSha));
+        // couldSee（slot 20）在伺服器路徑只來自 ServerLOS.isCouldSee(this, sq)；canSee（slot 21）先等於 couldSee，只在 bClient／!bServer 守衛下重寫
+        AbstractInsnNode serverSee = firstCall(v, Opcodes.INVOKEVIRTUAL, los, "isCouldSee",
+                "(L" + player + ";Lzombie/iso/IsoGridSquare;)Z");
+        List<AbstractInsnNode> st21 = new ArrayList<>();
+        for (AbstractInsnNode in : v.instructions) {
+            if (isVar(in, Opcodes.ISTORE, 21)) {
+                st21.add(in);
+            }
+        }
+        boolean canSeeGuards = st21.size() == 4 && isVar(prevReal(st21.get(0)), Opcodes.ILOAD, 20)
+                && guardedBy(v, st21.get(0), st21.get(1), 2, Opcodes.IFEQ, st21.get(1), st21.get(2))
+                && guardedBy(v, st21.get(1), st21.get(2), 1, Opcodes.IFNE, st21.get(3), null);
+        failed += check("W83 vanilla 前提：伺服器路徑 couldSee＝ServerLOS.isCouldSee(this, current)（恰 1 次，aload_0／aload 15 → istore 20），"
+                        + "canSee（slot 21）先取 couldSee、其餘 3 次寫入只在 iload_2（bClient）ifeq 與 iload_1（bServer）ifne 守衛下",
+                countCalls(v, los, "isCouldSee") == 1 && serverSee != null
+                && isVar(prevReal(serverSee), Opcodes.ALOAD, 15) && isVar(prevReal(prevReal(serverSee)), Opcodes.ALOAD, 0)
+                && isVar(nextReal(serverSee), Opcodes.ISTORE, 20) && canSeeGuards);
+        // ServerLOS.isCouldSee 視窗指紋
+        MethodNode see = methodFromJar(jar, los, "isCouldSee", "(L" + player + ";Lzombie/iso/IsoGridSquare;)Z");
+        AbstractInsnNode sizeZ = null;
+        for (AbstractInsnNode in : see.instructions) {
+            if (isField(in, Opcodes.GETSTATIC, "zombie/iso/LosUtil", "sizeZ", "I") && sizeZ == null) {
+                sizeZ = in;
+            }
+        }
+        failed += check("W83 vanilla 前提：ServerLOS.isCouldSee 指紋——findData 1 次、bipush 48 ×2、bipush 96 ×2、LosUtil.sizeZ ×2（第一個接 iconst_2／idiv）、"
+                        + "px／py／pz 與格子 x／y／z 各讀 1 次、visible 為 [[[Z",
+                countExactCalls(see, Opcodes.INVOKEVIRTUAL, los, "findData", "(L" + player + ";)L" + pd + ";") == 1
+                && countIntConst(see, 48) == 2 && countIntConst(see, 96) == 2
+                && countExactFields(see, Opcodes.GETSTATIC, "zombie/iso/LosUtil", "sizeZ", "I") == 2
+                && sizeZ != null && nextReal(sizeZ).getOpcode() == Opcodes.ICONST_2 && nextReal(nextReal(sizeZ)).getOpcode() == Opcodes.IDIV
+                && countExactFields(see, Opcodes.GETFIELD, pd, "px", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, pd, "py", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, pd, "pz", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, "zombie/iso/IsoGridSquare", "x", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, "zombie/iso/IsoGridSquare", "y", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, "zombie/iso/IsoGridSquare", "z", "I") == 1
+                && countExactFields(see, Opcodes.GETFIELD, pd, "visible", "[[[Z") == 1);
+        ClassNode pdNode = classNodeFromJar(jar, pd);
+        MethodNode findData = methodFromJar(jar, los, "findData", "(L" + player + ";)L" + pd + ";");
+        failed += check("W83 vanilla 前提：PlayerData 欄位 player／status／px／py／pz／visible 型別不變、UpdateStatus.BusyInMain 存在、"
+                        + "ServerLOS.playersMain 是 ArrayList；findData 由 0 往上取第一筆 player == p",
+                hasField(pdNode, "player", "L" + player + ";") && hasField(pdNode, "status", "L" + status + ";")
+                && hasField(pdNode, "px", "I") && hasField(pdNode, "py", "I") && hasField(pdNode, "pz", "I")
+                && hasField(pdNode, "visible", "[[[Z")
+                && hasField(classNodeFromJar(jar, status), "BusyInMain", "L" + status + ";")
+                && hasField(classNodeFromJar(jar, los), "playersMain", "Ljava/util/ArrayList;")
+                && hasField(classNodeFromJar(jar, los), "instance", "L" + los + ";")
+                && firstReal(findData, 1)[0].getOpcode() == Opcodes.ICONST_0
+                && countExactFields(findData, Opcodes.GETFIELD, pd, "player", "L" + player + ";") == 1
+                && countOpcode(findData, Opcodes.IF_ACMPNE) == 1 && countOpcode(findData, Opcodes.IINC) == 1);
+        // BusyInMain 只在 ServerLOS.updateLOS 呼叫 player.updateLOS() 期間；LOS 執行緒只對 WaitingInLOS 寫 px/py/pz
+        MethodNode losUpdate = methodFromJar(jar, los, "updateLOS", "(L" + player + ";)V");
+        AbstractInsnNode callLos = firstCall(losUpdate, Opcodes.INVOKEVIRTUAL, player, "updateLOS", "()V");
+        AbstractInsnNode beforeCall = callLos == null ? null : prevReal(prevReal(callLos));
+        AbstractInsnNode afterCall = callLos == null ? null : nextReal(nextReal(nextReal(callLos)));
+        String losThread = los + "$LOSThread";
+        MethodNode runInner = methodFromJar(jar, losThread, "runInner", "()V");
+        AbstractInsnNode calc = firstCall(runInner, Opcodes.INVOKEVIRTUAL, losThread, "calcLOS", "(L" + pd + ";)V");
+        boolean calcAfterWaiting = false;
+        for (AbstractInsnNode in = calc; in != null; in = in.getPrevious()) {
+            if (in instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IF_ACMPNE) {
+                calcAfterWaiting = isField(prevReal(j), Opcodes.GETSTATIC, status, "WaitingInLOS", "L" + status + ";")
+                        && runInner.instructions.indexOf(j.label) > runInner.instructions.indexOf(calc);
+                break;
+            }
+        }
+        Map<String, Integer> pxWriters = new java.util.TreeMap<>();
+        for (String f : new String[]{"px", "py", "pz"}) {
+            jarWideFieldRefs(jar, Opcodes.PUTFIELD, pd, f).forEach((k, n) -> pxWriters.merge(k, n, Integer::sum));
+        }
+        failed += check("W83 vanilla 前提：ServerLOS.updateLOS 在 player.updateLOS() 前把 status 設成 BusyInMain、之後設回 ReadyInMain，"
+                        + "全 jar 只有它讀 BusyInMain；px／py／pz 只在 LOSThread.calcLOS 寫，calcLOS 只由 runInner 在 status==WaitingInLOS 時呼叫",
+                callLos != null && countExactCalls(losUpdate, Opcodes.INVOKEVIRTUAL, player, "updateLOS", "()V") == 1
+                && isField(beforeCall, Opcodes.PUTFIELD, pd, "status", "L" + status + ";")
+                && isField(prevReal(beforeCall), Opcodes.GETSTATIC, status, "BusyInMain", "L" + status + ";")
+                && isVar(prevReal(callLos), Opcodes.ALOAD, 1)
+                && isField(afterCall, Opcodes.PUTFIELD, pd, "status", "L" + status + ";")
+                && isField(prevReal(afterCall), Opcodes.GETSTATIC, status, "ReadyInMain", "L" + status + ";")
+                && jarWideFieldRefs(jar, Opcodes.GETSTATIC, status, "BusyInMain")
+                        .equals(Map.of(los + ".updateLOS", 1, status + ".$values", 1))
+                && pxWriters.equals(Map.of(losThread + ".calcLOS", 3))
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, losThread, "calcLOS", "(L" + pd + ";)V")
+                        .equals(List.of(losThread + ".runInner()V"))
+                && calcAfterWaiting);
+        // 略過的物件在原版只做純讀取與伺服器 no-op：alpha 系列 server 守衛、getter 純讀取、全 jar IsoObject 子類零覆寫
+        String obj = "zombie/iso/IsoObject";
+        String mov = "zombie/iso/IsoMovingObject";
+        MethodNode sat2 = methodFromJar(jar, obj, "setAlphaAndTarget", "(IF)V");
+        MethodNode sat1 = methodFromJar(jar, obj, "setAlphaAndTarget", "(F)V");
+        MethodNode gta0 = methodFromJar(jar, obj, "getTargetAlpha", "()F");
+        failed += check("W83 vanilla 前提：setTargetAlpha(IF)／setAlpha(IF) 頭部 server guard、getTargetAlpha(I) server→1；setAlphaAndTarget(IF) 只呼叫"
+                        + " setAlpha(IF)＋setTargetAlpha(IF)，setAlphaAndTarget(F)／getTargetAlpha() 只經 getPlayerIndex 轉呼叫兩參數版",
+                checkServerGuardHead(methodFromJar(jar, obj, "setTargetAlpha", "(IF)V"))
+                && checkServerGuardHead(methodFromJar(jar, obj, "setAlpha", "(IF)V"))
+                && checkGetTargetAlphaGuard(methodFromJar(jar, obj, "getTargetAlpha", "(I)F"))
+                && callNames(sat2).equals(List.of(obj + ".setAlpha", obj + ".setTargetAlpha"))
+                && callNames(sat1).equals(List.of(player + ".getPlayerIndex", obj + ".setAlphaAndTarget"))
+                && callNames(gta0).equals(List.of(player + ".getPlayerIndex", obj + ".getTargetAlpha")));
+        List<String> watched = List.of("getX()F", "getY()F", "getZ()F", "getCurrentSquare()Lzombie/iso/IsoGridSquare;", "setAlpha(IF)V",
+                "setTargetAlpha(IF)V", "setAlphaAndTarget(IF)V", "setAlphaAndTarget(F)V", "getTargetAlpha(I)F", "getTargetAlpha()F",
+                "isReanimatedForGrappleOnly()Z", "isAsleep()Z", "getDetectionRange()F", "isSeeEveryone()Z",
+                "getAttachedAnimals()Ljava/util/List;", "getCell()Lzombie/iso/IsoCell;",
+                "getGrappledBy()Lzombie/core/skinnedmodel/IGrappleable;", "getWrappedGrappleable()Lzombie/core/skinnedmodel/IGrappleable;",
+                "getWornItemsHearingMultiplier()F");
+        JarIndex index = JarIndex.load(jar);
+        Map<String, Set<String>> declarers = declarersUnder(index.classes(), obj, watched);
+        Map<String, Set<String>> wantDeclarers = new java.util.TreeMap<>();
+        for (String[] e : PLAYER_LOS_DECLARERS) {
+            wantDeclarers.computeIfAbsent(e[0], k -> new java.util.TreeSet<>()).add(e[1]);
+        }
+        String grapple = "zombie/core/skinnedmodel/BaseGrappleable";
+        Map<String, Set<String>> grappleDecl = declarersUnder(index.classes(), grapple,
+                List.of("getGrappledBy()Lzombie/core/skinnedmodel/IGrappleable;"));
+        // 迴圈讀的 ServerOptions 選項是 BooleanServerOption（直接繼承 BooleanConfigOption）：它與子類都不覆寫 getValue
+        String boolOpt = "zombie/network/ServerOptions$BooleanServerOption";
+        ClassNode boolNode = index.classes().get(boolOpt);
+        Map<String, Set<String>> boolDecl = declarersUnder(index.classes(), boolOpt, List.of("getValue()Z"));
+        boolean subOk = grappleDecl.equals(Map.of(watched.get(16), Set.of(grapple))) && boolDecl.isEmpty()
+                && boolNode != null && "zombie/config/BooleanConfigOption".equals(boolNode.superName);
+        boolean pureGetters = true;
+        for (String[] g : new String[][]{{mov, "getX", "()F", "x"}, {mov, "getY", "()F", "y"}, {mov, "getZ", "()F", "z"},
+                {mov, "getCurrentSquare", "()Lzombie/iso/IsoGridSquare;", "current"},
+                {"zombie/iso/IsoCell", "getObjectList", "()Ljava/util/Set;", "objectList"}}) {
+            MethodNode m = methodFromJar(jar, g[0], g[1], g[2]);
+            AbstractInsnNode[] r = firstReal(m, 3);
+            pureGetters &= realInsnCount(m) == 3 && isVar(r[0], Opcodes.ALOAD, 0)
+                    && r[1] instanceof FieldInsnNode fi && fi.getOpcode() == Opcodes.GETFIELD && fi.name.equals(g[3]);
+        }
+        failed += check("W83 vanilla 前提：全 jar IsoObject 子類（objectList 裡的 IsoMovingObject 都在內）對略過路徑上的讀取與 alpha 方法零覆寫"
+                        + "（" + watched.size() + " 個方法的宣告者與 42.21 相同）、BaseGrappleable 子類不覆寫 getGrappledBy、"
+                        + "ServerOptions$BooleanServerOption 直接繼承 BooleanConfigOption 且它與子類不覆寫 getValue；"
+                        + "IsoMovingObject.getX/Y/Z／getCurrentSquare 與 IsoCell.getObjectList 是純欄位讀取",
+                declarers.equals(wantDeclarers) && subOk && pureGetters);
+        if (!declarers.equals(wantDeclarers) || !subOk) {
+            System.out.println("  實際宣告者：" + declarers + "；BaseGrappleable 系：" + grappleDecl + "；BooleanServerOption 系：" + boolDecl
+                    + "（super=" + (boolNode == null ? null : boolNode.superName) + "）");
+        }
+        // 負對照：多一個 IsoZombie 子類覆寫 setTargetAlpha(IF)V，普查必須抓到
+        Map<String, ClassNode> withFake = new HashMap<>(index.classes());
+        ClassNode fake = new ClassNode();
+        fake.name = "zombie/mdc/W83FakeZombie";
+        fake.superName = "zombie/characters/IsoZombie";
+        fake.methods.add(new MethodNode(Opcodes.ACC_PUBLIC, "setTargetAlpha", "(IF)V", null, null));
+        withFake.put(fake.name, fake);
+        Map<String, Set<String>> fakeDecl = declarersUnder(withFake, obj, watched);
+        failed += check("W83 覆寫普查負對照：多一個 IsoZombie 子類覆寫 setTargetAlpha(IF)V → 宣告者不同、普查變紅",
+                !fakeDecl.equals(wantDeclarers) && fakeDecl.get("setTargetAlpha(IF)V").contains(fake.name));
+        // 手術後：兩個呼叫同形改道，其餘指令與 frames 不變；IsoPlayer 其餘方法不變
+        MethodNode p = method(distJava, player, "updateLOS", "()V");
+        String expected = methodText(v)
+                .replace("INVOKEVIRTUAL " + player + ".getCell " + cellDesc,
+                        "INVOKESTATIC " + helper + ".getCell (L" + player + ";)Lzombie/iso/IsoCell;")
+                .replace("INVOKEINTERFACE java/util/Set.iterator " + itDesc + " (itf)",
+                        "INVOKESTATIC " + helper + ".iterator (Ljava/util/Set;)Ljava/util/Iterator;");
+        boolean othersSame = classNodeFromJar(jar, player).methods.stream()
+                .filter(m -> !(m.name.equals("updateLOS") && m.desc.equals("()V"))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, player, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W83 手術後：updateLOS 的 getCell／Set.iterator 同形改道 PlayerLosFilter，其餘指令與 frames 不變；IsoPlayer 其餘方法不變",
+                !expected.equals(methodText(v)) && methodText(p).equals(expected) && othersSame);
+        MethodNode hIt = method(distJava, helper, "iterator", "(Ljava/util/Set;)Ljava/util/Iterator;");
+        MethodNode hCell = method(distJava, helper, "getCell", "(L" + player + ";)Lzombie/iso/IsoCell;");
+        MethodNode hHas = method(distJava, helper + "$Filter", "hasNext", "()Z");
+        MethodNode pHas = method(distJava, helper + "$Plain", "hasNext", "()Z");
+        MethodNode pNext = method(distJava, helper + "$Plain", "next", "()Ljava/lang/Object;");
+        failed += check("W83 helper 契約：iterator 第一個呼叫就是原版 Set.iterator（恰 1 次）、getCell 第一個呼叫就是 IsoPlayer.getCell（恰 1 次）；"
+                        + "Filter.hasNext 只經底層 hasNext／next 各 1 處取元素、不呼叫 remove；Plain（原版計時）的 hasNext／next "
+                        + "各只委派底層同名方法 1 次、不呼叫 ServerLOS",
+                callNames(hIt).get(0).equals("java/util/Set.iterator") && countCalls(hIt, "java/util/Set", "iterator") == 1
+                && callNames(hCell).get(0).equals(player + ".getCell") && countCalls(hCell, player, "getCell") == 1
+                && countExactCalls(hHas, Opcodes.INVOKEINTERFACE, iter, "hasNext", "()Z") == 1
+                && countExactCalls(hHas, Opcodes.INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;") == 1
+                && countCalls(hHas, iter, "remove") == 0
+                && countCallsToOwner(pHas, iter) == 1 && countExactCalls(pHas, Opcodes.INVOKEINTERFACE, iter, "hasNext", "()Z") == 1
+                && countCallsToOwner(pNext, iter) == 1 && countExactCalls(pNext, Opcodes.INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;") == 1
+                && countCallsToOwner(pHas, los) + countCallsToOwner(pNext, los) == 0);
+        return failed;
+    }
+
+    /** {@code [from, to)} 之間最後一個「iload slot; jumpOp L」守衛，L 落在 {@code skipPast} 之後（且在 {@code before} 之前，null＝不限）。 */
+    static boolean guardedBy(MethodNode m, AbstractInsnNode from, AbstractInsnNode to, int slot, int jumpOp,
+            AbstractInsnNode skipPast, AbstractInsnNode before) {
+        JumpInsnNode guard = null;
+        for (AbstractInsnNode in = from; in != null && in != to; in = in.getNext()) {
+            if (in instanceof JumpInsnNode j && j.getOpcode() == jumpOp && isVar(prevReal(j), Opcodes.ILOAD, slot)) {
+                guard = j;
+            }
+        }
+        int target = guard == null ? -1 : m.instructions.indexOf(guard.label);
+        return guard != null && target > m.instructions.indexOf(skipPast)
+                && (before == null || target < m.instructions.indexOf(before));
+    }
+
+    /** W83：updateLOS 迭代器存入 slot 9 之後到 hasNext 的 ifeq 出口之間的呼叫多重集合（排序後，一行一個「opcode owner.name desc」）。 */
+    static String playerLosLoopInvokes(MethodNode v) {
+        AbstractInsnNode store9 = null;
+        for (AbstractInsnNode in : v.instructions) {
+            if (isVar(in, Opcodes.ASTORE, 9) && store9 == null) {
+                store9 = in;
+            }
+        }
+        AbstractInsnNode hasNext = store9 == null ? null : nextReal(nextReal(store9));
+        AbstractInsnNode exitJump = hasNext == null ? null : nextReal(hasNext);
+        List<String> loopInvokes = new ArrayList<>();
+        if (exitJump instanceof JumpInsnNode ej && ej.getOpcode() == Opcodes.IFEQ
+                && isCall(hasNext, Opcodes.INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z")) {
+            for (AbstractInsnNode in = store9; in != null && in != ej.label; in = in.getNext()) {
+                if (in instanceof MethodInsnNode mi) {
+                    loopInvokes.add(mi.getOpcode() + " " + mi.owner + "." + mi.name + mi.desc);
+                }
+            }
+        }
+        java.util.Collections.sort(loopInvokes);
+        return String.join("\n", loopInvokes);
+    }
+
+    /** root 本身與它在 classes 裡的所有子類別中，宣告 watched（name+desc）各方法的類別。 */
+    static Map<String, Set<String>> declarersUnder(Map<String, ClassNode> classes, String root, List<String> watched) {
+        Map<String, Set<String>> out = new java.util.TreeMap<>();
+        for (ClassNode cn : classes.values()) {
+            boolean under = false;
+            for (String s = cn.name; s != null && !under; ) {
+                under = s.equals(root);
+                ClassNode up = classes.get(s);
+                s = up == null ? null : up.superName;
+            }
+            if (under) {
+                for (MethodNode m : cn.methods) {
+                    if (watched.contains(m.name + m.desc)) {
+                        out.computeIfAbsent(m.name + m.desc, k -> new java.util.TreeSet<>()).add(cn.name);
+                    }
+                }
+            }
+        }
+        return out;
     }
 
     private SmokeCheck() {}
