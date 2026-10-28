@@ -5108,6 +5108,39 @@ write entry points still set `PolygonalMap2::instance+0x80` and that `findPath` 
 
 ---
 
+<a id="2cq"></a>
+## 2cq. Light settings sync check (W82, server, default on)
+
+Hardens server-side validation of `SyncCustomLightSettings`: the server ignores client light-setting fields it should not change and only accepts removing the bulb and turning the light off, and only when a player on the sending connection is within 50 tiles of the light. The details of the gap are not described in public documents.
+
+**Legitimate source**: a vanilla client sends this packet only when a bullet hits a light that has a bulb (not a room light): `CombatManager.shootPlacedItems` sets the bulb to null and syncs, leaving `activated` as it was. Both the shooter and every other client that sees the shot (replaying the tracer also calls `shootPlacedItems`) send it, so a late copy usually arrives after the server has already turned the light off. Adding or removing bulbs and batteries, changing the color and switching battery mode all happen in the server-side `complete` of timed actions and are broadcast by the server; turning a light on or off goes through `SyncIsoObject`, not this packet. The other 6 sync calls in `IsoLightSwitch` are on the server branch, and vanilla Lua never calls `syncCustomizedSettings`; among the local Workshop copies (463), the only mod that calls it does so on the server only.
+
+**Check** (only for this packet coming from a client): `activated` may only go true→false; if the server's light is off and the packet says on, the packet's `activated` is set back to false. The bulb may only be removed. Modifiable, use battery, has battery, power, delta and RGB always keep the server's values. What vanilla then forwards to the other clients (`write` reads the packet's `activated` and the light's current values) and the argument of the server's `switchLight` are therefore the server's state. Allowed changes in the same packet still apply (for example, a shot light loses its bulb even if other fields in the packet are not taken).
+
+**Distance**: those two changes also require a player on the sending connection within 50 tiles of the light on each horizontal axis (any player when several share the connection; floors are not compared). Otherwise they are refused too, and the bulb and `activated` keep the server's values. 50 tiles = the longest vanilla firearm range (40; among weapon parts only the shotgun choke tubes add range, at most +2, and scopes add none), plus a margin for the light's tile coordinates and for the player's position on the server lagging behind. Ranged weapons can hit targets up to 3.3 floors above or below and the bullet continues past the target, so floors are not compared. When another client that saw the shot is more than 50 tiles from the light, its packet is not applied; the shooter's packet still is. Such a packet is not logged once the server's light has no bulb. The check runs once, in the `activated` redirect (the first helper call in `parse`, reached only when the light exists); if it throws, the connection is treated as not nearby (counted in `anomalies`).
+
+**Surgery**: a HeadCall `MdcLightSettingsGuard.begin(connection)` (slot 2) at the head of `SyncCustomLightSettingsPacket.parse`; its only `GETFIELD activated` (javap offset 35, right before `setActivated`) is redirected to `activated(packet)` (FieldGetRedirect), and nine `IsoLightSwitch` setters (`setCanBeModified`, `setUseBatteryDirect`, `setHasBattery`, `setBulbItemRaw` twice, `setPower`, `setDelta`, `setPrimaryR`/`G`/`B`) are redirected 1:1 to helpers with the same names (new ClassPatch, 12 hits). The helper lives in `zombie.network.packets` so it can read the packet's package-private fields; `processServer`, `write` and `processClient` are unchanged.
+
+Console (one line per refused packet, at most 20 lines per 10 seconds; fields equal to the server's value do not count, a power difference within 0.01 does not count because the server syncs power only after draining it, so the client's value lags slightly, and a refused `activated` in a packet that removes the bulb does not count either, which covers the late copies above; `outOfRange=true` means no player on the connection was within 50 tiles, and `players=` lists the positions of the connection's players):
+
+```text
+[MinidoracatJavaPatch][LightSettingsGuard] refused fields=<refused fields, comma-separated> outOfRange=<true|false> connectionPlayers=<onlineID>:<name> at=<x>,<y>,<z> players=<x>,<y>,<z>[|…] refused=<n> suppressed=<n> anomalies=<n>.
+```
+
+**Acceptance**: after deployment, shooting lights, adding and removing bulbs and batteries, changing light colors and switching lights work as before; for any `refused` line, check `fields=` and the position.
+
+**Kill switch**: `-Dmdc.lightSettingsCheck=0|off`, restart required.
+
+**Deployment**: the manifest adds `zombie/network/packets/MdcLightSettingsGuard.class` and the patched `zombie/network/packets/SyncCustomLightSettingsPacket.class` (161 → 163 classes).
+
+**Guards and verification**:
+- SmokeCheck: upstream fingerprint (in `parse` each of the nine setters is called exactly once, `setBulbItemRaw` twice, `setPrimaryB` is the last call, and the only `activated` read is right before `setActivated`; `write` and `processClient` read the packet's `activated`; `processServer` forwards and then calls `processClient`); legitimate-source inventory (the only callers of `syncCustomizedSettings` in the jar are `CombatManager.shootPlacedItems` and 6 sites in `IsoLightSwitch` itself; a new caller means re-checking the legitimate sources); after surgery the head is `aload_2; begin` and everything else is the redirects only, with instructions and frames unchanged and every other method of the class unchanged; each setter helper calls the original setter exactly once, and `activated` only writes the packet field.
+- `LightSettingsGuardTest` (`build.ps1` [9zw/10], three JVMs: on, off, vanilla, each checking argv, the switch and where the packet class was loaded from; the vanilla classpath has no dist, so it runs the jar's original `parse`): the client light produces the wire with the real `write`, the server light goes through the real `parse`, and the forwarded content is decoded from the same packet's real `write`; only the `NetObject` that finds the light is a stand-in. All three modes behave as vanilla for a shot light (bulb becomes null, everything else unchanged) and for turning the light off; when the client's power lags by 0.005, on keeps the server's value and logs nothing; for a bystander's late shot packet (the server's light is already off with no bulb, the packet still says on) on does not turn the light back on and logs nothing; after a packet that is cut off mid-parse, a following legitimate shot packet does not log the previous packet's fields. Changing every field, swapping the bulb for another kind, and turning the light on only: on leaves the server state unchanged, forwards the server's values, passes the server's value to `switchLight` and logs one line per packet; off and vanilla take the client's values (negative control). Distance: connections 51 tiles away in either direction on x and on y shooting the light or turning it off leave the server state unchanged under on and log one `outOfRange=true` line each (with player positions), while off and vanilla take the client's values; a distant bystander's late shot packet changes nothing and logs nothing under on; exactly 50 on each axis (diagonal, 3 floors apart) and a connection with one far and one near player are accepted in all three modes; when the light has no square and the distance check throws, on refuses and counts an anomaly.
+
+**Retirement**: remove the patch when TIS validates the client fields of this packet on the server, or makes the server the only sender.
+
+---
+
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 

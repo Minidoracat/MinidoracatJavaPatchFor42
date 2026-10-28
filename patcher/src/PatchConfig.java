@@ -1024,6 +1024,28 @@ public final class PatchConfig {
                 spriteGuard, "getGridSquare"));
         spriteIngress.expectedHits = 2;   // begin＋getGridSquare
 
+        // W82：燈具設定同步驗證（docs/patches.md 2cq）。SyncCustomLightSettingsPacket.parse 頭部 begin(connection)（slot 2），
+        // 唯一 GETFIELD activated（javap offset 35，緊接 setActivated，parse 裡第一個 helper 呼叫）改道 activated(packet)：
+        // 先判連線上有沒有玩家在燈的水平每軸 MAX_RANGE 內（不比樓層），附近只接受 true→false、不在附近一律把封包欄位改回伺服器值（之後轉發與
+        // switchLight 都讀它）；九個 IsoLightSwitch setter（setBulbItemRaw 兩處）1:1 改道同名 helper，只接受附近的連線把燈泡改成
+        // null，其他欄位保留伺服器值。kill switch -Dmdc.lightSettingsCheck=0|off（距離一起關）。
+        String lightGuard = "zombie/network/packets/MdcLightSettingsGuard";
+        String lightSwitch = "zombie/iso/objects/IsoLightSwitch";
+        Patcher.ClassPatch lightSettings = new Patcher.ClassPatch("zombie/network/packets/SyncCustomLightSettingsPacket");
+        Patcher.MethodOps lightParse = lightSettings.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        lightParse.headCall = new Patcher.HeadCall(lightGuard, "begin", "(Lzombie/network/IConnection;)V", new int[]{2});
+        lightParse.fieldGetRedirects.add(new Patcher.FieldGetRedirect(
+                "zombie/network/packets/SyncCustomLightSettingsPacket", "activated", "Z", lightGuard, "activated"));
+        for (String[] setter : new String[][]{{"setCanBeModified", "(Z)V"}, {"setUseBatteryDirect", "(Z)V"},
+                {"setHasBattery", "(Z)V"}, {"setBulbItemRaw", "(Ljava/lang/String;)V"}, {"setPower", "(F)V"},
+                {"setDelta", "(F)V"}, {"setPrimaryR", "(F)V"}, {"setPrimaryG", "(F)V"}, {"setPrimaryB", "(F)V"}}) {
+            lightParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, lightSwitch, setter[0], setter[1],
+                    lightGuard, setter[0]));
+        }
+        lightParse.expectedHits = 12;   // begin＋activated＋九個 setter（setBulbItemRaw 兩處）
+        patches.add(lightSettings);
+
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");
         for (String methodName : new String[]{"updateSeed", "updateFishingData"}) {

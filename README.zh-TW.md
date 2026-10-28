@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 77 個 patched class、225 個命中點、85 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 78 個 patched class、237 個命中點、86 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -145,6 +145,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W77 建造距離驗證（[2cl](docs/patches.md#2cl)） | 同上。 | 建造位置與玩家每軸差超過 8 格或樓層差超過 1 時回 Reject 並記錄；有作弊建造權限的管理員不限。 | 未回報 |
 | W78 timed action 執行者驗證（[2cm](docs/patches.md#2cm)） | timed action 的伺服器端驗證有缺口；細節不在此公開。 | 動作的執行者（`character`）必須是送封包的玩家，否則回 Reject 並記錄；其他玩家參數（例如替別人包紮的病人）照原版。 | 未回報 |
 | W79 物件外觀更新距離驗證（[2cn](docs/patches.md#2cn)） | 物件外觀更新的伺服器端驗證有缺口；細節不在此公開。 | 送封包的連線上必須有玩家在該物件 20 格內，否則不改、不轉發並記錄；拆解、修理、開車撞圍籬照常。 | 未回報 |
+| W82 燈具設定同步驗證（[2cq](docs/patches.md#2cq)） | 燈具設定同步的伺服器端驗證有缺口；細節不在此公開。 | 伺服器不採用客戶端不該改的燈具設定欄位：從客戶端只接受打掉燈泡與關燈，而且送封包的連線上要有玩家在燈的 50 格內；轉發給其他客戶端的是伺服器的值，被擋的封包會記錄。 | 未回報 |
 | W29 動物同步驗證（[2aq](docs/patches.md#2aq)） | client 送往伺服器的動物同步封包有驗證缺口；細節會私下回報 TIS，不在此公開。 | 在任何遊戲狀態改變前驗證並丟棄不合法封包。 | 將私下回報 |
 | W19 車輛永久移除帳本（[2ag](docs/patches.md#2ag)） | 好幾條 Lua 路徑都能永久刪除車輛，卻沒有任何稽核紀錄。 | 每次永久移除都記錄呼叫來源與認領狀態（純觀測）。 | 未回報 |
 
