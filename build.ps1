@@ -705,8 +705,8 @@ Assert-Ok "ZombieReuseOwnerTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" off
 Assert-Ok "ZombieReuseOwnerTest（off，原版負對照）"
 
-Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、staleMsMax 不含閒置且穩定狀態約 T、chunk 移除後又載入的 reload10／reload60、自適應計時（開閘輪結束才起算、hold=max(T, 2×開閘輪耗時)、不連續開閘）與 fixed 負對照、holdMsMax、三個 mutant..."
-# gate-on＝出貨組態（T=1000、探針 on、adaptive）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常；adaptive-off＝v1 計時負對照。測試自驗 argv 與實際開關相符。
+Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、staleMsMax 不含閒置且穩定狀態約 T、chunk 移除後又載入的 reload10／reload60、自適應計時（開閘輪結束才起算、hold=max(T, min(上限, 2×開閘輪耗時))、不連續開閘、預設上限 10T 封頂、上限低於 T 等於 T、hold-off 不封頂）與 fixed 負對照、holdMsMax、三個 mutant..."
+# gate-on＝出貨組態（T=1000、探針 on、adaptive、上限 10000 ms）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常；adaptive-off＝v1 計時負對照；hold-off＝不封頂（＝v2）。測試自驗 argv 與實際開關相符。
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-on
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 on，出貨組態）"
 java -Xverify:all "-Dmdc.pathfindGateMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-off
@@ -715,6 +715,8 @@ java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\wor
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 off）"
 java -Xverify:all "-Dmdc.pathfindGateAdaptive=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest adaptive-off
 Assert-Ok "MdcPathfindGateTest（T=1000＋adaptive off，v1 計時負對照）"
+java -Xverify:all "-Dmdc.pathfindGateHoldMaxMs=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest hold-off
+Assert-Ok "MdcPathfindGateTest（T=1000＋關閘上限 off，v2 不封頂）"
 
 Write-Host "[9zw/10] 燈具設定同步驗證（W82）：客戶端真 write＋伺服器真 parse＋轉發用的真 write，打掉燈泡、關燈照原版，電量略落後與旁觀者晚到的打燈封包不記 log、讀壞的上一包不殘留；開燈、改可改裝、電池、裝或換燈泡、電量、耗電、顏色都不寫入伺服器、轉發伺服器值並每包記一行 log；距離：x、y 正負差 51 的連線打燈或關燈不寫入並記 outOfRange=true，每軸剛好 50、差 3 層、同機一遠一近照收，判距離丟例外時不接受並記 anomalies；off 與 jar 原版照收（負對照）..."
 # on＝出貨組態；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版 parse）。測試自驗 argv、開關與封包類別來源。

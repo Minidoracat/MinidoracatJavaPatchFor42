@@ -15,8 +15,8 @@ import java.util.stream.Collectors;
 import zombie.ai.astar.Mover;
 
 /**
- * W81 MdcPathfindGate 行為驗證（獨立 JVM；argv[0] = gate-on|gate-off|probe-off|adaptive-off，須與 {@code -Dmdc.pathfindGateMs}、
- * {@code -Dmdc.pathfindProbe}、{@code -Dmdc.pathfindGateAdaptive} 相符）。
+ * W81 MdcPathfindGate 行為驗證（獨立 JVM；argv[0] = gate-on|gate-off|probe-off|adaptive-off|hold-off，須與 {@code -Dmdc.pathfindGateMs}、
+ * {@code -Dmdc.pathfindProbe}、{@code -Dmdc.pathfindGateAdaptive}、{@code -Dmdc.pathfindGateHoldMaxMs} 相符）。
  *
  * <p>走 dist 內手術後的真 {@code PathfindNativeThread.updateThread}（native {@code PathfindNative.update} 照 W74 測試的做法：
  * 測試 JVM 沒有 native 庫，丟 {@code UnsatisfiedLinkError} 當作一輪結束；閘門在呼叫 native 之前就結算並決定下一輪）。
@@ -24,7 +24,8 @@ import zombie.ai.astar.Mover;
  * <p>鎖：開服第一輪開、之後每 T 開一輪；關閉時世界任務留在佇列、請求照常進優先佇列；開閘一輪套完全部積壓（超過 10 個 chunk）
  * 且 FIFO；{@code execute} 丟例外與原版相同；T=0 與原版逐輪相同（含 10 個上限）；W74 計數、rb／nr 分組、心跳欄位、refail；
  * {@code staleMsMax} 不含輪與輪之間的閒置、穩定狀態約 T 到 T 加一輪；同一個 chunk 移除後又載入的 {@code reload10}／{@code reload60}；
- * 自適應計時（合成時鐘）：開閘輪耗時大於 T 時不連續開閘、下一次開閘 ≥ 開閘輪結束＋max(T, 2×開閘輪耗時)，fixed（v1）為負對照。
+ * 自適應計時（合成時鐘）：開閘輪耗時大於 T 時不連續開閘、下一次開閘 ≥ 開閘輪結束＋max(T, min(上限, 2×開閘輪耗時))，預設上限
+ * 10T 封頂、上限低於 T 時等於 T、hold-off（不封頂）不封頂，fixed（v1）為負對照。
  * 情境另以測試內的 updateThread 模型（照 javap 抄的原版迴圈）跑三個 mutant，各自至少一個情境與出貨語意不同。
  */
 public final class MdcPathfindGateTest {
@@ -209,15 +210,20 @@ public final class MdcPathfindGateTest {
         boolean gate = !"gate-off".equals(mode);
         boolean probe = !"probe-off".equals(mode);
         boolean adaptive = !"adaptive-off".equals(mode);
+        boolean holdOff = "hold-off".equals(mode);
         expect("開關與 argv 相符（" + mode + "：gate=" + MdcPathfindGate.GATE_MS + " probe=" + MdcPathfindProbe.ENABLED
-                        + " adaptive=" + MdcPathfindGate.ADAPTIVE + "）",
+                        + " adaptive=" + MdcPathfindGate.ADAPTIVE + " holdMax=" + MdcPathfindGate.HOLD_MAX_MS + "）",
                 MdcPathfindGate.GATE_MS == (gate ? 1000L : 0L) && MdcPathfindProbe.ENABLED == probe
-                        && MdcPathfindGate.ADAPTIVE == adaptive);
+                        && MdcPathfindGate.ADAPTIVE == adaptive
+                        && MdcPathfindGate.HOLD_MAX_MS == (holdOff ? 0L : 10_000L)
+                        && MdcPathfindGate.holdMaxNs == (holdOff ? Long.MAX_VALUE : 10_000_000_000L));
         expect("開關解析：未設 1000、0／off 關、0–5000 照用、範圍外與亂碼落回 1000",
-                MdcPathfindGate.parseMs(null) == 1000L && MdcPathfindGate.parseMs("0") == 0L
-                        && MdcPathfindGate.parseMs(" OFF ") == 0L && MdcPathfindGate.parseMs("5000") == 5000L
-                        && MdcPathfindGate.parseMs("250") == 250L && MdcPathfindGate.parseMs("5001") == 1000L
-                        && MdcPathfindGate.parseMs("-1") == 1000L && MdcPathfindGate.parseMs("abc") == 1000L);
+                gateMs(null) == 1000L && gateMs("0") == 0L && gateMs(" OFF ") == 0L && gateMs("5000") == 5000L
+                        && gateMs("250") == 250L && gateMs("5001") == 1000L && gateMs("-1") == 1000L && gateMs("abc") == 1000L);
+        expect("關閘上限解析：未設 10000、0／off 不封頂、1000–600000 照用、範圍外與亂碼落回 10000",
+                holdMaxMs(null) == 10_000L && holdMaxMs("0") == 0L && holdMaxMs(" off ") == 0L
+                        && holdMaxMs("1000") == 1000L && holdMaxMs("600000") == 600_000L && holdMaxMs("999") == 10_000L
+                        && holdMaxMs("600001") == 10_000L && holdMaxMs("-1") == 10_000L && holdMaxMs("abc") == 10_000L);
 
         mainSequence(gate, probe);
         if (gate) {
@@ -236,6 +242,14 @@ public final class MdcPathfindGateTest {
             System.exit(1);
         }
         System.out.println("MdcPathfindGateTest OK (" + mode + ")");
+    }
+
+    private static long gateMs(String raw) {
+        return MdcPathfindGate.parseMs(raw, 1000L, 0L, 5000L);
+    }
+
+    private static long holdMaxMs(String raw) {
+        return MdcPathfindGate.parseMs(raw, 10_000L, 1000L, 600_000L);
     }
 
     /** 真 updateThread 連跑四輪：開服第一輪開 → 關 → 關（到期）→ 開；查任務、請求、W74 計數、rb／nr、心跳。 */
@@ -355,7 +369,9 @@ public final class MdcPathfindGateTest {
      * 自適應計時（合成時鐘直接呼叫 closeRound；開閘輪的重建 findPath 在它的結算之後、下一次結算之前，以 W74 的
      * busyNsTotal 累加模擬）。adaptive：開閘輪 findPath 3T → 下一輪不開、hold=6T、從開閘輪結束起算，6T−1 ns 不開、恰 6T 開；
      * findPath T/4 之後閒置 100T → hold=T（閒置不算進開閘輪耗時；冒煙實測牆鐘版閒置 47 秒把 hold 撐到 95 秒）；
-     * 開閘輪本身結算時即使早已超過 hold 也不連開；holdMsMax=6T。fixed（負對照，v1）：耗時 3T 的下一次結算就開、hold 恆為 T。
+     * 開閘輪本身結算時即使早已超過 hold 也不連開；holdMsMax=6T。上限：開閘輪 findPath 8T → 預設上限 hold=10T（差 1 ns 不開、
+     * 恰滿開，holdMsMax=10T）、hold-off 不封頂 hold=16T；上限 T/2（低於 T）→ hold=T。
+     * fixed（負對照，v1）：耗時 3T 的下一次結算就開、hold 恆為 T。
      */
     private static void adaptiveTiming(boolean adaptive) {
         long T = MdcPathfindGate.GATE_NS;
@@ -401,12 +417,43 @@ public final class MdcPathfindGateTest {
             MdcPathfindGate.closeRound(t3 + T + ms);
             expect("adaptive：開閘輪自己的結算即使早已超過 hold 也不連開", !MdcPathfindGate.open);
             expect("adaptive：holdMsMax 記到 6T", MdcPathfindGate.holdNsMax == 6 * T);
+            boolean capped = MdcPathfindGate.holdMaxNs != Long.MAX_VALUE;
+            long want = capped ? 10 * T : 16 * T;
+            MdcPathfindGate.resetWindow();
+            long t4 = t3 + T + 2 * ms;
+            long t5 = rebuildRound(t4, 8 * T, ms);
+            expect("adaptive＋" + (capped ? "預設上限 10T" : "不封頂（hold-off）") + "：開閘輪 findPath 8T → hold="
+                            + (capped ? "10T（封頂）" : "16T") + "（實際 " + MdcPathfindGate.holdNs / ms + " ms）",
+                    !MdcPathfindGate.open && MdcPathfindGate.holdNs == want && MdcPathfindGate.lastOpenNs == t5);
+            MdcPathfindGate.closeRound(t5 + want - 1L);
+            boolean early3 = MdcPathfindGate.open;
+            MdcPathfindGate.closeRound(t5 + want);
+            expect("adaptive＋" + (capped ? "上限" : "不封頂") + "：差 1 ns 不開、恰滿開，holdMsMax="
+                            + (capped ? "10T" : "16T"),
+                    !early3 && MdcPathfindGate.open && MdcPathfindGate.holdNsMax == want);
+            long savedMax = MdcPathfindGate.holdMaxNs;
+            MdcPathfindGate.holdMaxNs = T / 2;
+            long t6 = rebuildRound(t5 + want + ms, 8 * T, ms);
+            MdcPathfindGate.holdMaxNs = savedMax;
+            expect("adaptive：上限 T/2（低於 T）時開閘輪 findPath 8T → hold=T",
+                    !MdcPathfindGate.open && MdcPathfindGate.holdNs == T && MdcPathfindGate.lastOpenNs == t6);
         }
         MdcPathfindGate.open = false;
         MdcPathfindGate.lastRoundOpen = false;
         MdcPathfindGate.holdNs = T;
         MdcPathfindGate.lastOpenNs = System.nanoTime();
         MdcPathfindGate.resetWindow();
+    }
+
+    /** 把 t 這一輪當開閘輪結算（上一輪關），結算後 findPath 跑 busy，回傳下一次結算的時刻。 */
+    private static long rebuildRound(long t, long busy, long ms) {
+        MdcPathfindGate.open = true;
+        MdcPathfindGate.lastRoundOpen = false;
+        MdcPathfindGate.closeRound(t);
+        MdcPathfindProbe.busyNsTotal += busy;
+        long next = t + busy + 50 * ms;
+        MdcPathfindGate.closeRound(next);
+        return next;
     }
 
     /** 三個情境：真 updateThread、原版模型、閘門模型與三個 mutant 各跑一次。 */

@@ -4544,18 +4544,41 @@ console（第一次回收一行首次生效，之後每 30 分鐘一行，數值
 
 **v2 預期與風險**（研究模型，47–49 人；v1 現況 busy 98.8%、平均等 37 秒）：單價回到 10-27 22:40–22:59 那段（rb 2.0 s、nr 30 ms、需求每分鐘 780）時 busy 約 70–74%、平均等待 <0.5 秒；維持飽和時的單價（rb 3.24 s、nr 43.7 ms、需求每分鐘 600）busy 76–79%、約 0.5 秒；同上、需求每分鐘 733 時 busy 85–89%、約 1–5 秒。代價是尋路地圖更新間隔＝rb＋max(T, 2rb)：中負載約 6.4 秒、滿載約 10 秒（v1 約 3.4–4.2 秒），而且跟著 rb 沒有上限（rb 10 秒時是 30 秒）。剛載入的 chunk、剛開關的門、剛停下或開走的車，動物要晚這麼久才知道；剛生在新 chunk 上的動物會先很快失敗再重試（`refail` 可能升高、每次很便宜）。每批套用的任務變多（滿載時約 3,000–6,000 個），`ChunkUpdateTask` 池上限 2,048，超過的部分主執行緒要多配 direct buffer（沒量）。全域 square→Node map 在兩次重建之間累積得更久，敏感度估 busy 多 2–4 個百分點。上線後看 47–49 人時：`opens` 掉到每分鐘約 6–9 次、`holdMsMax` 落在 T 到約 20 秒、busy 與 `waitMs` 下降、`fail`／`refail` 不明顯上升。回退：`-Dmdc.pathfindGateAdaptive=off`（回 v1）或 `-Dmdc.pathfindGateMs=0`（原版），都要重啟。
 
-**開關**：`-Dmdc.pathfindGateMs=<T>`，需重啟。未設＝1000；`0`／`off`＝每一輪都開，兩個入口只委派 W74 探針，與原版逐指令等價（原版 10 個上限照舊）；0–5000 照用，其他值與無法解析落回 1000。`-Dmdc.pathfindGateAdaptive=0|off`：計時回到 v1（`hold = T`、從決定開閘起算），未設或其他值＝v2；T=0 時不起作用；首次生效行寫出目前是 `adaptive` 還是 `fixed`。兩者與 `-Dmdc.pathfindProbe` 各自獨立：探針 off 時閘門照常（但沒有心跳，v2 的 `hold` 固定為 T），閘門 off 時探針照常。
+**v2.1 關閘上限（2026-10-28，預設 10 秒）**：關閘長度改成 `hold = max(T, min(上限, 2 × 開閘輪耗時))`，上限由 `-Dmdc.pathfindGateHoldMaxMs` 決定，預設 10000 ms，`0`／`off` 不封頂（＝v2）。上限低於 T 時等於 T；fixed 計時不受影響；開閘輪自己的結算一律決定下一輪關，這條不變。只改 helper，沒有新的改道點，`expectedHits` 仍是 9。
+
+起因是 10-28 晚上正式服的 v2 數據：2×rb 會和重建成本互相放大。下表取每分鐘中位數，排除開服前 10 分鐘和重啟前 5 分鐘倒數；v1 是 10-27、45–49 人、52 分鐘，v2 是 10-28、45–47 人、12 分鐘。
+
+|指標|10-27 v1|10-28 v2|
+|---|---|---|
+|尋路執行緒 busy|98.0%|81.6%|
+|請求平均等待（`waitMs` 平均）|33.2 s|1.1 s|
+|每分鐘 `calls`|500|923|
+|每次重建 rb|2.6 s|13.2 s|
+|每分鐘重建次數|16|2|
+|每分鐘重建總時間|41.9 s|21.4 s|
+|`holdMsMax`|—|中位數 27.7 s，最高 36.3 s|
+|`staleMsMax`|—|中位數 28.6 s|
+
+40–44 人時 v2 每次重建 8.7 s，`holdMsMax` 中位數 23.6 s。
+
+回歸以每分鐘為一筆，`calls ÷ opens` 叫「每週期呼叫數」：40 人以上 157 分鐘（v1＋v2）rb(s) ≈ −4.17 ＋ 0.149×在線 ＋ 0.0137×每週期呼叫數，R² 0.76；30–39 人 200 分鐘 rb ≈ 3.56 − 0.068×在線 ＋ 0.0169×每週期呼叫數，R² 0.74。每次呼叫的 nr 和每週期呼叫數無關（係數 −0.0009 ms／呼叫）。依每週期呼叫數分組，40 人以上的 rb 中位數：每週期 0–40 次（多是 v1）2.2 s、320–640 次 12.0 s、640 次以上 14.0 s。長週期時 `rbMin` 也跟著到 9–14 s，表示重建本體也變貴，不是只有重建後第一個請求變貴。
+
+解讀（推論，未直接量測）：重建成本約等於「固定約 1.5 s」加上「上次重建以來每個呼叫約 15 ms」，所以每分鐘的重建時間約等於「週期數 × 固定成本」加上「每個呼叫 15 ms」，後面這項不會因為拉長 hold 而變少。v2 的 2×rb 因此一路拉長：rb 變大，hold 跟著變長；累積的呼叫變多，rb 又更大。結果每分鐘只開 1–2 次閘，地圖落後約 30–45 s。封頂約 10 s 時，模型估計每分鐘重建時間和不封頂差不多（約 21 s 對 19.5 s），地圖落後降到約 15 s。
+
+次要疑點（未確認）：45–47 人的每分鐘 FPS 中位數 v2 是 9.0、v1 是 9.5，最低 6.7 對 8.4；樣本小，也可能受其他因素影響。可能的機制是 `ChunkUpdateTask` 池上限 2,048、每個 task 帶一個 `ByteBuffer.allocateDirect`，hold 30 s 時每個週期累積上萬個 task，超出池子的部分由主執行緒新配；封頂也會減輕這個壓力。上線後看 45 人以上的 `holdMsMax`（應不超過 10000）、每分鐘重建總時間、busy、`waitMs` 與 FPS。回退：`-Dmdc.pathfindGateHoldMaxMs=off`（回 v2），需重啟。
+
+**開關**：`-Dmdc.pathfindGateMs=<T>`，需重啟。未設＝1000；`0`／`off`＝每一輪都開，兩個入口只委派 W74 探針，與原版逐指令等價（原版 10 個上限照舊）；0–5000 照用，其他值與無法解析落回 1000。`-Dmdc.pathfindGateAdaptive=0|off`：計時回到 v1（`hold = T`、從決定開閘起算），未設或其他值＝v2；T=0 時不起作用；首次生效行寫出目前是 `adaptive` 還是 `fixed`。`-Dmdc.pathfindGateHoldMaxMs=<ms>`（v2.1）：關閘上限，需重啟。未設＝10000；`0`／`off`＝不封頂（＝v2）；1000–600000 照用，其他值與無法解析落回 10000；低於 T 時等於 T（外層有 max）；fixed 計時與 T=0 時不起作用；首次生效行寫出上限與原始值。這些開關與 `-Dmdc.pathfindProbe` 各自獨立：探針 off 時閘門照常（但沒有心跳，v2 的 `hold` 固定為 T），閘門 off 時探針照常。
 
 console（第一輪一行；心跳併在 W74 每 60 秒一行的 `beat` 行尾）：
 
 ```text
-[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<原始值>；0|off 每輪都套用＝原版）；計時 adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed
+[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<原始值>；0|off 每輪都套用＝原版）；計時 adaptive（關閘 max(T, min(上限, 2×開閘輪耗時))，從開閘輪結束起算）；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed；關閘上限 10000 ms（-Dmdc.pathfindGateHoldMaxMs=<原始值>；0|off 不封頂）
 [MinidoracatJavaPatch][PathfindProbe] beat sec=… （W74 欄位）… total=<n> gate=<T> opens=<開閘輪數> heldRounds=<有世界任務在排但閘門關著的輪數> drained=<開閘輪平均>/<最大> staleMsMax=<ms> chunkU=<ChunkUpdateTask 數> chunkR=<ChunkRemoveTask 數> refail=<n> reload10=<移除後 10 秒內又載入> reload60=<移除後 60 秒內又載入> holdMsMax=<ms> rbMin=<ms> rbOk=<n>/<平均 ms> rbFail=<n>/<平均 ms> nrOk=<n>/<平均 ms> nrFail=<n>/<平均 ms> nrPos=<2–5>/<6–20>/<21+ 平均 ms> rbGap=<<20>/<20–59>/<≥60 平均 ms>
 ```
 
 欄位說明：`drained` 是開閘輪次套用的世界任務數（chunk＋格子＋載具）。`staleMsMax` 是開閘時最舊積壓任務等了多久：從第一個被擋輪次的開頭量到開閘那一輪的開頭，兩個「開頭」都是那一輪第一次 `poll` 的時刻，以前者近似最舊任務的入列時刻（最多少算一輪）；輪與輪之間 `notifier.wait()` 的閒置不算進去（佇列有任務時執行緒不會閒置，積壓期間的輪次是連續的）；穩定時約為 T 到 T 加一輪。`chunkU`＋`chunkR` 等於 W74 的 `chunk`。`refail` 是同一個 mover 這次失敗的目標格（`floor` 後的 x、y、z）與它上一次失敗的目標格相同的次數，只在尋路執行緒記（mover → 目標格的 `IdentityHashMap`，超過 10,000 筆整表清空；多目標請求只看第一個目標），用來量動物失敗後立刻以同一目標重試的迴圈有多大，只觀測。`reload10`／`reload60` 是這個視窗內「同一個 chunk 被尋路執行緒移除後 10／60 秒內又載入」的次數（`reload60` 含 `reload10`）：執行 `ChunkRemoveTask` 時把 chunk（`wx`、`wy`）與當下時刻記進「最近移除」表，執行同一個 chunk 的 `ChunkUpdateTask` 時取出並看隔了多久，超過 60 秒或沒移除過都不計；表不隨視窗歸零，每次 beat 清掉超過 60 秒的紀錄，滿 65,536 筆整表清空（只會少算），只在尋路執行緒記，只觀測。判讀「延遲卸載 ServerCell」值不值得做：`reload60 ÷ chunkU` 是 60 秒內就被載回來的 chunk 佔載入量的比例，也就是延遲 60 秒才真的移除最多能省下的載入（以及同樣多的移除與跟著來的重建工作），`reload10 ÷ chunkU` 是延遲 10 秒能省下的；比例只有個位數就不值得做，`reload10` 佔 `reload60` 的大部分代表載回來的多半在 10 秒內，短延遲就夠。T=0 時閘門欄位都是 0（純委派不計數）；`reload10`／`reload60` 屬於探針，T=0 照常計，探針 off 時是 0。
 
-v2 欄位（接在 `reload60` 之後，舊欄位的名稱、順序、格式都不變；時間都是 ms，平均一位小數，空桶寫 `0.0`）：`holdMsMax` 是這個視窗內最長的一段關閘（fixed 時恆為 T；沒有開閘輪結束時是 0），除以 2 約等於這分鐘最慢的開閘輪耗時，正式服常態超過 20 秒就該考慮給 hold 封頂；v2 下 `staleMsMax` 穩定時約為 `hold` 加一輪（不再是 T）。`rbMin` 是 rb 最快的一次（沒有 rb 時 0）：重建後第一個請求很快就失敗時，rb 約等於重建本體＋`VGAStar::init2`，所以它是「跟請求無關的重建本體」的上限。`rbOk`／`rbFail`／`nrOk`／`nrFail` 是 `n/平均 ms`，失敗＝native 回傳值不是 1（與 `fail` 同口徑，含多目標的第 2 個以後），四個 n 加總等於 `calls`：貴的是成功的長路徑還是掃完整片的失敗，看這四個。`nrPos=a/b/c` 是 nr 依「重建後第幾個呼叫」（重建那次＝1）分 2–5、6–20、21+ 三桶的平均：遞減＝重建後延後初始化為主（快取越來越熱），遞增＝兩次重建之間累積的全域 map 讓每次呼叫變貴，持平＝重建本體為主；開服到第一次重建之前的呼叫不計。`rbGap=a/b/c` 是 rb 依「前一週期呼叫數」（從上次重建那次起、到這次之前的呼叫數）分 <20、20–59、≥60 三桶的平均，遞增＝累積的 map 讓重建時的釋放變貴。全部在尋路執行緒單寫、每次呼叫 O(1)，只觀測。
+v2 欄位（接在 `reload60` 之後，舊欄位的名稱、順序、格式都不變；時間都是 ms，平均一位小數，空桶寫 `0.0`）：`holdMsMax` 是這個視窗內最長的一段關閘（fixed 時恆為 T；沒有開閘輪結束時是 0），沒被封頂時除以 2 約等於這分鐘最慢的開閘輪耗時；v2.1 起不超過關閘上限（預設 10000），等於上限代表這分鐘至少有一次被封頂；v2 下 `staleMsMax` 穩定時約為 `hold` 加一輪（不再是 T）。`rbMin` 是 rb 最快的一次（沒有 rb 時 0）：重建後第一個請求很快就失敗時，rb 約等於重建本體＋`VGAStar::init2`，所以它是「跟請求無關的重建本體」的上限。`rbOk`／`rbFail`／`nrOk`／`nrFail` 是 `n/平均 ms`，失敗＝native 回傳值不是 1（與 `fail` 同口徑，含多目標的第 2 個以後），四個 n 加總等於 `calls`：貴的是成功的長路徑還是掃完整片的失敗，看這四個。`nrPos=a/b/c` 是 nr 依「重建後第幾個呼叫」（重建那次＝1）分 2–5、6–20、21+ 三桶的平均：遞減＝重建後延後初始化為主（快取越來越熱），遞增＝兩次重建之間累積的全域 map 讓每次呼叫變貴，持平＝重建本體為主；開服到第一次重建之前的呼叫不計。`rbGap=a/b/c` 是 rb 依「前一週期呼叫數」（從上次重建那次起、到這次之前的呼叫數）分 <20、20–59、≥60 三桶的平均，遞增＝累積的 map 讓重建時的釋放變貴。全部在尋路執行緒單寫、每次呼叫 O(1)，只觀測。
 
 **判讀注意**：W74 的 `rb=n/平均/x`、`nr=n/平均/x` 第三段是 **p95**，不是最大值（`MdcPathfindProbe.formatWindow` 寫的是 `RB.p95Us(nsMax)`：四分之一倍頻桶的上界，不超過同一視窗全部呼叫的最大值 `usMax`；單位 µs，前兩段的平均也是 µs）。把它當 `rbMaxUs` 讀的分析腳本要改名成 p95。
 
@@ -4563,7 +4586,7 @@ v2 欄位（接在 `reload60` 之後，舊欄位的名稱、順序、格式都�
 
 **驗收**（上線後看晚峰幾行 `beat`）：`rb` 次數降到每分鐘約 `opens`（≤ 60），`calls` 每分鐘上升、`waitMs` 下降，`fail` 比例不上升；`staleMsMax` 約 T 到 T 加一輪、不持續增長；`drained` 最大值不持續增長（積壓沒有越滾越大）；主執行緒 FPS 不變；`PathfindNativeThread` CPU 仍可能 100%（需求大於產能時本來就會吃滿），不算失敗。pfguard 的 `cluster_alloc_calls`、`merge_calls`、`guard_alloc` 速率跟著下降是預期結果，不是 allowlist 失效。
 
-**部署**：manifest 新增 `zombie/pathfind/nativeCode/MdcPathfindGate.class`，`PathfindNativeThread.class`、`MdcPathfindProbe.class`、`MdcPathfindProbe$Hist.class`、`PatchInfo.class` 換新（159 → 160 個 class）。上線後確認 console 有 `PathfindGate` 的「首次生效」一行，`beat` 行尾出現 `gate=1000`。v2 不增減 class（`MdcPathfindGate.class`、`MdcPathfindProbe.class` 換新），上線後確認首次生效行寫 `計時 adaptive`、`beat` 行尾出現 `holdMsMax=`。
+**部署**：manifest 新增 `zombie/pathfind/nativeCode/MdcPathfindGate.class`，`PathfindNativeThread.class`、`MdcPathfindProbe.class`、`MdcPathfindProbe$Hist.class`、`PatchInfo.class` 換新（159 → 160 個 class）。上線後確認 console 有 `PathfindGate` 的「首次生效」一行，`beat` 行尾出現 `gate=1000`。v2 不增減 class（`MdcPathfindGate.class`、`MdcPathfindProbe.class` 換新），上線後確認首次生效行寫 `計時 adaptive`、`beat` 行尾出現 `holdMsMax=`。v2.1 不增減 class（只換 `MdcPathfindGate.class`、`PatchInfo.class`），上線後確認首次生效行寫 `關閘上限 10000 ms`、`holdMsMax` 不超過 10000。
 
 **不處理**：`requestsPerUpdate`（每輪 2 個）、失敗請求負快取、動物失敗後重試的 AI 都不改；`refail` 的數字出來後再決定。
 
@@ -4571,6 +4594,7 @@ v2 欄位（接在 `reload60` 之後，舊欄位的名稱、順序、格式都�
 - SmokeCheck：原版前提——`updateThread` 恰 8 個 `ConcurrentLinkedQueue.poll`、1 個 `PathfindNative.update`（W74 已鎖）；offset 0 是 `bipush 10`／`istore_1`，chunk 迴圈恰 1 個 `instanceof ChunkUpdateTask` 與 `iinc 1 -1`；請求迴圈的 `iconst_2`／`istore_2` 仍在；`PathfindNativeThread$Sync` 的 `period` 仍是 `50000000L`；`shouldWait` 恰 4 個 `isEmpty`。手術後 `updateThread` 除了 9 個改道到 `MdcPathfindGate` 的呼叫，方法文字（含 frames）與原版相同；helper 契約：`poll` 不直接呼叫 `ConcurrentLinkedQueue.poll`、只經探針取任務，排空恰 1 個 `execute` 與 1 個 `add`、沒有 catch；`update` 恰 1 次探針 `update`、不直接呼叫 native。
 - `MdcPathfindGateTest`（`build.ps1` [9zv/10]，T=1000＋探針 on（出貨組態）、T=0＋探針 on（原版負對照）、T=1000＋探針 off 三個 JVM，自驗 argv）：走 dist 內手術後的真 `updateThread`（native `update` 照 W74 丟 `UnsatisfiedLinkError`，閘門在那之前就結算）。連跑四輪：開服第一輪開，一次套完 16 個 chunk（含移除）與格子、載具，順序不變；第二輪關（之前先閒置 400 ms），世界任務留在佇列、請求照常進 `otherQ`；到期那輪仍關、結算後下一輪開；開閘一輪照 chunk→格子→載具各自 FIFO 套完積壓，`taskReturnQueue` 同順序；W74 計數、`worldRounds`、`rb`／`nr` 分組與心跳欄位正確，`staleMsMax` 不含那 400 ms 閒置。`staleMsMax` 穩定狀態：每 50 ms 一輪、每輪都有新 chunk，結果在 T − 一輪到 T＋兩輪之間。`decide` 的邊界：差 1 ns 不開、恰滿 T 開。三個情境（開閘 15 個 `ChunkUpdateTask`、閘門關、`execute` 丟例外）的結果與預期相同；T=0 時與原版逐輪相同（10 個上限、例外語意）。`refail`：同格才計、中間成功不重置、多目標第 2 次不計、負座標、滿 10,000 筆清空；探針 off 不計。`reload10`／`reload60`（時間用測試入口把「最近移除」表的紀錄往前推）：移除後馬上載入計 1／1、隔 30 秒只計 `reload60`、超過 60 秒不計、載入別的 chunk 與沒移除過的 chunk 不計、負座標合成 key 不相撞；beat 清掉超過 60 秒的紀錄、留下較新的並把計數歸零；滿 65,536 筆整表清空；探針 off 不計、表不長。mutant（測試內照 javap 抄的原版迴圈模型，先自驗模型與真 `updateThread` 相同）：開閘時仍受 10 個上限、閘門關時擋到請求佇列、排空時吞掉例外，三個都被抓到。
 - v2 計時與欄位（`build.ps1` [9zv/10] 第四個 JVM：T=1000＋`-Dmdc.pathfindGateAdaptive=off`，自驗 argv）：合成時鐘直接呼叫 `closeRound`，開閘輪的 findPath 時間以探針的累計耗時模擬。adaptive：開閘輪 findPath 3T 時下一次結算不開、`hold`=6T 從開閘輪結束起算，差 1 ns 不開、恰滿才開；findPath T/4 之後閒置 100T 時 `hold`=T（閒置不算）；開閘輪自己的結算即使早已超過 `hold` 也不連開；`holdMsMax`=6T。adaptive-off（v1 負對照）：同一序列在開閘輪結束的下一次結算就開、`hold` 恆為 T。四輪主序列與穩定狀態測試在兩種計時下都照跑；心跳 `holdMsMax`：T=0 為 0、fixed 恰為 T、adaptive ≥ T。`MdcPathfindProbeTest` 以合成耗時餵一串 rb／nr，逐字比對 `rbMin`、`rbOk`／`rbFail`／`nrOk`／`nrFail`、`nrPos`、`rbGap`（分桶邊界 5/6、20/21、20、60 都踩到），並驗證新欄位隨視窗歸零。
+- v2.1 關閘上限（`build.ps1` [9zv/10] 第五個 JVM：T=1000＋`-Dmdc.pathfindGateHoldMaxMs=off`，自驗 argv 與解析出的上限）：預設上限（gate-on、probe-off 兩個 JVM）時開閘輪 findPath 8T 的 `hold`=10T（被封頂），差 1 ns 不開、恰滿才開，`holdMsMax`=10T；hold-off 同一序列 `hold`=16T（不封頂）；上限改成 T/2（低於 T）時 `hold`=T；原本 3T→6T 的案例照舊。上限解析：未設 10000、`0`／`off` 為 0（不封頂）、1000 與 600000 照用，999、600001、-1 與亂碼落回 10000。
 
 **退場**：TIS 改成局部失效（native 寫入 JNI 不再設全域旗標，或 `findPath` 不再整批重建可見圖與載具 cluster）時撤刀。PathFind native lib 換版時用 objdump 重驗六個寫入 JNI 仍設 `PolygonalMap2::instance+0x80`、`findPath` 開頭仍檢查並呼叫 `createVisibilityGraphs`。
 

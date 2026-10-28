@@ -28,6 +28,9 @@ import zombie.debug.DebugLog;
  * 探針 off 時量不到，hold 固定為 T（仍從開閘輪結束起算）。{@code -Dmdc.pathfindGateAdaptive=0|off}：回到 v1，
  * {@code hold = T}、從決定開閘那一刻起算。
  *
+ * <p><b>關閘上限（v2.1）</b>：{@code hold = max(T, min(上限, 2 × 開閘輪耗時))}。{@code -Dmdc.pathfindGateHoldMaxMs=<ms>}：
+ * 未設＝10000；{@code 0|off}＝不封頂（＝v2）；1000–600000 照用，其他值與無法解析＝10000；低於 T 等於 T。fixed 計時不起作用。
+ *
  * <p>只有尋路執行緒呼叫 {@link #poll}／{@link #update}，狀態單寫者。佇列以物件身分比對（同 package 讀得到 protected 欄位）。
  * {@code -Dmdc.pathfindGateMs=<T>}：未設＝1000；{@code 0|off}＝每輪都開，兩個入口只委派 W74 探針（與原版逐指令等價，
  * 自適應開關不起作用）；0–5000 以外或無法解析＝1000。與 {@code -Dmdc.pathfindProbe} 各自獨立。
@@ -35,8 +38,10 @@ import zombie.debug.DebugLog;
 public final class MdcPathfindGate {
     static final long DEFAULT_MS = 1000L;
     static final String RAW = System.getProperty("mdc.pathfindGateMs");
-    static final long GATE_MS = parseMs(RAW);
+    static final long GATE_MS = parseMs(RAW, DEFAULT_MS, 0L, 5000L);
     static final long GATE_NS = GATE_MS * 1_000_000L;
+    static final String HOLD_MAX_RAW = System.getProperty("mdc.pathfindGateHoldMaxMs");
+    static final long HOLD_MAX_MS = parseMs(HOLD_MAX_RAW, 10_000L, 1000L, 600_000L);
     static final boolean ADAPTIVE = MdcPathfindProbe.parseEnabled(System.getProperty("mdc.pathfindGateAdaptive"));
     private static final String TAG = "[MinidoracatJavaPatch][PathfindGate] ";
 
@@ -44,6 +49,7 @@ public final class MdcPathfindGate {
     static boolean open = true;
     static long lastOpenNs = System.nanoTime();
     static long holdNs = GATE_NS;
+    static long holdMaxNs = HOLD_MAX_MS == 0L ? Long.MAX_VALUE : HOLD_MAX_MS * 1_000_000L; // 測試可改
     static boolean lastRoundOpen;
     private static long lastCloseBusyNs;
     static boolean announced;
@@ -65,9 +71,10 @@ public final class MdcPathfindGate {
     private MdcPathfindGate() {
     }
 
-    static long parseMs(String raw) {
+    /** 未設＝def；{@code 0|off}＝0；[min, max] 照用；其他值與無法解析＝def。 */
+    static long parseMs(String raw, long def, long min, long max) {
         if (raw == null) {
-            return DEFAULT_MS;
+            return def;
         }
         String s = raw.trim();
         if ("off".equalsIgnoreCase(s)) {
@@ -75,9 +82,9 @@ public final class MdcPathfindGate {
         }
         try {
             long v = Long.parseLong(s);
-            return v >= 0L && v <= 5000L ? v : DEFAULT_MS;
+            return v == 0L || v >= min && v <= max ? v : def;
         } catch (NumberFormatException e) {
-            return DEFAULT_MS;
+            return def;
         }
     }
 
@@ -127,10 +134,10 @@ public final class MdcPathfindGate {
         if (lastRoundOpen) {
             // 上一輪開閘：它在 update() 之後跑的 findPath（含重建）到這裡已結束
             if (ADAPTIVE) {
-                // ponytail: k=2 寫死，重建佔 findPath 時間上限約 1/3；代價是地圖更新間隔 rb＋max(T, 2rb) 跟著 rb 無上限地拉長
-                // （rb 10 s → 30 s）。要調 k 或給 hold 封頂，等正式服 holdMsMax 常態超過 20 s 或有「動物反應慢」回報再開參數。
+                // ponytail: k=2 寫死；hold 有上限，因為 rb 會隨上次重建以來的呼叫數變貴（約 15 ms／呼叫），2×rb 會自我放大
+                // （rb 變大→hold 變長→累積呼叫變多→rb 更大）。要更細的話改成依累積呼叫數、而不是時間決定開閘。
                 lastOpenNs = now;
-                holdNs = Math.max(GATE_NS, 2L * (MdcPathfindProbe.busyNsTotal - lastCloseBusyNs));
+                holdNs = Math.max(GATE_NS, Math.min(holdMaxNs, 2L * (MdcPathfindProbe.busyNsTotal - lastCloseBusyNs)));
             }
             if (holdNs > holdNsMax) {
                 holdNsMax = holdNs;
@@ -163,8 +170,10 @@ public final class MdcPathfindGate {
             announced = true;
             DebugLog.log(TAG + "首次生效（世界變動每 " + GATE_MS + " ms 最多套用一次；-Dmdc.pathfindGateMs=" + RAW
                     + "；0|off 每輪都套用＝原版）；計時 " + (ADAPTIVE
-                    ? "adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）"
-                    : "fixed（關閘 T，從決定開閘起算＝v1）") + "；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed");
+                    ? "adaptive（關閘 max(T, min(上限, 2×開閘輪耗時))，從開閘輪結束起算）"
+                    : "fixed（關閘 T，從決定開閘起算＝v1）") + "；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed；關閘上限 "
+                    + (HOLD_MAX_MS == 0L ? "不封頂" : HOLD_MAX_MS + " ms") + (ADAPTIVE ? "" : "（fixed 不起作用）")
+                    + "（-Dmdc.pathfindGateHoldMaxMs=" + HOLD_MAX_RAW + "；0|off 不封頂）");
         }
     }
 

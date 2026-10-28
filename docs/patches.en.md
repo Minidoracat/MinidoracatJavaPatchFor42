@@ -4991,24 +4991,66 @@ percentage points of busy. After it goes live, at 47–49 players: `opens` shoul
 and about 20 s, busy and `waitMs` should drop, and `fail`/`refail` should not rise noticeably. Rollback: `-Dmdc.pathfindGateAdaptive=off`
 (back to v1) or `-Dmdc.pathfindGateMs=0` (vanilla), both need a restart.
 
+**v2.1 hold cap (2026-10-28, default 10 s)**: the closed period becomes `hold = max(T, min(cap, 2 × open-round duration))`, with the cap set
+by `-Dmdc.pathfindGateHoldMaxMs` (default 10000 ms; `0`/`off` = no cap, i.e. v2). A cap below T acts as T; fixed timing is unaffected; the
+open round's own settlement still always closes the next round. Only the helper changes; there is no new redirect and `expectedHits` stays 9.
+
+The reason is the v2 data from production on the evening of 10-28: 2×rb and the rebuild cost amplify each other. The table takes per-minute
+medians, excluding the first 10 minutes after boot and the 5-minute pre-restart countdown; v1 is 10-27 at 45–49 players over 52 minutes, v2 is
+10-28 at 45–47 players over 12 minutes.
+
+|Metric|10-27 v1|10-28 v2|
+|---|---|---|
+|Pathfinding thread busy|98.0%|81.6%|
+|Average request wait (`waitMs` average)|33.2 s|1.1 s|
+|`calls` per minute|500|923|
+|rb per rebuild|2.6 s|13.2 s|
+|Rebuilds per minute|16|2|
+|Total rebuild time per minute|41.9 s|21.4 s|
+|`holdMsMax`|—|median 27.7 s, max 36.3 s|
+|`staleMsMax`|—|median 28.6 s|
+
+At 40–44 players v2 spent 8.7 s per rebuild with a median `holdMsMax` of 23.6 s.
+
+Regressions take one row per minute and call `calls ÷ opens` "calls per cycle": at 40+ players over 157 minutes (v1 + v2), rb(s) ≈ −4.17 +
+0.149 × online + 0.0137 × calls per cycle, R² 0.76; at 30–39 players over 200 minutes, rb ≈ 3.56 − 0.068 × online + 0.0169 × calls per
+cycle, R² 0.74. Per-call nr does not depend on calls per cycle (coefficient −0.0009 ms per call). Grouped by calls per cycle, the median rb at
+40+ players is 2.2 s at 0–40 calls per cycle (mostly v1), 12.0 s at 320–640 and 14.0 s above 640. In long cycles `rbMin` also rises to 9–14 s,
+so the rebuild itself gets more expensive, not only the first request after it.
+
+Interpretation (inference, not measured directly): a rebuild costs roughly a fixed ~1.5 s plus ~15 ms for every call since the previous
+rebuild, so rebuild time per minute is roughly "cycles × fixed cost" plus "15 ms per call", and the second term does not shrink when `hold`
+grows. v2's 2×rb therefore keeps stretching: rb grows, `hold` grows with it, more calls accumulate, and rb grows again. The result was only
+1–2 openings per minute and a pathfinding map 30–45 s behind. With a cap of about 10 s the model estimates about the same rebuild time per
+minute as without a cap (about 21 s versus 19.5 s) and the map lag drops to about 15 s.
+
+Secondary suspicion (unconfirmed): at 45–47 players the per-minute median FPS was 9.0 under v2 and 9.5 under v1, with minimums of 6.7 versus
+8.4; the sample is small and other factors may be involved. A possible mechanism is the `ChunkUpdateTask` pool (cap 2,048, each task holding a
+`ByteBuffer.allocateDirect`): with a 30 s `hold` each cycle accumulates tens of thousands of tasks, and the main thread allocates the ones
+beyond the pool anew. The cap relieves that too. After it goes live, watch `holdMsMax` (should not exceed 10000), total rebuild time per
+minute, busy, `waitMs` and FPS at 45+ players. Rollback: `-Dmdc.pathfindGateHoldMaxMs=off` (back to v2), restart required.
+
 **Switch**: `-Dmdc.pathfindGateMs=<T>`, restart required. Unset = 1000; `0`/`off` = every round open, both entry points only delegate to the W74
 probe, instruction-for-instruction equivalent to vanilla (vanilla's cap of 10 included); 0–5000 is used as given, anything else or an
 unparsable value falls back to 1000. `-Dmdc.pathfindGateAdaptive=0|off` returns the timing to v1 (`hold = T`, counted from the decision to
-open); unset or any other value = v2; it has no effect at T=0; the first-run line says whether the timing is `adaptive` or `fixed`. Both are
-independent of `-Dmdc.pathfindProbe`: with the probe off the gate still works (but there is no heartbeat, and the v2 `hold` stays T), and with
-the gate off the probe still works.
+open); unset or any other value = v2; it has no effect at T=0; the first-run line says whether the timing is `adaptive` or `fixed`.
+`-Dmdc.pathfindGateHoldMaxMs=<ms>` (v2.1): the hold cap, restart required. Unset = 10000; `0`/`off` = no cap (v2); 1000–600000 is used as
+given, anything else or an unparsable value falls back to 10000; a value below T acts as T (the outer max); no effect with fixed timing or at
+T=0; the first-run line shows the cap and the raw value. These switches are independent of `-Dmdc.pathfindProbe`: with the probe off the gate
+still works (but there is no heartbeat, and the v2 `hold` stays T), and with the gate off the probe still works.
 
 Console (one line at the first round; the heartbeat is appended to W74's `beat` line, every 60 seconds):
 
 ```text
-[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）；計時 adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed
+[MinidoracatJavaPatch][PathfindGate] 首次生效（世界變動每 1000 ms 最多套用一次；-Dmdc.pathfindGateMs=<raw value>；0|off 每輪都套用＝原版）；計時 adaptive（關閘 max(T, min(上限, 2×開閘輪耗時))，從開閘輪結束起算）；-Dmdc.pathfindGateAdaptive=0|off 回到 fixed；關閘上限 10000 ms（-Dmdc.pathfindGateHoldMaxMs=<raw value>；0|off 不封頂）
 [MinidoracatJavaPatch][PathfindProbe] beat sec=… (W74 fields) … total=<n> gate=<T> opens=<open rounds> heldRounds=<rounds with world tasks queued but the gate closed> drained=<average per open round>/<max> staleMsMax=<ms> chunkU=<ChunkUpdateTask count> chunkR=<ChunkRemoveTask count> refail=<n> reload10=<reloaded within 10 s of removal> reload60=<reloaded within 60 s of removal> holdMsMax=<ms> rbMin=<ms> rbOk=<n>/<avg ms> rbFail=<n>/<avg ms> nrOk=<n>/<avg ms> nrFail=<n>/<avg ms> nrPos=<2–5>/<6–20>/<21+ avg ms> rbGap=<under 20>/<20–59>/<60+ avg ms>
 ```
 
 (`首次生效（世界變動每 1000 ms 最多套用一次；…；0|off 每輪都套用＝原版）` = active (world changes applied at most once every 1000 ms; …; 0|off
-applies them every round = vanilla); `計時 adaptive（關閘 max(T, 2×開閘輪耗時)，從開閘輪結束起算）` = timing adaptive (closed for max(T, 2 ×
-open-round duration), counted from the end of the open round), or `計時 fixed（關閘 T，從決定開閘起算＝v1）` = timing fixed (closed for T,
-counted from the decision to open = v1); `回到 fixed` = back to fixed.)
+applies them every round = vanilla); `計時 adaptive（關閘 max(T, min(上限, 2×開閘輪耗時))，從開閘輪結束起算）` = timing adaptive (closed for
+max(T, min(cap, 2 × open-round duration)), counted from the end of the open round), or `計時 fixed（關閘 T，從決定開閘起算＝v1）` = timing
+fixed (closed for T, counted from the decision to open = v1); `回到 fixed` = back to fixed; `關閘上限 10000 ms（…；0|off 不封頂）` = hold cap
+10000 ms (…; 0|off = no cap), or `關閘上限 不封頂` = no cap, followed by `（fixed 不起作用）` = (no effect under fixed) when the timing is fixed.)
 
 Fields: `drained` counts the world tasks (chunk + square + vehicle) applied in open rounds. `staleMsMax` is how long the oldest queued task had
 waited when the gate opened: measured from the start of the first held round to the start of the open round, where a round starts at its first
@@ -5028,8 +5070,9 @@ not worth it; `reload10` making up most of `reload60` means most chunks come bac
 fields are 0 (pure delegation counts nothing); `reload10`/`reload60` belong to the probe, keep counting at T=0, and are 0 with the probe off.
 
 v2 fields (after `reload60`; the names, order and format of the existing fields are unchanged; times in ms, averages with one decimal, `0.0`
-for an empty bucket): `holdMsMax` is the longest closed period in the window (always T when fixed; 0 when no open round finished), and half of
-it is roughly this minute's slowest open round; if it routinely exceeds 20 s on production, consider capping `hold`. Under v2 `staleMsMax`
+for an empty bucket): `holdMsMax` is the longest closed period in the window (always T when fixed; 0 when no open round finished); when not
+capped, half of it is roughly this minute's slowest open round. From v2.1 it never exceeds the hold cap (default 10000), and a value equal to
+the cap means at least one capped hold that minute. Under v2 `staleMsMax`
 settles around `hold` plus one round instead of T. `rbMin` is the fastest rb call (0 without rb): when the first request after a rebuild fails
 quickly, rb is roughly the rebuild itself plus `VGAStar::init2`, so it bounds the request-independent rebuild cost from above.
 `rbOk`/`rbFail`/`nrOk`/`nrFail` are `n/average ms`, where failure means native returned something other than 1 (same basis as `fail`,
@@ -5063,7 +5106,8 @@ expected, not an allowlist failure.
 `MdcPathfindProbe$Hist.class` and `PatchInfo.class` are replaced (159 → 160 classes). After it goes live, check for the `PathfindGate`
 first-run line and for `gate=1000` at the end of the `beat` line. v2 adds or removes no class (`MdcPathfindGate.class` and
 `MdcPathfindProbe.class` are replaced); after it goes live, check that the first-run line says `計時 adaptive` and that `beat` carries
-`holdMsMax=`.
+`holdMsMax=`. v2.1 adds or removes no class (only `MdcPathfindGate.class` and `PatchInfo.class` are replaced); after it goes live, check that
+the first-run line says `關閘上限 10000 ms` and that `holdMsMax` stays at or below 10000.
 
 **Not handled**: `requestsPerUpdate` (2 per round), a negative cache for failed requests and the animal retry AI stay unchanged; they wait for
 the `refail` numbers.
@@ -5101,6 +5145,11 @@ the `refail` numbers.
   the heartbeat's `holdMsMax` is 0 at T=0, exactly T when fixed and ≥ T when adaptive. `MdcPathfindProbeTest` feeds a series of rb/nr calls
   with synthetic durations and compares `rbMin`, `rbOk`/`rbFail`/`nrOk`/`nrFail`, `nrPos` and `rbGap` verbatim (hitting the 5/6, 20/21, 20
   and 60 bucket boundaries), and checks that the new fields reset with the window.
+- v2.1 hold cap (a fifth JVM in `build.ps1` [9zv/10]: T=1000 with `-Dmdc.pathfindGateHoldMaxMs=off`, checking argv and the parsed cap): with
+  the default cap (the gate-on and probe-off JVMs), 8T of open-round findPath gives `hold` = 10T (capped), 1 ns short stays closed and
+  exactly due opens, `holdMsMax` = 10T; under hold-off the same sequence gives `hold` = 16T (no cap); with the cap set to T/2 (below T)
+  `hold` = T; the existing 3T → 6T case is unchanged. Cap parsing: unset 10000, `0`/`off` 0 (no cap), 1000 and 600000 used as given, 999,
+  600001, -1 and garbage fall back to 10000.
 
 **Retirement**: remove the patch when TIS makes invalidation local (the native write entry points no longer set a global flag, or `findPath` no
 longer rebuilds every visibility graph and vehicle cluster in bulk). When the PathFind native library changes, re-check with objdump that the six
