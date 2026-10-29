@@ -48,9 +48,9 @@ import zombie.vehicles.BaseVehicle;
  * </ul>
  *
  * <p>簿記只在伺服器主執行緒。非主執行緒（例如 {@code Threading.World} 開著時 worker 執行 {@code VehiclesDB2.updateMain}
- * → {@code addToWorld}）的呼叫計 {@code offThread}、照發生順序排進並行佇列：on（還沒回原版）現在不呼叫原版，由主執行緒
- * 下一次入口或更新器排空時照同一套規則決定（所以 native 載具呼叫只在主執行緒）；observe 與回原版之後照原版時機直接送，
- * 佇列只用來同步簿記。動物來源是 {@code IsoCell.getObjectList()} 裡的 {@link IsoAnimal}（{@code AnimalInstanceManager}
+ * → {@code addToWorld}）的呼叫計 {@code offThread}、照發生順序排進並行佇列：on（不論是否已回原版）現在不呼叫原版，由主執行緒
+ * 下一次入口或更新器排空時照當下的模式決定（所以 on 的 native 載具呼叫只在主執行緒、主執行緒是佇列唯一的消費者）；observe
+ * 照原版時機直接送，佇列只用來同步簿記。排空途中的錯誤等那一筆送完才回原版或停止簿記，不重入排空。動物來源是 {@code IsoCell.getObjectList()} 裡的 {@link IsoAnimal}（{@code AnimalInstanceManager}
  * 含不在世界上的動物、漏掉從雞舍載入的動物）。每次更新走一次物件清單與載具清單：動物 chunk 去重後放進邊長 {@link #GRID}
  * chunk 的格網，每輛車看 3×3 格、在每格裡線性走那格的動物 chunk（動物很集中時一格的 chunk 數就是比對次數）。
  *
@@ -90,7 +90,6 @@ public final class MdcPathfindVehicleScope {
     private static BaseVehicle justRemoved;
     private static volatile boolean fallen = MODE == MODE_ON && !MdcPathfindProbe.ENABLED;
     private static String fallbackReason = fallen ? "probeOff" : null;
-    private static boolean falling;
     private static volatile boolean disabled;
     /** 有呼叫發生在 {@code GameServer.mainThread} 還是 null 的時候（照原版、沒簿記）；on 在第一次更新時回原版。 */
     private static volatile boolean unbound;
@@ -162,21 +161,30 @@ public final class MdcPathfindVehicleScope {
 
     static final int OP_ADD = 0;
     static final int OP_REMOVE = 1;
-    /** 原版已經在別的執行緒照時呼叫過，只差主執行緒補簿記（observe、on 回原版之後）。 */
+    /** observe：原版已經在別的執行緒照時呼叫過，只差主執行緒補簿記。 */
     static final int NOTE_ADD = 2;
     static final int NOTE_REMOVE = 3;
 
     record Op(int kind, BaseVehicle vehicle) {
     }
 
-    /** 非主執行緒的呼叫，照發生順序排隊；主執行緒的下一次入口或更新器先排空（同 W75 IsoObjectRemoveDefer 的做法）。 */
+    /**
+     * 非主執行緒的呼叫，照發生順序排隊；主執行緒是唯一的消費者，在下一次入口或更新器先排空（同 W75 IsoObjectRemoveDefer）。
+     * on 不論是否已回原版、是否已停止簿記都排隊（背景執行緒永遠不直接呼叫原版），observe 只排簿記事件。
+     */
     private static final ConcurrentLinkedQueue<Op> PENDING = new ConcurrentLinkedQueue<>();
+    /** 主執行緒正在排空佇列（不重入：排空途中的錯誤只記下，等這一筆送完再切換模式）。 */
+    private static boolean draining;
+    /** 待處理的錯誤：在目前這一筆 add／remove 交給原版之後，由最外層呼叫 {@link #settle} 回原版或停止簿記。 */
+    private static String failWhere;
+    private static Throwable failCause;
 
     /** 取代 {@code PathfindNative.instance.addVehicle(vehicle)}（BaseVehicle 兩處、checkUseNativeCode 一處）。 */
     public static void addVehicle(PathfindNative pathfind, BaseVehicle vehicle) {
         if (route(OP_ADD, vehicle)) {
             pathfind.addVehicle(vehicle);
         }
+        settleOnMain();
     }
 
     /** 取代 {@code PathfindNative.instance.removeVehicle(vehicle)}（BaseVehicle 兩處）。 */
@@ -184,28 +192,34 @@ public final class MdcPathfindVehicleScope {
         if (route(OP_REMOVE, vehicle)) {
             pathfind.removeVehicle(vehicle);
         }
+        settleOnMain();
     }
 
     /** 取代 {@code PathfindNative.updateMain} 內唯一的 {@code IsoCell.getVehicles()}：先跑範圍更新器，再回原版同一個 Set。 */
     public static Set<BaseVehicle> getVehicles(IsoCell cell) {
         Set<BaseVehicle> vehicles = cell.getVehicles();
         if (MODE != MODE_OFF) {
-            if (disabled) {
-                drainDirect();
-            } else {
-                try {
-                    tick(cell, vehicles);
-                } catch (RuntimeException | LinkageError e) {
-                    fail("update", e);
-                }
+            if (!onMainThread()) {
+                OFF_THREAD.incrementAndGet();
+                return vehicles;
             }
+            try {
+                drain();
+                settle();
+                if (!disabled) {
+                    tick(cell, vehicles);
+                }
+            } catch (RuntimeException | LinkageError e) {
+                markFail("update", e);
+            }
+            settle();
         }
         return vehicles;
     }
 
     /**
-     * 回傳 true＝呼叫端現在就照原版呼叫。非主執行緒：on（還沒回原版）排進佇列、現在不送，由主執行緒照同一套規則決定；
-     * observe 與回原版之後照原版時機直接送，另排一筆簿記事件。主執行緒：先排空佇列（保持發生順序），再決定這一筆。
+     * 回傳 true＝呼叫端現在就照原版呼叫。非主執行緒：on 一律排進佇列、現在不送（主執行緒照當下的模式決定）；observe 照原版
+     * 時機直接送，另排一筆簿記事件。主執行緒：先排空佇列（保持發生順序），再決定這一筆。
      */
     static boolean route(int op, BaseVehicle vehicle) {
         if (MODE == MODE_OFF) {
@@ -220,32 +234,31 @@ public final class MdcPathfindVehicleScope {
         }
         if (Thread.currentThread() != main) {
             OFF_THREAD.incrementAndGet();
-            if (disabled) {
-                return true;
-            }
-            if (MODE == MODE_ON && !fallen) {
+            if (MODE == MODE_ON) {
                 PENDING.add(new Op(op, vehicle));
                 return false;
             }
-            PENDING.add(new Op(op + NOTE_ADD, vehicle));
+            if (!disabled) {
+                PENDING.add(new Op(op + NOTE_ADD, vehicle));
+            }
             return true;
         }
+        drain();
+        settle();
         if (disabled) {
-            drainDirect();
             return true;
         }
         try {
-            drain();
             return decide(op, vehicle);
         } catch (RuntimeException | LinkageError e) {
-            fail(op == OP_ADD ? "addVehicle" : "removeVehicle", e);
+            markFail(op == OP_ADD ? "addVehicle" : "removeVehicle", e);
             return true;
         }
     }
 
     /**
      * 主執行緒：決定這個 add／remove 要不要交給原版，並更新簿記。on（還沒回原版）時範圍外的 add 延後、沒送過的車的 remove
-     * 不送；送過的車緊接著重新加入時用離開半徑。判斷位置丟例外時這輛車照原版送、本次啟動回原版。
+     * 不送；送過的車緊接著重新加入時用離開半徑。判斷位置丟例外時這輛車照原版送，錯誤記下、等這一筆送完再回原版。
      */
     private static boolean decide(int op, BaseVehicle vehicle) {
         boolean scoped = MODE == MODE_ON && !fallen;
@@ -272,7 +285,7 @@ public final class MdcPathfindVehicleScope {
                 DEFERRED.remove(vehicle);
                 SENT.add(vehicle);
                 adds++;
-                fail("addVehicle", e);
+                markFail("addVehicle", e);
                 return true;
             }
             if (d > k) {
@@ -287,49 +300,87 @@ public final class MdcPathfindVehicleScope {
         return true;
     }
 
-    /** 主執行緒：照順序處理排隊的呼叫（需要時呼叫原版）與簿記事件。 */
+    /**
+     * 主執行緒：照順序處理排隊的呼叫（需要時呼叫原版）與簿記事件。停止簿記之後 add／remove 照原版送、簿記事件丟掉。
+     * 每一筆送完才處理這一筆造成的錯誤（回原版或停止簿記），不重入、不跳過後面的筆數。
+     */
     static void drain() {
-        for (Op op = PENDING.poll(); op != null; op = PENDING.poll()) {
-            BaseVehicle v = op.vehicle();
-            switch (op.kind()) {
-                case OP_ADD -> {
-                    if (decide(OP_ADD, v)) {
-                        pathfind().addVehicle(v);
+        if (draining) {
+            return;
+        }
+        draining = true;
+        try {
+            for (Op op = PENDING.poll(); op != null; op = PENDING.poll()) {
+                BaseVehicle v = op.vehicle();
+                try {
+                    switch (op.kind()) {
+                        case OP_ADD -> {
+                            if (disabled || decide(OP_ADD, v)) {
+                                pathfind().addVehicle(v);
+                            }
+                        }
+                        case OP_REMOVE -> {
+                            if (disabled || decide(OP_REMOVE, v)) {
+                                pathfind().removeVehicle(v);
+                            }
+                        }
+                        case NOTE_ADD -> {
+                            if (!disabled) {
+                                justRemoved = null;
+                                SENT.add(v);
+                                adds++;
+                            }
+                        }
+                        default -> {
+                            if (!disabled) {
+                                justRemoved = null;
+                                SENT.remove(v);
+                                removes++;
+                            }
+                        }
                     }
+                } catch (RuntimeException | LinkageError e) {
+                    markFail("drain", e);
                 }
-                case OP_REMOVE -> {
-                    if (decide(OP_REMOVE, v)) {
-                        pathfind().removeVehicle(v);
-                    }
-                }
-                case NOTE_ADD -> {
-                    justRemoved = null;
-                    DEFERRED.remove(v);
-                    SENT.add(v);
-                    adds++;
-                }
-                default -> {
-                    justRemoved = null;
-                    SENT.remove(v);
-                    removes++;
-                }
+                settle();
             }
+        } finally {
+            draining = false;
         }
     }
 
-    /** 停止簿記之後：還在排隊的 add／remove 照順序交給原版，簿記事件丟掉。 */
-    private static void drainDirect() {
-        for (Op op = PENDING.poll(); op != null; op = PENDING.poll()) {
-            try {
-                if (op.kind() == OP_ADD) {
-                    pathfind().addVehicle(op.vehicle());
-                } else if (op.kind() == OP_REMOVE) {
-                    pathfind().removeVehicle(op.vehicle());
-                }
-            } catch (RuntimeException | LinkageError e) {
-                anomalies++;
-            }
+    private static void markFail(String where, Throwable e) {
+        anomalies++;
+        if (failCause == null) {
+            failWhere = where;
+            failCause = e;
         }
+    }
+
+    private static void settleOnMain() {
+        if (failCause != null && MODE != MODE_OFF && onMainThread()) {
+            settle();
+        }
+    }
+
+    /** 主執行緒：處理記下的錯誤（on 還沒回原版就回原版），之後停止簿記。不消費佇列。 */
+    private static void settle() {
+        Throwable e = failCause;
+        if (e == null) {
+            return;
+        }
+        String where = failWhere;
+        failCause = null;
+        failWhere = null;
+        if (disabled) {
+            return;
+        }
+        if (MODE == MODE_ON && !fallen) {
+            fallback("exception@" + where + ": " + e);
+        } else {
+            DebugLog.log(TAG + "例外（" + where + "）：" + e + "；本次啟動停止簿記，全部照原版轉送");
+        }
+        disabled = true;
     }
 
     static boolean onMainThread() {
@@ -340,11 +391,6 @@ public final class MdcPathfindVehicleScope {
     // ---- 範圍更新器（主執行緒，約每秒一次） ----
 
     private static void tick(IsoCell cell, Set<BaseVehicle> vehicles) {
-        if (!onMainThread()) {
-            OFF_THREAD.incrementAndGet();
-            return;
-        }
-        drain();
         long now = System.nanoTime();
         if (!announced) {
             announced = true;
@@ -408,17 +454,12 @@ public final class MdcPathfindVehicleScope {
     }
 
     /**
-     * 回原版（本次啟動永久）：先照原規則排空佇列，再把延後集合裡還在世界上的車各補送一次 addVehicle；之後排進來的照原版送。
+     * 回原版（本次啟動永久）：把延後集合裡還在世界上的車各補送一次 addVehicle。不消費佇列：還在排隊的呼叫之後由主執行緒照
+     * 順序、以回原版之後的規則處理（全部送），所以和背景呼叫的先後只有一種順序。
      */
     static void fallback(String reason) {
-        if (fallen || falling) {
+        if (fallen) {
             return;
-        }
-        falling = true;
-        try {
-            drain();
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
         }
         fallen = true;
         fallbackReason = reason;
@@ -443,25 +484,9 @@ public final class MdcPathfindVehicleScope {
                 anomalies++;
             }
         }
-        try {
-            drain();
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
-        }
         DebugLog.log(TAG + "回原版（" + reason + "）：補送 " + sent + " 輛延後的載具"
                 + (gone > 0 ? "，略過已離開世界 " + gone + " 輛" : "") + (thrown > 0 ? "，補送丟例外 " + thrown + " 輛" : "")
                 + "；本次啟動之後全部照原版轉送");
-    }
-
-    private static void fail(String where, Throwable e) {
-        anomalies++;
-        if (MODE == MODE_ON && !fallen) {
-            fallback("exception@" + where + ": " + e);
-        } else {
-            DebugLog.log(TAG + "例外（" + where + "）：" + e + "；本次啟動停止簿記，全部照原版轉送");
-        }
-        disabled = true;
-        drainDirect();
     }
 
     // ---- 動物 chunk 格網 ----

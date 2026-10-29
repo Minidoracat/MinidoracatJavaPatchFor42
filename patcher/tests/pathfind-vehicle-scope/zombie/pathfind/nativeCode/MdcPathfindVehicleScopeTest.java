@@ -26,13 +26,16 @@ import zombie.vehicles.BaseVehicle;
  * <ul>
  *   <li>{@code observe}／{@code off}／{@code on-probeoff}：同一串呼叫（啟動迴圈、更新器、遲滯移動、沒送過與送過的重新加入、
  *       移除、原版 addToWorld 內 CheckSwap 造成的 remove→add→add、非主執行緒的 add 與移除送過的車、探針看到非動物）送到
- *       替身 native 的序列與原版逐筆相同。observe 另驗 vehNative 鏡像（含非主執行緒送的與移除的）與 M2 beat 欄位
- *       （與暴力列舉相同），off 零計數零 log，on-probeoff 從頭就回原版。</li>
+ *       替身 native 的序列與原版逐筆相同（on-probeoff 的非主執行緒呼叫改在主執行緒下一次入口照順序送）。observe 另驗
+ *       vehNative 鏡像（含非主執行緒送的與移除的）與 M2 beat 欄位（與暴力列舉相同），off 零計數零 log，on-probeoff 從頭就回原版。</li>
  *   <li>{@code on}：只送範圍內的車；進入 ≤8 chunk、離開 &gt;12 chunk 的遲滯；1 秒限頻；沒送過的車重新加入或移除不送任務；
  *       送過的車重新加入用離開半徑；探針在 native findPath 之前就記下非動物，下一次更新補送延後的車各一次並之後全照原版。</li>
  *   <li>{@code on-throw}：helper 例外 → 補送延後的車各一次、之後停止簿記。</li>
  *   <li>{@code on-thread}：非主執行緒呼叫不直接呼叫原版，排進佇列由主執行緒照同一套規則決定：延後的車在背景重新加入、
- *       之後回原版時只補送一次；背景移除送過的車由主執行緒送 remove；回原版之後背景呼叫照原版直接送；已離開世界的延後車不補送。</li>
+ *       之後回原版時只補送一次；背景移除送過的車由主執行緒送 remove；回原版之後背景呼叫仍排隊、由主執行緒照原版送；
+ *       已離開世界的延後車不補送。</li>
+ *   <li>{@code on-race}：回原版補送延後車 A 的途中，背景執行緒對另一輛延後車 V 做 remove＋add：native 對 V 沒有重複 add。</li>
+ *   <li>{@code on-reenter}：佇列依序 ADD(V)、REMOVE(V)，第一次範圍查詢丟例外：V 照順序送 add 再 remove，最後不在 native。</li>
  * </ul>
  * 替身 native 只覆寫 {@code addVehicle}／{@code removeVehicle}／{@code findPath} 記序列（沒有 JNI）；車是 allocateInstance 的
  * 原版 BaseVehicle（座標用反射寫），動物是覆寫座標與死亡的 IsoAnimal 子類別。
@@ -45,10 +48,19 @@ public final class MdcPathfindVehicleScopeTest {
     static final class FakeNative extends PathfindNative {
         final List<String> calls = Collections.synchronizedList(new ArrayList<>());
         int catAtFindPath = Integer.MIN_VALUE;
+        /** 送出這一筆（例如 "add A"）之後在同一個執行緒上跑一次 {@link #hook}。 */
+        String hookOn;
+        Runnable hook;
 
         @Override
         public void addVehicle(BaseVehicle vehicle) {
-            calls.add("add " + name(vehicle));
+            String call = "add " + name(vehicle);
+            calls.add(call);
+            if (hook != null && call.equals(hookOn)) {
+                Runnable h = hook;
+                hook = null;
+                h.run();
+            }
         }
 
         @Override
@@ -144,6 +156,8 @@ public final class MdcPathfindVehicleScopeTest {
             case "observe", "off", "on", "on-probeoff" -> script(mode);
             case "on-throw" -> onThrow();
             case "on-thread" -> onThread();
+            case "on-race" -> onRace();
+            case "on-reenter" -> onReenter();
             default -> expect("未知 argv " + mode, false);
         }
         if (failed > 0) {
@@ -297,29 +311,30 @@ public final class MdcPathfindVehicleScopeTest {
                             && deferred().isEmpty() && MdcPathfindVehicleScope.fallenForTest()
                             && "nonAnimal:other".equals(MdcPathfindVehicleScope.fallbackReasonForTest()));
         }
-        // S8 非主執行緒：新車 V6 的 add、送過的 V5 的 remove。observe 與回原版之後照原版時機直接送，主執行緒排空時補簿記
+        // S8 非主執行緒：新車 V6 的 add、送過的 V5 的 remove。observe 照原版時機直接送、主執行緒排空時補簿記；
+        // on（含 on-probeoff）一律排隊，由主執行緒下一次入口照順序送（回原版之後全部送）
         BaseVehicle v6 = vehicle("V6", 3000F, 3000F);
         background(() -> {
             MdcPathfindVehicleScope.addVehicle(fake, v6);
             MdcPathfindVehicleScope.removeVehicle(fake, v5);
         });
-        VANILLA.add("add V6@bg");
-        VANILLA.add("remove V5@bg");
+        String bg = observe || off ? "@bg" : "";
+        VANILLA.add("add V6" + bg);
+        VANILLA.add("remove V5" + bg);
         cellVehicles.remove(v5);
         moveChunk(v3, 160);
         before = fake.calls.size();
         tick(true);
-        boolean noLeave = fake.calls.size() == before;
         BaseVehicle v8 = vehicle("V8", 3000F, 3000F);
         add(v8);
         remove(v8);
         if (on) {
-            expect("on S8 回原版後：更新器不移除、遠處新車照送、非主執行緒照原版直接送並計數",
-                    noLeave && fake.calls.subList(before, fake.calls.size()).equals(List.of("add V8", "remove V8"))
-                            && fake.calls.contains("add V6@bg") && fake.calls.contains("remove V5@bg")
+            expect("on S8 回原版後：非主執行緒呼叫排隊、主執行緒下一次更新照順序送；更新器不移除；遠處新車照送",
+                    fake.calls.subList(before, fake.calls.size()).equals(
+                            List.of("add V6", "remove V5", "add V8", "remove V8"))
                             && MdcPathfindVehicleScope.offThreadForTest() == 2);
             expect("on 全序列", fake.calls.equals(List.of("add V1", "add V3", "remove V1", "add V1", "remove V3", "add V3",
-                    "remove V1", "add V9", "add V9", "add V2", "add V5", "add V6@bg", "remove V5@bg", "add V8", "remove V8")));
+                    "remove V1", "add V9", "add V9", "add V2", "add V5", "add V6", "remove V5", "add V8", "remove V8")));
             expect("on vehNative＝送進 native 的淨集合（V3、V9、V2、V6；背景移除的 V5 不在）",
                     names(MdcPathfindVehicleScope.sentForTest()).equals(Set.of("V3", "V9", "V2", "V6")));
             List<String> rows = rows();
@@ -328,6 +343,11 @@ public final class MdcPathfindVehicleScopeTest {
         } else {
             expect(mode + " 全序列與原版逐筆相同（" + fake.calls.size() + " 筆）", fake.calls.equals(VANILLA)
                     && VANILLA.size() == 18);
+        }
+        if (mode.equals("on-probeoff")) {
+            expect("on-probeoff：非主執行緒呼叫也在主執行緒送（背景執行緒從不直接呼叫原版）",
+                    fake.calls.stream().noneMatch(c -> c.endsWith("@bg")) && MdcPathfindVehicleScope.offThreadForTest() == 2
+                            && MdcPathfindVehicleScope.pendingForTest() == 0);
         }
         if (observe) {
             String line = MdcPathfindVehicleScope.beatForTest(cellVehicles);
@@ -442,8 +462,8 @@ public final class MdcPathfindVehicleScopeTest {
     /**
      * 非主執行緒（on，還沒回原版）：背景呼叫不直接呼叫原版，排進佇列，主執行緒排空時照同一套規則決定。
      * (a) 延後的車在背景重新加入 → 兩筆都不送、仍延後；(b) 背景移除送過的車 → 主執行緒送 remove；(c) 背景移除延後的車不送；
-     * (d) 回原版只補送一次（不重複 add）、略過已離開世界的；(e) 回原版之後背景呼叫照原版直接送、主執行緒補簿記。
-     * 修正前的程式在 (a) 會從背景直接送 remove／add、回原版時又補送一次 add（native 收到重複 id）。
+     * (d) 回原版只補送一次（不重複 add）、略過已離開世界的；(e) 回原版之後背景呼叫仍排隊、由主執行緒照原版送並簿記。
+     * d1a0a15 之前的程式在 (a) 會從背景直接送 remove／add、回原版時又補送一次 add（native 收到重複 id）。
      */
     private static void onThread() throws Exception {
         BaseVehicle v1 = vehicle("V1", 1040F, 1000F);
@@ -492,10 +512,113 @@ public final class MdcPathfindVehicleScopeTest {
         BaseVehicle v5 = vehicle("V5", 3000F, 3000F);
         background(() -> MdcPathfindVehicleScope.addVehicle(fake, v5));
         tick(false);
-        expect("on-thread (e) 回原版之後背景 add 照原版直接送、主執行緒把 V5 記進 vehNative",
-                fake.calls.equals(List.of("add V1", "remove V1", "add V2", "add V5@bg"))
+        expect("on-thread (e) 回原版之後背景 add 仍排隊、由主執行緒照原版送，V5 記進 vehNative",
+                fake.calls.equals(List.of("add V1", "remove V1", "add V2", "add V5"))
                         && MdcPathfindVehicleScope.sentForTest().contains(v5) && MdcPathfindVehicleScope.pendingForTest() == 0
                         && MdcPathfindVehicleScope.offThreadForTest() == 5 && MdcPathfindVehicleScope.anomaliesForTest() == 0);
+    }
+
+    /**
+     * 回原版交接的競態：補送延後車 A 時（替身 native 的回呼裡），背景執行緒對另一輛延後車 V 做 remove＋add，再讓回原版繼續。
+     * d1a0a15 先設回原版才補送，背景看到回原版就直接送 remove V／add V，回原版接著又補送 add V → native 收到重複 add。
+     */
+    private static void onRace() throws Exception {
+        BaseVehicle n = vehicle("N", 1040F, 1000F);
+        BaseVehicle a = vehicle("A", 1200F, 1000F);
+        BaseVehicle v = vehicle("V", 1300F, 1000F);
+        cellVehicles.addAll(List.of(n, a, v));
+        add(n);
+        add(a);
+        add(v);
+        tick(true);
+        expect("on-race 起點：送 N，A、V 延後", fake.calls.equals(List.of("add N")) && deferred().equals(List.of("A", "V")));
+        fake.hookOn = "add A";
+        fake.hook = () -> {
+            try {
+                background(() -> {
+                    MdcPathfindVehicleScope.removeVehicle(fake, v);
+                    MdcPathfindVehicleScope.addVehicle(fake, v);
+                });
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        MdcPathfindProbe.findPath(fake, new PathFindRequest(), null, false);
+        tick(false);
+        tick(false);
+        List<String> dup = new ArrayList<>();
+        Set<String> inNative = replay(fake.calls, dup);
+        expect("on-race 回原版補送 A 時背景對延後車 V 做 remove＋add：native 對 V 沒有重複 add、最後 N／A／V 各在一次"
+                        + "（實際 " + fake.calls + "）",
+                fake.hook == null && dup.isEmpty() && inNative.equals(Set.of("N", "A", "V"))
+                        && names(MdcPathfindVehicleScope.sentForTest()).equals(Set.of("N", "A", "V"))
+                        && MdcPathfindVehicleScope.pendingForTest() == 0 && MdcPathfindVehicleScope.anomaliesForTest() == 0
+                        && "nonAnimal:other".equals(MdcPathfindVehicleScope.fallbackReasonForTest()));
+        expect("on-race 背景執行緒沒有直接呼叫原版、委派順序 add N, add A, add V, remove V, add V",
+                fake.calls.equals(List.of("add N", "add A", "add V", "remove V", "add V")));
+    }
+
+    /**
+     * 例外路徑的重入：佇列依序 ADD(V)、REMOVE(V)，對第一次範圍查詢注入例外（V 所在格的動物 chunk 清單第一次讀就丟）。
+     * d1a0a15 在 ADD(V) 的錯誤處理裡回原版並排空佇列，先送了後面的 remove V，回到外層才送 add V → V 留在 native。
+     */
+    private static void onReenter() throws Exception {
+        BaseVehicle n = vehicle("N", 1040F, 1000F);
+        cellVehicles.add(n);
+        add(n);
+        tick(true);
+        BaseVehicle v = vehicle("V", 1601F, 1601F); // chunk (200,200)，離動物 75 chunk
+        cellVehicles.add(v);
+        int bucket = Math.floorDiv(200 - MdcPathfindVehicleScope.K_IN, MdcPathfindVehicleScope.GRID);
+        Field f = MdcPathfindVehicleScope.class.getDeclaredField("BUCKETS");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        gnu.trove.map.hash.TLongObjectHashMap<gnu.trove.list.array.TLongArrayList> buckets =
+                (gnu.trove.map.hash.TLongObjectHashMap<gnu.trove.list.array.TLongArrayList>) f.get(null);
+        int[] thrown = new int[1];
+        buckets.put(MdcPathfindVehicleScope.key(bucket, bucket), new gnu.trove.list.array.TLongArrayList() {
+            @Override
+            public int size() {
+                if (thrown[0]++ == 0) {
+                    throw new IllegalStateException("range");
+                }
+                return 0;
+            }
+        });
+        background(() -> {
+            MdcPathfindVehicleScope.addVehicle(fake, v);
+            MdcPathfindVehicleScope.removeVehicle(fake, v);
+        });
+        cellVehicles.remove(v);
+        tick(false);
+        tick(false);
+        List<String> dup = new ArrayList<>();
+        Set<String> inNative = replay(fake.calls, dup);
+        expect("on-reenter 佇列 ADD(V)、REMOVE(V)，第一次範圍查詢丟例外：照順序送 add V 再 remove V，最後 native 沒有 V"
+                        + "（實際 " + fake.calls + "）",
+                thrown[0] >= 1 && fake.calls.equals(List.of("add N", "add V", "remove V")) && dup.isEmpty()
+                        && inNative.equals(Set.of("N")) && MdcPathfindVehicleScope.pendingForTest() == 0);
+        expect("on-reenter 例外後回原版並停止簿記（anomalies 1、原因 exception@addVehicle）",
+                MdcPathfindVehicleScope.fallenForTest() && MdcPathfindVehicleScope.disabledForTest()
+                        && MdcPathfindVehicleScope.anomaliesForTest() == 1
+                        && "exception@addVehicle: java.lang.IllegalStateException: range".equals(
+                        MdcPathfindVehicleScope.fallbackReasonForTest()));
+    }
+
+    /** 照呼叫序列模擬 native 裡的載具集合（去掉 @bg）；已在集合裡又 add 記進 {@code dup}。 */
+    private static Set<String> replay(List<String> calls, List<String> dup) {
+        Set<String> in = new HashSet<>();
+        for (String c : calls) {
+            String id = c.substring(c.indexOf(' ') + 1).replace("@bg", "");
+            if (c.startsWith("add ")) {
+                if (!in.add(id)) {
+                    dup.add(id);
+                }
+            } else {
+                in.remove(id);
+            }
+        }
+        return in;
     }
 
     // ---- 工具 ----
