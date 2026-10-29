@@ -224,6 +224,17 @@ public final class MdcPathfindProbe {
         if (!ENABLED) {
             return pathfind.findPath(request, pathBb, render);
         }
+        if (nonAnimalCat < 0) {
+            // W85 的回原版要在這個請求進 native 之前就看得到（記一次就不再判斷）
+            try {
+                int cat = category(request.mover);
+                if (cat != CAT_ANIMAL) {
+                    nonAnimalCat = cat;
+                }
+            } catch (RuntimeException e) {
+                anomalies++;
+            }
+        }
         long t0 = System.nanoTime();
         int result;
         try {
@@ -292,9 +303,6 @@ public final class MdcPathfindProbe {
             countRefail(request);
         }
         int cat = category(request.mover);
-        if (cat != CAT_ANIMAL && nonAnimalCat < 0) {
-            nonAnimalCat = cat;
-        }
         CAT_N[cat]++;
         CAT_NS[cat] += ns;
         if (failed) {

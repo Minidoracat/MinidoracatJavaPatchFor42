@@ -7892,10 +7892,16 @@ public final class SmokeCheck {
         MethodNode hAdd = method(distJava, helper, "addVehicle", "(L" + pfn + ";L" + veh + ";)V");
         MethodNode hRemove = method(distJava, helper, "removeVehicle", "(L" + pfn + ";L" + veh + ";)V");
         MethodNode hGet = method(distJava, helper, "getVehicles", "(L" + cell + ";)Ljava/util/Set;");
-        failed += check("W85 helper 契約：addVehicle／removeVehicle 各只有 1 處呼叫原版同名方法、不呼叫另一個；getVehicles 第一個呼叫"
+        MethodNode hRoute = method(distJava, helper, "route", "(IL" + veh + ";)Z");
+        MethodNode hDrain = method(distJava, helper, "drain", "()V");
+        failed += check("W85 helper 契約：addVehicle／removeVehicle 各只有 1 處呼叫原版同名方法、不呼叫另一個；route（決定送不送、"
+                        + "背景呼叫排隊）不直接呼叫原版；drain（主執行緒排空佇列）add／remove 各 1 處；getVehicles 第一個呼叫"
                         + "就是 IsoCell.getVehicles（恰 1 次）",
                 countExactCalls(hAdd, virt, pfn, "addVehicle", vehDesc) == 1 && countCalls(hAdd, pfn, "removeVehicle") == 0
                         && countExactCalls(hRemove, virt, pfn, "removeVehicle", vehDesc) == 1 && countCalls(hRemove, pfn, "addVehicle") == 0
+                        && countCalls(hRoute, pfn, "addVehicle") + countCalls(hRoute, pfn, "removeVehicle") == 0
+                        && countExactCalls(hDrain, virt, pfn, "addVehicle", vehDesc) == 1
+                        && countExactCalls(hDrain, virt, pfn, "removeVehicle", vehDesc) == 1
                         && callNames(hGet).get(0).equals(cell + ".getVehicles") && countCalls(hGet, cell, "getVehicles") == 1);
         return failed;
     }
