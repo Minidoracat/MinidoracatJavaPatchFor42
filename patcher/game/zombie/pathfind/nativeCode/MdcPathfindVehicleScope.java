@@ -42,8 +42,8 @@ import zombie.vehicles.BaseVehicle;
  *   <li>更新器約每秒一次：延後的車進入範圍就照原版 {@code addVehicle}，送過的車離開遲滯半徑就照原版 {@code removeVehicle}。
  *       沒送過的車被移除或重新加入（scriptReloaded）都不送任務；送過的車重新加入時用離開半徑判斷。</li>
  *   <li>自動回原版（本次啟動永久）：W74 探針看到非動物的尋路請求者（player、aggroZombie、zombie、other）、本類任何例外、
- *       沒有伺服器主執行緒時的呼叫，或探針被關掉（{@code -Dmdc.pathfindProbe=0}，看不到請求者）。回原版時先排空佇列，
- *       再把延後集合裡還在世界上的車各補送一次 {@code addVehicle}，記一行 log。這是保險，不是屏障：探針在第一個非動物
+ *       沒有伺服器主執行緒時的呼叫，或探針被關掉（{@code -Dmdc.pathfindProbe=0}，看不到請求者）。回原版只把延後集合裡還在
+ *       世界上的車各補送一次 {@code addVehicle}、記一行 log，不消費佇列；還在佇列裡的操作由外層消費者接著依序處理。這是保險，不是屏障：探針在第一個非動物
  *       請求的 native {@code findPath} 之前就記下，但那個請求與補送套用之前的請求仍在少了延後載具的世界裡搜尋。</li>
  * </ul>
  *
