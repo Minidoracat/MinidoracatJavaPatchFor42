@@ -350,8 +350,9 @@ public final class WorldMapVisibilityIndexTest {
     }
 
     /**
-     * 跨輪變動：71 塊 → D 從第 3 塊移到最後一塊並縮到 63 塊（words 2→1）→ 1 塊 → 65 塊（名單打亂）→ 71 塊（名單與塊順序打亂）。
-     * 每輪都對全部有序名字對與全部玩家比對原版，抓 bitset 池重用時清零範圍或 words 變動的錯；原版答案本身在輪間確實改變。
+     * 跨輪變動：71 塊 → D 從第 3 塊移到最後一塊並縮到 63 塊（words 2→1）→ 1 塊（這一輪 {@code Faction.factions} 順序反過來，
+     * B 從派系 0 變成派系 1）→ 65 塊（名單打亂、派系順序恢復）→ 71 塊（名單與塊順序打亂）。每輪都對全部有序名字對與全部玩家
+     * 比對原版，抓 bitset 池重用時清零範圍、words 變動或派系表沒清空的錯；原版答案本身在輪間確實改變。
      */
     private static void crossRounds() throws Exception {
         List<String[]> base = new ArrayList<>();
@@ -380,10 +381,16 @@ public final class WorldMapVisibilityIndexTest {
         StringBuilder bad = new StringBuilder();
         boolean[] df = new boolean[worlds.size()];
         boolean[] bd = new boolean[worlds.size()];
+        Faction[] bFac = new Faction[worlds.size()];
         for (int w = 0; w < worlds.size(); w++) {
             setWorld(worlds.get(w));
+            boolean flip = w == 2;
+            if (flip) {
+                Collections.reverse(Faction.factions);   // 同一個清單物件，只換順序：B 第一個符合的變成派系 1
+            }
             df[w] = SafeHouse.isInSameSafehouse(D, F);
             bd[w] = SafeHouse.isInSameSafehouse(B, D);
+            bFac[w] = Faction.getPlayerFaction(player(B));
             WorldMapVisibilityIndex.begin();
             boolean same = true;
             for (String a : NAMES) {
@@ -394,17 +401,23 @@ public final class WorldMapVisibilityIndexTest {
                 same &= WorldMapVisibilityIndex.getPlayerFaction(p) == Faction.getPlayerFaction(p);
             }
             WorldMapVisibilityIndex.end();
+            if (flip) {
+                Collections.reverse(Faction.factions);
+            }
             if (!same) {
                 bad.append(' ').append(sizes[w]);
             }
         }
         setWorld(null);
         long[] c = delta(c0);
-        expect("跨輪 71→63→1→65→71 塊（D 換到最後一塊、名單與塊順序打亂）：每輪全部有序名字對與玩家等於原版"
+        expect("跨輪 71→63→1→65→71 塊（D 換到最後一塊、1 塊那輪派系順序反過來、名單與塊順序打亂）：每輪全部有序名字對與玩家等於原版"
                         + (bad.length() > 0 ? "（不符：" + bad + "）" : ""),
                 bad.length() == 0);
-        expect("跨輪原版答案確實改變：D·F 只在 63 塊那輪同屋；B·D 在 63 塊與 1 塊那輪不同屋",
-                !df[0] && df[1] && !df[2] && !df[3] && !df[4] && bd[0] && !bd[1] && !bd[2] && bd[3] && bd[4]);
+        expect("跨輪原版答案確實改變：D·F 只在 63 塊那輪同屋；B·D 在 63 塊與 1 塊那輪不同屋；B 的派系只在 1 塊那輪是派系 1、其他輪是派系 0；"
+                        + "派系恢復成 buildWorld 的順序",
+                !df[0] && df[1] && !df[2] && !df[3] && !df[4] && bd[0] && !bd[1] && !bd[2] && bd[3] && bd[4]
+                && bFac[0] == FACS.get(0) && bFac[1] == FACS.get(0) && bFac[2] == FACS.get(1) && bFac[3] == FACS.get(0)
+                && bFac[4] == FACS.get(0) && Faction.factions.equals(FACS));
         expect(engaged ? "跨輪：rounds=5、builds=5、mismatches=0" : "off：跨輪零計數",
                 engaged ? c[ROUNDS] == 5 && c[BUILDS] == 5 && c[MISMATCHES] == 0 : allZero(c));
     }
