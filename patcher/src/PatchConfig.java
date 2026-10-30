@@ -1590,6 +1590,17 @@ public final class PatchConfig {
         metaGridLoad.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/areas/DesignationZone",
                 "load", zoneLoadDesc, zoneGuard, "load"));
         metaGridLoad.expectedHits = 1;
+        // ---- W87 Map= 列了不存在的地圖資料夾時只略過那一項（docs/patches.md 2cv）----
+        // CreateStep1 照資料夾在 Map= 的序號建 MapFiles（javap offset 152 iload 4 → MapFiles.<init>，略過的資料夾也佔一號），
+        // higherPriority300x300CellExists 卻拿這個號碼索引少了那一項的 IsoLot.MapFiles：排在缺的資料夾後面的地圖比到自己，
+        // 建築全被略過（2026-10-31 正式服事故）。唯一 getLotDirectories()（offset 59，下一條 astore_3）同形改道
+        // MapFolderGuard.getLotDirectories：伺服器上拿掉不存在的資料夾，並把 GameServer.gameMap（ConnectionDetails.writeGameMap
+        // 送給客戶端的就是它）換成剩下的清單。client 路徑查核：client 的 CreateStep1 也照 GameClient.gameMap 算 priority，
+        // 收到的清單已沒有缺的那項，原版程式算出同樣結果，不必另做 client 包。-Dmdc.mapFolderGuard=0|off。
+        Patcher.MethodOps metaGridCreate = metaGrid.method("CreateStep1", "()V");
+        metaGridCreate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoMetaGrid",
+                "getLotDirectories", "()Ljava/util/ArrayList;", "zombie/mdc/MapFolderGuard", "getLotDirectories"));
+        metaGridCreate.expectedHits = 1;
         patches.add(metaGrid);
 
         // ---- W70 Bandit Raid 劇情無限迴圈（docs/patches.md 2cf）----

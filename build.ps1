@@ -147,6 +147,7 @@ $helperEntries = @(
     'zombie/mdc/PlayerLosFilter$Filter.class',
     'zombie/mdc/PlayerLosFilter$Plain.class',
     'zombie/mdc/WorldMapVisibilityIndex.class',
+    'zombie/mdc/MapFolderGuard.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -781,6 +782,24 @@ java -Xverify:all "-Dmdc.worldMapVisibilityIndex=on" -cp $wmviCp zombie.mdc.Worl
 Assert-Ok "WorldMapVisibilityIndexTest（on，查表＋抽樣比對）"
 java -Xverify:all "-Dmdc.worldMapVisibilityIndex=off" -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest off
 Assert-Ok "WorldMapVisibilityIndexTest（off，kill switch 純委派）"
+
+Write-Host "[9zza/10] Map= 列了不存在的地圖資料夾（W87）：工作目錄建 Alpha／Bravo／Zulu 三張地圖、跑真 ZomboidFileSystem.init 與真 IsoMetaGrid.CreateStep1（Zulu 沒有 map.info，載入時停在建世界之前），事故清單 Alpha;缺;Bravo;Zulu：on 伺服器與客戶端 priority 都是 0,1,2、Bravo 自己的 cell 不被真 higherPriority300x300CellExists 略過、重疊 cell 照原版讓 Alpha 優先、真 writeGameMap 送出的清單沒有缺的那項、一行警告；off 與 jar 原版兩邊 0,2,3、Bravo 被略過（負對照）；都在不動；只剩一項送出帶分號的清單；全部不存在照原版..."
+# on＝出貨組態；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版）。測試自驗 argv、開關與 IsoMetaGrid 來源。
+# 工作目錄必須是空的 map-folder-test：ZomboidFileSystem.init 從工作目錄的 media/ 建檔案表，測試在那裡建地圖。
+$mfgCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+foreach ($mfg in @(@('on', @(), $mfgCp), @('off', @('-Dmdc.mapFolderGuard=off'), $mfgCp),
+        @('vanilla', @(), "$R\work\out;$R\work\projectzomboid.jar"))) {
+    $mfgDir = "$R\work\map-folder-test"
+    Remove-Item -Recurse -Force $mfgDir -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $mfgDir | Out-Null
+    Push-Location $mfgDir
+    try {
+        java -Xverify:all -XX:-OmitStackTraceInFastThrow @($mfg[1]) -cp $mfg[2] zombie.mdc.MapFolderGuardTest $mfg[0]
+        Assert-Ok "MapFolderGuardTest（$($mfg[0])）"
+    } finally {
+        Pop-Location
+    }
+}
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

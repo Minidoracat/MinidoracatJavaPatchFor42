@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 80 個 patched class、249 個命中點、92 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 80 個 patched class、250 個命中點、93 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -88,6 +88,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W33 分娩品種守衛（[2av](docs/patches.md#2av)） | 查不到品種或幼崽定義的分娩仍會呼叫 `IsoAnimal` 建構子。 | 略過那一胎並記錄。 | 未回報 |
 | W43／W44 地面物品過期與交易失敗（[2bg](docs/patches.md#2bg)） | client 每次載入 chunk 都會清掉過期的地面物品，伺服器在 chunk 常駐期間卻從不清；兩邊的物品序號錯位，出現撿不起來的幽靈物品，而撿取失敗又不回報，讀條要空等時長再加 10 秒。 | 伺服器送出 chunk 前以相同規則清掉過期地面物品；交易失敗立即回報拒絕。 | 未回報 |
 | W69 實體 ID 撞號時的移除（[2ce](docs/patches.md#2ce)） | `IsoObject.getEntityNetID` 以座標加上物件在格子清單的序號當 ID，但地板一律算序號 0。玩家後蓋的地板排在牆或家具後面時，排第 0 個的物件就跟地板同 ID。伺服器移除它時 `UnregisterEntity` 丟 `Stored entity mismatch`：移除封包已經送給 client，伺服器卻留著物件，重登後變成拆不掉、擋住放置的殘件（多格家具缺了幾格之後，撿起、拆解、大錘都拆不掉）；chunk 卸載時整個 cell 的卸載中斷。本服 8 天 248 次，其中 19 次在移除時。 | ID 表那一格存的是別的實體時，先放進要移除的實體，讓原版照常移除，再把原本的實體放回；ID 表沒有它的實體也會離開 engine。ID 算法不動（client 也用同一套）。 | 未回報 |
+| W87 `Map=` 列了不存在的地圖資料夾（[2cv](docs/patches.md#2cv)） | 地圖 MOD 更新拿掉 `Map=` 還列著的資料夾時，原版照資料夾在 `Map=` 的序號算地圖優先順序（略過的也佔一號），比對時卻當成實際載入清單的索引：排在缺的資料夾後面的地圖比到自己，建築全部不載入（原生開關、燈、室內透視都壞，`map_meta.bin` 的建築狀態下次存檔就掉了）。客戶端拿同一份清單跑同一段程式，一起壞。本服一次 MOD 更新後 6 張地圖（含 Muldraugh）建築消失。 | 伺服器讀地圖時先拿掉不存在的資料夾（與原版同一個判斷），送給客戶端的清單也換成剩下的，等於管理員把那一項從 `Map=` 拿掉；客戶端不用裝東西。ini 不改。有缺的資料夾時 console 印一行警告。`-Dmdc.mapFolderGuard=off` 照原版保留、只警告。 | 未回報 |
 
 ### 效能：主執行緒耗時
 

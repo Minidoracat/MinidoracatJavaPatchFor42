@@ -4776,6 +4776,40 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行；沒�
 
 **退場**：官方讓世界地圖可見性改用索引、或不再每秒全表掃描時撤刀；SmokeCheck 的語境、呼叫點普查或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
 
+<a id="2cv"></a>
+## 2cv. `Map=` 列了不存在的地圖資料夾時只略過那一項（W87，server，預設 on）
+
+**事故**（2026-10-31）：一個地圖 MOD 更新時拿掉了 `Map=` 還列著的資料夾。下一次開服 console 先印 `skipping non-existent map folder media/maps/<名稱>`，接著 `invalid building metaID … while reading map_meta.bin` 16,116 行、`initSpawnBuildings: no room or building at …` 83 行（之前的場次都是 0）。排在缺的資料夾後面的 6 張地圖（含原版 Muldraugh）建築全部沒載入：原生開關不能用、燈是暗的、室內透視壞、靠 `square:getBuilding()` 的 MOD 失效；`map_meta.bin` 讀到的建築狀態找不到對象，下一次存檔就掉了。服主從 `Map=` 拿掉那一項並合併存檔才恢復，停服約 15 分鐘。
+
+**原因**（javap 對 42.21.0 jar）：`IsoMetaGrid.CreateStep1` 照資料夾在 `Map=` 的序號建 `MapFiles`——offset 152 的 `iload 4`（迴圈計數）直接當 `MapFiles.<init>` 的 priority，資料夾不存在時只印一行就 `goto` 下一圈，那個序號沒有人用。`higherPriority300x300CellExists(priority, x, y)` 卻是 `for (i = 0; i < priority; i++) IsoLot.MapFiles.get(i).hasCell300(x, y)`，把 priority 當成 `IsoLot.MapFiles` 的索引；少了一項之後，後面每張地圖的 priority 都比自己的索引大 1，迴圈會走到自己，自己當然有這一格，於是 `MetaGridLoaderThread`（:2309-2315）把這張地圖每一棟建築都當成「被更高優先的地圖蓋住」略過（房間照放，建築與房間的 metaChunk 登記都沒有）。`CellLoader`、`LotHeader`、`ZoneGenerator` 也都把 priority 當索引。客戶端拿伺服器在握手時送來的同一份清單（`ConnectionDetails.writeGameMap` 寫 `GameServer.gameMap`，`ConnectToServerState.TestTCP` 收進 `GameClient.gameMap`），跑同一段 `CreateStep1`，所以兩邊一起壞。
+
+**做法**：`CreateStep1` 在伺服器上拿到地圖清單時，先用原版同一個判斷（`ZomboidFileSystem.getDirectoryString("media/maps/<名稱>/")` 再 `isDirectory()`）找出不存在的資料夾、從清單拿掉，並把 `GameServer.gameMap` 換成剩下的清單（原版 `getLotDirectories` 剛把 `Core.gameMap` 設成它，一起換）。效果等於管理員把那一項從 `Map=` 拿掉：priority 回到等於索引，建築照常載入；之後連線的客戶端收到的清單也沒有那一項，原版程式算出同樣的 priority，**客戶端不用裝東西**。ini 不改，資料夾補回來後下一次開服照原樣。剩一項時清單寫成 `名稱;`：原版看到 `;` 才走「逐項切開」的分支，沒有分號會改走 map.info 的 `lots=` 遞迴，不存在 map.info 的地圖會拿到空清單。全部都不存在時照原版（沒有剩下的地圖可給）。
+
+**手術**（併在 W66 既有的 `IsoMetaGrid` ClassPatch，新 helper `zombie/mdc/MapFolderGuard`）：`CreateStep1()V` offset 59 唯一的 `invokevirtual IsoMetaGrid.getLotDirectories()Ljava/util/ArrayList;`（前面 `aload_0`、後面 `astore_3`）同形改道 `MapFolderGuard.getLotDirectories(IsoMetaGrid)`，`expectedHits` 1，堆疊形狀與指令長度不變、frames 不動。helper 先照原版呼叫一次（在 try 外，例外照原版上拋），只有 `GameServer.server` 時才檢查；檢查本身丟例外就記一行、回原版清單。
+
+**kill switch**：`-Dmdc.mapFolderGuard=0|off`：照原版保留缺的那一項，只印警告（需重啟）。`build.ps1` [9zza/10] 每次建置都跑過 off 路徑。
+
+console（開服讀地圖時一行）：
+
+```text
+[MinidoracatJavaPatch][MapFolderGuard] Map= 的 <n> 個地圖資料夾都在
+[MinidoracatJavaPatch][MapFolderGuard] Map= 有 <n> 個地圖資料夾不存在：media/maps/<名稱>/。已從伺服器與送給客戶端的地圖清單拿掉，其餘 <n> 張地圖照常載入建築（其中 <n> 張排在缺的資料夾後面，原版會漏載）。補回提供它的 MOD，或從 Map= 拿掉這一項。
+[MinidoracatJavaPatch][MapFolderGuard] Map= 有 <n> 個地圖資料夾不存在：media/maps/<名稱>/。-Dmdc.mapFolderGuard=off，照原版保留：排在它後面的 <n> 張地圖建築不會載入。
+```
+
+有修補時原版的 `skipping non-existent map folder` 不會再出現（清單裡已經沒有那一項），管理員改看第二行。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`CreateStep1` 恰一個 `getLotDirectories()`（`aload_0` → 呼叫 → `astore_3`），`MapFiles` 建構子恰一個、priority 參數是 `iload 4`（`iinc 4 1` 的迴圈計數）；全 jar `GameServer.gameMap` 的讀者只有 `GameServer.main`（2）、`IsoMetaGrid.getLotDirectories`、`MapFiles.getLotDirectories`、`ConnectionDetails.writeGameMap`，寫者只有 `<clinit>` 與 `main`（新增讀者或之後再寫都轉紅）。手術後：只差那一個呼叫，其餘指令與 frames 相同；helper 恰呼叫原版一次、不在 try 內。**原版本體 SHA 鎖**（同 W86 做法，各配負對照）：`CreateStep1`（helper 照抄它的略過判斷）、`getLotDirectories()`（`;` 分支）、`higherPriority300x300CellExists`（存在理由；TIS 修掉時會紅＝重估撤刀）、`ConnectionDetails.writeGameMap`、`ConnectToServerState.TestTCP`。
+- `MapFolderGuardTest`（`build.ps1` [9zza/10]，on（出貨組態）、off、jar 原版三個 JVM，自驗 argv、開關與 `IsoMetaGrid` 來源）：工作目錄建 Alpha（cell 0..2）、Bravo（cell 0..2 與 Alpha 重疊＋10..12 自己的）、Zulu（沒有 map.info）三張地圖，跑真 `ZomboidFileSystem.init()` 與真 `CreateStep1`（Zulu 讀不到 map.info，`MapFiles.load` 在建世界之前停下，`IsoLot.MapFiles` 留給測試看），再用真 `higherPriority300x300CellExists` 問 Bravo 的建築會不會被略過；伺服器跑完用真 `writeGameMap` 寫出清單，照 `TestTCP` 設成客戶端再跑一次真 `CreateStep1`。事故清單 `Alpha;缺;Bravo;Zulu`：on 伺服器與客戶端 priority 都是 0,1,2、Bravo 自己的 cell 不被略過、重疊的 cell 照原版讓 Alpha 優先、送出的清單沒有缺的那項、一行警告；off 與 jar 原版兩邊都是 0,2,3、Bravo 自己的 cell 被略過（負對照）。都在：三種模式相同、清單不動。只剩一項：送出 `Zulu;`。全部不存在：照原版。拿掉分號、不改 `GameServer.gameMap` 兩個 mutant 都會紅。
+- 實機 E2E（`javapatch-e2e` 的 `map-folder-mp`；固定世界有 `map_meta.bin`，`Map=W87Missing;Muldraugh, KY`，玩家站進 Muldraugh 出生點的房子）：原版伺服器 `skipping` 1、`invalid building metaID` 9,491、`initSpawnBuildings: no room or building` 82，metagrid 只剩 665 棟建築、21 個出生點 0 個有房間＋建築，玩家那一格沒有建築；客戶端 metagrid 的出生點也只有 1 個有。兩層樓那間（10810,10037）客戶端那一格也沒有房間與建築：畫面左邊那面牆與門沒畫出來、檯燈不亮。修補版伺服器三種錯誤都是 0、一行 `[MapFolderGuard]` 警告，伺服器與客戶端都是 9,978 棟建築、21/21 個出生點、那一格的房間是 `livingroom`、有建築，客戶端屋內的牆照常畫、燈亮。平房那間（10911,10037）原版客戶端那一格另有一棟房間名是空字串的建築、室內看起來正常（推測是客戶端從封閉房間補出來的，沒追 Java），所以前後要看伺服器 log 與 metagrid，不能只看客戶端畫面。
+
+**部署**：manifest 新增 `zombie/mdc/MapFolderGuard.class`，`IsoMetaGrid.class` 換新（172 → 173 個 class）。
+
+**不處理**：已經因為這個 bug 存檔掉的建築狀態（`map_meta.bin`）與事故期間第一次生成、沒有房間就填了戰利品的 chunk，要停服另外修；缺的那張地圖自己若有建築，它們不在 metagrid，讀 `map_meta.bin` 時照原版記 `invalid building metaID` 後略過，下一次存檔就沒了，補回資料夾也找不回來（原版一樣），所以看到「不存在」那行要當急件補 MOD 或改 `Map=`；客戶端自己少了某個地圖資料夾（MOD 版本不一致）時客戶端照原版，伺服器管不到；單一地圖名稱（不含 `;`）的 `Map=` 走 map.info 遞迴，只收存在的地圖，不會有這個問題。存檔時寫進 `map_ver.bin` 的地圖字串（`Core.gameMap`）在缺資料夾的那幾場是濾過的清單，專用伺服器開服不讀它、以 ini 為準，只有把存檔拿去單機開時看得到；Steam 伺服器瀏覽器的地圖名在建世界之前就用 ini 的 `Map=` 設好，仍列著缺的那項。
+
+**退場**：官方讓 priority 不算被略過的資料夾（或 `higherPriority300x300CellExists` 改用 priority 找對應的地圖）時撤刀；SmokeCheck 的語境、讀者清冊或原版本體 SHA 鎖變紅時先重新核對，不改斷言或 SHA 讓它變綠。
+
 ---
 
 <a id="3"></a>

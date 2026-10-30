@@ -25,6 +25,7 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
@@ -3918,6 +3919,7 @@ public final class SmokeCheck {
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
+        failed += checkMapFolderGuard(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -8127,6 +8129,105 @@ public final class SmokeCheck {
             }
         }
         return "none";
+    }
+
+    /**
+     * W87：42.21 原版本體（去 debug 的 methodText SHA-256），{class, name, desc, sha}。helper 照抄 CreateStep1 略過資料夾的判斷；
+     * 改寫後的清單靠 getLotDirectories 的「;」清單分支解析（伺服器與客戶端同一個方法），經 writeGameMap 送出、TestTCP 收下；
+     * 存在理由是 higherPriority300x300CellExists 拿 priority 當 IsoLot.MapFiles 的索引。
+     */
+    static final String[][] MAP_FOLDER_LOCKED = {
+            {"zombie/iso/IsoMetaGrid", "CreateStep1", "()V",
+                    "25818e049ce08e32f26346125aa09269dc4db3c5a09681769fa2ca3c0d4e8df9"},
+            {"zombie/iso/IsoMetaGrid", "getLotDirectories", "()Ljava/util/ArrayList;",
+                    "e89dc27e2e584d740b26b04739e396f3c2060f109e012fba04d8efc6ff7f4e1c"},
+            {"zombie/iso/IsoMetaGrid", "higherPriority300x300CellExists", "(III)Z",
+                    "2fe77364d81adb723fd7137f2ae4a8235f1951060f07847eb2d0f91bdb01d812"},
+            {"zombie/network/ConnectionDetails", "writeGameMap", "(Lzombie/core/network/ByteBufferWriter;)V",
+                    "c0caf478a9602a97855ea79f32d73bcf9bc8d53acb8fbef0f79cb39d05652450"},
+            {"zombie/gameStates/ConnectToServerState", "TestTCP", "()V",
+                    "524d1bcbb4146a9797c93cb57eb4af2f63decb0227034f2a79e23bcf42b1bb76"},
+    };
+
+    /** W87（docs/patches.md 2cv）：IsoMetaGrid.CreateStep1 唯一 getLotDirectories() 同形改道 MapFolderGuard，其餘指令不變。 */
+    static int checkMapFolderGuard(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String grid = "zombie/iso/IsoMetaGrid";
+        String helper = "zombie/mdc/MapFolderGuard";
+        String gs = "zombie/network/GameServer";
+        String listDesc = "()Ljava/util/ArrayList;";
+        String helperDesc = "(L" + grid + ";)Ljava/util/ArrayList;";
+        MethodNode v = methodFromJar(jar, grid, "CreateStep1", "()V");
+        MethodNode p = method(distJava, grid, "CreateStep1", "()V");
+        AbstractInsnNode call = null;
+        AbstractInsnNode ctor = null;
+        boolean counter = false;
+        for (AbstractInsnNode in : v.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, grid, "getLotDirectories", listDesc)) {
+                call = in;
+            } else if (isCall(in, Opcodes.INVOKESPECIAL, "zombie/iso/MapFiles", "<init>",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V")) {
+                ctor = in;
+            } else if (in instanceof IincInsnNode inc && inc.var == 4 && inc.incr == 1) {
+                counter = true;
+            }
+        }
+        failed += check("W87 vanilla 前提：CreateStep1 恰一個 getLotDirectories()（aload_0 → 呼叫 → astore_3），MapFiles 建構子恰一個、"
+                        + "priority 參數是迴圈計數 iload 4（iinc 4 1）",
+                countExactCalls(v, Opcodes.INVOKEVIRTUAL, grid, "getLotDirectories", listDesc) == 1
+                        && isVar(prevReal(call), Opcodes.ALOAD, 0) && isVar(nextReal(call), Opcodes.ASTORE, 3)
+                        && countExactCalls(v, Opcodes.INVOKESPECIAL, "zombie/iso/MapFiles", "<init>",
+                                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V") == 1
+                        && isVar(prevReal(ctor), Opcodes.ILOAD, 4) && counter);
+        // 改寫 GameServer.gameMap 等於改送給客戶端的清單：讀者與寫者清冊釘死，新增讀者（例如開服後才讀的）或之後再寫都轉紅。
+        Map<String, Integer> gets = jarWideFieldRefs(jar, Opcodes.GETSTATIC, gs, "gameMap");
+        Map<String, Integer> puts = jarWideFieldRefs(jar, Opcodes.PUTSTATIC, gs, "gameMap");
+        failed += check("W87 vanilla 前提：GameServer.gameMap 的讀者只有 main、IsoMetaGrid／MapFiles 的 getLotDirectories、"
+                        + "ConnectionDetails.writeGameMap，寫者只有 <clinit> 與 main（實際 讀 " + gets + " 寫 " + puts + "）",
+                gets.equals(Map.of(gs + ".main", 2, grid + ".getLotDirectories", 1, "zombie/iso/MapFiles.getLotDirectories", 1,
+                        "zombie/network/ConnectionDetails.writeGameMap", 1))
+                        && puts.equals(Map.of(gs + ".<clinit>", 1, gs + ".main", 1)));
+        String expected = methodText(v).replace("INVOKEVIRTUAL " + grid + ".getLotDirectories " + listDesc,
+                "INVOKESTATIC " + helper + ".getLotDirectories " + helperDesc);
+        failed += check("W87 手術後：CreateStep1 唯一 getLotDirectories() 同形改道 MapFolderGuard，其餘指令與 frames 保留",
+                !expected.equals(methodText(v)) && expected.equals(methodText(p))
+                        && countExactCalls(p, Opcodes.INVOKEVIRTUAL, grid, "getLotDirectories", listDesc) == 0);
+        MethodNode h = method(distJava, helper, "getLotDirectories", helperDesc);
+        boolean callInTry = false;
+        for (AbstractInsnNode in : h.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, grid, "getLotDirectories", listDesc)) {
+                int at = h.instructions.indexOf(in);
+                for (TryCatchBlockNode t : h.tryCatchBlocks) {
+                    callInTry |= h.instructions.indexOf(t.start) <= at && at < h.instructions.indexOf(t.end);
+                }
+            }
+        }
+        failed += check("W87 helper 契約：改道目標恰呼叫原版 getLotDirectories() 1 次，不在 try 內（例外照原版上拋）",
+                countExactCalls(h, Opcodes.INVOKEVIRTUAL, grid, "getLotDirectories", listDesc) == 1 && !callInTry);
+        // 原版本體 SHA 鎖（任一變紅＝原版算 priority、解析清單或送清單的方式改了，先重新核對；TIS 修掉 priority 時也會紅＝重估撤刀）。
+        Map<String, ClassNode> lockClasses = new HashMap<>();
+        for (String[] lock : MAP_FOLDER_LOCKED) {
+            ClassNode cn = lockClasses.get(lock[0]);
+            if (cn == null) {
+                cn = new ClassNode();
+                try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+                    new ClassReader(jf.getInputStream(jf.getJarEntry(lock[0] + ".class")).readAllBytes())
+                            .accept(cn, ClassReader.SKIP_DEBUG);
+                }
+                lockClasses.put(lock[0], cn);
+            }
+            String what = lock[0].substring(lock[0].lastIndexOf('/') + 1) + "." + lock[1] + lock[2];
+            MethodNode body = declaredMethod(cn, lock[1], lock[2]);
+            String got = body == null ? "missing" : sha256Hex(methodText(body));
+            failed += check("W87 vanilla 前提：" + what + " 本體（去 debug 的 methodText SHA-256）與 42.21 相同", got.equals(lock[3]));
+            if (!got.equals(lock[3])) {
+                System.out.println("  實際 SHA：" + got);
+            }
+            String mutation = body == null ? "none" : wmIndexMutate(body);
+            failed += check("W87 SHA 鎖負對照：" + what + " " + mutation + " → SHA 鎖變紅",
+                    got.equals(lock[3]) && !mutation.equals("none") && !sha256Hex(methodText(body)).equals(lock[3]));
+        }
+        return failed;
     }
 
     /** root 本身與它在 classes 裡的所有子類別中，宣告 watched（name+desc）各方法的類別。 */
