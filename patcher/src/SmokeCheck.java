@@ -7944,6 +7944,49 @@ public final class SmokeCheck {
         return String.join("\n", loopInvokes);
     }
 
+    /**
+     * W86：42.21 原版本體（去 debug 的 methodText SHA-256），{class, name, desc, sha}。helper 重做的兩個查詢與它們讀的 getter、
+     * 原版每次比對都呼叫的 getUsername，以及等價論證依賴的這一輪呼叫圖（送出入口、逐連線、可見性判斷、派系／安全屋兩層）。
+     * 鎖的是 jar 原版；W59 對 sendWorldMapPlayerPosition(UdpConnection) 的手術不影響。
+     */
+    static final String[][] WORLD_MAP_INDEX_LOCKED = {
+            {"zombie/characters/Faction", "getPlayerFaction", "(Lzombie/characters/IsoPlayer;)Lzombie/characters/Faction;",
+                    "01dd0bc6b794e50eae4171d629a9ab7260f1115c1630bda56404a55689cedc4e"},
+            {"zombie/characters/Faction", "getOwner", "()Ljava/lang/String;",
+                    "e8bbe5af870c008a2434a36d63cb2962ffffa893704cc7237ab74f81a1369cf6"},
+            {"zombie/characters/Faction", "getPlayers", "()Ljava/util/ArrayList;",
+                    "a2888b68e388a3bf3df04e633175f11dcc678fa8a2e43765d998f13abdf14bd3"},
+            {"zombie/iso/areas/SafeHouse", "isInSameSafehouse", "(Ljava/lang/String;Ljava/lang/String;)Z",
+                    "f143771941a65b757bce357203ddfc750f81d6fce17aabe1d26530c3f5193534"},
+            {"zombie/iso/areas/SafeHouse", "playerAllowed", "(Ljava/lang/String;)Z",
+                    "f2aa0936cc931a0853eddbf8ee64ec59292490c64014547af967e66509a9e2a7"},
+            {"zombie/iso/areas/SafeHouse", "getOwner", "()Ljava/lang/String;",
+                    "602c4a1b818a2bd5157578f17b8da7ecbfe6e7f619f8785bac1900bc64bdd1a9"},
+            {"zombie/iso/areas/SafeHouse", "getPlayers", "()Ljava/util/ArrayList;",
+                    "bcbb756e405fdd452c136288513f1295a36b7f469495f14084b14d6907a97b34"},
+            {"zombie/iso/areas/SafeHouse", "getSafehouseList", "()Ljava/util/ArrayList;",
+                    "7b349383f7a52cb46add4f1651f9b0aae5a9fd00af11b6602f1812a837bed330"},
+            {"zombie/characters/IsoPlayer", "getUsername", "()Ljava/lang/String;",
+                    "dfca414979f2d3be6228ec8fcf0267feb39da88f18eb6d95c3fd0bd31817d05a"},
+            {"zombie/characters/IsoPlayer", "getUsername", "(Ljava/lang/Boolean;Ljava/lang/Boolean;)Ljava/lang/String;",
+                    "1b517fe59ecf84d858d202514e3f772731988ee60fafb0abe18501a7c7b87e3c"},
+            {"zombie/network/GameServer", "sendWorldMapPlayerPosition", "()V",
+                    "06683b65be8c706cff81ed90459fc72f237bb1d78fdeddb70cdf43dbbb0ea039"},
+            {"zombie/network/GameServer", "sendWorldMapPlayerPosition", "(Lzombie/core/raknet/UdpConnection;)V",
+                    "422e9505070197da696a60010435b7a75481b6b44081f244edcc5b8c5a7ef30e"},
+            {"zombie/network/GameServer", "shouldSendWorldMapPlayerPosition",
+                    "(Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)Z",
+                    "36dfb53103ac5814036a644b5caedda454343a023743ea5bb6ff110a8eabdf02"},
+            {"zombie/network/GameServer", "isAnyPlayerInSameFaction",
+                    "(Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)Z",
+                    "4a69cc43d0646adf2f5ec659fb45730f37e91d6276d1a373ad2283de106fddc4"},
+            {"zombie/network/GameServer", "isInSameFaction", "(Lzombie/characters/IsoPlayer;Lzombie/characters/IsoPlayer;)Z",
+                    "3f03bf8393fe6e18a2d0bcb45fa9d2b9b9986a7704d474d28ff21bf7f4e7a422"},
+            {"zombie/network/GameServer", "isAnyPlayerInSameSafehouse",
+                    "(Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)Z",
+                    "8b0b3397ee8560b0dc5fed3c18909d00a85f532fc4fa881b18b3036b71977abf"},
+    };
+
     /** W86（docs/patches.md 2cu）：GameServer 三個方法四處同形改道 WorldMapVisibilityIndex，語境與其餘指令不變。 */
     static int checkWorldMapVisibilityIndex(Path jar, Path distJava) throws Exception {
         int failed = 0;
@@ -7993,6 +8036,30 @@ public final class SmokeCheck {
         failed += check("W86 helper 契約：round 恰呼叫原版 sendWorldMapPlayerPosition() 1 次，只有 finally、不吞例外",
                 countExactCalls(round, Opcodes.INVOKESTATIC, gs, "sendWorldMapPlayerPosition", "()V") == 1
                 && !round.tryCatchBlocks.isEmpty() && round.tryCatchBlocks.stream().allMatch(t -> t.type == null));
+        // 原版本體 SHA 鎖（任一變紅＝原版查詢或這一輪的呼叫圖改了，先重新核對等價，不改 SHA 讓它變綠）。
+        // 負對照：有條件跳轉的方法把第一個條件跳轉反過來，沒有的（getter）把第一條指令換成 NOP，SHA 都必須變紅。
+        Map<String, ClassNode> lockClasses = new HashMap<>();
+        for (String[] lock : WORLD_MAP_INDEX_LOCKED) {
+            ClassNode cn = lockClasses.get(lock[0]);
+            if (cn == null) {
+                cn = new ClassNode();
+                try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+                    new ClassReader(jf.getInputStream(jf.getJarEntry(lock[0] + ".class")).readAllBytes())
+                            .accept(cn, ClassReader.SKIP_DEBUG);
+                }
+                lockClasses.put(lock[0], cn);
+            }
+            String what = lock[0].substring(lock[0].lastIndexOf('/') + 1) + "." + lock[1] + lock[2];
+            MethodNode body = declaredMethod(cn, lock[1], lock[2]);
+            String got = body == null ? "missing" : sha256Hex(methodText(body));
+            failed += check("W86 vanilla 前提：" + what + " 本體（去 debug 的 methodText SHA-256）與 42.21 相同", got.equals(lock[3]));
+            if (!got.equals(lock[3])) {
+                System.out.println("  實際 SHA：" + got);
+            }
+            String mutation = body == null ? "none" : wmIndexMutate(body);
+            failed += check("W86 SHA 鎖負對照：" + what + " " + mutation + " → SHA 鎖變紅",
+                    got.equals(lock[3]) && !mutation.equals("none") && !sha256Hex(methodText(body)).equals(lock[3]));
+        }
         return failed;
     }
 
@@ -8040,6 +8107,26 @@ public final class SmokeCheck {
                         && nextReal(c).getOpcode() == Opcodes.IFEQ;
             }
         }
+    }
+
+    /** W86 SHA 鎖負對照：第一個條件跳轉反過來；沒有條件跳轉就把第一條真指令換成 NOP。回傳做了什麼。 */
+    static String wmIndexMutate(MethodNode m) {
+        for (AbstractInsnNode in : m.instructions) {
+            if (in instanceof JumpInsnNode j && j.getOpcode() != Opcodes.GOTO && j.getOpcode() != Opcodes.JSR) {
+                int op = j.getOpcode();
+                int flipped = op == Opcodes.IFNULL ? Opcodes.IFNONNULL : op == Opcodes.IFNONNULL ? Opcodes.IFNULL
+                        : (op - Opcodes.IFEQ) % 2 == 0 ? op + 1 : op - 1;
+                m.instructions.set(j, new JumpInsnNode(flipped, j.label));
+                return "第一個條件跳轉反過來";
+            }
+        }
+        for (AbstractInsnNode in : m.instructions) {
+            if (in.getOpcode() >= 0) {
+                m.instructions.set(in, new InsnNode(Opcodes.NOP));
+                return "第一條指令換成 NOP";
+            }
+        }
+        return "none";
     }
 
     /** root 本身與它在 classes 裡的所有子類別中，宣告 watched（name+desc）各方法的類別。 */

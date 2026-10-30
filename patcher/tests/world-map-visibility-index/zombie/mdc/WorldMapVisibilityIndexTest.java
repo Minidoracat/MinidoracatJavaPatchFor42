@@ -5,7 +5,10 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 
 import zombie.characters.Faction;
 import zombie.characters.IsoPlayer;
@@ -24,12 +27,14 @@ import zombie.network.GameServer;
  *
  * <p>真 {@code SafeHouse}／{@code Faction} 類別、真 {@code safehouseList}／{@code Faction.factions}，原版查詢直接呼叫 jar 的
  * 靜態方法。邊界資料：同名在多塊、非標記 owner 等於查詢名、只差大小寫、名單內重複名、空名單塊、跨第二個 bitset word 的塊；
- * 同名在兩個派系（第一個贏）、owner 也列在成員、沒有成員的派系、成員重複；不在任何地方的名字與 null。
+ * 同名在兩個派系（第一個贏）、派系 0 的成員又是後面派系的 owner（回派系 0）、owner 也列在成員、沒有成員的派系、成員重複；
+ * 不在任何地方的名字與 null。
  *
  * <p>鎖：所有有序名字對逐值等於原版（派系比參照）；經手術後的 GameServer 私有方法也一樣；owner／成員 null、非字串成員、
- * {@code Faction.factions} 被換掉、輪外、其他執行緒都回原版（含原版的例外）；{@code round()} 把原版這一輪包在輪內、例外照丟。
+ * {@code Faction.factions} 被換掉、輪外、其他執行緒都回原版（含原版的例外）；{@code round()} 把原版這一輪包在輪內、例外照丟；
+ * 跨輪變動（71 → 63 → 1 → 65 → 71 塊、名字換塊、名單與塊順序打亂）每輪逐對等於原版（bitset 池重用與 words 變動）。
  * 原版負對照：輪內改名單後，查表本身會答錯，on 的抽樣比對在 256 次內抓到並永久停用、之後回原版的值，observe 第一次就抓到；
- * off 同一組資料全是原版的值、零計數零 log。
+ * 停用後的下一次心跳帶 {@code disabled=true}。off 同一組資料全是原版的值、零計數零 log。
  */
 public final class WorldMapVisibilityIndexTest {
     private static final String TAG = "[MinidoracatJavaPatch][WorldMapVisibilityIndex]";
@@ -41,8 +46,9 @@ public final class WorldMapVisibilityIndexTest {
     private static final String E = "Player-E";
     private static final String F = "Player-F";
     private static final String G = "Player-G";
+    private static final String H = "Player-H";
     private static final String MARK = "@MSH:1";
-    private static final String[] NAMES = {A, A_LOWER, B, C, D, E, F, G, MARK, null};
+    private static final String[] NAMES = {A, A_LOWER, B, C, D, E, F, G, H, MARK, null};
 
     // countersForTest 的位置
     private static final int ROUNDS = 0;
@@ -98,13 +104,17 @@ public final class WorldMapVisibilityIndexTest {
         untrusted();
         outsideAndOffThread();
         rounds();
+        crossRounds();
         negativeControl();
 
         List<String> rows = rows();
         if (engaged) {
-            expect("首次生效行恰一行、含 kill switch 名稱；停用行恰一行（kind=safehouse）",
+            expect("首次生效行恰一行、含 kill switch 名稱；停用行恰一行（kind=safehouse）；停用後的心跳恰一行、帶 disabled=true",
                     rows.stream().filter(r -> r.contains("首次生效") && r.contains("-Dmdc.worldMapVisibilityIndex=0|off")).count() == 1
-                    && rows.stream().filter(r -> r.contains("停用（本次啟動改回原版）：kind=safehouse")).count() == 1);
+                    && rows.stream().filter(r -> r.contains("停用（本次啟動改回原版）：kind=safehouse")).count() == 1
+                    && rows.stream().filter(r -> r.contains(TAG + " beat ")).count() == 1
+                    && rows.stream().filter(r -> r.contains(TAG + " beat ")).allMatch(r -> r.contains("disabled=true")
+                            && r.contains("fallback[outsideRound=")));
         } else {
             expect("off：零 log 行", rows.isEmpty());
         }
@@ -120,7 +130,7 @@ public final class WorldMapVisibilityIndexTest {
         System.out.println("world-map-visibility-index OK mode=" + mode);
     }
 
-    /** 安全屋 0..70（70 在第二個 bitset word）與派系 0..4。 */
+    /** 安全屋 0..70（70 在第二個 bitset word）與派系 0..5。 */
     private static void buildWorld() {
         SafeHouse.getSafehouseList().clear();
         Faction.factions.clear();
@@ -132,11 +142,12 @@ public final class WorldMapVisibilityIndexTest {
             house("@MSH:" + (i + 10), B);  // 同名在多塊
         }
         house("@MSH:99", F, G);            // 70：第二個 word
-        faction(A, A, B);                  // 0：owner 也列在成員
+        faction(A, A, B, H);               // 0：owner 也列在成員；H 是成員
         faction("Player-X", B, C);         // 1：B 也在這裡，第一個贏
         faction(D);                        // 2：沒有成員
         faction(A_LOWER);                  // 3：只差大小寫
         faction(F, G, G);                  // 4：成員重複
+        faction(H);                        // 5：H 是派系 0 的成員、又是這裡的 owner → 原版回 0（先放全部 owner 會錯回 5）
     }
 
     private static void house(String owner, String... members) {
@@ -181,9 +192,10 @@ public final class WorldMapVisibilityIndexTest {
                 SafeHouse.isInSameSafehouse(A, B) && SafeHouse.isInSameSafehouse(A, A_LOWER) && SafeHouse.isInSameSafehouse(A, C)
                 && SafeHouse.isInSameSafehouse(F, G) && SafeHouse.isInSameSafehouse(MARK, A)
                 && !SafeHouse.isInSameSafehouse(F, A) && !SafeHouse.isInSameSafehouse(E, A) && !SafeHouse.isInSameSafehouse(A_LOWER, B));
-        expect("原版派系釘住：A→0、B→0（第一個贏）、C→1、D→2、a→3、G→4、E 與 null 名字→null",
-                fac(A) == FACS.get(0) && fac(B) == FACS.get(0) && fac(C) == FACS.get(1) && fac(D) == FACS.get(2)
-                && fac(A_LOWER) == FACS.get(3) && fac(G) == FACS.get(4) && fac(E) == null && fac(null) == null);
+        expect("原版派系釘住：A→0、B→0（第一個贏）、H→0（成員先於後面派系的 owner）、C→1、D→2、a→3、G→4、E 與 null 名字→null",
+                fac(A) == FACS.get(0) && fac(B) == FACS.get(0) && fac(H) == FACS.get(0) && fac(C) == FACS.get(1)
+                && fac(D) == FACS.get(2) && fac(A_LOWER) == FACS.get(3) && fac(G) == FACS.get(4) && fac(E) == null
+                && fac(null) == null);
         expect("null 玩家：helper 與原版都丟 NullPointerException", npe);
         int facQueries = NAMES.length + 1;
         if (engaged) {
@@ -338,6 +350,92 @@ public final class WorldMapVisibilityIndexTest {
     }
 
     /**
+     * 跨輪變動：71 塊 → D 從第 3 塊移到最後一塊並縮到 63 塊（words 2→1）→ 1 塊 → 65 塊（名單打亂）→ 71 塊（名單與塊順序打亂）。
+     * 每輪都對全部有序名字對與全部玩家比對原版，抓 bitset 池重用時清零範圍或 words 變動的錯；原版答案本身在輪間確實改變。
+     */
+    private static void crossRounds() throws Exception {
+        List<String[]> base = new ArrayList<>();
+        for (SafeHouse h : HOUSES) {
+            String[] spec = new String[h.getPlayers().size() + 1];
+            spec[0] = h.getOwner();
+            for (int i = 0; i < h.getPlayers().size(); i++) {
+                spec[i + 1] = h.getPlayers().get(i);
+            }
+            base.add(spec);
+        }
+        Random rnd = new Random(86);
+        List<String[]> r2 = new ArrayList<>(base.subList(0, 62));
+        r2.set(3, new String[]{base.get(3)[0], B});
+        String[] last = Arrays.copyOf(base.get(70), base.get(70).length + 1);
+        last[last.length - 1] = D;
+        r2.add(last);
+        List<String[]> r4 = new ArrayList<>(base.subList(0, 64));
+        r4.add(base.get(70));
+        List<String[]> r5 = new ArrayList<>(base);
+        Collections.shuffle(r5, rnd);
+        List<List<String[]>> worlds = List.of(base, r2, List.<String[]>of(base.get(0)), shuffledMembers(r4, rnd),
+                shuffledMembers(r5, rnd));
+        String[] sizes = {"71", "63", "1", "65", "71"};
+        long[] c0 = WorldMapVisibilityIndex.countersForTest();
+        StringBuilder bad = new StringBuilder();
+        boolean[] df = new boolean[worlds.size()];
+        boolean[] bd = new boolean[worlds.size()];
+        for (int w = 0; w < worlds.size(); w++) {
+            setWorld(worlds.get(w));
+            df[w] = SafeHouse.isInSameSafehouse(D, F);
+            bd[w] = SafeHouse.isInSameSafehouse(B, D);
+            WorldMapVisibilityIndex.begin();
+            boolean same = true;
+            for (String a : NAMES) {
+                for (String b : NAMES) {
+                    same &= WorldMapVisibilityIndex.isInSameSafehouse(a, b) == SafeHouse.isInSameSafehouse(a, b);
+                }
+                IsoPlayer p = player(a);
+                same &= WorldMapVisibilityIndex.getPlayerFaction(p) == Faction.getPlayerFaction(p);
+            }
+            WorldMapVisibilityIndex.end();
+            if (!same) {
+                bad.append(' ').append(sizes[w]);
+            }
+        }
+        setWorld(null);
+        long[] c = delta(c0);
+        expect("跨輪 71→63→1→65→71 塊（D 換到最後一塊、名單與塊順序打亂）：每輪全部有序名字對與玩家等於原版"
+                        + (bad.length() > 0 ? "（不符：" + bad + "）" : ""),
+                bad.length() == 0);
+        expect("跨輪原版答案確實改變：D·F 只在 63 塊那輪同屋；B·D 在 63 塊與 1 塊那輪不同屋",
+                !df[0] && df[1] && !df[2] && !df[3] && !df[4] && bd[0] && !bd[1] && !bd[2] && bd[3] && bd[4]);
+        expect(engaged ? "跨輪：rounds=5、builds=5、mismatches=0" : "off：跨輪零計數",
+                engaged ? c[ROUNDS] == 5 && c[BUILDS] == 5 && c[MISMATCHES] == 0 : allZero(c));
+    }
+
+    private static List<String[]> shuffledMembers(List<String[]> specs, Random rnd) {
+        List<String[]> out = new ArrayList<>();
+        for (String[] s : specs) {
+            List<String> m = new ArrayList<>(Arrays.asList(s).subList(1, s.length));
+            Collections.shuffle(m, rnd);
+            m.add(0, s[0]);
+            out.add(m.toArray(new String[0]));
+        }
+        return out;
+    }
+
+    /** safehouseList 換成照 spec 新建的塊；null＝放回 buildWorld 的原始 71 塊。 */
+    private static void setWorld(List<String[]> specs) {
+        SafeHouse.getSafehouseList().clear();
+        if (specs == null) {
+            SafeHouse.getSafehouseList().addAll(HOUSES);
+            return;
+        }
+        for (String[] s : specs) {
+            SafeHouse h = new SafeHouse(0, 0, 1, 1, s[0]);
+            h.getPlayers().clear();
+            h.getPlayers().addAll(Arrays.asList(s).subList(1, s.length));
+            SafeHouse.getSafehouseList().add(h);
+        }
+    }
+
+    /**
      * 原版負對照：輪內把 B 移出第 0 塊（實際不可能的輪內變動）。查表本身仍答 A·B 同屋（錯），on 的抽樣比對要在 256 次內抓到、
      * 永久停用並回原版的值；observe 第一次就抓到；off 一直是原版的值。之後 round() 不再進輪。
      */
@@ -383,6 +481,14 @@ public final class WorldMapVisibilityIndexTest {
         zero.add(B);
         liveAfter &= WorldMapVisibilityIndex.isInSameSafehouse(A, B);
         expect("停用（或 off）後 round() 只呼叫原版、不進輪；查詢讀 live 原版", plain && liveAfter);
+        int before5 = rows().size();
+        WorldMapVisibilityIndex.expireBeatForTest();
+        WorldMapVisibilityIndex.round();
+        List<String> after = rows();
+        boolean beat = after.size() == before5 + 1 && after.get(after.size() - 1).contains(TAG + " beat ")
+                && after.get(after.size() - 1).contains("disabled=true");
+        expect(engaged ? "停用後心跳照常：間隔到了的下一輪印一行 beat、帶 disabled=true" : "off：心跳間隔到了也不印",
+                engaged ? beat : after.size() == before5);
     }
 
     /** udpEngine.connections 換成會記錄自己被讀時是否在輪內的空清單。 */

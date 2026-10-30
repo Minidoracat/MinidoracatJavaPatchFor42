@@ -773,7 +773,7 @@ Assert-Ok "MdcPathfindVehicleScopeTest（on-race，回原版補送途中背景 r
 java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on-reenter
 Assert-Ok "MdcPathfindVehicleScopeTest（on-reenter，排空途中例外不重入、照順序送）"
 
-Write-Host "[9zz/10] 世界地圖可見性索引（W86）：真 SafeHouse／Faction 邊界資料逐對等於原版（含 null、大小寫、重複、空名單、第二個 word、同名兩派系第一個贏），經手術後 GameServer 私有方法進 helper；owner／成員 null、非字串成員、factions 被換掉、輪外、其他執行緒回原版（例外類別相同）；round() 包住原版、例外照丟；原版負對照：輪內改名單，on 抽樣 256 次內抓到並永久停用、observe 第一次抓到；off 純委派零計數零 log..."
+Write-Host "[9zz/10] 世界地圖可見性索引（W86）：真 SafeHouse／Faction 邊界資料逐對等於原版（含 null、大小寫、重複、空名單、第二個 word、同名兩派系第一個贏、成員先於後面派系的 owner），經手術後 GameServer 私有方法進 helper；owner／成員 null、非字串成員、factions 被換掉、輪外、其他執行緒回原版（例外類別相同）；round() 包住原版、例外照丟；跨輪 71→63→1→65→71 塊（換塊、words 變動、順序打亂）每輪逐對等於原版；原版負對照：輪內改名單，on 抽樣 256 次內抓到並永久停用、observe 第一次抓到，停用後心跳照常帶 disabled=true；off 純委派零計數零 log..."
 $wmviCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest observe
 Assert-Ok "WorldMapVisibilityIndexTest（observe，出貨組態）"

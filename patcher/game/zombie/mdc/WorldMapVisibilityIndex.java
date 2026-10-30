@@ -23,12 +23,13 @@ import zombie.network.GameServer;
  * <p>手術：{@code main} 唯一的 {@code sendWorldMapPlayerPosition()} 改道 {@link #round()}，{@code isInSameFaction} 兩個
  * {@code Faction.getPlayerFaction}、{@code isAnyPlayerInSameSafehouse} 唯一的 {@code SafeHouse.isInSameSafehouse} 同形改道
  * 同名方法。等價依據：這一輪的呼叫圖不改安全屋、派系與名單，所以輪內的快照等於每次查詢當下的原版狀態；每輪重建。
- * 只在 {@code round()} 的執行緒、輪內才查表；輪外（{@code receiveWorldMapPlayerPosition}）、其他執行緒、名字是 null、
- * 清單含 null／非預期型別（原版會丟例外）、{@code Faction.factions} 被換掉時都呼叫原版。
+ * 只在 {@code round()} 的執行緒、輪內才查表；輪外（{@code receiveWorldMapPlayerPosition}）、其他執行緒、安全屋查詢的名字是 null、
+ * 派系查詢的玩家是 null、清單含 null／非預期型別（原版會丟例外）、{@code Faction.factions} 被換掉時都呼叫原版；派系查詢的玩家
+ * 名字是 null 時查表回 null（和原版相同，計入 fast）。
  *
  * <p>{@code -Dmdc.worldMapVisibilityIndex}：{@code 2|observe}（程式預設：每次兩邊都算、回原版、計時）、{@code 1|on}
  * （查表，每 256 次比對原版一次）、{@code 0|off}；未知值當 observe，需重啟。不一致即本次啟動永久停用（全走原版）並記一行。
- * 心跳每 5 分鐘一行，只有計數與耗時，不記名字。
+ * 心跳每 5 分鐘一行（停用後照樣每 5 分鐘一行，帶 {@code disabled=true}），只有計數與耗時，不記名字。
  */
 public final class WorldMapVisibilityIndex {
     static final int MODE_OFF = 0;
@@ -102,7 +103,10 @@ public final class WorldMapVisibilityIndex {
         }
     }
 
-    /** {@code GameServer.main} offset 4755 的改道目標：原版這一輪包在 begin／end 之間，例外照樣往外丟。 */
+    /**
+     * {@code GameServer.main} offset 4755 的改道目標：原版這一輪包在 begin／end 之間，例外照樣往外丟。已停用時只跑原版，
+     * 但心跳照常（finally 裡），停用後的 beat 仍印 {@code disabled=true} 與輪外／其他執行緒的計數。
+     */
     public static void round() {
         boolean engage = MODE != MODE_OFF && !disabled;
         if (engage) {
@@ -113,6 +117,8 @@ public final class WorldMapVisibilityIndex {
         } finally {
             if (engage) {
                 end();
+            } else if (MODE != MODE_OFF) {
+                maybeBeat();
             }
         }
     }
@@ -408,6 +414,11 @@ public final class WorldMapVisibilityIndex {
 
     static boolean disabledForTest() {
         return disabled;
+    }
+
+    /** 讓下一次 {@code maybeBeat} 不受 5 分鐘間隔限制（測試用）。 */
+    static void expireBeatForTest() {
+        lastBeatNs = System.nanoTime() - BEAT_NS;
     }
 
     static boolean inRoundForTest() {
