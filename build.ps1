@@ -146,6 +146,7 @@ $helperEntries = @(
     'zombie/mdc/PlayerLosFilter.class',
     'zombie/mdc/PlayerLosFilter$Filter.class',
     'zombie/mdc/PlayerLosFilter$Plain.class',
+    'zombie/mdc/WorldMapVisibilityIndex.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -771,6 +772,15 @@ java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nat
 Assert-Ok "MdcPathfindVehicleScopeTest（on-race，回原版補送途中背景 remove＋add 不重複 add）"
 java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest on-reenter
 Assert-Ok "MdcPathfindVehicleScopeTest（on-reenter，排空途中例外不重入、照順序送）"
+
+Write-Host "[9zz/10] 世界地圖可見性索引（W86）：真 SafeHouse／Faction 邊界資料逐對等於原版（含 null、大小寫、重複、空名單、第二個 word、同名兩派系第一個贏），經手術後 GameServer 私有方法進 helper；owner／成員 null、非字串成員、factions 被換掉、輪外、其他執行緒回原版（例外類別相同）；round() 包住原版、例外照丟；原版負對照：輪內改名單，on 抽樣 256 次內抓到並永久停用、observe 第一次抓到；off 純委派零計數零 log..."
+$wmviCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest observe
+Assert-Ok "WorldMapVisibilityIndexTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.worldMapVisibilityIndex=on" -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest on
+Assert-Ok "WorldMapVisibilityIndexTest（on，查表＋抽樣比對）"
+java -Xverify:all "-Dmdc.worldMapVisibilityIndex=off" -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest off
+Assert-Ok "WorldMapVisibilityIndexTest（off，kill switch 純委派）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

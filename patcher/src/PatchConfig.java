@@ -1031,6 +1031,27 @@ public final class PatchConfig {
         wmFullData.redirects.add(wmChangeCount);
         wmFullData.expectedHits = 1;
 
+        // W86：世界地圖玩家位置的派系／安全屋查詢索引（docs/patches.md 2cu）。main 唯一的 sendWorldMapPlayerPosition()（javap offset
+        // 4755，前面是 sendWorldMapPlayerPositionLimiter.Check→ifeq，後面 goto，例外表 4755 4758 4761 Exception）改道 round()；
+        // isInSameFaction 的兩個 Faction.getPlayerFaction（offset 1／6，各接 astore_2／astore_3）與 isAnyPlayerInSameSafehouse 唯一的
+        // SafeHouse.isInSameSafehouse（offset 29，前面兩個 getUsername）同形改道同名 helper。
+        // -Dmdc.worldMapVisibilityIndex=2|observe（預設）／1|on／0|off。
+        String wmIndex = "zombie/mdc/WorldMapVisibilityIndex";
+        Patcher.MethodOps wmRound = gameServer.method("main", "([Ljava/lang/String;)V");
+        wmRound.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/GameServer",
+                "sendWorldMapPlayerPosition", "()V", wmIndex, "round"));
+        wmRound.expectedHits = 1;
+        Patcher.MethodOps wmFaction = gameServer.method("isInSameFaction",
+                "(Lzombie/characters/IsoPlayer;Lzombie/characters/IsoPlayer;)Z");
+        wmFaction.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/characters/Faction", "getPlayerFaction",
+                "(Lzombie/characters/IsoPlayer;)Lzombie/characters/Faction;", wmIndex, "getPlayerFaction"));
+        wmFaction.expectedHits = 2;
+        Patcher.MethodOps wmSafehouse = gameServer.method("isAnyPlayerInSameSafehouse",
+                "(Lzombie/core/raknet/UdpConnection;Lzombie/characters/IsoPlayer;)Z");
+        wmSafehouse.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/iso/areas/SafeHouse", "isInSameSafehouse",
+                "(Ljava/lang/String;Ljava/lang/String;)Z", wmIndex, "isInSameSafehouse"));
+        wmSafehouse.expectedHits = 1;
+
         // W79：UpdateItemSprite 距離檢查（docs/patches.md 2cn）。頭部 begin(connection)（slot 1）綁定連線，方法內唯一
         // IsoCell.getGridSquare(III)（javap offset 47，之後 ifnull 跳 return）改道 SpriteUpdateGuard：連線上沒有玩家在範圍內時
         // 回 null，原版什麼都不做。kill switch -Dmdc.spriteUpdateRange=0|off。

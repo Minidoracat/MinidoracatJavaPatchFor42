@@ -4729,6 +4729,55 @@ console（首次生效一行、每 60 秒一行 beat、回原版或例外各一�
 
 ---
 
+<a id="2cu"></a>
+## 2cu. 世界地圖可見性索引（W86，server，預設 observe）
+
+**成本**：伺服器主迴圈每秒一次（`sendWorldMapPlayerPositionLimiter`，`UpdateLimit(1000)`）呼叫 `GameServer.sendWorldMapPlayerPosition()`，對每條連線、每位玩家跑 `shouldSendWorldMapPlayerPosition`。`MapRemotePlayerVisibility=2`（FACTION_ONLY）時，沒有 SeeWorldMap 能力的連線對每位活著、fully connected、不是自己的玩家，一定先跑 `isAnyPlayerInSameFaction` → `isInSameFaction` 的兩次 `Faction.getPlayerFaction(IsoPlayer)`（依序走訪整份 `Faction.factions`，每個派系比 owner 再逐一比成員），不同派系再跑 `isAnyPlayerInSameSafehouse` → `SafeHouse.isInSameSafehouse(String,String)`（iterator 走訪整份 `safehouseList`，每塊 `players.contains` 再 `owner.equals`）。成本約為連線數 × 玩家數 ×（派系名單總長 ×2 ＋ 安全屋名單總長）。本服晚峰（506 塊安全屋、塊內名單合計 3,426 筆、164 個派系、成員合計 336 筆；安全屋 MOD 一個 claim 最多 4 塊、每塊各存一份名單）在本機用真類別量，50 人一輪約 15.9 ms（以 `getPlayerFaction(String)` 量）；改量伺服器實際走的 `getPlayerFaction(IsoPlayer)`（每次比對都呼叫一次 `getUsername()`，javap offset 28／64）是 25–29 ms。整輪擠在同一幀，每秒一個尖峰。兩次晚峰 thread dump 的頂層 frame 都有 `isInSameSafehouse`／`playerAllowed`，比例和量測一致。
+
+**做法**：這一輪第一次查詢時建兩張表：名字 → 所在安全屋的 bitset（位置＝`safehouseList` 的索引，owner 與每個字串成員各標一位），名字 → 依 `Faction.factions` 順序第一個 owner 或成員等於它的派系（依序 `putIfAbsent`，owner 先於成員）。之後 `isInSameSafehouse(a,b)` ＝ 兩個 bitset 有交集，`getPlayerFaction(p)` ＝ 查 `p.getUsername()`。表每輪重建、輪結束就清空（不留 `SafeHouse`／`Faction` 參照到下一輪），bitset 用池子重用。
+
+**等價論證**：(1) 這一輪的呼叫圖（`shouldSend…` 的連線查詢、能力判斷、`ServerOptions` 讀值、`checkCanSeeClient`、派系／安全屋查詢、`startPacket`、`WorldMapRemotePlayers` 的條目複製、封包寫入與送出）不改 `safehouseList`、塊的名單與 owner、`Faction.factions` 與成員，也不觸發 Lua 事件；安全屋與派系只在主執行緒變動，所以輪內的快照等於每次查詢當下原版讀到的狀態。(2) 原版 `isInSameSafehouse(a,b)` ＝ 存在一塊 s 使 `allowed(s,a) && allowed(s,b)`，`allowed(s,n)` ＝ `players.contains(n) || owner.equals(n)`；n 不是 null 時 `contains` 用 `n.equals(e)`，null 與非字串元素都不會中，所以只標字串成員等價；結果只是布林值，走訪順序不影響。(3) 原版 `getPlayerFaction` 回「依清單順序第一個 owner 或成員等於名字」的派系，依序 `putIfAbsent` 得到同一個物件，`isInSameFaction` 比的是 `==`。(4) `HashMap` 用 `hashCode`＋`equals`，和 `String.equals` 一樣區分大小寫、逐字元比對。(5) 原版會丟例外或語意可能不同的狀態一律交給原版重現：塊是 null 或非 `SafeHouse`、owner 或 `players` 是 null（這一輪安全屋全走原版）；派系清單是 null、派系是 null、owner 是 null、成員是 null 或非字串（這一輪派系全走原版）；查詢名字是 null、玩家是 null、`Faction.factions` 在輪內被換成別的清單。on 的 1/256 抽樣與 observe 的逐次比對是最後防線。
+
+**手術**（併在既有 `GameServer` ClassPatch，三個新 `MethodOps`，全是同形 `INVOKESTATIC` 改道，堆疊形狀與指令長度不變、frames 不動；新 helper `zombie/mdc/WorldMapVisibilityIndex`）：
+- `main([Ljava/lang/String;)V` offset 4755 唯一的 `invokestatic GameServer.sendWorldMapPlayerPosition()V`（前面 `getstatic sendWorldMapPlayerPositionLimiter`→`UpdateLimit.Check()Z`→`ifeq`，後面 `goto`，被例外表 `4755 4758 4761 java/lang/Exception` 包住）→ `round()`，`expectedHits` 1。全 jar 只有這一處呼叫它。
+- `isInSameFaction(IsoPlayer,IsoPlayer)Z` offset 1、6 的 `invokestatic Faction.getPlayerFaction(IsoPlayer)`（分別接 `astore_2`／`astore_3`）→ `getPlayerFaction(IsoPlayer)`，`expectedHits` 2。
+- `isAnyPlayerInSameSafehouse(UdpConnection,IsoPlayer)Z` offset 29 的 `invokestatic SafeHouse.isInSameSafehouse(String,String)`（前面是兩個 `IsoPlayer.getUsername()`，後面 `ifeq`）→ `isInSameSafehouse(String,String)`，`expectedHits` 1。
+- 兩個私有方法各只有一個呼叫點（`isAnyPlayerInSameFaction`、`shouldSendWorldMapPlayerPosition`），送（每秒一輪）與收（`receiveWorldMapPlayerPosition`，只在客戶端計數不符時來）兩條路徑都會進 helper。
+
+**只在輪內、只在輪的執行緒**：`round()` 在呼叫原版前記下目前執行緒、結束（含原版丟例外）後清掉；例外照樣往外丟，由 `main` 原本的 catch 吞掉。查詢時沒有在輪內（`receiveWorldMapPlayerPosition` 或其他時機）記 `outsideRound`、不是輪的執行緒記 `offThread`，兩者都直接呼叫原版。表在輪內第一次查詢時才建，全是管理員或沒有可送對象的輪不建；建表本身丟例外（不該發生）就本次啟動停用。
+
+**模式與 kill switch**：`-Dmdc.worldMapVisibilityIndex=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。
+- `observe`：每次查詢兩邊都算、回原版的值，逐次比對；分別累計原版查詢與索引（建表＋查表）的耗時，心跳印每輪平均／最大。用來在正式服拿到同一場、同負載下「原版每輪幾 ms、索引每輪幾 ms」的絕對值。
+- `on`：查表；兩種查詢共用計數，每 256 次多跑一次原版比對。
+- `off`：`round()` 只呼叫原版、不進輪，查詢全部直接呼叫原版；不計數、不記 log。
+- 任何比對不一致（mismatch）就本次啟動永久停用，之後全走原版（`round()` 也不再進輪），記一行，只有種類（`safehouse`／`faction`）與計數，不記名字。
+
+**上線順序**：先用程式預設 observe 跑一個晚峰，看心跳 `mismatches=0`、`anomalies=0`、`disabled=false`，記下 `vanillaUs` 與 `indexUs`；服主同意後改 JVM 參數 `-Dmdc.worldMapVisibilityIndex=on`（下一次重啟生效，改 JVM 參數要同步兩份 json）。切 on 之後 `roundUs` 應從 observe 的「原版＋索引」降到「索引＋1/256 比對」。緊急降級 `off`（需重啟），`build.ps1` [9zz/10] 每次建置都跑過 off 路徑。
+
+console（首次生效一行、每 5 分鐘一行 beat、停用時一行；沒有名字）：
+
+```text
+[MinidoracatJavaPatch][WorldMapVisibilityIndex] 首次生效（-Dmdc.worldMapVisibilityIndex=0|off 停用、1|on 查表（每 256 次比對原版）、2|observe 兩邊都算回原版（程式預設））mode=observe rounds=1 …
+[MinidoracatJavaPatch][WorldMapVisibilityIndex] beat mode=<on|observe> rounds=<n> queries[faction=<n> safehouse=<n>] fast=<n> fallback[outsideRound=<n> offThread=<n> null=<n> untrusted=<n> factionsSwapped=<n>] builds=<n> buildUs=<avg>/<max> roundUs=<avg>/<max> [vanillaUs=<avg>/<max> indexUs=<avg>/<max>] audits=<n> mismatches=<n> disabled=<true|false> anomalies=<n>
+[MinidoracatJavaPatch][WorldMapVisibilityIndex] 停用（本次啟動改回原版）：kind=<safehouse|faction|build:例外類別> <同 beat 欄位>
+```
+
+欄位：`rounds` 是進輪的次數（每秒 1）；`queries` 是輪內、輪的執行緒上的兩種查詢次數，`fast` 是其中走表的次數（observe 是比對次數）；`fallback` 的 `outsideRound`／`offThread` 是輪外與其他執行緒的查詢（直接原版、不算進 queries），`null` 是名字或玩家是 null，`untrusted` 是清單不可信的那一輪的查詢，`factionsSwapped` 是派系清單在輪內被換掉；`builds`／`buildUs` 是建表次數與每次耗時；`roundUs` 是整輪 `sendWorldMapPlayerPosition()`（含封包）的耗時；方括號那段只有 observe：每輪原版查詢合計耗時與索引（建表＋查表）合計耗時；`audits` 是比對次數（observe 每次、on 每 256 次）。
+
+**本機量測**（2026-10-31，本機 Ryzen 9 9950X3D、JDK 25、ZGC；用正式服匿名化結構（只有整數 id 與名字長度）、真 `SafeHouse`／`Faction` 類別，直接呼叫 helper 的 `begin`／`end` 與兩個查詢入口，對照原版 `getPlayerFaction(IsoPlayer)`／`isInSameSafehouse`；每連線 1 個 slot，暖機 400 輪、量 300 輪，每輪斷言送出人數相同）：on 時 N＝32 原版中位 8.7 ms、helper 0.19 ms，N＝50 原版 25.3 ms、helper 0.35 ms（含每 256 次一次的原版比對，每輪約 28 次）。observe 一輪比原版多約 0–4%（N＝32 9.2 對 9.4 ms、N＝50 30.6 對 29.5 ms），心跳自己記到的每輪 `indexUs` 平均 0.30 ms（N＝32）／0.58 ms（N＝50）、`buildUs` 約 0.13 ms。正式服的實際數字等 observe 心跳。
+
+**部署**：manifest 新增 `zombie/mdc/WorldMapVisibilityIndex.class`，`GameServer.class` 換新（171 → 172 個 class）。
+
+**不處理**：`MapRemotePlayerVisibility` 改 1（ALL）可讓成本歸零，但所有人都會在地圖上看到所有人，是玩法決定；`receiveWorldMapPlayerPosition` 的少量查詢照原版；安全屋 MOD 一個 claim 多塊各存一份名單、讓所有走訪 `safehouseList` 的原版程式一起放大，屬於 MOD 設計；`getConnectionFromPlayer`、`hasCapability`、`values()` 複製與封包寫入不在範圍。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——全 jar `GameServer.sendWorldMapPlayerPosition()V` 只有 `GameServer.main` 呼叫 1 次，前面依序 `getstatic sendWorldMapPlayerPositionLimiter`、`UpdateLimit.Check()Z`、`ifeq`，後面 `goto`，恰被一個起點是它、終點是那個 `goto`、處理器 `astore 26` 的 `java/lang/Exception` 例外區塊包住；`isInSameFaction` 兩個 `getPlayerFaction` 前面是 `aload_0`／`aload_1`、後面 `astore_2`／`astore_3`；`isAnyPlayerInSameSafehouse` 唯一的 `isInSameSafehouse` 前面是 `aload_3→getUsername→aload_1→getUsername`、後面 `ifeq`；`GameServer` 全 class 恰 2 個 `getPlayerFaction(IsoPlayer)`、1 個 `isInSameSafehouse`，兩個私有方法各只有 1 個呼叫點。手術後同一套語境（只換被呼叫者）、原呼叫歸零、helper 呼叫各 1／2／1，三個方法的 methodText 除被替換的那一行外逐字相同（含例外表與 frames）；helper 契約：`round` 恰呼叫原版 1 次、只有 finally。
+- `WorldMapVisibilityIndexTest`（`build.ps1` [9zz/10]，observe（出貨組態）、on、off 三個 JVM，帶 `-Xverify:all`，自驗 argv 與 MODE）：真 `SafeHouse`／`Faction`、真 `safehouseList`／`Faction.factions`。邊界資料：同名在 68 塊、非標記 owner 等於查詢名、只差大小寫的兩個名字、名單內重複名、空名單塊、第 70 塊（第二個 bitset word）；同名在兩個派系（第一個贏）、owner 也列在成員、沒有成員的派系、只差大小寫的 owner、成員重複；不在任何地方的名字、null 名字、null 玩家。輪內 100 個有序名字對（含 null）安全屋逐值、10 個玩家派系逐參照等於原版，原版答案本身也釘住（避免全 false 假綠）；null 玩家兩邊都丟 NPE；經 dist 手術後的 `GameServer.isInSameFaction`／`isAnyPlayerInSameSafehouse`（反射呼叫）結果等於原版且真的進 helper（計數）；安全屋 owner 設 null、派系成員塞 null、派系成員塞非字串：這一輪那一種全走原版、與原版丟同一個例外類別，另一種照樣查表；安全屋名單塞非字串照樣查表且結果相同；`Faction.factions` 輪內被換掉回原版讀新清單；輪外改名單後回原版的新值；輪內改名單後其他執行緒的查詢看得到（走原版）；`round()` 讓原版 `sendWorldMapPlayerPosition()` 在輪內執行（替身 `udpEngine.connections` 記錄被讀時是否在輪內），原版丟例外照丟、輪照樣結束。**原版負對照**：輪內把一個名字移出第 0 塊（實際不可能的輪內變動），on 的查表在停用前答錯 146 次、第 147 次的抽樣比對抓到，`mismatches=1`、停用、之後 453 次都回原版的值，`round()` 不再進輪；observe 第一次查詢就抓到。off 同一套全是原版的值、零計數、零 log。log 斷言：首次生效與停用各恰一行、不含任何名字。
+
+**退場**：官方讓世界地圖可見性改用索引、或不再每秒全表掃描時撤刀；SmokeCheck 的語境或呼叫點普查變紅時先重新核對等價，不改斷言讓它變綠。
+
+---
+
 <a id="3"></a>
 ## 3. 部署後驗證清單
 

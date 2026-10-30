@@ -3917,6 +3917,7 @@ public final class SmokeCheck {
         failed += checkLightSettings(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
+        failed += checkWorldMapVisibilityIndex(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7941,6 +7942,104 @@ public final class SmokeCheck {
         }
         java.util.Collections.sort(loopInvokes);
         return String.join("\n", loopInvokes);
+    }
+
+    /** W86（docs/patches.md 2cu）：GameServer 三個方法四處同形改道 WorldMapVisibilityIndex，語境與其餘指令不變。 */
+    static int checkWorldMapVisibilityIndex(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String gs = "zombie/network/GameServer";
+        String helper = "zombie/mdc/WorldMapVisibilityIndex";
+        String player = "zombie/characters/IsoPlayer";
+        String faction = "zombie/characters/Faction";
+        String safe = "zombie/iso/areas/SafeHouse";
+        String facDesc = "(L" + player + ";)L" + faction + ";";
+        String shDesc = "(Ljava/lang/String;Ljava/lang/String;)Z";
+        String mainDesc = "([Ljava/lang/String;)V";
+        // {方法, desc, 原 owner, 原 name, 原 desc（＝helper desc）, helper name}
+        String[][] sites = {
+                {"main", mainDesc, gs, "sendWorldMapPlayerPosition", "()V", "round"},
+                {"isInSameFaction", "(L" + player + ";L" + player + ";)Z", faction, "getPlayerFaction", facDesc, "getPlayerFaction"},
+                {"isAnyPlayerInSameSafehouse", "(Lzombie/core/raknet/UdpConnection;L" + player + ";)Z", safe, "isInSameSafehouse",
+                        shDesc, "isInSameSafehouse"}};
+        int[] hits = {1, 2, 1};
+        ClassNode vGs = classNodeFromJar(jar, gs);
+        ClassNode pGs = classNode(distJava, gs);
+        boolean vanillaOk = jarWideCallers(jar, Opcodes.INVOKESTATIC, gs, "sendWorldMapPlayerPosition", "()V")
+                .equals(List.of(gs + ".main" + mainDesc))
+                && classWideCalls(vGs, Opcodes.INVOKESTATIC, faction, "getPlayerFaction", facDesc) == 2
+                && classWideCalls(vGs, Opcodes.INVOKESTATIC, safe, "isInSameSafehouse", shDesc) == 1
+                && classWideCalls(vGs, Opcodes.INVOKESTATIC, gs, sites[1][0], sites[1][1]) == 1
+                && classWideCalls(vGs, Opcodes.INVOKESTATIC, gs, sites[2][0], sites[2][1]) == 1;
+        boolean patchedOk = true;
+        for (int i = 0; i < sites.length; i++) {
+            String[] s = sites[i];
+            MethodNode v = methodFromJar(jar, gs, s[0], s[1]);
+            MethodNode p = method(distJava, gs, s[0], s[1]);
+            vanillaOk &= wmIndexContextOk(v, s[2], s[3], s[4], hits[i]);
+            patchedOk &= wmIndexContextOk(p, helper, s[5], s[4], hits[i])
+                    && countExactCalls(p, Opcodes.INVOKESTATIC, s[2], s[3], s[4]) == 0
+                    && classWideCalls(pGs, Opcodes.INVOKESTATIC, helper, s[5], s[4]) == hits[i];
+            String expected = methodText(v).replace("INVOKESTATIC " + s[2] + "." + s[3] + " " + s[4],
+                    "INVOKESTATIC " + helper + "." + s[5] + " " + s[4]);
+            patchedOk &= !expected.equals(methodText(v)) && expected.equals(methodText(p));
+        }
+        failed += check("W86 vanilla 前提：sendWorldMapPlayerPosition() 全 jar 只有 GameServer.main 呼叫 1 次（前面 limiter.Check→ifeq、後面 goto、"
+                        + "恰被一個 Exception 例外區塊包住）；isInSameFaction 兩個 getPlayerFaction 接 astore_2／astore_3；isAnyPlayerInSameSafehouse "
+                        + "唯一 isInSameSafehouse 前面是兩個 getUsername、後面 ifeq；兩個私有方法各只有 1 個呼叫點",
+                vanillaOk);
+        failed += check("W86 手術後：四處同形改道 WorldMapVisibilityIndex（round／getPlayerFaction×2／isInSameSafehouse），語境、例外區塊與其餘指令不變",
+                patchedOk);
+        MethodNode round = method(distJava, helper, "round", "()V");
+        failed += check("W86 helper 契約：round 恰呼叫原版 sendWorldMapPlayerPosition() 1 次，只有 finally、不吞例外",
+                countExactCalls(round, Opcodes.INVOKESTATIC, gs, "sendWorldMapPlayerPosition", "()V") == 1
+                && !round.tryCatchBlocks.isEmpty() && round.tryCatchBlocks.stream().allMatch(t -> t.type == null));
+        return failed;
+    }
+
+    /** W86 命中點語境；vanilla 與手術後共用，只換被呼叫者。 */
+    static boolean wmIndexContextOk(MethodNode m, String owner, String name, String desc, int want) {
+        List<AbstractInsnNode> calls = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (isCall(in, Opcodes.INVOKESTATIC, owner, name, desc)) {
+                calls.add(in);
+            }
+        }
+        if (calls.size() != want) {
+            return false;
+        }
+        AbstractInsnNode c = calls.get(0);
+        switch (m.name) {
+            case "main": {
+                AbstractInsnNode ifeq = prevReal(c);
+                AbstractInsnNode check = prevReal(ifeq);
+                AbstractInsnNode after = nextReal(c);
+                int guarded = 0;
+                for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                    if (nextReal(t.start) == c && nextReal(t.end) == after && "java/lang/Exception".equals(t.type)
+                            && isVar(nextReal(t.handler), Opcodes.ASTORE, 26)) {
+                        guarded++;
+                    }
+                }
+                return ifeq.getOpcode() == Opcodes.IFEQ
+                        && isCall(check, Opcodes.INVOKEVIRTUAL, "zombie/core/utils/UpdateLimit", "Check", "()Z")
+                        && isField(prevReal(check), Opcodes.GETSTATIC, "zombie/network/GameServer",
+                                "sendWorldMapPlayerPositionLimiter", "Lzombie/core/utils/UpdateLimit;")
+                        && after.getOpcode() == Opcodes.GOTO && guarded == 1;
+            }
+            case "isInSameFaction":
+                return isVar(prevReal(c), Opcodes.ALOAD, 0) && isVar(nextReal(c), Opcodes.ASTORE, 2)
+                        && isVar(prevReal(calls.get(1)), Opcodes.ALOAD, 1) && isVar(nextReal(calls.get(1)), Opcodes.ASTORE, 3);
+            default: {
+                String getName = "()Ljava/lang/String;";
+                AbstractInsnNode u2 = prevReal(c);
+                AbstractInsnNode u1 = prevReal(prevReal(u2));
+                return isCall(u2, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "getUsername", getName)
+                        && isVar(prevReal(u2), Opcodes.ALOAD, 1)
+                        && isCall(u1, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "getUsername", getName)
+                        && isVar(prevReal(u1), Opcodes.ALOAD, 3)
+                        && nextReal(c).getOpcode() == Opcodes.IFEQ;
+            }
+        }
     }
 
     /** root 本身與它在 classes 裡的所有子類別中，宣告 watched（name+desc）各方法的類別。 */
