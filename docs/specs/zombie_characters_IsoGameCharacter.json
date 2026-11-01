@@ -1,0 +1,16 @@
+{
+  "className": "zombie/characters/IsoGameCharacter",
+  "kind": "redirect",
+  "patches": [
+    { "op": "redirect",
+      "id": "W88",
+      "method": { "name": "DoDeath", "desc": "(Lzombie/inventory/types/HandWeapon;Lzombie/characters/IsoGameCharacter;Z)V" },
+      "site": "invokevirtual zombie/characters/IsoGameCharacter.getAttackedBy ()Lzombie/characters/IsoGameCharacter; ×2",
+      "target": "invokestatic zombie/mdc/PveDeathLog.getAttackedBy (Lzombie/characters/IsoGameCharacter;)Lzombie/characters/IsoGameCharacter;",
+      "expectedHits": 2,
+      "rationale": "DoDeath 只看 getAttackedBy() 是不是 IsoPlayer（且 GameServer.server、this 是 IsoPlayer）就走 PVPLogTool.logKill（pvp.txt Kill、AnnounceDeath 聊天公告 Kill: \"A\" killed \"B\"），不讀 ServerOptions.pvp。attackedBy 沒有時效、碰撞先設再檢查 PVP，PVP=false 下非戰鬥死亡會被公告成玩家擊殺。PVP=false、死者是非動物玩家、attackedBy 是 IsoPlayer 時 helper 回 null，原版走 non pvp 分支。",
+      "evidence": "42.21.0 javap：0: aload_0 | 1: invokevirtual OnDeath | 4: aload_0 | 5: invokevirtual getAttackedBy ← 改道 | 8: instanceof IsoPlayer | 11: ifeq 44 | 14: getstatic GameServer.server | 17: ifeq 44 | 20: aload_0 | 21: instanceof IsoPlayer | 24: ifeq 44 | 27: aload_0 | 28: invokevirtual getAttackedBy ← 改道 | 31: checkcast IsoPlayer | 34: aload_0 | 35: checkcast IsoPlayer | 38: invokestatic PVPLogTool.logKill | 41: goto 132 | 44: getstatic GameServer.server …（57: ldc \"user\"、60: LoggerManager.getLogger、79: ZLogger.write、85: getfield ServerOptions.announceDeath、129: ChatServer.sendMessageToServerChat）。全 jar 只有 DoDeath 呼叫 PVPLogTool.logKill。" }
+  ],
+  "behaviorNotes": "只改判斷、不改 attackedBy 欄位：屍體 killedBy、DeadCharacterPacket killerId、onKilled 的 playersKilledByPlayerToday 照原版。第 2 個呼叫點只在第 1 個回了 IsoPlayer 時執行，兩次之間無副作用。",
+  "verification": "build SmokeCheck W88 五條（掛點語境、存在理由、原版 DoDeath SHA-256 鎖含負對照、手術後同形且類別其他方法不變、helper 契約）；PveDeathLogTest on／off（手術後與原版真 DoDeath 搬成 static 方法、外部效果換替身，24 格逐格比）；實機 E2E pve-kill-mp。"
+}

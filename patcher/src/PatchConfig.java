@@ -550,7 +550,7 @@ public final class PatchConfig {
                 "zombie/characters/IsoGameCharacter", "tempVector2_2", "Lzombie/iso/Vector2;",
                 "zombie/mdc/ForwardVectorGuard", "swap");
         fwdFromIso.expectedHits = 2;
-        patches.add(gameChr);   // W7＋W34 共用；emitter 於下方掛入同一 ClassPatch
+        patches.add(gameChr);   // W7＋W34＋W88 共用；emitter、DoDeath 於下方掛入同一 ClassPatch
 
         // 退役（2026-09-28，42.21.0 官方已修）：W22 面向物件 sprite-grid null 守衛
         // （faceThisObject 的 getClosestSpriteGridObject 改道）。42.21 faceThisObject 開頭新增
@@ -568,6 +568,18 @@ public final class PatchConfig {
                 "zombie/audio/FMODParameterList", "update", "()V",
                 "zombie/mdc/EmitterParamGate", "update"));
         emitter.expectedHits = 1;
+
+        // ---- W88 PVP=false 時玩家死亡不歸給玩家（2026-11-01；docs/patches.md 2cw）----
+        // DoDeath(HandWeapon, IsoGameCharacter, boolean) 恰 2 個 invokevirtual getAttackedBy()（javap offset 5：後接
+        // instanceof IsoPlayer／ifeq 進 non pvp 分支；offset 28：後接 checkcast IsoPlayer 給 PVPLogTool.logKill）同形改道
+        // PveDeathLog（receiver 前置）：PVP=false、死者是非動物玩家、attackedBy 是玩家時回 null，原版走 else 分支寫 user.txt
+        // 的 died (non pvp)、AnnounceDeath 公告「名字 is dead.」。不動欄位（屍體 killedBy、客戶端 killerId 照原版）。
+        // -Dmdc.pveDeathLog=0|off 照原版。
+        Patcher.MethodOps doDeath = gameChr.method("DoDeath",
+                "(Lzombie/inventory/types/HandWeapon;Lzombie/characters/IsoGameCharacter;Z)V");
+        doDeath.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoGameCharacter",
+                "getAttackedBy", "()Lzombie/characters/IsoGameCharacter;", "zombie/mdc/PveDeathLog", "getAttackedBy"));
+        doDeath.expectedHits = 2;
 
         // ---- W8 chunk 寫入閘（2026-08-14；CRC-blam 家族 43 筆資料損失的止血＋蒐證；
         //      docs/patches.md 2t）----

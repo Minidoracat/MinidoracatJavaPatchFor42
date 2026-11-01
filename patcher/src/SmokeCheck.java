@@ -3920,6 +3920,7 @@ public final class SmokeCheck {
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
         failed += checkMapFolderGuard(jar, distJava);
+        failed += checkPveDeathLog(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -8388,5 +8389,139 @@ public final class SmokeCheck {
         return out;
     }
 
+    /** W88：42.21.0 原版 IsoGameCharacter.DoDeath(HandWeapon, IsoGameCharacter, boolean) 以 SKIP_DEBUG 讀入的 methodText SHA-256。 */
+    static final String DO_DEATH_SHA = "8368c451bf729bcaba4241073f862010373c5e8cb47459e864e505a24a0f79e8";
+
+    /**
+     * W88 PVP=false 時玩家死亡不歸給玩家（docs/patches.md 2cw）：存在理由（原版 DoDeath 只看 attackedBy 是不是 IsoPlayer、不讀 PVP；
+     * 任一項變紅＝官方可能已修，先重估撤刀，不改斷言）、原版本體 SHA 鎖（含負對照）、掛點語境、同形手術、helper 契約。
+     */
+    static int checkPveDeathLog(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String gc = "zombie/characters/IsoGameCharacter";
+        String player = "zombie/characters/IsoPlayer";
+        String helper = "zombie/mdc/PveDeathLog";
+        String deathDesc = "(Lzombie/inventory/types/HandWeapon;L" + gc + ";Z)V";
+        String getDesc = "()L" + gc + ";";
+        String logKillDesc = "(L" + player + ";L" + player + ";)V";
+        MethodNode vDeath = methodFromJar(jar, gc, "DoDeath", deathDesc);
+        List<MethodInsnNode> gets = new ArrayList<>();
+        for (AbstractInsnNode in : vDeath.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.getOpcode() == Opcodes.INVOKEVIRTUAL && mi.owner.equals(gc)
+                    && mi.name.equals("getAttackedBy") && mi.desc.equals(getDesc)) {
+                gets.add(mi);
+            }
+        }
+        boolean firstOk = false;
+        boolean secondOk = false;
+        LabelNode elseLabel = null;
+        if (gets.size() == 2) {
+            MethodInsnNode g1 = gets.get(0);
+            MethodInsnNode g2 = gets.get(1);
+            AbstractInsnNode t1 = nextReal(g1);
+            AbstractInsnNode j1 = t1 == null ? null : nextReal(t1);
+            firstOk = prevReal(g1) instanceof VarInsnNode l && l.getOpcode() == Opcodes.ALOAD && l.var == 0
+                    && t1 instanceof TypeInsnNode io && io.getOpcode() == Opcodes.INSTANCEOF && io.desc.equals(player)
+                    && j1 instanceof JumpInsnNode jump && jump.getOpcode() == Opcodes.IFEQ;
+            if (firstOk) {
+                elseLabel = ((JumpInsnNode) j1).label;
+            }
+            AbstractInsnNode c1 = nextReal(g2);
+            AbstractInsnNode a0 = c1 == null ? null : nextReal(c1);
+            AbstractInsnNode c2 = a0 == null ? null : nextReal(a0);
+            AbstractInsnNode kill = c2 == null ? null : nextReal(c2);
+            secondOk = prevReal(g2) instanceof VarInsnNode l2 && l2.getOpcode() == Opcodes.ALOAD && l2.var == 0
+                    && c1 instanceof TypeInsnNode cc1 && cc1.getOpcode() == Opcodes.CHECKCAST && cc1.desc.equals(player)
+                    && a0 instanceof VarInsnNode l3 && l3.getOpcode() == Opcodes.ALOAD && l3.var == 0
+                    && c2 instanceof TypeInsnNode cc2 && cc2.getOpcode() == Opcodes.CHECKCAST && cc2.desc.equals(player)
+                    && kill instanceof MethodInsnNode lk && lk.getOpcode() == Opcodes.INVOKESTATIC
+                    && lk.owner.equals("zombie/network/PVPLogTool") && lk.name.equals("logKill") && lk.desc.equals(logKillDesc)
+                    && vDeath.instructions.indexOf(g2) < vDeath.instructions.indexOf(elseLabel == null ? g2 : elseLabel);
+        }
+        failed += check("W88 掛點：DoDeath 恰 2 個 invokevirtual getAttackedBy()；第 1 個 aload_0 → instanceof IsoPlayer → ifeq（non pvp 分支），"
+                        + "第 2 個在該分支之前、aload_0 → checkcast IsoPlayer → aload_0 → checkcast IsoPlayer → PVPLogTool.logKill",
+                gets.size() == 2 && firstOk && secondOk);
+        boolean elseOk = false;
+        if (elseLabel != null) {
+            int from = vDeath.instructions.indexOf(elseLabel);
+            boolean user = false;
+            boolean write = false;
+            boolean announce = false;
+            boolean chat = false;
+            for (AbstractInsnNode in = elseLabel; in != null; in = in.getNext()) {
+                if (in instanceof LdcInsnNode ldc && "user".equals(ldc.cst)) {
+                    user = true;
+                } else if (in instanceof MethodInsnNode mi && mi.owner.equals("zombie/core/logger/ZLogger") && mi.name.equals("write")) {
+                    write = user;
+                } else if (in instanceof FieldInsnNode fi && fi.owner.equals("zombie/network/ServerOptions") && fi.name.equals("announceDeath")) {
+                    announce = write;
+                } else if (in instanceof MethodInsnNode mi && mi.owner.equals("zombie/network/chat/ChatServer")
+                        && mi.name.equals("sendMessageToServerChat") && mi.desc.equals("(Ljava/lang/String;)V")) {
+                    chat = announce;
+                    break;
+                }
+            }
+            elseOk = from > 0 && user && write && announce && chat;
+        }
+        failed += check("W88 存在理由：ifeq 跳到的 non pvp 分支依序有 ldc \"user\"→ZLogger.write、ServerOptions.announceDeath→sendMessageToServerChat；"
+                        + "DoDeath 不讀 ServerOptions.pvp；全 jar 只有 DoDeath 呼叫 PVPLogTool.logKill（多了＝有別的路徑要重估）",
+                elseOk && !methodText(vDeath).contains("zombie/network/ServerOptions.pvp")
+                && jarWideCallers(jar, Opcodes.INVOKESTATIC, "zombie/network/PVPLogTool", "logKill", logKillDesc)
+                        .equals(List.of(gc + ".DoDeath" + deathDesc)));
+        // 原版本體鎖：helper 依賴「回 null 就走 non pvp 分支」的整段語意。負對照：把第一個條件跳轉反轉，SHA 必須變。
+        String vText = debuglessMethodText(jar, gc, "DoDeath", deathDesc);
+        ClassNode vNoDebug = new ClassNode();
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            new ClassReader(jf.getInputStream(jf.getJarEntry(gc + ".class")).readAllBytes()).accept(vNoDebug, ClassReader.SKIP_DEBUG);
+        }
+        MethodNode mutated = vNoDebug.methods.stream().filter(m -> m.name.equals("DoDeath") && m.desc.equals(deathDesc))
+                .findFirst().orElseThrow();
+        boolean flipped = false;
+        for (AbstractInsnNode in : mutated.instructions) {
+            if (in instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IFEQ) {
+                j.setOpcode(Opcodes.IFNE);
+                flipped = true;
+                break;
+            }
+        }
+        failed += check("W88 原版 DoDeath 本體與核對時相同（sha256 " + DO_DEATH_SHA.substring(0, Math.min(12, DO_DEATH_SHA.length()))
+                        + "…，實際 " + sha256Hex(vText).substring(0, 12) + "…）；負對照：反轉第一個 ifeq 後 SHA 不同",
+                sha256Hex(vText).equals(DO_DEATH_SHA) && flipped && !sha256Hex(methodText(mutated)).equals(DO_DEATH_SHA));
+        MethodNode pDeath = method(distJava, gc, "DoDeath", deathDesc);
+        String from = "INVOKEVIRTUAL " + gc + ".getAttackedBy " + getDesc;
+        String to = "INVOKESTATIC " + helper + ".getAttackedBy (L" + gc + ";)L" + gc + ";";
+        String vDeathText = methodText(vDeath);
+        Set<String> patchedHere = Set.of("DoDeath" + deathDesc, "setForwardDirectionFromIsoDirection()V", "updateEmitter()V");
+        ClassNode pGc = classNode(distJava, gc);
+        boolean othersSame = classNodeFromJar(jar, gc).methods.stream()
+                .filter(m -> !patchedHere.contains(m.name + m.desc)).allMatch(m -> pGc.methods.stream()
+                        .filter(p -> p.name.equals(m.name) && p.desc.equals(m.desc)).findFirst()
+                        .map(p -> methodText(p).equals(methodText(m))).orElse(false));
+        failed += check("W88 手術後：DoDeath 兩個 getAttackedBy 同形改道 PveDeathLog，其餘指令與 frames 不變；IsoGameCharacter 除 W7／W34／W88 三個方法外不變",
+                vDeathText.split(java.util.regex.Pattern.quote(from), -1).length == 3
+                && methodText(pDeath).equals(vDeathText.replace(from, to)) && othersSame);
+        MethodNode h = method(distJava, helper, "getAttackedBy", "(L" + gc + ";)L" + gc + ";");
+        int nullReturns = 0;
+        for (AbstractInsnNode in : h.instructions) {
+            if (in.getOpcode() == Opcodes.ACONST_NULL && nextReal(in) != null && nextReal(in).getOpcode() == Opcodes.ARETURN) {
+                nullReturns++;
+            }
+        }
+        // 判斷不得包在 try 裡、catch 不得改變回傳值：否則兩個呼叫點可能一個回玩家、一個回 null（logKill 拿到 null）。
+        // try 只包 log；全方法恰 2 個 areturn（return attacker、return null），catch 裡多一個 return 就紅。
+        boolean onlyLogInTry = !h.tryCatchBlocks.isEmpty()
+                && callsInsideTryRange(h, Opcodes.INVOKEVIRTUAL, player, "isAnimal", "()Z") == 0
+                && callsInsideTryRange(h, Opcodes.INVOKEVIRTUAL, gc, "getAttackedBy", getDesc) == 0
+                && callsInsideTryRange(h, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V") == 1
+                && countOpcode(h, Opcodes.ARETURN) == 2;
+        failed += check("W88 helper 契約：恰一次呼叫原版 getAttackedBy（不經改道）、讀 ServerOptions.pvp 與 isAnimal、恰一處 return null；"
+                        + "唯一的 try 只包 DebugLog.log、判斷在 try 外、全方法恰 2 個 areturn（log 失敗不改變結果）",
+                countExactCalls(h, Opcodes.INVOKEVIRTUAL, gc, "getAttackedBy", getDesc) == 1
+                && countCalls(h, helper, "getAttackedBy") == 0
+                && methodText(h).contains("GETFIELD zombie/network/ServerOptions.pvp")
+                && countCalls(h, player, "isAnimal") == 1
+                && nullReturns == 1 && onlyLogInTry);
+        return failed;
+    }
     private SmokeCheck() {}
 }

@@ -4854,6 +4854,39 @@ console（開服讀地圖時一行）：
 
 ---
 
+<a id="2cw"></a>
+## 2cw. PVP=false 時玩家死亡不歸給玩家（W88，server，預設 on）
+
+**原版缺陷**：`IsoGameCharacter.DoDeath` 只要死者的 `attackedBy` 是 `IsoPlayer`（並且在伺服器、死者是 `IsoPlayer`）就呼叫 `PVPLogTool.logKill`：pvp.txt 記 `[IMPORTANT] Kill: "A" … killed "B" …`，`AnnounceDeath=true` 時全服聊天公告 `Kill: "A" killed "B"`，`PVPLogToolChat=true` 時管理員頻道也一行，完全不看 `PVP` 選項。`attackedBy` 沒有時效，只會被下一個攻擊者蓋掉（受火傷時清成 null），伺服器上血量歸零時 `die()` 把它當凶手傳給 `Kill`。被車碰到時 `onHitByVehicle` 先把 `attackedBy` 設成那台車的網路控制者（駕駛，或推、碰那台車的人），之後才檢查 PVP；伺服器每個 tick 對遠端玩家跑這段碰撞，不寫 log。所以 `PVP=false` 的伺服器上，被隊友的車擦過、之後才失溫或餓死的玩家，會被公告成被隊友殺死。正式服（`PVP=false`）2026-11-01 一位玩家在暴風雪中失溫死亡（核心體溫 21.1 °C），全服聊天公告成被隊友擊殺；當時 pvp.txt 現存的 17 筆 Kill 行全是這種誤報，有的兩人相距 4,000 格。
+
+**修補**：`PVP=false` 時，死者是非動物的玩家、`attackedBy` 是 `IsoPlayer` 的死亡改走原版的 non pvp 分支：user.txt 記 `user <名> died at (x,y,z) (non pvp)`，`AnnounceDeath=true` 時聊天公告 `<名> is dead.`，不寫 pvp.txt、不發管理員頻道。動物類別也繼承 `IsoPlayer`，`attackedBy` 是動物時一樣處理（原版伺服器上沒找到把動物設成玩家 `attackedBy` 的路徑，這是 MOD 才可能走到的分支；動物沒有帳號名，log 行的攻擊者名稱是原版預設值）。`PVP=true`、死者是殭屍或動物、`attackedBy` 不是玩家時照原版。`PVP` 選項每次死亡時讀，`changeoption PVP` 立刻生效。
+
+**手術**：`DoDeath(HandWeapon, IsoGameCharacter, boolean)` 內恰 2 個 `invokevirtual getAttackedBy()` 同形改道 `PveDeathLog.getAttackedBy(self)`（javap offset 5：後接 `instanceof IsoPlayer`／`ifeq`，跳到 non pvp 分支；offset 28：在 logKill 分支內，後接 `checkcast IsoPlayer` 給 `logKill`），上述情況回 null，其餘回原值。併進 W7／W34 的 `IsoGameCharacter` ClassPatch（命中 3 → 5）。第 2 個呼叫點只在第 1 個回了玩家時才執行，兩次之間沒有別的副作用，回的是同一個值。只改判斷，不改 `attackedBy` 欄位。
+
+**沒改的**：凶手還會流到別處，本刀不動：屍體的 `killedBy` 與 `DeadCharacterPacket` 送給客戶端的 killerId（客戶端 `dieNetwork(killer)` 在死者的客戶端角色上再 `setAttackedBy`）、`IsoPlayer.onKilled` 的 `playersKilledByPlayerToday` 統計、`DoDeath` 傳給血跡音效的 wielder（它的 `AddXP(HandWeapon, int)` 是空方法）。原版 Lua 不讀 `getAttackedBy`／`getKilledBy`；2026-11-01 查正式服 `Mods=` 150 項（本機 Workshop 副本）與家族 MOD，玩家死亡時都不讀凶手，所以選影響最小的 `DoDeath` 判斷，不在 `die()` 清掉凶手。之後裝了會在玩家死亡時讀凶手的 MOD，它在 `PVP=false` 下仍會讀到錯的凶手，到時再評估改在 `die()` 清。
+
+console（首次呼叫一行生效狀態；每次改走 non pvp 一行，玩家死亡不頻繁，不限量）：
+
+```text
+[MinidoracatJavaPatch][PveDeathLog] 首次生效（-Dmdc.pveDeathLog=0|off 照原版）mode=on pvp=false
+[MinidoracatJavaPatch][PveDeathLog] PVP=false: <死者> died with attackedBy=<攻擊者>, logged as non pvp instead of Kill (#<n>)
+```
+
+**驗收**：上線後 pvp.txt 不再新增死者是玩家的 Kill 行（死者是動物的照原版：`AnnounceAnimalDeath=true` 時玩家殺動物仍會記）；玩家死亡在 user.txt 有 `died … (non pvp)`，`AnnounceDeath=true` 時聊天是 `<名> is dead.`；有 `[PveDeathLog] PVP=false:` 行的就是原版會誤報成擊殺的那幾次。
+
+**kill switch**：`-Dmdc.pveDeathLog=0|off`，需重啟。
+
+**部署**：manifest 新增 `zombie/mdc/PveDeathLog.class`，patched `zombie/characters/IsoGameCharacter.class` 命中 3 → 5（173 → 174 個 class）。
+
+**守門與驗證**：
+- SmokeCheck：掛點語境——`DoDeath` 恰 2 個 `getAttackedBy`，第 1 個 `aload_0` → `instanceof IsoPlayer` → `ifeq`，第 2 個在 `ifeq` 目標之前、`aload_0` → `checkcast IsoPlayer` → `aload_0` → `checkcast IsoPlayer` → `logKill`；存在理由——`ifeq` 目標依序有 `ldc "user"` → `ZLogger.write`、`announceDeath` → `sendMessageToServerChat`，`DoDeath` 不讀 `ServerOptions.pvp`，全 jar 只有 `DoDeath` 呼叫 `logKill`；原版 `DoDeath` 本體 SHA-256 鎖（SKIP_DEBUG），負對照把第一個 `ifeq` 反轉後 SHA 必須不同；手術後兩個呼叫點同形改道、其餘指令與 frames 不變，`IsoGameCharacter` 除 W7／W34／W88 三個方法外不變；helper 恰一次呼叫原版 `getAttackedBy`、讀 `pvp` 與 `isAnimal`、恰一處回 null，唯一的 try 只包 log、判斷在 try 外、全方法恰 2 個 `areturn`（log 失敗時兩個呼叫點的結果才不會不同；把判斷包進 try 或在 catch 裡 return 都會讓這條紅）。
+- `PveDeathLogTest`（`build.ps1` [9zzb/10]，on、off 兩個 JVM，自驗 argv 與開關）：把 dist 內手術後與 jar 內原版的 `DoDeath` 各自原樣搬成 static 方法（`this` 變第一個參數，locals 與 frames 不變），只把七個外部效果呼叫（`OnDeath`、`logKill`、`getLogger`＋`ZLogger.write`、`ChatServer.getInstance`＋`sendMessageToServerChat`、`doDeathSplatterAndSounds`）換成記錄用的替身；條件、`getAttackedBy`／helper、`isAnimal`、`GameServer.server`、`ServerOptions` 都是真的。死者（玩家、動物、殭屍）× `attackedBy`（玩家、動物、殭屍、null）× `PVP`（false、true）24 格：on 只有 `PVP=false`、死者是玩家、`attackedBy` 是玩家或動物的 2 格改走 non pvp（user.txt `died … (non pvp)`、聊天 `is dead.`、不呼叫 `logKill`），其餘 22 格與原版逐筆相同；off 24 格都與原版相同；`attackedBy` 欄位都沒被改；原版 `PVP=false` 玩家被記成玩家攻擊時照樣 `logKill`（紅燈前提）。突變：拿掉 `pvp` 判斷 → `PVP=true` 兩格 FAIL；拿掉 `isAnimal` 判斷 → 動物死者兩格 FAIL。
+- 實機 E2E（本機專用伺服器＋兩個客戶端，伺服器 ini `PVP=false`、`AnnounceDeath=true`、`PVPLogToolChat=true`、`PVPLogToolFile=true`）：伺服器 Lua 把 B 的 `attackedBy` 設成 A（或殭屍、或 null），再 `setHealth(0)`＋`die()`，走和正式服失溫死亡同一條 `die()` → `Kill(getAttackedBy())` → `DoDeath`。原版：pvp.txt `[IMPORTANT] Kill: "A" … killed "B" …`，A、B 兩端聊天都是 `Kill: "A" killed "B"`，user.txt 沒有 died（紅燈）。on：pvp.txt 0 行 Kill，user.txt `user B died at … (non pvp)`，兩端聊天 `B is dead.`，console 一行 `[PveDeathLog] PVP=false: B died with attackedBy=A`。off：回到原版的 Kill 行與 Kill 公告。on 時 `attackedBy` 是殭屍或 null：user.txt died、聊天 `is dead.`、沒有 Kill 行、沒有 `[PveDeathLog] PVP=false` 行（與原版相同）。伺服器只把遠端玩家血量設 0 不會走到 `die()`，所以情境直接呼叫 `die()`。
+
+**退場**：官方讓 `DoDeath` 在 PVP 關閉時不走 `logKill`（或 `attackedBy` 有時效、碰撞在 PVP 關閉時不設 `attackedBy`）時撤刀；SmokeCheck 鎖了原版 `DoDeath` 本體，官方改這個方法時會變紅，先重估再決定。
+
+---
+
 <a id="3"></a>
 ## 3. 部署後驗證清單
 

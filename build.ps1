@@ -1,4 +1,4 @@
-﻿# build.ps1 — 建置 PZ 伺服器 loose-class patch
+# build.ps1 — 建置 PZ 伺服器 loose-class patch
 # 需求：JDK 25（42.19 unstable jar 已是 class file v69）、lib/asm-*.jar 9.8、
 #       work/projectzomboid.jar（從目標伺服器拉取的權威 jar）
 $ErrorActionPreference = 'Stop'
@@ -148,6 +148,7 @@ $helperEntries = @(
     'zombie/mdc/PlayerLosFilter$Plain.class',
     'zombie/mdc/WorldMapVisibilityIndex.class',
     'zombie/mdc/MapFolderGuard.class',
+    'zombie/mdc/PveDeathLog.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -800,6 +801,13 @@ foreach ($mfg in @(@('on', @(), $mfgCp), @('off', @('-Dmdc.mapFolderGuard=off'),
         Pop-Location
     }
 }
+
+Write-Host "[9zzb/10] PVP=false 時玩家死亡不歸給玩家（W88）：手術後與 jar 原版的真 DoDeath 各自搬成 static 方法、外部效果換替身，死者（玩家／動物／殭屍）×攻擊者（玩家／動物／殭屍／null）×PVP 逐格比，on 只在 PVP=false、死者是玩家、攻擊者是 IsoPlayer 時改走 non pvp（user.txt died、聊天 is dead.、不 logKill），其餘與原版逐筆相同；off 全部同原版..."
+# on＝出貨組態；off＝kill switch（原版負對照）。測試自驗 argv 與實際開關相符。
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+Assert-Ok "PveDeathLogTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.pveDeathLog=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+Assert-Ok "PveDeathLogTest（off，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
