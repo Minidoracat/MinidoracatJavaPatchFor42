@@ -813,7 +813,7 @@ Assert-Ok "PveDeathLogTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.pveDeathLog=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" off
 Assert-Ok "PveDeathLogTest（off，原版負對照）"
 
-Write-Host "[9zzc/10] 閒置車降頻（W89）：真 MovingObjectUpdateScheduler.startFrame（dist 手術後與 jar 原版），閒置條件 20 項（含收音機開著）逐項翻轉的真值表；observe 每台車每幀都 add、會跳次數＝每 N 幀 N−1 次、16 個輪次只記 1 個輪次、只改位置算 posDiff、位置與狀態都改算 stateDiff、心跳（vehicles／orphanTow／posTop）；on N=8 與 N=4 每 N 幀閒置車恰好 1 次、活動車每幀，第一次稽核狀態也變了不停用、第二次只改位置就停用、停用後照原版且心跳照印 disabled=true；on-wake N=8 與 N=4：收音機打開最多 N−1 幀內改成每幀、關掉重新暖機，連續閒置未滿 5 秒每幀都 add、中途不閒置一幀就重算；helper 例外照原版 add 並停用；off 原樣轉呼叫；原版負對照每台車每幀都 add..."
+Write-Host "[9zzc/10] 閒置車降頻（W89）：真 MovingObjectUpdateScheduler.startFrame（dist 手術後與 jar 原版），閒置條件 20 項（含收音機開著）逐項翻轉的真值表；observe 每台車每幀都 add、會跳次數＝每 N 幀 N−1 次、16 個輪次只記 1 個輪次、只改位置算 posDiff、位置與狀態都改算 stateDiff、心跳（vehicles／orphanTow／posTop）；on N=8 與 N=4 每 N 幀閒置車恰好 1 次、活動車每幀，第一次稽核狀態也變了不停用、第二次只改位置就停用、停用後照原版且心跳照印 disabled=true；on-wake N=8 與 N=4：收音機打開最多 N−1 幀內改成每幀、關掉重新暖機，同 id 換車重新暖機，暖機看放行幀累加的物理秒（牆鐘 60 秒、卡頓、不在 scheduler 都不提早降頻，4.99 仍每幀、不閒置一幀歸 0、滿 5 只在輪次），真 VehiclePedestrianContactTracking 差分：只在放行幀推進與每幀推進同一幀清掉接觸、第一次被跳過在那之後；helper 例外照原版 add 並停用；off 原樣轉呼叫；原版負對照每台車每幀都 add..."
 # observe＝出貨組態；on／on N=4／on-wake（收音機與暖機）／on-throw；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版）。測試自驗 argv、模式、N 與 scheduler 來源。
 $ivtCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest observe 8

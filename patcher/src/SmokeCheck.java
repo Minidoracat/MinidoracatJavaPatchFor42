@@ -8440,6 +8440,9 @@ public final class SmokeCheck {
                     "bd821455561c644481618c471d2a89821f32b330d1f50cbfb53ae50e93257c0d"},
             {"zombie/vehicles/BaseVehicle", "hitAnimal", "(Lzombie/characters/animals/IsoAnimal;)V",
                     "d93001de17ea33ff1704d5a0214d683b80182427141087cd9c035b62dc0c8273"},
+            // 暖機累加的物理秒＝接觸時鐘 updateTimeNow 每次加的值
+            {"zombie/GameTime", "getPhysicsSecondsSinceLastUpdate", "()F", "d1bf720cdccc1b1818607c5d0bdffa53e7a54c2ccd24594270505860d3607e99"},
+            {"zombie/GameTime", "getRealworldSecondsSinceLastUpdate", "()F", "b7dc25014b2e2b8cb8f7f45d158cc1bdd625b3246b833b7d051992d3e411bae8"},
             {"zombie/vehicles/BaseVehicle", "getMinimumSimulationLevel", "()Lzombie/UpdateSchedulerSimulationLevel;",
                     "8d7cdda40ffacf8be6e3c6239ecb2699f6bbc1a287fe46a0edaa8dee4c895c07"},
             {"zombie/vehicles/BaseVehicle", "getController", "()Lzombie/core/physics/CarController;",
@@ -8571,6 +8574,20 @@ public final class SmokeCheck {
                 countExactCalls(hAdd, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc) == 2
                         && callsInTry(hAdd, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc) == 0);
         failed += shaLocks(jar, "W89", IDLE_VEHICLE_LOCKED);
+        // 暖機在 startFrame（newFrame）讀一次物理秒，接觸時鐘在同一幀的 postupdate 讀，兩邊必須是同一個值。fpsMultiplier 的寫入者
+        // （javap 逐一看過）：GameServer.main 在主迴圈每幀寫一次（世界更新之外）、GameTime.<init>、FPSTracking.frameStep（只有
+        // 客戶端 GameWindow 呼叫）；AnimatedModel 三個方法與 IsoDeadBody.reanimate 是「存→設→呼叫動畫更新→finally 還原」，
+        // 呼叫結束就還原。寫入者或次數變了就紅，要重新分析。
+        Map<String, Integer> fpsWriters = jarWideFieldRefs(jar, Opcodes.PUTFIELD, "zombie/GameTime", "fpsMultiplier");
+        List<String> fpsTrackCallers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/FPSTracking", "frameStep", "()J");
+        failed += check("W89 vanilla 前提：GameTime.fpsMultiplier 的寫入者與 42.21 相同（實際 " + fpsWriters + "；FPSTracking.frameStep 的呼叫者 "
+                        + fpsTrackCallers + " 都在 GameWindow）；暖機讀的物理秒與同一幀 postupdate 接觸時鐘加的相同",
+                fpsWriters.equals(Map.of("zombie/FPSTracking.frameStep", 2, "zombie/GameTime.<init>", 1,
+                        "zombie/core/skinnedmodel/advancedanimation/AnimatedModel.renderMain", 3,
+                        "zombie/core/skinnedmodel/advancedanimation/AnimatedModel.setModelData", 3,
+                        "zombie/core/skinnedmodel/advancedanimation/AnimatedModel.updateInternal", 5,
+                        "zombie/iso/objects/IsoDeadBody.reanimate", 3, "zombie/network/GameServer.main", 1))
+                        && !fpsTrackCallers.isEmpty() && fpsTrackCallers.stream().allMatch(c -> c.startsWith("zombie/GameWindow.")));
 
         // ---- W90 ----
         String pkg = "zombie/vehicleNetworkSound/server/";

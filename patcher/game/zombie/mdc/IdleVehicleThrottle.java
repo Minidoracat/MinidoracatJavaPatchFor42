@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
 
+import zombie.GameTime;
 import zombie.MovingObjectUpdateScheduler;
 import zombie.MovingObjectUpdateSchedulerUpdateBucket;
 import zombie.core.physics.CarController;
@@ -31,12 +32,16 @@ import zombie.vehicles.VehicleParts;
  * {@code ((frameCounter + vehicleId) & (N-1)) == 0} 的幀放進 bucket，其他幀整台跳過四段（同一個 bucket，伺服器 frameMod＝1）。
  *
  * <p><b>收音機／CD</b>：開著的裝置（{@code drainBatteryUpdateHack} 的寫法：{@code getDeviceData() != null && getIsTurnedOn()}）每幀
- * {@code DeviceData.update} 扣 {@code 1.25×getMultiplier()} 的計數器（播放、訊號、聲音、靜電），跳幀會吃掉而不是延後，所以有裝置開著就不算閒置。
+ * {@code DeviceData.update} 扣計數器（播放、訊號、聲音每次 {@code 1.25×getMultiplier()}，靜電 {@code getMultiplier()}），跳幀會吃掉而不是延後，
+ * 所以有裝置開著就不算閒置。
  * 掃零件的結果以 vehicleId 快取，只在這一幀本來就會更新（輪到它或暖機中）或快取是「開著」時重掃；沒人時被打開的收音機最多晚 N−1 幀被發現。
  *
- * <p><b>暖機</b>：連續閒置滿 {@link #WARMUP_MS}（牆鐘，每幀取一次）才開始降頻，任何一幀不閒置就重算。
- * {@code VehiclePedestrianContactTracking.postUpdate} 只在 postupdate 推進接觸時鐘、3.5 物理秒後才清舊接觸；剛撞過人的車若立刻降頻，
- * 接觸紀錄老化慢 N 倍，再開動撞同一個角色會被判成持續接觸。5 秒 ≥ 3.5 物理秒（slomo 1），期間閒置車不能新增接觸（速度 &lt; 0.05 就提早回傳）。
+ * <p><b>暖機</b>：{@code VehiclePedestrianContactTracking.postUpdate} 每次 postupdate 把接觸時鐘加上
+ * {@code GameTime.getPhysicsSecondsSinceLastUpdate()}（伺服器上＝1/60 × fpsMultiplier × slomo，fpsMultiplier 跟著實際 FPS 的 EMA 走），
+ * 超過 3.5 物理秒才清舊接觸；剛撞過人的車若立刻降頻，接觸紀錄老化慢 N 倍，再開動撞同一個角色會被判成持續接觸。所以每台車累加
+ * 「自己這一幀真的被放進 bucket 時」的物理秒（{@link #newFrame} 每幀讀一次，和它的接觸時鐘同一個來源、同一個值），滿 {@link #WARMUP_S}
+ * 才開始降頻；任何一幀不閒置（含裝置開著）或身分換了就歸 0。掉幀、卡頓、系統時鐘跳動都不會讓暖機變短。暖機期間閒置車不能新增接觸
+ * （{@code hitCharacter}／{@code hitAnimal} 速度 &lt; 0.05 就提早回傳）。
  *
  * <p><b>模式</b>（{@code -Dmdc.idleVehicleThrottle}，需重啟）：{@code 2|observe}（預設）一律放行，對「會跳」的車記這一幀與下一幀的指紋；
  * observe 只在每台車每 16 個輪次抽一個輪次記錄（{@link #observeSampled}），成本約 1/16；
@@ -45,7 +50,8 @@ import zombie.vehicles.VehicleParts;
  *
  * <p><b>指紋</b>：{@code pos}＝x、y、z、{@code jniTransform.origin}、{@code current}／{@code chunk} 的身分；{@code state}＝閒置條件用到的
  * 欄位（見 {@link #STATE_NAMES}）加上是否還在 {@code cell.vehicles}；{@code parts}＝每 64 次抽一次電瓶電量。下一幀 state 變了就算
- * {@code stateDiff}（下一幀判斷不成立、最多延後 1 幀），state 沒變而 pos 變了才算 {@code posDiff}（on 會延後最多 N−1 幀的位置同步）。
+ * {@code stateDiff}（下一幀判斷不成立、最多延後 1 幀；{@code device} 位元除外：裝置以快取每 N 幀重掃，最多 N−1 幀），
+ * state 沒變而 pos 變了才算 {@code posDiff}（on 會延後最多 N−1 幀的位置同步）。
  *
  * <p>只在主執行緒（{@code startFrame} 所在）讀寫，計數欄位不加鎖。
  */
@@ -60,7 +66,8 @@ public final class IdleVehicleThrottle {
     static final int N = parseN(RAW_N);
     private static final int MASK = N - 1;
     private static final int SHIFT = Integer.numberOfTrailingZeros(N);
-    static final long WARMUP_MS = 5_000L;
+    /** 暖機：連續閒置而且被放進 bucket 的幀，累加的物理秒（接觸時鐘的來源）滿這個值才降頻。 */
+    static final float WARMUP_S = 5.0F;
     private static final long NONE = Long.MIN_VALUE;
 
     private static final String TAG = "[MinidoracatJavaPatch][IdleVehicleThrottle] ";
@@ -84,8 +91,8 @@ public final class IdleVehicleThrottle {
     private static long frames, visits, idles, actives, wouldSkip, skipped, skipSeen, audits;
     private static long compared, posDiff, stateDiff, partsDiff, predNs, predN, anomalies, fallbacks, records;
     private static long warmups, devOnHits, devScans, obsOps, obsNs, obsN, recordsTotal;
-    private static long frameMs;
-    private static long testClock = Long.MIN_VALUE;   // 測試固定的牆鐘；Long.MIN_VALUE＝用真的時間
+    private static float framePhys;   // 這一幀的 GameTime.getPhysicsSecondsSinceLastUpdate()
+    private static long testClock = Long.MIN_VALUE;   // 測試固定的牆鐘（只給心跳用）；Long.MIN_VALUE＝用真的時間
     private static final long[] STATE_BITS = new long[STATE_NAMES.length];
     private static final StringBuilder posTop = new StringBuilder();
     private static int posTopN;
@@ -100,11 +107,11 @@ public final class IdleVehicleThrottle {
     private static int[] fpState = new int[0];
     private static float[] fpBattery = new float[0];
     private static boolean[] fpAudit = new boolean[0];
-    // 每台車的快取，以 vehicleId 為索引、identityHashCode 防重用：裝置開著、連續閒置起點（NONE＝不在閒置）。
+    // 每台車的快取，以 vehicleId 為索引、identityHashCode 防重用：裝置開著、連續閒置期間放進 bucket 的物理秒。
     private static boolean[] slotUsed = new boolean[0];
     private static int[] slotIdent = new int[0];
     private static boolean[] slotDev = new boolean[0];
-    private static long[] idleSince = new long[0];
+    private static float[] physAcc = new float[0];
 
     static int parseMode(String raw) {
         if (raw == null) {
@@ -174,7 +181,8 @@ public final class IdleVehicleThrottle {
         if (!slotUsed[vid] || slotIdent[vid] != ident) {
             slotUsed[vid] = true;
             slotIdent[vid] = ident;
-            idleSince[vid] = NONE;
+            slotDev[vid] = false;
+            physAcc[vid] = 0F;
         }
         boolean idle;
         if ((visits & PRED_SAMPLE_MASK) == 0) {
@@ -186,28 +194,25 @@ public final class IdleVehicleThrottle {
             idle = idle(v);
         }
         if (!idle) {
-            idleSince[vid] = NONE;
+            physAcc[vid] = 0F;
             actives++;
             return false;
         }
         boolean turn = ((frame + vid) & MASK) == 0;
-        long since = idleSince[vid];
-        boolean warm = since == NONE || frameMs - since < WARMUP_MS;
+        boolean warm = physAcc[vid] < WARMUP_S;
         if (turn || warm || slotDev[vid]) {   // 這一幀本來就會更新，或快取是開著（才能發現關掉）
             devScans++;
             slotDev[vid] = devicesOn(v);
         }
         if (slotDev[vid]) {
-            idleSince[vid] = NONE;
+            physAcc[vid] = 0F;
             devOnHits++;
             actives++;
             return false;
         }
         idles++;
-        if (warm) {
-            if (since == NONE) {
-                idleSince[vid] = frameMs;
-            }
+        if (warm) {   // 這一幀照原版放進 bucket，它的 postupdate 會把接觸時鐘推進 framePhys
+            physAcc[vid] += framePhys;
             warmups++;
             return false;
         }
@@ -422,15 +427,16 @@ public final class IdleVehicleThrottle {
         slotUsed = Arrays.copyOf(slotUsed, n);
         slotIdent = Arrays.copyOf(slotIdent, n);
         slotDev = Arrays.copyOf(slotDev, n);
-        idleSince = Arrays.copyOf(idleSince, n);
-        Arrays.fill(idleSince, old, n, NONE);
+        physAcc = Arrays.copyOf(physAcc, n);
     }
 
     private static void newFrame(long frame) {
         curFrame = frame;
         frames++;
         long now = nowMs();
-        frameMs = now;
+        GameTime gt = GameTime.getInstance();
+        float p = gt == null ? 0F : gt.getPhysicsSecondsSinceLastUpdate();
+        framePhys = p > 0F ? p : 0F;   // NaN／負數當 0（暖機只會變長）
         if (!started) {
             started = true;
             lastBeat = now;
@@ -539,7 +545,7 @@ public final class IdleVehicleThrottle {
         lastBeat = nowMs() - HEARTBEAT_MS;
     }
 
-    /** 測試推進牆鐘（暖機）：第一次呼叫起改用固定的時間，之後只有這裡會讓它前進；下一幀生效。 */
+    /** 測試推進牆鐘（心跳；暖機不看牆鐘）：第一次呼叫起改用固定的時間，之後只有這裡會讓它前進；下一幀生效。 */
     static void advanceClockForTest(long ms) {
         testClock = nowMs() + ms;
     }

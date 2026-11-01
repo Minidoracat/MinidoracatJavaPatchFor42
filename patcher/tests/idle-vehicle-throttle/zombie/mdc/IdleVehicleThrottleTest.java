@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import zombie.GameTime;
 import zombie.MovingObjectUpdateScheduler;
 import zombie.MovingObjectUpdateSchedulerUpdateBucket;
 import zombie.UpdateSchedulerSimulationLevel;
@@ -28,6 +29,8 @@ import zombie.vehicles.VehicleAlarm;
 import zombie.vehicles.VehicleEngine;
 import zombie.vehicles.VehiclePart;
 import zombie.vehicles.VehicleParts;
+import zombie.vehicles.VehiclePedestrianContact;
+import zombie.vehicles.VehiclePedestrianContactTracking;
 
 /**
  * W89：跑真的 {@code MovingObjectUpdateScheduler.startFrame()}（dist 手術後或 jar 原版），看每一幀 FULL bucket 裡有哪些車。
@@ -51,6 +54,8 @@ public final class IdleVehicleThrottleTest {
         int n = args.length > 1 ? Integer.parseInt(args[1]) : 8;
         GameServer.server = true;
         GameServer.mainThread = Thread.currentThread();
+        GameTime.instance = alloc(GameTime.class);   // 物理秒＝1/60 × fpsMultiplier × slomo；測試用 fpsMultiplier 控制
+        phys(FRAME_S);
         world();
         List<BaseVehicle> idle = new ArrayList<>();
         List<BaseVehicle> active = new ArrayList<>();
@@ -147,10 +152,19 @@ public final class IdleVehicleThrottleTest {
         return part;
     }
 
-    /** 全部車先跑一幀（開始暖機），再把牆鐘推進 5 秒：之後的幀暖機都滿了。 */
+    static final float FRAME_S = 1.0F / 60.0F;
+
+    /** 下一幀起每幀的物理秒（GameTime.getPhysicsSecondsSinceLastUpdate，也是接觸時鐘每次 postupdate 加的值）。 */
+    static void phys(float seconds) {
+        GameTime.instance.fpsMultiplier = seconds / 0.016666668F;
+    }
+
+    /** 全部車跑一幀 6 物理秒（暖機滿），牆鐘也推進 5 秒；之後回到每幀 1/60 物理秒。 */
     static void warm() throws Exception {
+        phys(6.0F);
         run(1);
-        IdleVehicleThrottle.advanceClockForTest(IdleVehicleThrottle.WARMUP_MS);
+        phys(FRAME_S);
+        IdleVehicleThrottle.advanceClockForTest(5_000L);
     }
 
     static void observe(List<BaseVehicle> idle, List<BaseVehicle> active, int n) throws Exception {
@@ -205,8 +219,10 @@ public final class IdleVehicleThrottleTest {
         check("on 稽核：放行的車下一幀位置與狀態都變了 → stateDiff、不停用", audited != null && !IdleVehicleThrottle.disabledForTest()
                 && IdleVehicleThrottle.stateDiffForTest() >= 1 && IdleVehicleThrottle.posDiffForTest() == 0);
         audited.getController().isEnable = false;
-        run(1);   // 它重新開始暖機；推進牆鐘讓暖機滿，下一次稽核找到的才是被抽到的車
-        IdleVehicleThrottle.advanceClockForTest(IdleVehicleThrottle.WARMUP_MS);
+        phys(6.0F);   // 它重新開始暖機；這一幀 6 物理秒讓暖機滿，下一次稽核找到的才是被抽到的車
+        run(1);
+        phys(FRAME_S);
+        IdleVehicleThrottle.advanceClockForTest(5_000L);
         BaseVehicle second = runUntilAudit(idle, n, 2);
         second.setX(second.getX() + 0.5F);
         run(1);
@@ -258,54 +274,86 @@ public final class IdleVehicleThrottleTest {
     }
 
     /**
-     * on：收音機與暖機。只留三台閒置車（其他改成活動車，稽核抽不到），x 測收音機、y 測暖機、z 是對照。
+     * on：收音機、暖機（物理秒）、身分重置與接觸時鐘差分。只留四台閒置車（其他改成活動車，稽核抽不到）：
+     * x 測收音機與身分重置、y 測暖機、c 測接觸時鐘、z 是對照。
      */
     static void onWake(List<BaseVehicle> idle, int n) throws Exception {
         BaseVehicle x = idle.get(10);
         BaseVehicle y = idle.get(11);
         BaseVehicle z = idle.get(12);
+        BaseVehicle c = idle.get(13);
         for (BaseVehicle v : idle) {
-            if (v != x && v != y && v != z) {
+            if (v != x && v != y && v != z && v != c) {
                 v.getController().isEnable = true;
             }
         }
-        check("暖機滿了：三台閒置車每 N 幀 1 次", count(runSeq(4 * n, x)) == 4 && count(runSeq(4 * n, y)) == 4 && count(runSeq(4 * n, z)) == 4);
+        check("暖機滿了：閒置車每 N 幀 1 次", count(runSeq(4 * n, x)) == 4 && count(runSeq(4 * n, y)) == 4 && count(runSeq(4 * n, z)) == 4);
         // 收音機：閒置中打開 → 最多 N−1 幀內改成每幀更新
         VehiclePart radio = radio(x);
         setBool(DeviceData.class, radio.getDeviceData(), "isTurnedOn", true);
         boolean[] seq = runSeq(3 * n, x);
         int first = firstTrue(seq);
         check("收音機打開：第 " + first + " 幀（≤ N−1）發現，之後每幀都 add", first >= 0 && first <= n - 1 && allTrue(seq, first));
-        // 關掉 → 重新暖機：牆鐘不動時每幀都 add，滿 5 秒後回到每 N 幀 1 次
+        // 關掉 → 重新暖機：物理秒未滿 5 時每幀都 add，滿 5 後回到每 N 幀 1 次
         setBool(DeviceData.class, radio.getDeviceData(), "isTurnedOn", false);
         seq = runSeq(3 * n, x);
         check("收音機關掉：暖機中每幀都 add（" + count(seq) + "/" + 3 * n + "）", allTrue(seq, 0));
-        IdleVehicleThrottle.advanceClockForTest(IdleVehicleThrottle.WARMUP_MS);
-        check("收音機關掉滿 5 秒：回到每 N 幀 1 次", count(runSeq(4 * n, x)) == 4);
-        // 暖機：不閒置一幀 → 未滿 5 秒每幀都 add；中途再不閒置一幀 → 從那一幀重算
+        phys(6.0F);
+        run(1);
+        phys(FRAME_S);
+        check("收音機關掉、物理秒滿 5：回到每 N 幀 1 次", count(runSeq(4 * n, x)) == 4);
+        // 身分重置：同一個 vehicleId 換成另一台車 → 從頭暖機，下一幀起每幀都 add；新車開著收音機 → 每幀都 add
+        BaseVehicle x2 = replace(x);
+        check("身分重置：同 id 的新車下一幀起每幀都 add", allTrue(runSeq(2 * n, x2), 0));
+        BaseVehicle x3 = replace(x2);
+        setBool(DeviceData.class, radio(x3).getDeviceData(), "isTurnedOn", true);
+        phys(10.0F);
+        seq = runSeq(2 * n, x3);
+        phys(FRAME_S);
+        check("身分重置：同 id 的新車開著收音機，每幀 10 物理秒仍每幀都 add", allTrue(seq, 0));
+        // 暖機看物理秒，不看牆鐘
         y.getController().isEnable = true;
         run(1);
         y.getController().isEnable = false;
-        seq = runSeq(2 * n, y);
-        check("暖機：不閒置一幀之後、牆鐘不動時每幀都 add", allTrue(seq, 0));
+        run(1);   // 重新閒置的第一幀（牆鐘版從這一幀起算）
+        IdleVehicleThrottle.advanceClockForTest(60_000L);
+        check("牆鐘過了 60 秒、物理秒只有 2N/60：每幀都 add", allTrue(runSeq(2 * n, y), 0));
         IdleVehicleThrottle.advanceClockForTest(3_000L);
-        check("暖機：3 秒時仍每幀都 add", allTrue(runSeq(n, y), 0));
+        phys(0.001F);
+        run(1);
+        phys(FRAME_S);
+        check("卡頓（牆鐘 3 秒、這一幀 0.001 物理秒）不提早降頻：每幀都 add", allTrue(runSeq(n, y), 0));
+        objects.remove(y);
+        phys(10.0F);
+        run(3);
+        phys(FRAME_S);
+        objects.add(y);
+        check("不在 scheduler 的 3 幀（各 10 物理秒）不累加：回來後每幀都 add", allTrue(runSeq(n, y), 0));
         y.getController().isEnable = true;
         run(1);
         y.getController().isEnable = false;
-        run(1);   // 重新閒置的第一幀：暖機從這一幀的牆鐘算起
-        IdleVehicleThrottle.advanceClockForTest(2_000L);
-        check("暖機：中途不閒置一幀 → 從那一幀重算（距第一次 5 秒、距中斷 2 秒仍每幀都 add）", allTrue(runSeq(2 * n, y), 0));
-        IdleVehicleThrottle.advanceClockForTest(2_999L);
-        check("暖機：距中斷 4.999 秒仍每幀都 add", allTrue(runSeq(n, y), 0));
-        IdleVehicleThrottle.advanceClockForTest(1L);
+        phys(4.99F);
+        run(1);
+        phys(0.0F);
+        check("物理秒 4.99：每幀都 add", allTrue(runSeq(n, y), 0));
+        y.getController().isEnable = true;
+        run(1);
+        y.getController().isEnable = false;
+        phys(0.02F);
+        run(1);
+        phys(0.0F);
+        check("物理秒 4.99 時不閒置一幀 → 歸 0（再加 0.02 仍每幀都 add）", allTrue(runSeq(n, y), 0));
+        phys(4.99F);
+        run(1);
+        phys(FRAME_S);
         seq = runSeq(4 * n, y);
         boolean onTurn = count(seq) == 4;
         long f0 = frame() - 4L * n + 1;
         for (int i = 0; i < seq.length; i++) {
             onTurn &= seq[i] == (((f0 + i + y.vehicleId) & (n - 1)) == 0);
         }
-        check("暖機：距中斷滿 5 秒後只在自己的輪次 add（每 N 幀 1 次）", onTurn);
+        check("物理秒滿 5：只在自己的輪次 add（每 N 幀 1 次）", onTurn);
+        contactClock(c, n);
         check("對照車全程每 N 幀 1 次、沒有稽核、沒有停用", count(runSeq(4 * n, z)) == 4 && IdleVehicleThrottle.auditsForTest() == 0
                 && !IdleVehicleThrottle.disabledForTest());
         IdleVehicleThrottle.forceBeatForTest();
@@ -313,6 +361,63 @@ public final class IdleVehicleThrottleTest {
         String line = IdleVehicleThrottle.lastBeatLine;
         check("心跳有 warmup／devOn／devScans（" + line + "）", line != null && !line.contains(" warmup=0 ") && !line.contains(" devOn=0 ")
                 && !line.contains(" devScans=0 ") && line.contains(" warmup=") && line.contains(" devOn="));
+    }
+
+    /**
+     * 接觸時鐘差分：真的 VehiclePedestrianContactTracking 兩份，各放一筆剛發生的接觸。A 只在這台車被放進 bucket 的幀跑 postUpdate
+     * （手術後的行為），B 每幀都跑（原版）；每幀的物理秒輪流變動。A、B 必須在同一幀清掉接觸，而且第一次被跳過時已經清掉。
+     */
+    static void contactClock(BaseVehicle c, int n) throws Exception {
+        c.getController().isEnable = true;   // 剛撞過人：這一幀還在動
+        run(1);
+        c.getController().isEnable = false;
+        VehiclePedestrianContactTracking a = tracking();
+        VehiclePedestrianContactTracking b = tracking();
+        float[] pattern = {0.016F, 0.4F, 0.001F, 0.05F, 0.9F, 0.0F, 0.2F, 0.033F};
+        int expireA = -1;
+        int expireB = -1;
+        int firstSkip = -1;
+        for (int f = 0; f < 400 && (firstSkip < 0 || expireA < 0 || expireB < 0); f++) {
+            phys(pattern[f % pattern.length]);
+            boolean added = run(1).get(c) == 1;
+            if (added) {
+                a.postUpdate(c, null);
+            } else if (firstSkip < 0) {
+                firstSkip = f;
+            }
+            b.postUpdate(c, null);
+            if (expireA < 0 && contacts(a).isEmpty()) {
+                expireA = f;
+            }
+            if (expireB < 0 && contacts(b).isEmpty()) {
+                expireB = f;
+            }
+        }
+        phys(FRAME_S);
+        check("接觸時鐘：只在放行幀推進的一份與每幀推進的原版在同一幀清掉接觸（第 " + expireA + "／" + expireB
+                + " 幀），第一次被跳過（第 " + firstSkip + " 幀）時已經清掉", expireA >= 0 && expireA == expireB && firstSkip > expireB);
+    }
+
+    static VehiclePedestrianContactTracking tracking() throws Exception {
+        VehiclePedestrianContactTracking t = new VehiclePedestrianContactTracking();
+        VehiclePedestrianContact contact = VehiclePedestrianContact.alloc();
+        contact.character = alloc(zombie.characters.IsoZombie.class);
+        contact.hitTime = 0.0F;   // timeNow 從 0 起，這一筆就是「現在」
+        contacts(t).add(contact);
+        return t;
+    }
+
+    @SuppressWarnings("unchecked")
+    static Set<VehiclePedestrianContact> contacts(VehiclePedestrianContactTracking t) throws Exception {
+        return (Set<VehiclePedestrianContact>) get(VehiclePedestrianContactTracking.class, t, "persistentContacts");
+    }
+
+    /** 同一個 vehicleId 換成另一台閒置車（舊車離開 scheduler 與 cell）。 */
+    @SuppressWarnings("unchecked")
+    static BaseVehicle replace(BaseVehicle old) throws Exception {
+        objects.remove(old);
+        ((Set<BaseVehicle>) get(IsoCell.class, cell, "vehicles")).remove(old);
+        return vehicle(old.vehicleId);
     }
 
     /** 跑 frames 幀，回傳 v 每一幀有沒有被放進 bucket。 */
