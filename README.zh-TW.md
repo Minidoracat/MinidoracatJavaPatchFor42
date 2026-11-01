@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 82 個 patched class、258 個命中點、98 個 helper class。
+- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 83 個 patched class、262 個命中點、102 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -116,6 +116,9 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W89 閒置車降頻（[2cx](docs/patches.md#2cx)） | 伺服器把每輛載入的車釘在每幀更新，沒人、熄火、沒在動的車也每幀重算格子、作物與燈光，結果和上一幀相同。本服 45–47 人、約 2,090 輛載入車時，主執行緒 dump 有約 20% 停在 `BaseVehicle.update`。 | 「閒置」的車（沒人、引擎 Idle、物理沒在動、授權是伺服器、沒拖車、警報與警笛關、收音機與 CD 關等，每幀重算）連續閒置滿 5 物理秒（接觸時鐘用的時間，掉幀時比牆鐘慢）後每 N 幀才更新一次（`-Dmdc.idleVehicleThrottleN`，預設 8），用車輛 id 錯開；上車、發動、被推、被撞、警報都讓下一幀回到每幀更新，之後要再閒置滿 5 物理秒（剛撞過人的車接觸紀錄要照原版速度過期）。預設 observe（行為同原版，對會跳的車抽樣比對下一幀的位置與狀態，每 5 分鐘一行）；`-Dmdc.idleVehicleThrottle=on` 啟用並每 4096 次跳過抽一次比對，位置在不更新時變了就本次啟動回原版；`off` 完全原版。 | 未回報 |
 | W90 車輛聲音網路相關性預篩（[2cy](docs/patches.md#2cy)） | 車輛聲音每幀對每條連線走全部車問「這台的聲音和這位玩家有關嗎」：46 條連線 × 約 2,090 輛約每幀 9.6 萬次，而聲音半徑只看車本身（警報、倒車蜂鳴、車門警報、引擎、喇叭、警笛），多數車半徑是 0。 | 每幀先依原順序篩出有聲音的車，各連線只看這份清單；原版判斷照跑，結果與順序相同。預設 observe（每 16 輪兩邊都算並逐條比對、回原版）；`-Dmdc.vehicleSoundPrefilter=on` 用清單並每 256 輪比對，不一致就本次啟動回原版；`off` 完全原版。 | 未回報 |
 | W91 `checkIsNearVehicle` 只在潛行時跑（[2cz](docs/patches.md#2cz)） | 每位玩家每幀最多一次走全部車算距離，結果丟掉（兩個呼叫點互斥：offset 897 在 `updateRemotePlayer` 分支、942 `ireturn`；1263 在伺服器上走不到）；唯一的作用是潛行時標記「靠近車蹲著」，不潛行時什麼都不寫。 | 不潛行時跳過，潛行時照原版。預設 observe（照原版，不潛行時確認狀態沒變）；`-Dmdc.nearVehicleSneakGate=on` 跳過並每 4096 次抽一次照原版檢查，變了就本次啟動回原版；`off` 完全原版。 | 未回報 |
+| W92 動物循環音迴圈在伺服器整段跳過（[2da](docs/patches.md#2da)） | `IsoCell.ProcessObjects` 每幀走完整份物件清單（約 4,000 個），對每隻動物跑走路／奔跑循環音：查品種聲音、走動畫節點、比字串。伺服器上「聽者在範圍內」恆為否、動物的 emitter 是不出聲的 dummy，整段沒有任何可觀察的輸出；11-01 晚峰 60 份主執行緒 dump 有 3 份停在這裡。 | 伺服器上讓這段迴圈拿到空的迭代器，之後照原版跑殭屍聲音。預設 observe（照原版，每 64 幀量一次這段的耗時）；兩個模式都每 256 幀稽核一次前提（`SoundManager` 是原版類別、每隻動物的 emitter 是 dummy、循環音的事件 id 是 0），不成立 on 就本次啟動回原版。`-Dmdc.animalLoopSoundGate=on` 啟用；`off` 完全原版。 | 未回報 |
+| W93 動物同步範圍判定的每連線常數提到迴圈外（[2db](docs/patches.md#2db)） | W13 對每個「連線×動物」組合重算同一條連線的對齊半徑與「有沒有人在車上」（46 人、約 1,364 隻動物時約每秒 58 萬對），計數器還用 `AtomicLong`，雖然只有主執行緒在呼叫。 | 每次 `sendUpdateToClient` 開頭（W14 的 `getPacket` 改道點）每條連線算一次，同一條連線的動物直接用；計數器改普通 long。判定與計數和原本相同。預設 observe（每對照原本重算並與快取比對，不一致記 `hoistMismatch`，併入 W13 心跳）；`-Dmdc.animalRelevancyHoist=on` 用快取並每 4096 對抽一對重算，不一致就本次啟動回每對重算；`off` 每對重算。 | 未回報 |
+| W94 伺服器跳過 `setBodyPartsLastState`（[2dc](docs/patches.md#2dc)） | 每位玩家與每隻動物每幀 postupdate 都把 17 個身體部位的包紮、咬傷、抓傷、割傷狀態抄一份「上一幀」；這份資料唯一的讀者在伺服器上第一行就返回，不存檔、不送封包。 | 伺服器上跳過這次抄寫（其他寫入點照原版）。預設 observe（照原版，分玩家／動物計數並抽樣量耗時）；`-Dmdc.bodyLastStateSkip=on` 跳過；`off` 完全原版。正式服 233 個與本機 466 個 Workshop 項目的 Lua 都沒有讀它（2026-11-02 grep）。 | 未回報 |
 
 ### 網路：頻寬與重送迴圈
 
@@ -165,7 +168,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ### 觀測
 
-不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）、動物 ID 解析失敗紀錄（[2bo](docs/patches.md#2bo)）、聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）、SyncIsoObject 洪流觀測（[2bv](docs/patches.md#2bv)；原版 `Packets limit has exceeded` 警告不記連線，這支記下洪流背後的玩家與物件）與動物遺失觀測（[2bx](docs/patches.md#2bx)；放下動物時移走了別隻、chunk 的卸載存檔還在寫就被重新載入、長大的動物因附近有同 ID 的複製體被刪，都會記一行）。它們在 console
+不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）、動物 ID 解析失敗紀錄（[2bo](docs/patches.md#2bo)）、聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）、SyncIsoObject 洪流觀測（[2bv](docs/patches.md#2bv)；原版 `Packets limit has exceeded` 警告不記連線，這支記下洪流背後的玩家與物件）與動物遺失觀測（[2bx](docs/patches.md#2bx)；放下動物時移走了別隻、chunk 的卸載存檔還在寫就被重新載入、長大的動物因附近有同 ID 的複製體被刪，都會記一行）與動物、液體容器探針（[2dd](docs/patches.md#2dd)；虛擬動物的規模與每幀耗時、液體容器更新的實體數與會集雨的比例、沒人收得到而且閒置的動物比例，給兩個要服主裁定的降頻選項用）。它們在 console
 寫限流的心跳行，上面多數問題都是靠它們找到的。
 
 ### 客戶端修補（發布包）

@@ -212,8 +212,12 @@ public final class AnimalRequestGate {
      * 附帶效果是不長期釘住 {@code UdpConnection} 物件圖（含其 1 MB buffer）。
      * <b>這個保證要成立，`filterRequests` 的每一條 Long-key 路徑都必須經過該 finally</b>
      * ——包含兩把 kill switch 都 off 的組態（否則 both-off 下這裡每次 set 都不會被清）。
+     *
+     * <p>W93（docs/patches.md 2db）：同一個入口先呼叫 {@code AnimalRelevancyGate.beginConnection}，把這條連線的對齊半徑與載具判定
+     * 算一次（它自己 catch，不會拋）。這是每次 {@code sendUpdateToClient}（含遞迴的 pending）在動物迴圈之前必經的點。
      */
     public static INetworkPacket getPacket(UdpConnection connection, PacketTypes.PacketType type) {
+        AnimalRelevancyGate.beginConnection(connection);
         CURRENT.set(connection);
         return connection.getPacket(type);
     }

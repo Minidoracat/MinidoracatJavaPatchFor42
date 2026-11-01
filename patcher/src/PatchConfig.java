@@ -205,7 +205,7 @@ public final class PatchConfig {
         // 主執行緒；docs/patches.md 2af、docs/animal-los-gate-design-v1.md；前案佐證
         // docs/isoanimal-updatelos-design-v1.md 40人層 18.3%＋server-only 七呼叫點表）：每動物
         // 每 tick 掃 getCell().getObjectList() 全表（Set）只為找 zombie/player 呼叫 spotted()。
-        // caller 側 updateInternal 內唯一 updateLOS callsite（offset 197）改道 AnimalLosGate——
+        // caller 側 updateInternal 內唯一 updateLOS callsite（42.21.0 javap offset 205）改道 AnimalLosGate——
         // observe 量化（size 分布＋耗時採樣）、enforce 以 vanilla frameCounter 輪轉每動物每
         // N tick 掃一次（grok 審查修正：v1 草案 nanoTime 窗口在低 fps 有 gcd 剩餘類永久失明；
         // Δframe=1 是 server⇒FULL⇒frameMod=1 的條件性事實，SmokeCheck 承重前提釘＋helper
@@ -789,6 +789,8 @@ public final class PatchConfig {
                 "java/util/HashMap", "get", "(Ljava/lang/Object;)Ljava/lang/Object;",
                 "zombie/mdc/AnimalRequestGate", "filterRequests"));
         // 1 (W13 RelevantTo, offset 242) + 2 (W14 getPacket) + 3 (W14 HashMap.get)
+        // W93（docs/patches.md 2db）不加手術：AnimalRequestGate.getPacket 先呼叫 AnimalRelevancyGate.beginConnection，
+        // 每條連線的對齊半徑與載具判定提到動物迴圈外；-Dmdc.animalRelevancyHoist=2|observe（預設）／1|on／0|off。
         animalSyncSend.expectedHits = 6;
         patches.add(animalSync);
 
@@ -1324,6 +1326,13 @@ public final class PatchConfig {
         worldUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/iso/areas/DesignationZone", "update", "()V", awayProbe, "zoneUpdate"));
         worldUpdate.expectedHits = 1;
+        // ---- W95 a0 虛擬動物探針（docs/patches.md 2dd；併在上面 W56 的 IsoWorld ClassPatch）----
+        // updateThread 唯一的 invokestatic AnimalZones.updateVirtualAnimals()V（javap offset 255，前面 "Update VA" profile→astore_2，
+        // 後面 aload_2）同形改道 MdcAnimalProbes：照原版呼叫並量 µs，心跳時掃 loadedCells。純觀測；-Dmdc.animalProbes=2|observe（預設）／0|off。
+        Patcher.MethodOps worldThread = isoWorld.method("updateThread", "()V");
+        worldThread.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/characters/animals/AnimalZones",
+                "updateVirtualAnimals", "()V", "zombie/characters/animals/MdcAnimalProbes", "updateVirtualAnimals"));
+        worldThread.expectedHits = 1;
         patches.add(isoWorld);
         Patcher.ClassPatch animalPop = new Patcher.ClassPatch("zombie/characters/animals/AnimalPopulationManager");
         Patcher.MethodOps chunkRemoved = animalPop.method("removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V");
@@ -1407,6 +1416,14 @@ public final class PatchConfig {
         Patcher.MethodOps isoRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
         isoRemove.headCall = new Patcher.HeadCall(isoGate, "touchRemove", cellArg);
         isoRemove.expectedHits = 1;
+        // ---- W92 動物循環音迴圈在伺服器整段跳過（docs/patches.md 2da）----
+        // ProcessObjects 唯一的 invokeinterface Set.iterator()（javap offset 10，前面 aload_0→getfield objectList，後面 astore_2）
+        // 同形改道 AnimalLoopSoundGate：on 時回空 iterator（伺服器上整段迴圈沒有可觀測輸出），之後照原版跑 updateZombieVocals。
+        // -Dmdc.animalLoopSoundGate=2|observe（預設）／1|on／0|off。
+        Patcher.MethodOps processObjects = isoCell.method("ProcessObjects", "(Ljava/util/Iterator;)V");
+        processObjects.redirects.add(new Patcher.Site(Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator",
+                "()Ljava/util/Iterator;", "zombie/mdc/AnimalLoopSoundGate", "iterator"));
+        processObjects.expectedHits = 1;
         patches.add(isoCell);
         // W75：IsoObject.removeFromWorld() bci 15 唯一 invokevirtual IsoCell.addToProcessIsoObjectRemove 同形改道
         // （receiver 前置）。非主執行緒（實測 ServerPlayersVehicles 載車：BaseVehicle.load → addAnimalInTrailer →
@@ -1696,6 +1713,14 @@ public final class PatchConfig {
         playerNearVehicle.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "checkIsNearVehicle",
                 "()Z", "zombie/mdc/NearVehicleSneakGate", "checkIsNearVehicle"));
         playerNearVehicle.expectedHits = 2;
+        // ---- W94 伺服器跳過 setBodyPartsLastState（docs/patches.md 2dc；併在 W83 的 IsoPlayer ClassPatch）----
+        // postupdateInternal 唯一的 invokevirtual BodyDamage.setBodyPartsLastState()V（javap offset 121，前面 aload_0→getBodyDamage，
+        // 後面 return）同形改道 BodyLastStateGate：伺服器上這份狀態唯一的讀者 Bandages.update 開頭就回傳，on 時跳過。
+        // -Dmdc.bodyLastStateSkip=2|observe（預設）／1|on／0|off。
+        Patcher.MethodOps playerPostupdate = isoPlayer.method("postupdateInternal", "()V");
+        playerPostupdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/BodyDamage/BodyDamage",
+                "setBodyPartsLastState", "()V", "zombie/mdc/BodyLastStateGate", "setBodyPartsLastState"));
+        playerPostupdate.expectedHits = 1;
         patches.add(isoPlayer);
 
         // ---- W85 只把動物附近的載具送進 native 尋路（docs/patches.md 2ct；BaseVehicle 三個方法併在上面 W3-4 的 ClassPatch）----
@@ -1746,6 +1771,17 @@ public final class PatchConfig {
                 "()Ljava/util/Set;", soundPre, "getVehicles"));
         soundRelevant.expectedHits = 1;
         patches.add(soundManager);
+
+        // ---- W95 F1 液體容器探針（docs/patches.md 2dd）----
+        // updateSimulation 唯一的 invokevirtual EntityBucket.getEntities()（javap offset 19，前面 aload_0→getfield fluidContainerEntities，
+        // 後面 astore_2）同形改道 MdcAnimalProbes.fluidEntities：回傳原版同一個陣列，記 bucket 大小、抽樣數 rainCatcher > 0。
+        // FluidContainerUpdateSystem 原本沒有 ClassPatch。純觀測；與 a0、sim 共用 -Dmdc.animalProbes。
+        Patcher.ClassPatch fluidSystem = new Patcher.ClassPatch("zombie/entity/components/fluids/FluidContainerUpdateSystem");
+        Patcher.MethodOps fluidUpdate = fluidSystem.method("updateSimulation", "()V");
+        fluidUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/EntityBucket", "getEntities",
+                "()Lzombie/entity/util/ImmutableArray;", "zombie/characters/animals/MdcAnimalProbes", "fluidEntities"));
+        fluidUpdate.expectedHits = 1;
+        patches.add(fluidSystem);
 
         return patches;
     }

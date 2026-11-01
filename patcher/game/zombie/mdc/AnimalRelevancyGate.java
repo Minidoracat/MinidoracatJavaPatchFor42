@@ -1,6 +1,6 @@
 package zombie.mdc;
 
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Locale;
 
 import zombie.characters.IsoPlayer;
 import zombie.core.raknet.UdpConnection;
@@ -89,6 +89,14 @@ import zombie.debug.DebugLog;
  * {@code 2} observe（回 vanilla 結果、只統計 suppressed 判定差集）、{@code 0} off
  * （緊急降級，不需重新部署）。
  *
+ * <p><b>W93 每條連線的常數提到迴圈外</b>（2026-11-02；docs/patches.md 2db；{@code -Dmdc.animalRelevancyHoist}）：
+ * 一次 {@code sendUpdateToClient} 期間同一條連線的 {@code getChunkGridWidth}、玩家是否在載具內都不變（迴圈 body 只讀連線狀態、
+ * 不處理封包），所以 {@link #alignedRadius}、{@link #anyPlayerInVehicle} 在 {@code AnimalRequestGate.getPacket}（每次
+ * {@code sendUpdateToClient} 開頭必經，遞迴的 pending 也會再經過）呼叫 {@link #beginConnection} 時算一次，之後同一條連線的每隻動物
+ * 直接用。計數器改普通 long（唯一呼叫點在主執行緒，心跳也在同一條執行緒）。{@code 2|observe}（預設）照原版每對重算，並與快取逐次比對，
+ * 不一致記 {@code hoistMismatch}；{@code 1|on} 用快取，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；{@code 0|off}
+ * 每對重算（原版）。換連線時快取在下一次 {@code beginConnection} 更新；連線不是快取的那條就照原版重算。
+ *
  * <p><b>刻意不做的事</b>：
  * <ul>
  *   <li>不改 {@code isAnimalOnScreen}——它同樣有 {@code (relevantRange-2)*10} 的形狀
@@ -129,26 +137,26 @@ public final class AnimalRelevancyGate {
     private static final int MIN_TRUSTED_GRID = 13;
     private static final int MAX_TRUSTED_GRID = 19;
 
-    /** 判定總次數；heartbeat 節拍的唯一來源（<b>不能</b>用來推導 allowed——見 rejected）。 */
-    private static final AtomicLong calls = new AtomicLong();
+    /** 判定總次數；heartbeat 節拍的唯一來源（<b>不能</b>用來推導 allowed——見 rejected）。只在主執行緒遞增（W93 起普通 long）。 */
+    private static long calls;
     /**
      * enforce 下夾過半徑判定為 false 的次數。
      * <b>不等於環帶占比、也不等於節省量</b>：vanilla 半徑外、本來就不會送的遠距動物也計在內
      * （{@code toSendList} 未經距離預篩）。而 {@code calls - rejected} <b>不是</b> allowed
      * ——passthrough 分支的 vanilla-false 結果不進 {@code rejected}。
      */
-    private static final AtomicLong rejected = new AtomicLong();
+    private static long rejected;
     /**
      * observe 下「vanilla 為真而夾過為假」的<b>判定差集</b>。
      * <b>不是</b>實際浪費流量的占比：較寬側小於 8 squares 的區域可能已載入卻被夾掉
      * （under-send，不會產生重送）；中心漂移與 streaming 空窗又使判定矩形不等於
      * client loaded set。真正的浪費率仍要用 pcap 的重複快照指標量。
      */
-    private static final AtomicLong suppressed = new AtomicLong();
+    private static long suppressed;
     /** 走 vanilla 半徑的次數（載具排除／偶數或 clamp 邊界／grid width 未同步／夾不縮小）。 */
-    private static final AtomicLong passthrough = new AtomicLong();
+    private static long passthrough;
     /** helper 自身診斷失敗數；恆應為 0。 */
-    private static final AtomicLong anomalies = new AtomicLong();
+    private static long anomalies;
 
     /**
      * heartbeat 週期。這是熱路徑（每 client × 每 relevant 動物 × 每 tick 各一次），
@@ -159,8 +167,56 @@ public final class AnimalRelevancyGate {
      */
     private static final long HEARTBEAT_EVERY = 1L << 20;
     /** 計數閘命中後再以 5 分鐘時間閘節流（2026-09-27：原每 20 秒一行、佔 log 大宗）。 */
-    private static final java.util.concurrent.atomic.AtomicLong LAST_BEAT_MS = new java.util.concurrent.atomic.AtomicLong();
+    private static long lastBeatMs;
     private static final String TAG = "[MinidoracatJavaPatch][AnimalRelevancy] ";
+
+    static final int HOIST_OFF = 0;
+    static final int HOIST_ON = 1;
+    static final int HOIST_OBSERVE = 2;
+    static final String HOIST_RAW = System.getProperty("mdc.animalRelevancyHoist");
+    static final int HOIST = parseHoist(HOIST_RAW);
+    static final int HOIST_AUDIT_MASK = 4095;
+    /** 目前快取的連線（{@link #beginConnection} 寫入；hoist off 或停用時是 null）與它的兩個常數。 */
+    private static UdpConnection hoistConn;
+    private static float hoistAligned;
+    private static boolean hoistInVehicle;
+    private static boolean hoistStarted;
+    private static boolean hoistDisabled;
+    private static long hoistBegins, hoistHits, hoistSeen, hoistAudits, hoistMismatch;
+
+    static int parseHoist(String raw) {
+        if (raw == null) {
+            return HOIST_OBSERVE;
+        }
+        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+            case "0", "off" -> HOIST_OFF;
+            case "1", "on" -> HOIST_ON;
+            default -> HOIST_OBSERVE;
+        };
+    }
+
+    /**
+     * W93：{@code AnimalRequestGate.getPacket}（{@code sendUpdateToClient} 兩個 reliability 分支的開頭）每次呼叫一次，
+     * 把這條連線的對齊半徑與載具判定算好。不拋例外（兩個計算各自 catch）。
+     */
+    public static void beginConnection(UdpConnection connection) {
+        if (HOIST == HOIST_OFF || MODE == MODE_OFF || hoistDisabled) {
+            return;
+        }
+        if (!hoistStarted) {
+            hoistStarted = true;
+            log("hoist 首次生效 mode=" + hoistModeName() + " raw=" + HOIST_RAW
+                    + "（-Dmdc.animalRelevancyHoist=0|off 每對重算、1|on 用每條連線的快取、2|observe 兩路都算並比對；併入本 tag 心跳）");
+        }
+        hoistBegins++;
+        hoistConn = null;
+        if (connection == null) {
+            return;
+        }
+        hoistAligned = alignedRadius(connection);
+        hoistInVehicle = anyPlayerInVehicle(connection);
+        hoistConn = connection;
+    }
 
     private static int parseMode() {
         String raw = System.getProperty("mdc.animalRelevancy");
@@ -194,11 +250,20 @@ public final class AnimalRelevancyGate {
         if (MODE == MODE_OFF || connection == null) {
             return vanilla(connection, x, y, vanillaRadius);
         }
-        float aligned = alignedRadius(connection);
+        boolean hoisted = false;
+        if (connection == hoistConn) {
+            if (HOIST == HOIST_OBSERVE) {
+                hoistMatches(connection);
+            } else if ((++hoistSeen & HOIST_AUDIT_MASK) != 0 || hoistMatches(connection)) {
+                hoisted = true;
+                hoistHits++;
+            }
+        }
+        float aligned = hoisted ? hoistAligned : alignedRadius(connection);
         // 夾不縮小就沒有可省的環帶：chunkGridWidth 尚未同步（握手前）、vanilla 已更保守、
         // 載具情境（client chunk 中心前移，server 對不上）、或非有限的 vanillaRadius。
-        if (!(aligned > 0.0f) || !(aligned < vanillaRadius) || anyPlayerInVehicle(connection)) {
-            passthrough.incrementAndGet();
+        if (!(aligned > 0.0f) || !(aligned < vanillaRadius) || (hoisted ? hoistInVehicle : anyPlayerInVehicle(connection))) {
+            passthrough++;
             tick();
             return vanilla(connection, x, y, vanillaRadius);
         }
@@ -206,17 +271,42 @@ public final class AnimalRelevancyGate {
             boolean vanillaResult = vanilla(connection, x, y, vanillaRadius);
             // 只量測、不改行為：vanilla 為真而對齊後為假的判定差集，不是實際浪費率
             if (vanillaResult && !connection.RelevantTo(x, y, aligned)) {
-                suppressed.incrementAndGet();
+                suppressed++;
             }
             tick();
             return vanillaResult;
         }
         boolean gated = connection.RelevantTo(x, y, aligned);
         if (!gated) {
-            rejected.incrementAndGet();
+            rejected++;
         }
         tick();
         return gated;
+    }
+
+    /**
+     * W93：重算這條連線的兩個常數並與快取比對。不一致記 {@code hoistMismatch}；on 模式就本次啟動停用快取（回每對重算）。
+     * 回傳是否一致（一致時呼叫端可以用快取）。
+     */
+    private static boolean hoistMatches(UdpConnection connection) {
+        hoistAudits++;
+        float aligned = alignedRadius(connection);
+        boolean inVehicle = anyPlayerInVehicle(connection);
+        if (Float.compare(aligned, hoistAligned) == 0 && inVehicle == hoistInVehicle) {
+            return true;
+        }
+        hoistMismatch++;
+        if (hoistMismatch <= 5) {
+            log("hoist mismatch #" + hoistMismatch + " cached aligned=" + hoistAligned + " inVehicle=" + hoistInVehicle
+                    + " now aligned=" + aligned + " inVehicle=" + inVehicle);
+        }
+        if (HOIST == HOIST_ON && !hoistDisabled) {
+            hoistDisabled = true;
+            hoistConn = null;
+            log("hoist DISABLED（本次啟動永久回原版）reason=cached connection constants changed within sendUpdateToClient"
+                    + " hits=" + hoistHits + " audits=" + hoistAudits);
+        }
+        return false;
     }
 
     /**
@@ -233,7 +323,7 @@ public final class AnimalRelevancyGate {
             }
             return (stored / 2) * SQUARES_PER_CHUNK;
         } catch (RuntimeException | LinkageError e) {
-            anomalies.incrementAndGet();
+            anomalies++;
             return 0.0f;
         }
     }
@@ -252,7 +342,7 @@ public final class AnimalRelevancyGate {
             }
             return false;
         } catch (RuntimeException | LinkageError e) {
-            anomalies.incrementAndGet();
+            anomalies++;
             // 判不出來就當作在載具：寧可退回 vanilla，不要用可能錯的中心去夾
             return true;
         }
@@ -260,33 +350,51 @@ public final class AnimalRelevancyGate {
 
     private static boolean vanilla(UdpConnection connection, float x, float y, float radius) {
         if (connection == null) {
-            anomalies.incrementAndGet();
+            anomalies++;
             return false;
         }
         return connection.RelevantTo(x, y, radius);
     }
 
     private static void tick() {
-        if (calls.incrementAndGet() % HEARTBEAT_EVERY == 0L) {
+        if (++calls % HEARTBEAT_EVERY == 0L) {
             heartbeat();
         }
     }
 
     private static void heartbeat() {
         long now = System.currentTimeMillis();
-        long prev = LAST_BEAT_MS.get();
-        if (now - prev < 300_000L || !LAST_BEAT_MS.compareAndSet(prev, now)) {
+        if (now - lastBeatMs < 300_000L) {
             return;
         }
+        lastBeatMs = now;
         try {
             DebugLog.log(TAG + "mode=" + MODE
-                    + " calls=" + calls.get()
-                    + " rejected=" + rejected.get()
-                    + " suppressed=" + suppressed.get()
-                    + " passthrough=" + passthrough.get()
-                    + " anomalies=" + anomalies.get());
+                    + " calls=" + calls
+                    + " rejected=" + rejected
+                    + " suppressed=" + suppressed
+                    + " passthrough=" + passthrough
+                    + " anomalies=" + anomalies
+                    + " hoist=" + hoistModeName()
+                    + " hoistBegins=" + hoistBegins
+                    + " hoistHits=" + hoistHits
+                    + " hoistAudits=" + hoistAudits
+                    + " hoistMismatch=" + hoistMismatch
+                    + " hoistDisabled=" + hoistDisabled);
         } catch (RuntimeException | LinkageError ignored) {
-            anomalies.incrementAndGet();
+            anomalies++;
+        }
+    }
+
+    static String hoistModeName() {
+        return HOIST == HOIST_OFF ? "off" : HOIST == HOIST_ON ? "on" : "observe";
+    }
+
+    private static void log(String s) {
+        try {
+            DebugLog.log(TAG + s);
+        } catch (RuntimeException | LinkageError ignored) {
+            anomalies++;
         }
     }
 
@@ -297,22 +405,31 @@ public final class AnimalRelevancyGate {
 
     /** 測試用：enforce 下夾過半徑判定為 false 的次數（含遠距動物，非環帶占比）。 */
     static long rejectedCount() {
-        return rejected.get();
+        return rejected;
     }
 
     /** 測試用：observe 下的判定差集（不是實際浪費率）。 */
     static long suppressedCount() {
-        return suppressed.get();
+        return suppressed;
     }
 
     /** 測試用：走 vanilla 半徑的次數。 */
     static long passthroughCount() {
-        return passthrough.get();
+        return passthrough;
     }
 
     /** 測試用：helper 自身診斷失敗數，恆應為 0。 */
     static long anomalyCount() {
-        return anomalies.get();
+        return anomalies;
+    }
+
+    static long hoistHitsForTest() { return hoistHits; }
+    static long hoistAuditsForTest() { return hoistAudits; }
+    static long hoistMismatchForTest() { return hoistMismatch; }
+    static boolean hoistDisabledForTest() { return hoistDisabled; }
+    static void forceHeartbeatForTest() {
+        lastBeatMs = 0L;
+        heartbeat();
     }
 
     private AnimalRelevancyGate() {}

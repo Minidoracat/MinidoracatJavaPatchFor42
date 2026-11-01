@@ -8,6 +8,8 @@ import java.util.Set;
 import zombie.GameTime;
 import zombie.MovingObjectUpdateScheduler;
 import zombie.MovingObjectUpdateSchedulerUpdateBucket;
+import zombie.characters.animals.IsoAnimal;
+import zombie.characters.animals.MdcAnimalProbes;
 import zombie.core.physics.CarController;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
@@ -136,8 +138,14 @@ public final class IdleVehicleThrottle {
         }
     }
 
-    /** {@code MovingObjectUpdateScheduler.startFrame()} 唯一的 {@code bucket.add(obj)}。 */
+    /**
+     * {@code MovingObjectUpdateScheduler.startFrame()} 唯一的 {@code bucket.add(obj)}。W95 的 sim 探針（docs/patches.md 2dd）掛在入口：
+     * 動物只計數，照下面原路徑放進 bucket。
+     */
     public static void add(MovingObjectUpdateSchedulerUpdateBucket bucket, IsoMovingObject o) {
+        if (o instanceof IsoAnimal a) {
+            MdcAnimalProbes.sim(a);
+        }
         if (MODE == OFF || !(o instanceof BaseVehicle v) || !GameServer.server || Thread.currentThread() != GameServer.mainThread) {
             bucket.add(o);
             return;

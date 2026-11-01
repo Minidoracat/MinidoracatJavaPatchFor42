@@ -3045,6 +3045,8 @@ public final class SmokeCheck {
         piTargets.add("ProcessIsoObject()V");
         piTargets.add("addToProcessIsoObject(Lzombie/iso/IsoObject;)V");
         piTargets.add("addToProcessIsoObjectRemove(Lzombie/iso/IsoObject;)V");
+        // W92：ProcessObjects 的 Set.iterator 改道由 checkAnimalCuts 鎖住。
+        piTargets.add("ProcessObjects(Ljava/util/Iterator;)V");
         for (String[] w : piWriters) {
             piTargets.add(w[0] + w[1]);
             MethodNode vW = methodFromJar(jar, isoCellCls, w[0], w[1]);
@@ -3922,6 +3924,7 @@ public final class SmokeCheck {
         failed += checkMapFolderGuard(jar, distJava);
         failed += checkPveDeathLog(jar, distJava);
         failed += checkVehicleUpdateCuts(jar, distJava);
+        failed += checkAnimalCuts(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -5934,7 +5937,9 @@ public final class SmokeCheck {
             int changed = 0;
             int seen = 0;
             for (MethodNode original : classNodeFromJar(jar, t[0]).methods) {
-                if (original.name.equals(t[1]) && original.desc.equals(t[2])) {
+                // W95 的 a0 也掛在 IsoWorld（updateThread），由 checkAnimalCuts 鎖住
+                if (original.name.equals(t[1]) && original.desc.equals(t[2])
+                        || t[0].equals(worldCls) && original.name.equals("updateThread") && original.desc.equals("()V")) {
                     continue;
                 }
                 seen++;
@@ -7842,7 +7847,8 @@ public final class SmokeCheck {
         Map<String, Set<String>> fakeDecl = declarersUnder(withFake, obj, watched);
         failed += check("W83 覆寫普查負對照：多一個 IsoZombie 子類覆寫 setTargetAlpha(IF)V → 宣告者不同、普查變紅",
                 !fakeDecl.equals(wantDeclarers) && fakeDecl.get("setTargetAlpha(IF)V").contains(fake.name));
-        // 手術後：兩個呼叫同形改道，其餘指令與 frames 不變；IsoPlayer 其餘方法不變（updateInternal2 是 W91 的命中點，由 checkVehicleUpdateCuts 鎖）
+        // 手術後：兩個呼叫同形改道，其餘指令與 frames 不變；IsoPlayer 其餘方法不變（updateInternal2 是 W91、postupdateInternal 是 W94 的命中點，
+        // 分別由 checkVehicleUpdateCuts、checkAnimalCuts 鎖）
         MethodNode p = method(distJava, player, "updateLOS", "()V");
         String expected = methodText(v)
                 .replace("INVOKEVIRTUAL " + player + ".getCell " + cellDesc,
@@ -7851,7 +7857,8 @@ public final class SmokeCheck {
                         "INVOKESTATIC " + helper + ".iterator (Ljava/util/Set;)Ljava/util/Iterator;");
         boolean othersSame = classNodeFromJar(jar, player).methods.stream()
                 .filter(m -> !(m.name.equals("updateLOS") && m.desc.equals("()V"))
-                        && !(m.name.equals("updateInternal2") && m.desc.equals("()Z"))).allMatch(m -> {
+                        && !(m.name.equals("updateInternal2") && m.desc.equals("()Z"))
+                        && !(m.name.equals("postupdateInternal") && m.desc.equals("()V"))).allMatch(m -> {
                     try {
                         return methodText(m).equals(methodText(method(distJava, player, m.name, m.desc)));
                     } catch (Exception e) {
@@ -7859,7 +7866,7 @@ public final class SmokeCheck {
                     }
                 });
         failed += check("W83 手術後：updateLOS 的 getCell／Set.iterator 同形改道 PlayerLosFilter，其餘指令與 frames 不變；IsoPlayer 其餘方法"
-                        + "（W91 的 updateInternal2 除外）不變",
+                        + "（W91 的 updateInternal2、W94 的 postupdateInternal 除外）不變",
                 !expected.equals(methodText(v)) && methodText(p).equals(expected) && othersSame);
         MethodNode hIt = method(distJava, helper, "iterator", "(Ljava/util/Set;)Ljava/util/Iterator;");
         MethodNode hCell = method(distJava, helper, "getCell", "(L" + player + ";)Lzombie/iso/IsoCell;");
@@ -8693,6 +8700,268 @@ public final class SmokeCheck {
                         && callsInTry(hNear, Opcodes.INVOKEVIRTUAL, player, "checkIsNearVehicle", "()Z") == 0
                         && countExactCalls(hNear, Opcodes.INVOKEVIRTUAL, player, "isSneaking", "()Z") == 1);
         failed += shaLocks(jar, "W91", NEAR_VEHICLE_LOCKED);
+        return failed;
+    }
+
+    /**
+     * W92 的原版前提：迴圈本體與它呼叫的動物方法、伺服器上 start 到不了（isListenerInRange）、eventInstance 只由 start／stop 寫、
+     * 動物 emitter 在伺服器是 Dummy（建構子的選擇與 playVocals 回 0）。
+     */
+    static final String[][] LOOP_SOUND_LOCKED = {
+            {"zombie/iso/IsoCell", "ProcessObjects", "(Ljava/util/Iterator;)V", "482151bcdc4bf7d5855220eb77360ab2e252fa7d09eeed0639fb93285adc1763"},
+            {"zombie/characters/animals/IsoAnimal", "isOnHook", "()Z", "40afe5947fa50a1e539164ccc0d19239e1b4c0b259019018a2718cd915545a5c"},
+            {"zombie/characters/animals/IsoAnimal", "updateVocalProperties", "()V", "513f9b2b9aec11fcf16426160dc8a5b600fc50d0ec48cd76402d2394911c0836"},
+            {"zombie/characters/animals/IsoAnimal", "updateLoopingSounds", "()V", "a01a611a329684939829ebff66b1b55b599175c177a7eebd5a68a46f157128d8"},
+            {"zombie/characters/animals/IsoAnimal", "updateRunLoopingSound", "()V", "eb5292f5372e8c4d3ab8b4492b8d407d0520c5bebd944f8716ceb9745e7bfe64"},
+            {"zombie/characters/animals/IsoAnimal", "updateWalkLoopingSound", "()V", "b3818a2c1e8eae6e0839bf04b3dd46b9fe883d3c9ac7802f0a86d5e2b64229ee"},
+            {"zombie/characters/animals/IsoAnimal", "getAnimalSoundState", "(Ljava/lang/String;)Lzombie/characters/animals/AnimalSoundState;", "ab3bb18a876a70b0399698abc8c256c6b0c423804ac3402c318133255ff54e2a"},
+            {"zombie/characters/animals/AnimalSoundState", "isPlaying", "()Z", "caeec2a6255f04240aeadc3c2c94ac9a8fbec79ea0d725bd40f15eda19de6732"},
+            {"zombie/characters/animals/AnimalSoundState", "start", "(Ljava/lang/String;I)J", "c8d7ca0925f884b53debe8a3638a9199666bdf7c43726b48db713935c36cd47e"},
+            {"zombie/characters/animals/AnimalSoundState", "stop", "()V", "eb9c01e227eacf410e71e0359edd7fd06275b6198043c0296cc89b8420a9fff6"},
+            {"zombie/SoundManager", "isListenerInRange", "(FFF)Z", "07f932a50e7f593d3c38da44776b3b88fe5c32677dc9e098d24e5faaf287ad29"},
+            {"zombie/characters/DummyCharacterSoundEmitter", "playVocals", "(Ljava/lang/String;)J", "20773656392e552ad141f354903e4a432daae528422f28c91d5ba8608de4e43e"},
+            {"zombie/characters/IsoGameCharacter", "<init>", "(Lzombie/iso/IsoCell;FFF)V", "47c757b2c483806c179628f6221d985ea7250d33d3d3b212adb3401cada2ae3d"},
+            {"zombie/characters/IsoGameCharacter", "getEmitter", "()Lzombie/characters/BaseCharacterSoundEmitter;", "ca3aa85b43398ac29388493af6ccff4ea4a7cca855c05501c8706f686ae5f7b8"},
+    };
+
+    /** W93 的原版前提：sendUpdateToClient 本體（getPacket 在動物迴圈前、迴圈內沒有改連線狀態的呼叫）與 helper 讀的連線／玩家 getter。 */
+    static final String[][] RELEVANCY_HOIST_LOCKED = {
+            {"zombie/popman/animal/AnimalSynchronizationManager", "sendUpdateToClient",
+                    "(Lzombie/core/raknet/UdpConnection;ZLjava/util/HashSet;)V", "e3b49848d8bb321a399243ac0e153bcf7480c11f8082deea4c5b78056145f977"},
+            {"zombie/core/raknet/UdpConnection", "RelevantTo", "(FFF)Z", "6ee3d2031937ef6897a9f4513a429039a61a4511403a9cdaffcdca9e9de08273"},
+            {"zombie/core/raknet/UdpConnection", "getChunkGridWidth", "()I", "8cfa349a2b067a71ae784c43b887f994081878b67fc483e97fa94bbda180bca3"},
+            {"zombie/core/raknet/UdpConnection", "getRelevantRange", "()B", "79615f201e2b67752f474e56e3bf4d6aefba18bd29dd2fa0d2316ac93ed36bd6"},
+            {"zombie/core/raknet/UdpConnection", "getPlayerAt", "(I)Lzombie/characters/IsoPlayer;", "d8167c53b7dfcdddf8781bab7a748053411e68931d103ed62b849926791022ec"},
+            {"zombie/characters/IsoGameCharacter", "getVehicle", "()Lzombie/vehicles/BaseVehicle;", "57811147b9f5538d8340ee925d432682bf6af61dd1e7094f874075e26c820079"},
+    };
+
+    /** W94 的原版前提：呼叫點所在方法、寫入與唯一讀者（伺服器上開頭就回傳）。 */
+    static final String[][] BODY_LAST_STATE_LOCKED = {
+            {"zombie/characters/IsoPlayer", "postupdateInternal", "()V", "2790cb299fb45877d7e16008d5d0c87d6d65c3798cc2eb901e3df7bde333a2be"},
+            {"zombie/characters/BodyDamage/BodyDamage", "setBodyPartsLastState", "()V", "83020399854cb89d462b901e3483ad6186e50c6c47b2032ec1983e4948933278"},
+            {"zombie/characters/BodyDamage/BodyDamage", "getBodyPartsLastState",
+                    "(Lzombie/characters/BodyDamage/BodyPartType;)Lzombie/characters/BodyDamage/BodyPartLast;", "b9c37d1a8cafc32228660eefc68298ed0c62ca560bef3a708f0d292ae405381d"},
+            {"zombie/characters/IsoGameCharacter$Bandages", "update", "(Lzombie/characters/IsoGameCharacter;)V", "3134dc3de8ca7fd6fd023290f8e53dcaaa5563deb5efbeeded7b2dbd64c39fbe"},
+    };
+
+    /** W95 探針判讀依據：idle＝沒有遷徙定義就 return；迴圈只對 rainCatcher > 0 做事；sim 用原版送出半徑。 */
+    static final String[][] ANIMAL_PROBES_LOCKED = {
+            {"zombie/characters/animals/AnimalZones", "updateVirtualAnimals", "()V", "8b6433916ddeba143aac12bb118334cbc4ebf658a04c2f974a7418c230272034"},
+            {"zombie/characters/animals/VirtualAnimal", "update", "()V", "4d555295abfeffcbe02bee4f8ab875cce581781efae100eb10f9fa55ce5726dc"},
+            {"zombie/entity/components/fluids/FluidContainerUpdateSystem", "updateSimulation", "()V", "96cd16cb8eb068aa74730a841c6612094099b870ddf27cadd713c41574181aa1"},
+            {"zombie/entity/components/fluids/FluidContainerUpdateSystem", "updateEntity",
+                    "(Lzombie/entity/GameEntity;Lzombie/entity/components/fluids/FluidContainer;Z)V", "dcecab3e7c1207a7c5fe50e49772b06c54030902c927b3ee363b1ca4ee8684a3"},
+            {"zombie/entity/components/fluids/FluidContainer", "getRainCatcher", "()F", "f129591e1357f00533b0872bf260f9f84d12b420ca2f36a403bbcb3dbe9f25e1"},
+            {"zombie/entity/components/fluids/FluidContainer", "isQualifiesForMetaStorage", "()Z", "a4a193ac443a72866b22e922b9e2800c06d1f78ee7d96c5c45b828fa8180da40"},
+    };
+
+    /** W92（2da）／W93（2db）／W94（2dc）／W95（2dd）：原版前提、同形手術、helper 契約。任一前提變紅＝先重新分析等價或撤刀，不改斷言讓它變綠。 */
+    static int checkAnimalCuts(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        JarIndex index = JarIndex.load(jar);
+        String animal = "zombie/characters/animals/IsoAnimal";
+
+        // ---- W92 ----
+        String cell = "zombie/iso/IsoCell";
+        String loopGate = "zombie/mdc/AnimalLoopSoundGate";
+        String itDesc = "()Ljava/util/Iterator;";
+        MethodNode vProc = methodFromJar(jar, cell, "ProcessObjects", "(Ljava/util/Iterator;)V");
+        AbstractInsnNode setIt = firstCall(vProc, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc);
+        failed += check("W92 vanilla 前提：ProcessObjects 恰 1 個 Set.iterator（aload_0→getfield objectList→呼叫→astore_2），迴圈只呼叫 "
+                        + "isOnHook／updateVocalProperties／updateLoopingSounds",
+                countExactCalls(vProc, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 1 && setIt != null
+                        && isField(prevReal(setIt), Opcodes.GETFIELD, cell, "objectList", "Ljava/util/Set;")
+                        && isVar(prevReal(prevReal(setIt)), Opcodes.ALOAD, 0) && isVar(nextReal(setIt), Opcodes.ASTORE, 2)
+                        && countExactCalls(vProc, Opcodes.INVOKEVIRTUAL, animal, "isOnHook", "()Z") == 1
+                        && countExactCalls(vProc, Opcodes.INVOKEVIRTUAL, animal, "updateVocalProperties", "()V") == 1
+                        && countExactCalls(vProc, Opcodes.INVOKEVIRTUAL, animal, "updateLoopingSounds", "()V") == 1);
+        List<String> loopWatched = List.of("isOnHook()Z", "updateVocalProperties()V", "updateLoopingSounds()V", "updateRunLoopingSound()V",
+                "updateWalkLoopingSound()V", "getAnimalSoundState(Ljava/lang/String;)Lzombie/characters/animals/AnimalSoundState;");
+        Map<String, Set<String>> loopDecl = declarersUnder(index.classes(), animal, loopWatched);
+        boolean onlyAnimal = loopDecl.size() == loopWatched.size() && loopDecl.values().stream().allMatch(s -> s.equals(Set.of(animal)));
+        failed += check("W92 vanilla 前提：IsoAnimal 的子類別不覆寫迴圈呼叫的方法（實際 " + loopDecl + "）", onlyAnimal);
+        Map<String, ClassNode> withFakeAnimal = new HashMap<>(index.classes());
+        ClassNode fakeAnimal = new ClassNode();
+        fakeAnimal.name = "zombie/mdc/W92FakeAnimal";
+        fakeAnimal.superName = animal;
+        fakeAnimal.methods.add(new MethodNode(Opcodes.ACC_PUBLIC, "updateLoopingSounds", "()V", null, null));
+        withFakeAnimal.put(fakeAnimal.name, fakeAnimal);
+        failed += check("W92 覆寫普查負對照：多一個 IsoAnimal 子類覆寫 updateLoopingSounds → 普查變紅",
+                !declarersUnder(withFakeAnimal, animal, loopWatched).equals(loopDecl));
+        String ass = "zombie/characters/animals/AnimalSoundState";
+        ClassNode vAss = classNodeFromJar(jar, ass);
+        int eiStart = countExactFields(declaredMethod(vAss, "start", "(Ljava/lang/String;I)J"), Opcodes.PUTFIELD, ass, "eventInstance", "J");
+        int eiStop = countExactFields(declaredMethod(vAss, "stop", "()V"), Opcodes.PUTFIELD, ass, "eventInstance", "J");
+        failed += check("W92 vanilla 前提：eventInstance 全 jar 恰 3 個 putfield（start 1、stop 2）",
+                jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, ass, "eventInstance") == 3 && eiStart == 1 && eiStop == 2);
+        String igc = "zombie/characters/IsoGameCharacter";
+        String emDesc = "Lzombie/characters/BaseCharacterSoundEmitter;";
+        boolean emitterFinal = classNodeFromJar(jar, igc).fields.stream()
+                .anyMatch(f -> f.name.equals("emitter") && (f.access & Opcodes.ACC_FINAL) != 0);
+        failed += check("W92 vanilla 前提：IsoGameCharacter.emitter 是 final，全 jar 恰 2 個 putfield、都在 <init>(IsoCell,FFF)（Dummy／真 emitter 二選一）",
+                emitterFinal && jarWideFieldReadCensus(jar, Opcodes.PUTFIELD, igc, "emitter") == 2
+                        && countExactFields(methodFromJar(jar, igc, "<init>", "(Lzombie/iso/IsoCell;FFF)V"), Opcodes.PUTFIELD, igc, "emitter", emDesc) == 2);
+        MethodNode vGsMain = methodFromJar(jar, "zombie/network/GameServer", "main", "([Ljava/lang/String;)V");
+        AbstractInsnNode smPut = null;
+        for (AbstractInsnNode in : vGsMain.instructions) {
+            if (isField(in, Opcodes.PUTSTATIC, "zombie/SoundManager", "instance", "Lzombie/BaseSoundManager;")) {
+                smPut = in;
+            }
+        }
+        failed += check("W92 vanilla 前提：SoundManager.instance 全 jar 恰 2 個寫入（GameServer.main 與客戶端 GameWindow），GameServer.main 那個是 new SoundManager()",
+                jarWideFieldReadCensus(jar, Opcodes.PUTSTATIC, "zombie/SoundManager", "instance") == 2 && smPut != null
+                        && isCall(prevReal(smPut), Opcodes.INVOKESPECIAL, "zombie/SoundManager", "<init>", "()V")
+                        && prevReal(prevReal(smPut)).getOpcode() == Opcodes.DUP
+                        && prevReal(prevReal(prevReal(smPut))) instanceof TypeInsnNode tNew && tNew.getOpcode() == Opcodes.NEW
+                        && tNew.desc.equals("zombie/SoundManager"));
+        String procExpected = methodText(vProc).replace("INVOKEINTERFACE java/util/Set.iterator " + itDesc + " (itf)",
+                "INVOKESTATIC " + loopGate + ".iterator (Ljava/util/Set;)Ljava/util/Iterator;");
+        failed += check("W92 手術後：ProcessObjects 唯一的 Set.iterator 同形改道 AnimalLoopSoundGate.iterator，其餘指令與 frames 不變",
+                !procExpected.equals(methodText(vProc))
+                        && procExpected.equals(methodText(method(distJava, cell, "ProcessObjects", "(Ljava/util/Iterator;)V"))));
+        MethodNode hIt = method(distJava, loopGate, "iterator", "(Ljava/util/Set;)Ljava/util/Iterator;");
+        failed += check("W92 helper 契約：先判斷 GameServer.server；回空 iterator 只有 1 處；原版 set.iterator() 3 處（off／抽樣量時間／其餘），"
+                        + "回空 iterator 前必經稽核與停用判斷",
+                countExactFields(hIt, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1
+                        && countExactCalls(hIt, Opcodes.INVOKESTATIC, "java/util/Collections", "emptyIterator", itDesc) == 1
+                        && countExactCalls(hIt, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 3
+                        && firstCallIndex(hIt, Opcodes.INVOKESTATIC, loopGate, "audit", "(Ljava/util/Set;)V")
+                                < firstCallIndex(hIt, Opcodes.INVOKESTATIC, "java/util/Collections", "emptyIterator", itDesc));
+        failed += shaLocks(jar, "W92", LOOP_SOUND_LOCKED);
+
+        // ---- W93 ----
+        String asm = "zombie/popman/animal/AnimalSynchronizationManager";
+        String udp = "zombie/core/raknet/UdpConnection";
+        String sendDesc = "(L" + udp + ";ZLjava/util/HashSet;)V";
+        String getPacketDesc = "(Lzombie/network/PacketTypes$PacketType;)Lzombie/network/packets/INetworkPacket;";
+        MethodNode vSend = methodFromJar(jar, asm, "sendUpdateToClient", sendDesc);
+        Set<String> udpCalls = new java.util.TreeSet<>();
+        for (AbstractInsnNode in : vSend.instructions) {
+            if (in instanceof MethodInsnNode mi && mi.owner.equals(udp)) {
+                udpCalls.add(mi.name + mi.desc);
+            }
+        }
+        Set<String> wantUdp = Set.of("getConnectedGUID()J", "getPacket" + getPacketDesc, "getRelevantRange()B", "RelevantTo(FFF)Z");
+        failed += check("W93 vanilla 前提：sendUpdateToClient 兩個 getPacket 都在 RelevantTo 之前；對連線只呼叫 getConnectedGUID／getPacket／"
+                        + "getRelevantRange／RelevantTo（實際 " + udpCalls + "），沒有改連線狀態的呼叫",
+                lastCallIndex(vSend, Opcodes.INVOKEVIRTUAL, udp, "getPacket", getPacketDesc)
+                        < firstCallIndex(vSend, Opcodes.INVOKEVIRTUAL, udp, "RelevantTo", "(FFF)Z")
+                        && udpCalls.equals(wantUdp));
+        MethodNode hGetPacket = method(distJava, "zombie/mdc/AnimalRequestGate", "getPacket", "(L" + udp + ";" + getPacketDesc.substring(1));
+        String relGate = "zombie/mdc/AnimalRelevancyGate";
+        failed += check("W93 helper 契約：AnimalRequestGate.getPacket 恰 1 次 beginConnection，在原版 getPacket 之前",
+                countExactCalls(hGetPacket, Opcodes.INVOKESTATIC, relGate, "beginConnection", "(L" + udp + ";)V") == 1
+                        && firstCallIndex(hGetPacket, Opcodes.INVOKESTATIC, relGate, "beginConnection", "(L" + udp + ";)V")
+                                < firstCallIndex(hGetPacket, Opcodes.INVOKEVIRTUAL, udp, "getPacket", getPacketDesc));
+        MethodNode hBegin = method(distJava, relGate, "beginConnection", "(L" + udp + ";)V");
+        MethodNode hMatch = method(distJava, relGate, "hoistMatches", "(L" + udp + ";)Z");
+        failed += check("W93 helper 契約：beginConnection 與 hoistMatches 都各算一次 alignedRadius／anyPlayerInVehicle（同一份算法，不另寫）",
+                countExactCalls(hBegin, Opcodes.INVOKESTATIC, relGate, "alignedRadius", "(L" + udp + ";)F") == 1
+                        && countExactCalls(hBegin, Opcodes.INVOKESTATIC, relGate, "anyPlayerInVehicle", "(L" + udp + ";)Z") == 1
+                        && countExactCalls(hMatch, Opcodes.INVOKESTATIC, relGate, "alignedRadius", "(L" + udp + ";)F") == 1
+                        && countExactCalls(hMatch, Opcodes.INVOKESTATIC, relGate, "anyPlayerInVehicle", "(L" + udp + ";)Z") == 1);
+        failed += shaLocks(jar, "W93", RELEVANCY_HOIST_LOCKED);
+
+        // ---- W94 ----
+        String player = "zombie/characters/IsoPlayer";
+        String bd = "zombie/characters/BodyDamage/BodyDamage";
+        String bdDesc = "()L" + bd + ";";
+        MethodNode vPost = methodFromJar(jar, player, "postupdateInternal", "()V");
+        AbstractInsnNode setLast = firstCall(vPost, Opcodes.INVOKEVIRTUAL, bd, "setBodyPartsLastState", "()V");
+        failed += check("W94 vanilla 前提：postupdateInternal 恰 1 個 setBodyPartsLastState（aload_0→getBodyDamage→呼叫→return）",
+                countExactCalls(vPost, Opcodes.INVOKEVIRTUAL, bd, "setBodyPartsLastState", "()V") == 1 && setLast != null
+                        && isCall(prevReal(setLast), Opcodes.INVOKEVIRTUAL, player, "getBodyDamage", bdDesc)
+                        && isVar(prevReal(prevReal(setLast)), Opcodes.ALOAD, 0) && nextReal(setLast).getOpcode() == Opcodes.RETURN);
+        String bandages = "zombie/characters/IsoGameCharacter$Bandages";
+        String lastDesc = "(Lzombie/characters/BodyDamage/BodyPartType;)Lzombie/characters/BodyDamage/BodyPartLast;";
+        List<String> readers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, bd, "getBodyPartsLastState", lastDesc);
+        List<String> writers = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, bd, "setBodyPartsLastState", "()V");
+        Set<String> fieldUsers = new java.util.TreeSet<>();
+        for (MethodNode m : classNodeFromJar(jar, bd).methods) {
+            if (countExactFields(m, Opcodes.GETFIELD, bd, "bodyPartsLastState", "Ljava/util/ArrayList;") > 0
+                    || countExactFields(m, Opcodes.PUTFIELD, bd, "bodyPartsLastState", "Ljava/util/ArrayList;") > 0) {
+                fieldUsers.add(m.name);
+            }
+        }
+        // 寫入者有 4 個（建構子、load、postupdateInternal、BodyDamageSync.startSendingUpdates 對另一份 bdSent）；本刀只跳過 postupdateInternal
+        // 那一個，等價只靠「讀者只有伺服器上開頭就回傳的 Bandages.update」。寫入者清冊釘住，多一個新的就重新核對。
+        failed += check("W94 vanilla 前提：getBodyPartsLastState 全 jar 只有 Bandages.update 呼叫（實際 " + readers + "）；setBodyPartsLastState 的呼叫者恰為 "
+                        + "BodyDamage.<init>／load、IsoPlayer.postupdateInternal、BodyDamageSync.startSendingUpdates（實際 " + writers + "）；"
+                        + "bodyPartsLastState 欄位只在建構子與這兩個方法（實際 " + fieldUsers + "）",
+                readers.size() >= 1 && readers.stream().allMatch(r -> r.equals(bandages + ".update(Lzombie/characters/IsoGameCharacter;)V"))
+                        && writers.equals(List.of(bd + ".<init>(Lzombie/characters/IsoGameCharacter;)V", bd + ".load(Ljava/nio/ByteBuffer;I)V",
+                                player + ".postupdateInternal()V", "zombie/network/BodyDamageSync.startSendingUpdates(SS)V"))
+                        && fieldUsers.equals(Set.of("<init>", "getBodyPartsLastState", "setBodyPartsLastState")));
+        MethodNode vBand = methodFromJar(jar, bandages, "update", "(Lzombie/characters/IsoGameCharacter;)V");
+        AbstractInsnNode[] bandHead = firstReal(vBand, 3);
+        failed += check("W94 vanilla 前提：Bandages.update 開頭 getstatic GameServer.server→ifeq→return（伺服器上沒有讀者）",
+                isField(bandHead[0], Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z")
+                        && bandHead[1] != null && bandHead[1].getOpcode() == Opcodes.IFEQ
+                        && bandHead[2] != null && bandHead[2].getOpcode() == Opcodes.RETURN);
+        String lastGate = "zombie/mdc/BodyLastStateGate";
+        String postExpected = methodText(vPost).replace("INVOKEVIRTUAL " + bd + ".setBodyPartsLastState ()V",
+                "INVOKESTATIC " + lastGate + ".setBodyPartsLastState (L" + bd + ";)V");
+        failed += check("W94 手術後：postupdateInternal 唯一的 setBodyPartsLastState 同形改道 BodyLastStateGate，其餘指令與 frames 不變",
+                !postExpected.equals(methodText(vPost)) && postExpected.equals(methodText(method(distJava, player, "postupdateInternal", "()V"))));
+        MethodNode hLast = method(distJava, lastGate, "setBodyPartsLastState", "(L" + bd + ";)V");
+        failed += check("W94 helper 契約：先判斷 GameServer.server；原版 setBodyPartsLastState 3 處（off／客戶端、observe、抽樣量時間），都不在 try 內",
+                countExactFields(hLast, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1
+                        && countExactCalls(hLast, Opcodes.INVOKEVIRTUAL, bd, "setBodyPartsLastState", "()V") == 3
+                        && callsInTry(hLast, Opcodes.INVOKEVIRTUAL, bd, "setBodyPartsLastState", "()V") == 0);
+        failed += shaLocks(jar, "W94", BODY_LAST_STATE_LOCKED);
+
+        // ---- W95 ----
+        String world = "zombie/iso/IsoWorld";
+        String zones = "zombie/characters/animals/AnimalZones";
+        String probes = "zombie/characters/animals/MdcAnimalProbes";
+        MethodNode vThread = methodFromJar(jar, world, "updateThread", "()V");
+        AbstractInsnNode va = firstCall(vThread, Opcodes.INVOKESTATIC, zones, "updateVirtualAnimals", "()V");
+        failed += check("W95 vanilla 前提：updateThread 恰 1 個 updateVirtualAnimals（\"Update VA\" profile→astore_2→呼叫→aload_2）；全 jar 只有這裡呼叫",
+                countExactCalls(vThread, Opcodes.INVOKESTATIC, zones, "updateVirtualAnimals", "()V") == 1 && va != null
+                        && isVar(prevReal(va), Opcodes.ASTORE, 2) && isVar(nextReal(va), Opcodes.ALOAD, 2)
+                        && prevReal(prevReal(prevReal(va))) instanceof LdcInsnNode ldc && "Update VA".equals(ldc.cst)
+                        && jarWideCallers(jar, Opcodes.INVOKESTATIC, zones, "updateVirtualAnimals", "()V").equals(List.of(world + ".updateThread()V")));
+        String threadExpected = methodText(vThread).replace("INVOKESTATIC " + zones + ".updateVirtualAnimals ()V",
+                "INVOKESTATIC " + probes + ".updateVirtualAnimals ()V");
+        failed += check("W95 手術後：updateThread 唯一的 updateVirtualAnimals 同形改道 MdcAnimalProbes，其餘指令與 frames 不變",
+                !threadExpected.equals(methodText(vThread))
+                        && threadExpected.equals(methodText(method(distJava, world, "updateThread", "()V"))));
+        String fus = "zombie/entity/components/fluids/FluidContainerUpdateSystem";
+        String bucket = "zombie/entity/EntityBucket";
+        String entDesc = "()Lzombie/entity/util/ImmutableArray;";
+        MethodNode vSim = methodFromJar(jar, fus, "updateSimulation", "()V");
+        AbstractInsnNode ge = firstCall(vSim, Opcodes.INVOKEVIRTUAL, bucket, "getEntities", entDesc);
+        failed += check("W95 vanilla 前提：updateSimulation 恰 1 個 getEntities（aload_0→getfield fluidContainerEntities→呼叫→astore_2）",
+                countExactCalls(vSim, Opcodes.INVOKEVIRTUAL, bucket, "getEntities", entDesc) == 1 && ge != null
+                        && isField(prevReal(ge), Opcodes.GETFIELD, fus, "fluidContainerEntities", "L" + bucket + ";")
+                        && isVar(nextReal(ge), Opcodes.ASTORE, 2));
+        String simExpected = methodText(vSim).replace("INVOKEVIRTUAL " + bucket + ".getEntities " + entDesc,
+                "INVOKESTATIC " + probes + ".fluidEntities (L" + bucket + ";)Lzombie/entity/util/ImmutableArray;");
+        failed += check("W95 手術後：updateSimulation 唯一的 getEntities 同形改道 MdcAnimalProbes.fluidEntities，其餘指令與 frames 不變；"
+                        + "FluidContainerUpdateSystem 其餘方法不變",
+                !simExpected.equals(methodText(vSim)) && simExpected.equals(methodText(method(distJava, fus, "updateSimulation", "()V")))
+                        && otherMethodsSame(jar, distJava, fus, "updateSimulation", "()V"));
+        MethodNode hVa = method(distJava, probes, "updateVirtualAnimals", "()V");
+        MethodNode hFluid = method(distJava, probes, "fluidEntities", "(L" + bucket + ";)Lzombie/entity/util/ImmutableArray;");
+        boolean simReadOnly = true;
+        for (String[] m : new String[][]{{"sim", "(L" + animal + ";)V"}, {"unseen", "(L" + animal + ";)Z"}, {"still", "(L" + animal + ";)Z"}}) {
+            MethodNode h = method(distJava, probes, m[0], m[1]);
+            simReadOnly &= countOpcode(h, Opcodes.PUTFIELD) == 0 && callNames(h).stream().noneMatch(n -> n.contains(".set"));
+        }
+        MethodNode hAdd = method(distJava, "zombie/mdc/IdleVehicleThrottle", "add",
+                "(Lzombie/MovingObjectUpdateSchedulerUpdateBucket;Lzombie/iso/IsoMovingObject;)V");
+        failed += check("W95 helper 契約：a0 原版 updateVirtualAnimals 2 處、F1 原版 getEntities 1 處，都不在 try 內；sim／unseen／still 不寫物件欄位、"
+                        + "不呼叫 setter；W89 add 在第一個 bucket.add 之前呼叫 sim 恰 1 次",
+                countExactCalls(hVa, Opcodes.INVOKESTATIC, zones, "updateVirtualAnimals", "()V") == 2
+                        && callsInTry(hVa, Opcodes.INVOKESTATIC, zones, "updateVirtualAnimals", "()V") == 0
+                        && countExactCalls(hFluid, Opcodes.INVOKEVIRTUAL, bucket, "getEntities", entDesc) == 1
+                        && callsInTry(hFluid, Opcodes.INVOKEVIRTUAL, bucket, "getEntities", entDesc) == 0
+                        && simReadOnly
+                        && countExactCalls(hAdd, Opcodes.INVOKESTATIC, probes, "sim", "(L" + animal + ";)V") == 1
+                        && firstCallIndex(hAdd, Opcodes.INVOKESTATIC, probes, "sim", "(L" + animal + ";)V")
+                                < firstCallIndex(hAdd, Opcodes.INVOKEVIRTUAL, "zombie/MovingObjectUpdateSchedulerUpdateBucket", "add",
+                                        "(Lzombie/iso/IsoMovingObject;)V"));
+        failed += shaLocks(jar, "W95", ANIMAL_PROBES_LOCKED);
         return failed;
     }
 

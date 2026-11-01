@@ -2019,7 +2019,7 @@ stack（22:45-22:48、66 人）：**`IsoAnimal.updateLOS` 單一 leaf 25/60=41.7
 ### 手術
 
 caller 側單 redirect：`IsoAnimal.updateInternal()V` 內唯一
-`invokevirtual updateLOS:()V`（offset 197）→
+`invokevirtual updateLOS:()V`（42.21.0 offset 205）→
 `invokestatic zombie/mdc/AnimalLosGate.updateLOS(IsoAnimal)V`（1:1 同形，expectedHits=1）。`updateLOS` 本體不動（Lua/mod 直呼路徑照舊；W3-3 的兩處 prefilter redirect 保留＝防禦深度）。
 
 enforce 幀輪轉：`floorMod((long)(identityHashCode(animal)*0x9E3779B9 >>> 16) + frame, N) == 0`
@@ -4663,7 +4663,7 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行）：
 **不處理**：`getDetectionRange` 在伺服器略過（研究的刀 2，刀 1 上線後收益不到 0.5 ms）；每幀快照加空間網格（刀 3，要看本刀上線後 dump 裡 `updateLOS` 是否仍大於 3%）；`ServerLOS.findData` 在 `isCouldSee`、`doServerZombieLOS`、`IsoDeadBody` 等其他呼叫點的線性掃描；客戶端與非 `BusyInMain` 的呼叫來源一律照原版。
 
 **守門與驗證**：
-- SmokeCheck：原版前提——`updateLOS` 恰 1 個 `getCell`、1 個 `Set.iterator`，`aload_0→getCell→getObjectList→iterator→astore 9` 直線、迭代器只存 slot 9 一次且每個 `aload 9` 緊接 `hasNext`／`next`；**原版本體 SHA 鎖**（去 debug 的 methodText SHA-256，沿用 W31／W73 寫法）鎖住視窗外物件在原版迴圈裡實際會到達的 33 個方法：`IsoPlayer.updateLOS()`、`ServerLOS.isCouldSee`／`findData`／`updateLOS(IsoPlayer)`、`IsoObject.getCell`、`IsoCell.getObjectList`、`IsoMovingObject.getX/Y/Z`／`getCurrentSquare`、`IsoUtils.DistanceTo`、`Type.tryCastTo`、`IsoPlayer.isSeeEveryone`／`getAttachedAnimals`／`getPlayerIndex`、`IsoGameCharacter.isAsleep`／`getDetectionRange` 與它呼叫的 `getWornItemsHearingMultiplier`、`CharacterTraits.get`、`Stats.get`、`IsoZombie.isReanimatedForGrappleOnly`、`IGrappleableWrapper.getGrappledBy`（default method）、`IsoGameCharacter.getWrappedGrappleable`（兩個簽章）、`BaseGrappleable.getGrappledBy`、`ServerOptions.getInstance`、`BooleanConfigOption.getValue`、`IsoObject.setAlpha(IF)`／`setTargetAlpha(IF)`／`setAlphaAndTarget(IF)`／`setAlphaAndTarget(F)`／`getTargetAlpha(I)`／`getTargetAlpha()`，任一變了就紅（印出實際 SHA，但要先重新分析，不是改值讓它變綠）；負對照在記憶體裡的原版 `updateLOS` 迴圈頭插一筆 `putfield ticksSinceSeenZombie`，呼叫集合照舊相同、SHA 鎖必須變紅。迴圈本體（slot 9 之後到迴圈出口）66 個呼叫的多重集合保留為診斷；伺服器路徑 `couldSee` 只來自 `ServerLOS.isCouldSee(this, current)`，slot 21（canSee）其餘 3 次寫入只在 `bClient`／`!bServer` 守衛下；`isCouldSee` 指紋（`findData` 1 次、`bipush 48`／`96` 各 2、`LosUtil.sizeZ` 2 次且第一個接 `iconst_2; idiv`、`visible` 為 `[[[Z`）；PlayerData 欄位型別、`BusyInMain` 存在、`playersMain` 是 ArrayList、`findData` 取第一筆；`ServerLOS.updateLOS` 在 `player.updateLOS()` 前後設 `BusyInMain`／`ReadyInMain`、全 jar 只有它讀 `BusyInMain`，`px`／`py`／`pz` 只在 `LOSThread.calcLOS` 寫、`calcLOS` 只在 `WaitingInLOS` 時呼叫；`setTargetAlpha`／`setAlpha` 頭部 server guard、`getTargetAlpha(int)` server 回 1、`setAlphaAndTarget`／`getTargetAlpha()` 只轉呼叫兩參數版；**覆寫普查**：全 jar `IsoObject` 子類（objectList 裡的物件都在內）對上述讀取與 alpha 方法、`getGrappledBy`、`getWrappedGrappleable`、`getWornItemsHearingMultiplier` 共 19 個方法的宣告者與 42.21 相同（`IsoDeadBody` 也宣告 `getWrappedGrappleable`，但 grapple-only 分支只對 `IsoZombie` 呼叫 `getGrappledBy`），`BaseGrappleable` 子類不覆寫 `getGrappledBy`，`ServerOptions$BooleanServerOption` 直接繼承 `BooleanConfigOption` 且它與子類不覆寫 `getValue`（負對照：多一個覆寫 `setTargetAlpha(IF)` 的 `IsoZombie` 子類，普查必須變紅）；`getX/Y/Z`、`getCurrentSquare`、`IsoCell.getObjectList` 是純欄位讀取。手術後只有兩個呼叫同形改道、`IsoPlayer` 其餘方法不變（W91 的命中點 `updateInternal2` 除外，由 [2cz](#2cz) 鎖住）；helper 先建原版迭代器、`Filter.hasNext` 只經底層 `hasNext`／`next` 取元素，`Plain` 的 `hasNext`／`next` 各只委派底層同名方法一次、不碰 `ServerLOS`。
+- SmokeCheck：原版前提——`updateLOS` 恰 1 個 `getCell`、1 個 `Set.iterator`，`aload_0→getCell→getObjectList→iterator→astore 9` 直線、迭代器只存 slot 9 一次且每個 `aload 9` 緊接 `hasNext`／`next`；**原版本體 SHA 鎖**（去 debug 的 methodText SHA-256，沿用 W31／W73 寫法）鎖住視窗外物件在原版迴圈裡實際會到達的 33 個方法：`IsoPlayer.updateLOS()`、`ServerLOS.isCouldSee`／`findData`／`updateLOS(IsoPlayer)`、`IsoObject.getCell`、`IsoCell.getObjectList`、`IsoMovingObject.getX/Y/Z`／`getCurrentSquare`、`IsoUtils.DistanceTo`、`Type.tryCastTo`、`IsoPlayer.isSeeEveryone`／`getAttachedAnimals`／`getPlayerIndex`、`IsoGameCharacter.isAsleep`／`getDetectionRange` 與它呼叫的 `getWornItemsHearingMultiplier`、`CharacterTraits.get`、`Stats.get`、`IsoZombie.isReanimatedForGrappleOnly`、`IGrappleableWrapper.getGrappledBy`（default method）、`IsoGameCharacter.getWrappedGrappleable`（兩個簽章）、`BaseGrappleable.getGrappledBy`、`ServerOptions.getInstance`、`BooleanConfigOption.getValue`、`IsoObject.setAlpha(IF)`／`setTargetAlpha(IF)`／`setAlphaAndTarget(IF)`／`setAlphaAndTarget(F)`／`getTargetAlpha(I)`／`getTargetAlpha()`，任一變了就紅（印出實際 SHA，但要先重新分析，不是改值讓它變綠）；負對照在記憶體裡的原版 `updateLOS` 迴圈頭插一筆 `putfield ticksSinceSeenZombie`，呼叫集合照舊相同、SHA 鎖必須變紅。迴圈本體（slot 9 之後到迴圈出口）66 個呼叫的多重集合保留為診斷；伺服器路徑 `couldSee` 只來自 `ServerLOS.isCouldSee(this, current)`，slot 21（canSee）其餘 3 次寫入只在 `bClient`／`!bServer` 守衛下；`isCouldSee` 指紋（`findData` 1 次、`bipush 48`／`96` 各 2、`LosUtil.sizeZ` 2 次且第一個接 `iconst_2; idiv`、`visible` 為 `[[[Z`）；PlayerData 欄位型別、`BusyInMain` 存在、`playersMain` 是 ArrayList、`findData` 取第一筆；`ServerLOS.updateLOS` 在 `player.updateLOS()` 前後設 `BusyInMain`／`ReadyInMain`、全 jar 只有它讀 `BusyInMain`，`px`／`py`／`pz` 只在 `LOSThread.calcLOS` 寫、`calcLOS` 只在 `WaitingInLOS` 時呼叫；`setTargetAlpha`／`setAlpha` 頭部 server guard、`getTargetAlpha(int)` server 回 1、`setAlphaAndTarget`／`getTargetAlpha()` 只轉呼叫兩參數版；**覆寫普查**：全 jar `IsoObject` 子類（objectList 裡的物件都在內）對上述讀取與 alpha 方法、`getGrappledBy`、`getWrappedGrappleable`、`getWornItemsHearingMultiplier` 共 19 個方法的宣告者與 42.21 相同（`IsoDeadBody` 也宣告 `getWrappedGrappleable`，但 grapple-only 分支只對 `IsoZombie` 呼叫 `getGrappledBy`），`BaseGrappleable` 子類不覆寫 `getGrappledBy`，`ServerOptions$BooleanServerOption` 直接繼承 `BooleanConfigOption` 且它與子類不覆寫 `getValue`（負對照：多一個覆寫 `setTargetAlpha(IF)` 的 `IsoZombie` 子類，普查必須變紅）；`getX/Y/Z`、`getCurrentSquare`、`IsoCell.getObjectList` 是純欄位讀取。手術後只有兩個呼叫同形改道、`IsoPlayer` 其餘方法不變（W91 的命中點 `updateInternal2`、W94 的命中點 `postupdateInternal` 除外，分別由 [2cz](#2cz)、[2dc](#2dc) 鎖住）；helper 先建原版迭代器、`Filter.hasNext` 只經底層 `hasNext`／`next` 取元素，`Plain` 的 `hasNext`／`next` 各只委派底層同名方法一次、不碰 `ServerLOS`。
 - `PlayerLosFilterTest`（`build.ps1` [9zx/10]，vanilla、observe、on、off、violation、phase50、phase64 七個 JVM，全部帶 `-XX:hashCode=2`（identity hash 固定，兩個 JVM 的 HashSet 迭代順序相同）與 `-XX:-OmitStackTraceInFastThrow`，手術後的六個另帶 `-Dmdc.playerLosFilter.seed=83`，測試用同一個 xorshift64* 照種子重算每次抽到什麼）：vanilla 的 classpath 不含 dist，跑 jar 原版 `updateLOS` 把每次呼叫寫成一行 trace，observe／on／off 跑 dist 手術後的版本、同一批世界逐行比對 1,105 次呼叫：例外類別與訊息、`TestZombieSpotPlayer`／`spotted` 呼叫序列、spottedList／lastSpotted、viewer 與 stats 的全部基本型別欄位、每個物件的全部基本型別欄位、GameTime 倍率。世界涵蓋視窗四邊 ±1 格與 z 上下界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物（含牽著的）、survivor、睡著、PlayerData 重複（同一位玩家兩筆：第一筆是真的視窗與 visible，第二筆視窗移開 300 格、visible 另一份全 false，所以取到第二筆就會略過看得見的目標；另有第一筆不是 `BusyInMain`、第二筆是的情況，必須 fallback notBusy）／缺少、status 不是 `BusyInMain`、`TestZombieSpotPlayer` 中加入元素／移除正在處理的元素／移除別的元素（CME，含被改的是最後一個元素）、null 與非 `IsoMovingObject` 元素、非主執行緒。替身只在出口：viewer 覆寫 `TestZombieSpotPlayer` 記錄（殭屍不往下呼叫，`IsoZombie` 是 final，真的 `spotted`／`ZombieControl` 要完整世界與網路）與 `getDetectionRange`（真的要 traits 與穿戴物品；伺服器上不影響分支），玩家與動物目標覆寫 `spotted` 記錄；測試 JVM 建不起 `SandboxOptions`（`isFakeDead`）與殭屍的 `StateMachineComponent`，所以同樓層 7 格內的殭屍一律 ghost、殭屍不設 target，近處分支裡 `ticksSinceSeenZombie` 那段與 music 的 target 分支沒有走到（它們都在視窗內，本刀原樣放行）。observe、on、off 都與原版逐行相同，notBusy／noData／thread 三種 fallback 都走過；observe 與 on 的 `audits`、`plains` 等於照種子重算的精確值（`engaged=899` 時 18 與 12），亂數狀態與測試的副本同步，`mismatches=0`，比對有實際呼叫 `isCouldSee`；off 計數全 0、不記 log。另外直接呼叫 `getCell`／`iterator` 640 次（視窗內外各 8 個殭屍），逐次照種子預測並驗證：原版計時那 15 次拿到 `Plain`、走完全部元素且 `isCouldSee` 計數不變，比對那 10 次對 8 個視窗外各呼叫一次，其餘 615 次 observe 拿到的就是原版迭代器本身（同一個物件）、on 拿到只交出自己與視窗內 8 個的過濾迭代器。violation（on）：`TestZombieSpotPlayer` 中把 PlayerData 往 +x 挪 30 格，讓建立迭代器時在視窗外的殭屍變成看得見；照種子預測，在看到漂移下的原版計時與過濾之前抽到比對的 5 次不漂移（零 mismatch），過濾的 244 次它被略過（前提被破壞時 on 與原版不同），1 次原版計時全部放行、原版處理到它但不比對，第 251 次是漂移下的第一次比對：全部放行、原版處理到它並記 mismatch、本次啟動停用、停用行帶玩家與座標，之後同樣的漂移下回到原版。phase50／phase64（on）：50 或 64 位玩家各有自己的 PlayerData，每輪照固定順序各跑一次 `updateLOS`，只有第 4 位（50 人）或第 5 位（64 人）在迴圈中漂移——舊的「序號 &63」抽樣在這兩個位置永遠抽不到比對；隨機抽樣下分別在第 164 輪與第 87 輪抓到並停用，停用行是那一位，其間其他玩家被比對 133 次與 83 次、零 mismatch。另外以 8 個手改的 helper（視窗 x 上下界、y 上界、z 上下界各縮一格，略過自己，略過 null，PlayerData 取最後一筆）跑 on，全部與原版不同（差 3–782 行）；跑 observe 時行為仍是原版（差 0），5 個視窗界 mutant 由比對抓到 mismatch，略過自己與略過 null 不影響 observe（observe 從不過濾、比對時全部放行），取最後一筆在 observe 下行為也是原版，這次的比對沒有落在重複 PlayerData 的呼叫上。
 
 **退場**：官方讓伺服器的 `updateLOS` 只走視窗內的物件（或有空間索引）時撤刀；SmokeCheck 的原版本體 SHA 鎖、覆寫普查或 `isCouldSee` 指紋變紅時先重新分析等價，不改 SHA 讓它變綠。
@@ -4984,6 +4984,117 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 **部署**：manifest 新增 `zombie/mdc/NearVehicleSneakGate.class`，`IsoPlayer.class` 換新。W89–W91 合計 174 → 180 個 class（含 W88 共 82 個 patched class、258 個命中點、98 個 helper）。
 
 **退場**：官方拿掉這兩個呼叫或讓 `checkIsNearVehicle` 只在潛行時跑時撤刀；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對，不改斷言或 SHA 讓它變綠。
+
+<a id="2da"></a>
+## 2da. 動物循環音迴圈在伺服器整段跳過（W92，server，預設 observe）
+
+**成本**：`IsoCell.ProcessObjects`（每幀一次）offset 10 取 `objectList.iterator()`（`HashSet`，玩家、動物、車、殭屍全部移動物件，晚峰約 4,000 個），每個物件 `instanceof IsoAnimal`，不在鉤子上的動物呼叫 `updateVocalProperties()` 與 `updateLoopingSounds()`；後者對 runloop／walkloop 各查一次品種聲音（`toLowerCase`＋`HashMap.get`）、經 ECS 拿 `AdvancedAnimator` 走 root layer 每個 live node 做兩次 `equalsIgnoreCase`、`getAnimalSoundState`。物件數 × 每幀＋動物數 × 每幀；三批晚峰 dump 合計 3/176（約 17 ms/s，Wilson 6–48；11-01 單晚 3/60），另加 HashSet 迭代本身。
+
+**伺服器上為什麼沒有輸出**：`GameServer.main` 把 `SoundManager.instance` 設成 `new SoundManager()`，它的 `isListenerInRange` 第一行在伺服器回 false，所以「動畫在跑」一律被改成 false、會加世界聲音的 `AnimalSoundState.start` 到不了；`isPlaying()`＝`eventInstance != 0 && …`，`eventInstance` 只在 `start`／`stop` 寫，動物的 `emitter` 是 `final`、建構子在伺服器選 `DummyCharacterSoundEmitter`（`playVocals` 回 0）。`updateVocalProperties` 第一行 `!GameServer.server`，`isOnHook` 只讀欄位。唯一的狀態變化是私有 map 裡延後建立空的 `AnimalSoundState`，之後任何人第一次取用時也會建出同樣的東西，時間點不可觀察。整段沒有封包、沒有世界聲音。客戶端照原版播放循環音（server-only loose class，helper 也先看 `GameServer.server`）。
+
+**做法與手術**（併在 W40／W41／W45／W73 既有的 `IsoCell` ClassPatch，新 helper `zombie/mdc/AnimalLoopSoundGate`）：`ProcessObjects(Ljava/util/Iterator;)V` offset 10 唯一的 `invokeinterface java/util/Set.iterator()`（前面 `aload_0`→`getfield objectList`，後面 `astore_2`）同形改道 `AnimalLoopSoundGate.iterator(Set)Iterator`，`expectedHits` 1。on 時回 `Collections.emptyIterator()`，迴圈直接結束，之後照原版跑 `updateZombieVocals`；不是方法中段 return，原版迴圈與 frames 都不動。
+
+**模式與 kill switch**：`-Dmdc.animalLoopSoundGate=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 回原版 iterator，每 64 幀包一層量整段迴圈（第一次 `hasNext()` 回 false 時記時間）；observe 與 on 都每 256 幀稽核一次：`SoundManager.instance` 的類別是原版 `SoundManager`、每隻不在鉤子上的動物 emitter 是 `DummyCharacterSoundEmitter`、有 runloop／walkloop 聲音的 slot `getEventInstance() == 0`；不成立記 anomalies（前 5 筆印細節），on 就本次啟動永久回原版。helper 例外同樣回原版並停用。off 完全原版、不計數、不記 log。
+
+console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
+
+```text
+[MinidoracatJavaPatch][AnimalLoopSoundGate] beat mode=<observe|on> frames=<n> objects=<n> animals=<n> loopUsAvg=<µs> loopUsMax=<µs> loopSamples=<n> skipped=<n> audits=<n> anomalies=<n> disabled=<true|false>
+[MinidoracatJavaPatch][AnimalLoopSoundGate] DISABLED（本次啟動永久回原版）reason=<emitter=…|runloop eventInstance!=0 …|SoundManager.instance=…|helper exception …> frames=<n> audits=<n>
+```
+
+`objects` 是最近一幀的物件數，`animals` 是最近一次稽核的不在鉤子上動物數，`loopUsAvg × FPS` 就是 on 之後每秒省下的時間；`anomalies` 必須是 0。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`ProcessObjects` 恰 1 個 `Set.iterator` 且語境如上、迴圈只呼叫 `isOnHook`／`updateVocalProperties`／`updateLoopingSounds`；`IsoAnimal` 的子類別不覆寫這六個方法（普查負對照：多一個子類覆寫 `updateLoopingSounds` 就紅）；`eventInstance` 全 jar 恰 3 個 putfield（`start` 1、`stop` 2）；`IsoGameCharacter.emitter` 是 final、全 jar 恰 2 個 putfield 都在 `<init>(IsoCell,FFF)`；`SoundManager.instance` 全 jar 恰 2 個寫入（`GameServer.main` 與客戶端 `GameWindow`），`GameServer.main` 那個是 `new SoundManager()`；14 個原版方法本體 SHA 鎖（`LOOP_SOUND_LOCKED`，各配負對照）：`ProcessObjects`、`isOnHook`、`updateVocalProperties`、三個 looping 方法、`getAnimalSoundState`、`AnimalSoundState.isPlaying`／`start`／`stop`、`SoundManager.isListenerInRange`、`DummyCharacterSoundEmitter.playVocals`、`IsoGameCharacter.<init>(IsoCell,FFF)`、`getEmitter`。手術後 `ProcessObjects` 只差改道（W40 的「IsoCell 其餘方法不變」把它列為例外）；helper 先看 `GameServer.server`、回空 iterator 只有一處而且在稽核與停用判斷之後。
+- `AnimalLoopSoundGateTest`（`build.ps1` [9zzf/10]，observe、on、off、jar 原版四個 JVM）：真 `IsoCell.ProcessObjects`，objectList 放 5 隻動物（1 隻在鉤子上，覆寫兩個聲音方法只計數）與 1 台車、跑 512 幀：observe／off 與原版一樣每幀對 4 隻各一次，on 0 次；zombieList 放一個不是殭屍的物件時四個組態都在 `updateZombieVocals` 拋 `ClassCastException`（迴圈之後照原版跑）；observe 量到 8 次迴圈時間；第 256、512 幀稽核、anomalies 0，稽核讀 runloop 狀態但不改它。三種違反前提（emitter 換成 `CharacterSoundEmitter`、runloop `eventInstance` 非 0、`SoundManager.instance` 換成 `DummySoundManager`）：observe 每次都在下一次稽核記 anomalies、不停用；on 第一次就停用並回到原版迴圈；心跳照印；off 不稽核。jar 原版負對照：每幀都跑整段迴圈。
+
+**部署**：manifest 新增 `zombie/mdc/AnimalLoopSoundGate.class`、`AnimalLoopSoundGate$Timed.class`，`IsoCell.class` 換新。
+
+**退場**：官方讓伺服器不跑這段或改了循環音的伺服器行為時撤刀；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
+
+<a id="2db"></a>
+## 2db. 動物同步範圍判定的每連線常數提到迴圈外（W93，server，預設 observe）
+
+**成本**：`AnimalSynchronizationManager.sendUpdateToClient` 每幀對每條連線走「這幀有更新的所有動物」，每一對都經 W13 `AnimalRelevancyGate.relevantTo`（[2aa](#2aa)）。helper 每對重算同一條連線的對齊半徑（`getChunkGridWidth`、範圍與奇偶判斷）與「有沒有玩家在車上」（4 次 `getPlayerAt`＋`getVehicle`），還有兩個 `AtomicLong`（`lock xadd`），雖然唯一的呼叫點在主執行緒。46 條連線 × 約 1,364 隻動物 × 9.2 FPS ≈ 每秒 58 萬對；三批晚峰 dump 停在這一行 4/176（約 22 ms/s），推估 W13 這部分約占每對成本 35–45%（約 8–10 ms/s）。
+
+**為什麼等價**：一次 `sendUpdateToClient` 期間同一條連線的 `chunkGridWidth`、`relevantRange`、玩家是否在車上都不變——方法內對連線只呼叫 `getConnectedGUID`／`getPacket`／`getRelevantRange`／`RelevantTo`，迴圈 body 只讀連線狀態、更新計時器與集合，不處理封包、不上下車；主執行緒單一使用者。判定與 rejected／passthrough／suppressed 計數和每對重算相同。
+
+**做法**（不加新手術，`expectedHits` 維持 6）：W14 的 `AnimalRequestGate.getPacket`（offset 12／31，每次 `sendUpdateToClient` 在動物迴圈之前必經，遞迴的 pending 也會再經過）先呼叫 `AnimalRelevancyGate.beginConnection(connection)`：算好這條連線的對齊半徑與載具判定存進 static 欄位。`relevantTo` 的連線就是快取那條時直接用，否則照原版重算。W13 的計數器全部改成普通 long（判定次數、心跳節拍不變）。
+
+**模式與 kill switch**：`-Dmdc.animalRelevancyHoist=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟；W13 自己的 `-Dmdc.animalRelevancy` 不變，W13 off 時這刀也不動。observe 每對照原版重算，並與快取比對兩個常數，不一致記 `hoistMismatch`（前 5 筆印細節）；on 用快取，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；off 每對重算、不快取不比對。
+
+console（併入 W13 的 `[MinidoracatJavaPatch][AnimalRelevancy]` 心跳，同一行多 6 欄；首次 `beginConnection` 印一行生效、停用時一行）：
+
+```text
+[MinidoracatJavaPatch][AnimalRelevancy] mode=<n> calls=<n> rejected=<n> suppressed=<n> passthrough=<n> anomalies=<n> hoist=<observe|on|off> hoistBegins=<n> hoistHits=<n> hoistAudits=<n> hoistMismatch=<n> hoistDisabled=<true|false>
+[MinidoracatJavaPatch][AnimalRelevancy] hoist DISABLED（本次啟動永久回原版）reason=cached connection constants changed within sendUpdateToClient hits=<n> audits=<n>
+```
+
+`hoistBegins` 是 `beginConnection` 次數（每條連線每幀至少 1），`hoistHits` 是用快取的對數，`hoistAudits` 是重算比對的對數；`hoistMismatch` 必須是 0。W13 的計數是累計值（原本就是），不隨心跳歸零。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`sendUpdateToClient` 兩個 `getPacket` 都在 `RelevantTo` 之前、對連線只呼叫上述 4 個方法；6 個原版方法本體 SHA 鎖（`RELEVANCY_HOIST_LOCKED`，各配負對照）：`sendUpdateToClient`、`UdpConnection.RelevantTo`／`getChunkGridWidth`／`getRelevantRange`／`getPlayerAt`、`IsoGameCharacter.getVehicle`。helper 契約：`getPacket` 在原版 `getPacket` 之前恰呼叫 1 次 `beginConnection`；`beginConnection` 與比對都只呼叫既有的 `alignedRadius`／`anyPlayerInVehicle`（同一份算法）；W13 原有的 helper 契約照舊。
+- `AnimalRelevancyHoistTest`（`build.ps1` [9zzg/10]，observe、on、off 三個 JVM；W13 是預設 enforce）：真 `UdpConnection.RelevantTo`，60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × 有無 coop connectArea）各 400 個隨機動物座標，`beginConnection` 過的連線與一模一樣但沒 begin 的連線（每對重算）判定逐筆相同、三個計數器增量相同；on 真的用快取（hits 每對都有、抽查 5 次），observe 每對比對、不用快取，off 都不動；換連線：begin(13)→begin(19) 後 19 的判定與重算相同、回頭判 13 照原版重算不算命中；違反前提（begin 之後同一輪內玩家上車）：observe 第一對就記 mismatch、判定照重算（載具內環帶照送），on 先用到舊快取（環帶擋下）、在抽查抓到並停用、之後每對重算且再 begin 也不快取，下一輪 begin 後快取更新不再 mismatch。原本的 `AnimalRelevancyGateTest` 三個模式照舊（它不呼叫 `beginConnection`，走每對重算）。
+
+**部署**：`AnimalRelevancyGate.class`、`AnimalRequestGate.class` 換新，manifest 不增減。
+
+**退場**：W13 撤刀時一起撤；SmokeCheck 的語境或 SHA 鎖變紅時先重新核對「同一輪內連線常數不變」，不改斷言或 SHA 讓它變綠。
+
+<a id="2dc"></a>
+## 2dc. 伺服器跳過 `setBodyPartsLastState`（W94，server，預設 observe）
+
+**成本**：`IsoPlayer.postupdateInternal`（玩家與動物都走這裡，`IsoAnimal` 沒有覆寫）最後一步 `getBodyDamage().setBodyPartsLastState()`，把 17 個 `BodyPart` 的包紮、咬傷、抓傷、割傷、髒繃帶狀態抄進 17 個 `BodyPartLast`。角色數 × 每幀，約每秒 1.3 萬次、22 萬個部位，動物的部位多是冷記憶體。三批晚峰 dump 1/176（約 6 ms/s，Wilson 1–31；11-01 單晚 1/60）。
+
+**伺服器上為什麼沒有讀者**：`bodyPartsLastState` 只經 `getBodyPartsLastState` 讀，全 jar 唯一的呼叫者 `IsoGameCharacter$Bandages.update` 開頭 `getstatic GameServer.server`→`ifeq`→`return`；欄位只在 `BodyDamage` 的建構子與這兩個方法；不存檔（`save` 沒寫）、不進封包。其他寫入點（建構子、`load`、`BodyDamageSync.startSendingUpdates` 對另一份 `bdSent`）照原版，這刀只跳過 postupdate 那一次。客戶端自己對自己的角色照原版抄（給 `Bandages.update` 用），伺服器這份本來就不送出去，沒有 desync。Lua 端：正式服 233 個 Workshop 項目與本機 466 個的 Lua 都沒有呼叫 `getBodyPartsLastState`（2026-11-02 grep；本機有 1 個 MOD 用 Lua 直接呼叫 `setBodyPartsLastState`，那是寫入、不經這個呼叫點，不受影響）。
+
+**做法與手術**（併在 W83／W91 既有的 `IsoPlayer` ClassPatch，新 helper `zombie/mdc/BodyLastStateGate`）：`postupdateInternal()V` offset 121 唯一的 `invokevirtual BodyDamage.setBodyPartsLastState()V`（前面 `aload_0`→`getBodyDamage`，後面 `return`）同形改道 `BodyLastStateGate.setBodyPartsLastState(BodyDamage)V`，`expectedHits` 1。伺服器 on 時直接回傳，其他情況照原版。W83 的「IsoPlayer 其餘方法不變」把 `postupdateInternal` 加進例外，由本刀的語境鎖與「手術後只差這個呼叫」鎖住。
+
+**模式與 kill switch**：`-Dmdc.bodyLastStateSkip=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 照原版呼叫，依 `getParentChar()` 分玩家／動物計數，每 64 次量一次 µs；on 在伺服器跳過（客戶端照原版）；off 完全原版、不計數。沒有稽核與停用（跳過的東西在伺服器上沒有任何讀者，SmokeCheck 守前提）。
+
+console（首次生效一行、每 5 分鐘一行 beat）：
+
+```text
+[MinidoracatJavaPatch][BodyLastStateGate] beat mode=<observe|on> players=<n> animals=<n> skipped=<n> usAvg=<µs> samples=<n>
+```
+
+`players`／`animals` 是這 5 分鐘兩類的 postupdate 次數（也就是 postupdate 的玩家／動物拆分），`usAvg × (players+animals) / 300` 是 on 之後每秒省下的時間。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`postupdateInternal` 恰 1 個 `setBodyPartsLastState` 且語境如上；`getBodyPartsLastState` 全 jar 只有 `Bandages.update` 呼叫、`setBodyPartsLastState` 的呼叫者恰為上述 4 個、`bodyPartsLastState` 欄位只在建構子與兩個存取方法；`Bandages.update` 開頭是伺服器早退；4 個原版方法本體 SHA 鎖（`BODY_LAST_STATE_LOCKED`，各配負對照）：`postupdateInternal`、`setBodyPartsLastState`、`getBodyPartsLastState`、`Bandages.update`。手術後只差改道；helper 先看 `GameServer.server`，三個原版呼叫（off／客戶端、observe、抽樣）都不在 try 內。
+- `BodyLastStateGateTest`（`build.ps1` [9zzh/10]，observe、on、off、jar 原版四個 JVM）：真 `BodyDamage.setBodyPartsLastState`（3 個部位：包紮、咬傷＋割傷、抓傷）經 helper 呼叫後：observe／off 與原版一樣抄進 lastState，on 在伺服器上不抄；客戶端（`GameServer.server=false`）一律照原版抄；玩家 1 次、動物 127 次分開計數，observe 抽樣 2 次；心跳。jar 原版負對照：原版會抄。
+
+**部署**：manifest 新增 `zombie/mdc/BodyLastStateGate.class`，`IsoPlayer.class` 換新。
+
+**退場**：官方在伺服器上不再呼叫它，或伺服器上出現新的讀者時撤刀；SmokeCheck 的普查或 SHA 鎖變紅時先重新核對，不改斷言或 SHA 讓它變綠。
+
+<a id="2dd"></a>
+## 2dd. 動物與液體容器純觀測（W95，server，預設 observe）
+
+**目的**：第八輪研究找到兩個比 W92–W94 大、但行為不等價的槓桿，要服主裁定：(1) 沒有任何連線收得到、而且沒在移動的動物改放原版 QUARTER 桶（每 4 幀更新一次，「每次 update 擲一次骰」的事件機率變 1/4，例如壓力 > 80 的懷孕流產）；(2) 虛擬動物每 N 幀跑一次（足跡密度變 1/N）。另有一個等價但比例沒量過的候選：液體容器更新只把 rainCatcher > 0 的實體交給迴圈。三者的收益都取決於正式服沒量過的數字，這刀只量、不改行為、不省時間。
+
+**做法與手術**（三個探針共用一個 helper `zombie/characters/animals/MdcAnimalProbes`、一個開關、一行心跳；放在 `zombie.characters.animals` 才讀得到 package-private 的 `loadedCells`／`chunks`／`animals`）：
+- **a0 虛擬動物**：併在 W56 既有的 `IsoWorld` ClassPatch，`updateThread()V` offset 255 唯一的 `invokestatic AnimalZones.updateVirtualAnimals()V`（前面 `"Update VA"` profile→`astore_2`，後面 `aload_2`；全 jar 只有這裡呼叫）同形改道 `MdcAnimalProbes.updateVirtualAnimals()V`，`expectedHits` 1。每次照原版呼叫並量 µs；心跳時在主執行緒掃一次 `AnimalManagerWorker.loadedCells`：cell 數、有虛擬動物或足跡的 chunk 數、虛擬動物數、其中遷徙群組沒有定義的（idle，原版 `VirtualAnimal.update` 第一行就 return）與有定義的（moving）、足跡數，附 JVM uptime，看規模是否隨開服時間長大。
+- **F1 液體容器**：新 ClassPatch `FluidContainerUpdateSystem`，`updateSimulation()V` offset 19 唯一的 `invokevirtual EntityBucket.getEntities()`（前面 `aload_0`→`getfield fluidContainerEntities`，後面 `astore_2`）同形改道 `MdcAnimalProbes.fluidEntities(EntityBucket)ImmutableArray`，`expectedHits` 1。回傳原版同一個陣列，記 bucket 大小；每 64 次掃一次陣列數 rainCatcher > 0 的實體，並量這次唯讀掃描的 µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，所以這個比例就是索引能省的部分）。
+- **sim 動物降頻候選**：不加手術，W89 的 `IdleVehicleThrottle.add`（[2cx](#2cx)）入口對每隻 `IsoAnimal` 呼叫 `MdcAnimalProbes.sim`，之後照 W89 原路徑放進 bucket（不改 W89 對車的任何行為）。只在主執行緒、每 16 幀抽一幀：「沒人收得到」＝每條連線 `!RelevantTo(x, y, (getRelevantRange()−2)×10 + 16)`（原版送出半徑再加 16 格）；「沒在移動」＝狀態是 `AnimalIdleState`、沒有路徑、沒在做行為、沒被驚動、沒有回應中的聲音、不在車上、沒被抱或牽、沒被吸引、沒在打架、沒著火、活著、不在鉤子上、不是剛從 meta 轉回。記兩者同時成立的比例 `wouldPct`，以及其中懷孕且壓力 > 80 的平均隻數 `pregStress`。
+
+**模式與 kill switch**：`-Dmdc.animalProbes=2|observe`（程式預設；`on` 與未知值也當 observe）、`0|off`，需重啟。只在伺服器生效。原版呼叫都不在 try 內（例外照原版上拋）；探針自己的例外只記 anomalies。off 原樣轉呼叫、不計數、不記 log。
+
+console（首次生效一行、每 5 分鐘一行 beat，由每幀必經的 a0 驅動）：
+
+```text
+[MinidoracatJavaPatch][AnimalProbes] beat mode=observe uptimeS=<s> vaCalls=<n> vaUsAvg=<µs> vaUsMax=<µs> cells=<n> chunks=<n> va=<n> vaIdle=<n> vaMoving=<n> tracks=<n> fluidCalls=<n> bucketAvg=<n> bucketMax=<n> rcAvg=<n> fluidScanUsAvg=<µs> fluidScans=<n> simFrames=<n> animals=<n> unseenPct=<%> stillPct=<%> wouldPct=<%> pregStress=<n> simUsAvg=<µs> anomalies=<n>
+```
+
+**判讀**：`vaUsAvg × FPS` 是虛擬動物每秒耗時，`va`／`vaIdle`／`cells` 隨 `uptimeS` 上升就是「AnimalCell 整場不卸載」在累積；`(bucketAvg − rcAvg) / bucketAvg` 是 F1 索引能濾掉的比例、`fluidScanUsAvg × fluidCalls / 300` 約是可省的上限；`wouldPct` 就是降頻比例 f（研究估中間約 38 ms/s，範圍 7–116），`pregStress` 給服主判斷流產機率變 1/4 的影響量級。`animals` 是抽樣幀的平均動物數。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`updateThread` 恰 1 個 `updateVirtualAnimals` 且語境如上、全 jar 只有這裡呼叫；`updateSimulation` 恰 1 個 `getEntities` 且語境如上；6 個原版方法本體 SHA 鎖（`ANIMAL_PROBES_LOCKED`，各配負對照）：`AnimalZones.updateVirtualAnimals`、`VirtualAnimal.update`（idle 的定義）、`FluidContainerUpdateSystem.updateSimulation`／`updateEntity`（只對 rainCatcher > 0 做事）、`FluidContainer.getRainCatcher`／`isQualifiesForMetaStorage`。手術後兩處只差改道；W56 的「IsoWorld 非目標方法不變」把 `updateThread` 列為例外，`FluidContainerUpdateSystem` 其餘方法不變。helper 契約：a0 原版呼叫 2 處、F1 原版呼叫 1 處都不在 try 內；`sim`／`unseen`／`still` 沒有 putfield、不呼叫 setter；W89 `add` 在第一個 `bucket.add` 之前恰呼叫 1 次 `sim`。W89 原有的守門與 `IdleVehicleThrottleTest` 全部照舊。
+- `MdcAnimalProbesTest`（`build.ps1` [9zzi/10]，observe、off 兩個 JVM）：a0 照原版呼叫（原版開頭會清掉 `doneVirtualAnimals`，放進去的哨兵被清掉）；loadedCells 掃描（2 個 cell 其中一個沒有 chunks、3 個有內容的 chunk、3 隻虛擬動物 2 隻 idle、1 個足跡）；F1 64 次都回原版同一個陣列、第 64 次抽樣數到 5 個實體中的 2 個 rainCatcher > 0（0、負數、沒有液體容器的不算）；sim 一條連線、4 隻動物（近的、遠而閒置、遠而在走、遠而閒置且懷孕壓力 90），只數 frame % 16 == 0 的幀、別的執行緒不數，`wouldPct` 50、`pregStress` 1，動物狀態與座標不變；心跳欄位；off 不計數、原版照樣被呼叫。
+
+**部署**：manifest 新增 `zombie/characters/animals/MdcAnimalProbes.class` 與 `FluidContainerUpdateSystem.class`，`IsoWorld.class`、`IdleVehicleThrottle.class` 換新。W92–W95 合計 180 → 185 個 class（83 個 patched class、262 個命中點、102 個 helper）。
+
+**退場**：拿到數字、服主裁定之後，a0／sim 併入要做的那一刀或撤掉，F1 依比例決定要不要做索引；SmokeCheck 變紅時先重新核對，不改斷言或 SHA 讓它變綠。
 
 ---
 
