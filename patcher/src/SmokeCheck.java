@@ -8963,19 +8963,26 @@ public final class SmokeCheck {
                                 < firstCallIndex(hAdd, Opcodes.INVOKEVIRTUAL, "zombie/MovingObjectUpdateSchedulerUpdateBucket", "add",
                                         "(Lzombie/iso/IsoMovingObject;)V"));
         failed += shaLocks(jar, "W95", ANIMAL_PROBES_LOCKED);
-        // 診斷碼不得把日誌鏈的例外帶進原版流程：四個 helper 的每個 DebugLog.log 都在 try 內（log() 與 W13 心跳 catch Throwable）
-        boolean logsGuarded = true;
-        StringBuilder unguarded = new StringBuilder();
+        // 診斷碼不得把日誌鏈的例外帶進原版流程，也不得吞掉 Error（docs/patches.md「Error 必須保持致命且可見」）：
+        // 四個 helper 的每個 DebugLog.log 都在 try 內，涵蓋它的 handler 型別恰為 {RuntimeException, LinkageError}；
+        // 四個 helper 全部 try-catch 也只准這兩種（比照 W6／W10 把型別釘在 exception table 上）。
+        StringBuilder logViolations = new StringBuilder();
         for (String h : new String[]{loopGate, relGate, lastGate, probes}) {
-            for (MethodNode m : classNode(distJava, h).methods) {
-                int all = countExactCalls(m, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V");
-                if (all != callsInTry(m, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V")) {
-                    logsGuarded = false;
-                    unguarded.append(' ').append(h).append('.').append(m.name);
-                }
-            }
+            logViolations.append(logHandlerViolations(classNode(distJava, h)));
         }
-        failed += check("W92–W95 helper 契約：每個 DebugLog.log 都在 try 內（日誌鏈例外不外拋）" + unguarded, logsGuarded);
+        failed += check("W92–W95 helper 契約：每個 DebugLog.log 都在 try 內、handler 恰為 RuntimeException＋LinkageError，"
+                        + "四個 helper 沒有 Throwable／Error／catch-all（Error 穿透）" + logViolations, logViolations.length() == 0);
+        ClassNode widened = classNode(distJava, loopGate);
+        ClassNode narrowed = classNode(distJava, loopGate);
+        MethodNode wLog = widened.methods.stream().filter(m -> m.name.equals("log")).findFirst().orElseThrow();
+        MethodNode nLog = narrowed.methods.stream().filter(m -> m.name.equals("log")).findFirst().orElseThrow();
+        boolean mutable = wLog.tryCatchBlocks.size() == 2 && nLog.tryCatchBlocks.size() == 2;
+        if (mutable) {
+            wLog.tryCatchBlocks.get(0).type = "java/lang/Throwable";
+            nLog.tryCatchBlocks.removeIf(t -> "java/lang/LinkageError".equals(t.type));
+        }
+        failed += check("W92–W95 日誌 handler 型別鎖負對照：AnimalLoopSoundGate.log 的 catch 放寬成 Throwable、收窄成只有 RuntimeException 都會紅",
+                mutable && logHandlerViolations(widened).length() > 0 && logHandlerViolations(narrowed).length() > 0);
         return failed;
     }
 
@@ -9002,6 +9009,38 @@ public final class SmokeCheck {
             }
         }
         return true;
+    }
+
+    /**
+     * W92–W95 日誌 handler 型別鎖：回傳違規描述（空字串＝通過）。每個 {@code DebugLog.log(String)} 至少在一個 try 內，
+     * 涵蓋它的 handler 型別集合恰為 {RuntimeException, LinkageError}；整個 class 的 try-catch 只准這兩種型別。
+     */
+    static String logHandlerViolations(ClassNode cn) {
+        Set<String> allowed = Set.of("java/lang/RuntimeException", "java/lang/LinkageError");
+        StringBuilder out = new StringBuilder();
+        for (MethodNode m : cn.methods) {
+            for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                if (!allowed.contains(t.type)) {
+                    out.append(' ').append(cn.name).append('.').append(m.name).append(" catch=").append(t.type);
+                }
+            }
+            for (AbstractInsnNode in : m.instructions) {
+                if (!isCall(in, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V")) {
+                    continue;
+                }
+                int at = m.instructions.indexOf(in);
+                Set<String> types = new java.util.TreeSet<>();
+                for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                    if (m.instructions.indexOf(t.start) <= at && at < m.instructions.indexOf(t.end)) {
+                        types.add(String.valueOf(t.type));
+                    }
+                }
+                if (!types.equals(allowed)) {
+                    out.append(' ').append(cn.name).append('.').append(m.name).append(" log handlers=").append(types);
+                }
+            }
+        }
+        return out.toString();
     }
 
     /** 落在任一 try 區塊內的精確呼叫數。 */

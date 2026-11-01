@@ -36,7 +36,7 @@ import zombie.network.GameServer;
  *
  * <p><b>模式</b>（{@code -Dmdc.animalProbes}，三個探針共用，需重啟）：{@code 2|observe}（預設，{@code on} 也當 observe）量測；
  * {@code 0|off} 原樣轉呼叫、不計數。只在伺服器生效。心跳每 5 分鐘一行（由每幀必經的 a0 驅動）。探針自己的例外（含心跳、格式化與日誌鏈）
- * 只記 anomalies、前 5 次記一行例外類別與訊息，不外拋；原版呼叫不在 try 內（例外照原版上拋）。
+ * （RuntimeException／LinkageError）只記 anomalies、前 5 次記一行例外類別與訊息，不外拋，Error（OOM／SOE）照常外拋；原版呼叫不在 try 內（例外照原版上拋）。
  */
 public final class MdcAnimalProbes {
 
@@ -122,7 +122,7 @@ public final class MdcAnimalProbes {
                 fluidScans++;
                 rcSum += rc;
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             anomaly("F1", t);
         }
         return entities;
@@ -167,7 +167,7 @@ public final class MdcAnimalProbes {
                 simNs += System.nanoTime() - t0;
                 simTimed++;
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             anomaly("sim", t);
         }
     }
@@ -196,7 +196,7 @@ public final class MdcAnimalProbes {
                 && !a.isOnFire() && !a.isDead() && !a.isOnHook() && !a.fromMeta;
     }
 
-    /** 首次生效與心跳；整段不外拋（例外只記 anomalies），狀態先更新再記錄，失敗也不會每幀重試。 */
+    /** 首次生效與心跳；整段不外拋（RuntimeException／LinkageError 只記 anomalies，Error 照常外拋），狀態先更新再記錄，失敗也不會每幀重試。 */
     private static void tick() {
         try {
             long now = System.currentTimeMillis();
@@ -210,7 +210,7 @@ public final class MdcAnimalProbes {
                 lastBeat = now;
                 beat();
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             anomaly("beat", t);
         }
     }
@@ -221,7 +221,7 @@ public final class MdcAnimalProbes {
         if (anomalies <= 5) {
             try {
                 log("anomaly #" + anomalies + " " + where + " " + t.getClass().getName() + ": " + t.getMessage());
-            } catch (Throwable ignored) {
+            } catch (RuntimeException | LinkageError ignored) {
                 anomalies++;
             }
         }
@@ -264,7 +264,7 @@ public final class MdcAnimalProbes {
         String scan;
         try {
             scan = scanVirtual();
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             anomaly("scan", t);
             scan = "scan=" + t.getClass().getSimpleName();
         }
@@ -298,11 +298,11 @@ public final class MdcAnimalProbes {
         return MODE == OFF ? "off" : "observe";
     }
 
-    /** 記錄不外拋：日誌鏈（格式化、輸出）的例外只記 anomalies，不影響原版呼叫。 */
+    /** 記錄不外拋：日誌鏈（格式化、輸出）的 RuntimeException／LinkageError 只記 anomalies，不影響原版呼叫；Error 照常外拋。 */
     private static void log(String s) {
         try {
             DebugLog.log(TAG + s);
-        } catch (Throwable ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
     }

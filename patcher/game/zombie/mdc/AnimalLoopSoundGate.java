@@ -28,7 +28,7 @@ import zombie.network.GameServer;
  * {@code 1|on} 回空 iterator；{@code 0|off} 原版；未知值當 observe。observe 與 on 都每 256 幀稽核一次：{@code SoundManager.instance}
  * 是原版 {@code SoundManager}、每隻不在鉤子上的動物 emitter 是 {@code DummyCharacterSoundEmitter}、runloop／walkloop 的
  * {@code AnimalSoundState.eventInstance == 0}；不成立記 anomalies，on 就本次啟動永久回原版。helper 例外同樣回原版並停用（先停用再記錄）；
- * 日誌鏈本身的例外只記 anomalies、不外拋。心跳每 5 分鐘一行，停用後照印。
+ * 日誌鏈本身的 RuntimeException／LinkageError 只記 anomalies、不外拋；Error（OOM／SOE）照常外拋。心跳每 5 分鐘一行，停用後照印。
  */
 public final class AnimalLoopSoundGate {
 
@@ -64,8 +64,8 @@ public final class AnimalLoopSoundGate {
     }
 
     /**
-     * {@code IsoCell.ProcessObjects} 唯一的 {@code objectList.iterator()}。診斷（心跳、稽核、記錄）全在 try 內、任何例外只記 anomalies 並停用；
-     * 原版 {@code set.iterator()} 在 try 外。
+     * {@code IsoCell.ProcessObjects} 唯一的 {@code objectList.iterator()}。心跳、稽核拋出的例外（RuntimeException／LinkageError）記 anomalies
+     * 並停用；記錄本身的例外在 {@link #log} 內只記 anomalies、不停用。Error（OOM／SOE）照常外拋。原版 {@code set.iterator()} 在 try 外。
      */
     public static Iterator<?> iterator(Set<?> set) {
         if (MODE == OFF || !GameServer.server) {
@@ -84,7 +84,7 @@ public final class AnimalLoopSoundGate {
                 skip = MODE == ON;
                 time = !skip && (f & TIME_MASK) == 0;
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             skip = false;
             time = false;
             failed(t);
@@ -162,7 +162,7 @@ public final class AnimalLoopSoundGate {
         log("DISABLED（本次啟動永久回原版）reason=" + reason + " frames=" + frames + " audits=" + audits);
     }
 
-    /** helper 自己的例外：先停用（之後一律回原版 iterator），再記錄；組訊息或記錄失敗都不外拋。 */
+    /** helper 自己的例外：先停用（之後一律回原版 iterator），再記錄；組訊息或記錄的 RuntimeException／LinkageError 不外拋。 */
     private static void failed(Throwable t) {
         boolean first = !disabled;
         disabled = true;
@@ -170,7 +170,7 @@ public final class AnimalLoopSoundGate {
         if (first) {
             try {
                 log("DISABLED（本次啟動永久回原版）reason=helper exception " + t + " frames=" + frames + " audits=" + audits);
-            } catch (Throwable ignored) {
+            } catch (RuntimeException | LinkageError ignored) {
                 anomalies++;
             }
         }
@@ -190,11 +190,11 @@ public final class AnimalLoopSoundGate {
         return MODE == OFF ? "off" : MODE == ON ? "on" : "observe";
     }
 
-    /** 記錄不外拋：日誌鏈（格式化、輸出）的例外只記 anomalies，不影響原版呼叫。 */
+    /** 記錄不外拋：日誌鏈（格式化、輸出）的 RuntimeException／LinkageError 只記 anomalies，不影響原版呼叫；Error 照常外拋。 */
     private static void log(String s) {
         try {
             DebugLog.log(TAG + s);
-        } catch (Throwable ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
     }

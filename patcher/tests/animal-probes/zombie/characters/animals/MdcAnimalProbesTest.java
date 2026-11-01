@@ -46,6 +46,8 @@ import zombie.network.GameServer;
 public final class MdcAnimalProbesTest {
 
     private static int failed;
+    /** logthrow：日誌串流改拋 OutOfMemoryError（證明 Error 不被吞）。 */
+    static boolean oom;
 
     public static void main(String[] args) throws Exception {
         zombie.core.random.RandStandard.INSTANCE.init();
@@ -190,11 +192,17 @@ public final class MdcAnimalProbesTest {
         zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
             @Override
             public void write(int b) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
 
             @Override
             public void write(byte[] b, int off, int len) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
         });
@@ -262,6 +270,17 @@ public final class MdcAnimalProbesTest {
             same &= MdcAnimalProbes.fluidEntities(bucket) == bucket.getEntities();
         }
         check("F1 照回原版同一個陣列（日誌壞掉時也一樣）", same);
+        oom = true;
+        MdcAnimalProbes.armBeatForTest();
+        doneSet.add("sentinel");
+        t = null;
+        try {
+            MdcAnimalProbes.updateVirtualAnimals();
+        } catch (Throwable e) {
+            t = e;
+        }
+        check("Error 照常外拋：心跳的日誌鏈拋 OutOfMemoryError 時不被吞（" + t + "），原版已先跑完（哨兵被清掉）",
+                t instanceof OutOfMemoryError && doneSet.isEmpty());
     }
 
     /** 狀態由測試指定（原版 getCurrentState 走 ECS）。其餘條件都是欄位讀取，Unsafe 配置後是 null／false。 */

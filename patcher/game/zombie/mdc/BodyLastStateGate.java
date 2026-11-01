@@ -18,7 +18,7 @@ import zombie.network.GameServer;
  *
  * <p><b>模式</b>（{@code -Dmdc.bodyLastStateSkip}，需重啟）：{@code 2|observe}（預設）照原版呼叫，分玩家／動物計數，每 64 次量一次 µs；
  * {@code 1|on} 跳過；{@code 0|off} 原版；未知值當 observe。心跳每 5 分鐘一行。心跳與記錄（格式化、輸出）在不外拋的邊界內，
- * 例外只記 anomalies；原版呼叫不在 try 內。
+ * RuntimeException／LinkageError 只記 anomalies，Error（OOM／SOE）照常外拋；原版呼叫不在 try 內。
  */
 public final class BodyLastStateGate {
 
@@ -76,7 +76,7 @@ public final class BodyLastStateGate {
         samples++;
     }
 
-    /** 首次生效與心跳；整段不外拋（例外只記 anomalies），狀態先更新再記錄，失敗也不會每次重試。 */
+    /** 首次生效與心跳；整段不外拋（RuntimeException／LinkageError 只記 anomalies，Error 照常外拋），狀態先更新再記錄，失敗也不會每次重試。 */
     private static void tick() {
         try {
             long now = System.currentTimeMillis();
@@ -90,7 +90,7 @@ public final class BodyLastStateGate {
                 lastBeat = now;
                 beat();
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException | LinkageError t) {
             anomalies++;
         }
     }
@@ -108,11 +108,11 @@ public final class BodyLastStateGate {
         return MODE == OFF ? "off" : MODE == ON ? "on" : "observe";
     }
 
-    /** 記錄不外拋：日誌鏈的例外只記 anomalies。 */
+    /** 記錄不外拋：日誌鏈的 RuntimeException／LinkageError 只記 anomalies；Error 照常外拋。 */
     private static void log(String s) {
         try {
             DebugLog.log(TAG + s);
-        } catch (Throwable ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
     }

@@ -24,6 +24,8 @@ import zombie.network.GameServer;
 public final class BodyLastStateGateTest {
 
     private static int failed;
+    /** logthrow：日誌串流改拋 OutOfMemoryError（證明 Error 不被吞）。 */
+    static boolean oom;
 
     public static void main(String[] args) throws Exception {
         zombie.core.random.RandStandard.INSTANCE.init();
@@ -95,6 +97,13 @@ public final class BodyLastStateGateTest {
         String line = BodyLastStateGate.lastBeatLine;
         check("心跳記錄拋例外（第 2048 次）：例外不外拋（" + t + "）、照原版抄寫、心跳行有組出來（" + line + "）、記下 anomalies",
                 t == null && copied(beat) && line != null && line.startsWith("beat ") && BodyLastStateGate.anomaliesForTest() > a0);
+        oom = true;
+        BodyLastStateGate.armBeatForTest();
+        for (int i = 2049; i < 3072; i++) {
+            BodyLastStateGate.setBodyPartsLastState(player);
+        }
+        t = call(body(alloc(IsoPlayer.class)));
+        check("Error 照常外拋：第 3072 次心跳的日誌鏈拋 OutOfMemoryError 時不被吞（" + t + "）", t instanceof OutOfMemoryError);
     }
 
     static Throwable call(BodyDamage bd) {
@@ -112,11 +121,17 @@ public final class BodyLastStateGateTest {
         zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
             @Override
             public void write(int b) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
 
             @Override
             public void write(byte[] b, int off, int len) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
         });

@@ -36,6 +36,8 @@ import zombie.network.GameServer;
 public final class AnimalLoopSoundGateTest {
 
     private static int failed;
+    /** logthrow：日誌串流改拋 OutOfMemoryError（證明 Error 不被吞）。 */
+    static boolean oom;
     static int loopCalls;
     static int vocalCalls;
 
@@ -167,6 +169,10 @@ public final class AnimalLoopSoundGateTest {
         before = loopCalls;
         t = frame(processObjects, cell, objects);
         check("停用後下一幀照原版迴圈", t == null && loopCalls - before == 4);
+        oom = true;
+        AnimalLoopSoundGate.forceBeatForTest();
+        t = frame(processObjects, cell, objects);
+        check("Error 照常外拋：日誌鏈拋 OutOfMemoryError 時不被吞，從 ProcessObjects 拋出（" + t + "）", t instanceof OutOfMemoryError);
     }
 
     /** 跑一幀；回傳 ProcessObjects 拋出的例外（沒有就 null）。參數 iterator 先取好，避免消耗 objectList 預備好的那次例外。 */
@@ -186,11 +192,17 @@ public final class AnimalLoopSoundGateTest {
         zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
             @Override
             public void write(int b) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
 
             @Override
             public void write(byte[] b, int off, int len) {
+                if (oom) {
+                    throw new OutOfMemoryError("<test> logger oom");
+                }
                 throw new IllegalStateException("<test> logger exploded");
             }
         });

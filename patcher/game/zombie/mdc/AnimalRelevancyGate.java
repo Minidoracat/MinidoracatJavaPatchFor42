@@ -93,7 +93,7 @@ import zombie.debug.DebugLog;
  * 一次 {@code sendUpdateToClient} 期間同一條連線的 {@code getChunkGridWidth}、玩家是否在載具內都不變（迴圈 body 只讀連線狀態、
  * 不處理封包），所以 {@link #alignedRadius}、{@link #anyPlayerInVehicle} 在 {@code AnimalRequestGate.getPacket}（每次
  * {@code sendUpdateToClient} 開頭必經，遞迴的 pending 也會再經過）呼叫 {@link #beginConnection} 時算一次，之後同一條連線的每隻動物
- * 直接用。計數器改普通 long（唯一呼叫點在主執行緒，心跳也在同一條執行緒）。{@code 2|observe}（預設）照原版每對重算，每 16 次
+ * 直接用。計數器改普通 long（唯一呼叫點在主執行緒，心跳也在同一條執行緒）。{@code 2|observe}（預設）照原版每對重算，每 17 次
  * {@code beginConnection} 抽一輪（那條連線這一輪的每一對）與快取比對，不一致記 {@code hoistMismatch}，其餘輪不算快取、不比對；
  * {@code 1|on} 每輪都算快取並使用，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；{@code 0|off} 每對重算（原版）。
  * 換連線時快取在下一次 {@code beginConnection} 更新；連線不是快取的那條就照原版重算。
@@ -177,8 +177,11 @@ public final class AnimalRelevancyGate {
     static final String HOIST_RAW = System.getProperty("mdc.animalRelevancyHoist");
     static final int HOIST = parseHoist(HOIST_RAW);
     static final int HOIST_AUDIT_MASK = 4095;
-    /** observe 每 16 次 {@link #beginConnection} 抽一輪比對（比照 W89 observe 的 1/16）。 */
-    static final int HOIST_OBSERVE_EVERY = 16;
+    /**
+     * observe 每 17 次 {@link #beginConnection} 抽一輪比對（約 1/17，比照 W89 observe 的抽樣成本）。用質數：begin 次數是全域計數，
+     * 連線數 N 固定時用 16 只抽得到 N/gcd(N,16) 條（48 條只抽到 3 條），17 與常見連線數互質，每條都輪得到。
+     */
+    static final int HOIST_OBSERVE_EVERY = 17;
     /**
      * 目前快取的連線（{@link #beginConnection} 寫入；hoist off、停用、observe 沒抽到的輪是 null）與它的兩個常數。
      * 最多釘住一條 {@code UdpConnection}：下一次 begin 就換掉；伺服器清空時沒有人觸發 {@code sendUpdateToClient}，
@@ -392,7 +395,7 @@ public final class AnimalRelevancyGate {
                     + " hoistAudits=" + hoistAudits
                     + " hoistMismatch=" + hoistMismatch
                     + " hoistDisabled=" + hoistDisabled);
-        } catch (Throwable ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
     }
@@ -404,7 +407,7 @@ public final class AnimalRelevancyGate {
     private static void log(String s) {
         try {
             DebugLog.log(TAG + s);
-        } catch (Throwable ignored) {
+        } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
     }
