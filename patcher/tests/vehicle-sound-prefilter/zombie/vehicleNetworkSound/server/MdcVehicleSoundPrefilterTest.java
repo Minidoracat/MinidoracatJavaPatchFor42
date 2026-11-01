@@ -3,6 +3,7 @@ package zombie.vehicleNetworkSound.server;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -10,6 +11,8 @@ import java.util.Set;
 
 import zombie.core.raknet.UdpConnection;
 import zombie.core.raknet.UdpEngine;
+import zombie.inventory.InventoryItem;
+import zombie.inventory.types.DrainableComboItem;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoWorld;
 import zombie.iso.Vector3;
@@ -18,6 +21,7 @@ import zombie.scripting.objects.VehicleScript;
 import zombie.vehicles.BaseVehicle;
 import zombie.vehicles.LightbarSirenMode;
 import zombie.vehicles.VehicleAlarm;
+import zombie.vehicles.VehicleDoor;
 import zombie.vehicles.VehicleEngine;
 import zombie.vehicles.VehiclePart;
 import zombie.vehicles.VehicleParts;
@@ -29,6 +33,7 @@ import zombie.vehicles.VehicleParts;
  *
  * <p>用法：{@code MdcVehicleSoundPrefilterTest vanilla|off|observe|on}。vanilla 的 classpath 不含 dist（jar 原版 Manager，證明 oracle
  * 就是原版的結果）。車的半徑條件隨機：引擎 Running／Idle、喇叭、倒車蜂鳴、{@code vehicleId == -1}；連線的 releventPos 隨機。
+ * 另有六種聲源各自成立（警報、倒車蜂鳴、車門警報、引擎、喇叭、警笛）與全部關閉的確定性案例，並以少一個條件的替身預篩確認每個條件都有案例守住。
  */
 public final class MdcVehicleSoundPrefilterTest {
 
@@ -92,6 +97,17 @@ public final class MdcVehicleSoundPrefilterTest {
                 check("on：篩好的清單比全部車少（" + MdcVehicleSoundPrefilter.candidatesForTest() + " / " + VEHICLES + "）",
                         MdcVehicleSoundPrefilter.candidatesForTest() > 0 && MdcVehicleSoundPrefilter.candidatesForTest() < VEHICLES);
             }
+        }
+        cases(real, empty, vanilla);
+        if (mode.equals("on")) {   // 沒有連線的一輪只記計數、不建清單
+            long b0 = MdcVehicleSoundPrefilter.builtForTest();
+            List<UdpConnection> saved = GameServer.udpEngine.connections;
+            set(UdpEngine.class, GameServer.udpEngine, "connections", new ArrayList<UdpConnection>());
+            empty.update();
+            set(UdpEngine.class, GameServer.udpEngine, "connections", saved);
+            check("on：沒有連線的一輪不建清單", MdcVehicleSoundPrefilter.builtForTest() == b0);
+        }
+        if (!vanilla) {
             if (mode.equals("off")) {
                 check("off：不印心跳、不記狀態", MdcVehicleSoundPrefilter.lastBeatLine == null);
             } else {
@@ -104,6 +120,137 @@ public final class MdcVehicleSoundPrefilterTest {
             }
         }
         finish(mode);
+    }
+
+    static final String[] SOURCES = {"警報", "倒車蜂鳴", "車門警報", "引擎不是 Idle", "喇叭", "警笛"};
+
+    /**
+     * 六種聲源各自成立＋全部關閉：每個案例跑一輪真的流程，逐條連線等於原版迴圈；再以「少一個條件」的替身預篩重算，
+     * 證明拿掉任何一個條件至少一個案例會不同（車門警報例外：它要先 isEngineRunning，引擎條件一定同時成立）。
+     */
+    @SuppressWarnings("unchecked")
+    static void cases(Manager real, Manager empty, boolean vanilla) throws Exception {
+        BaseVehicle t = list.get(0);
+        VehicleScript script = new VehicleScript();
+        script.getSounds().alarmEnable = Boolean.TRUE;   // hasAlarm
+        script.getLightbar().enable = true;              // hasSiren
+        VehicleScript.Passenger seat = alloc(VehicleScript.Passenger.class);
+        seat.door = "DoorFrontLeft";
+        ((ArrayList<VehicleScript.Passenger>) get(VehicleScript.class, script, "passengers")).add(seat);
+        set(BaseVehicle.class, t, "script", script);
+        set(BaseVehicle.class, t, "passengers", new BaseVehicle.Passenger[] {alloc(BaseVehicle.Passenger.class)});
+        VehicleParts parts = (VehicleParts) get(BaseVehicle.class, t, "parts");
+        VehiclePart doorPart = alloc(VehiclePart.class);
+        VehicleDoor door = alloc(VehicleDoor.class);
+        set(VehiclePart.class, doorPart, "door", door);
+        HashMap<String, VehiclePart> byId = new HashMap<>();
+        byId.put("DoorFrontLeft", doorPart);
+        set(VehicleParts.class, parts, "partsById", byId);
+        VehiclePart battery = alloc(VehiclePart.class);   // 電瓶有電（警報、警笛要 getBatteryCharge > 0）
+        DrainableComboItem cell = alloc(DrainableComboItem.class);
+        setInt(InventoryItem.class, cell, "uses", 1);
+        setFloat(DrainableComboItem.class, cell, "useDelta", 1.0F);
+        set(VehiclePart.class, battery, "item", cell);
+        set(VehicleParts.class, parts, "battery", battery);
+        VehicleAlarm alarm = (VehicleAlarm) get(BaseVehicle.class, t, "vehicleAlarm");
+        boolean[] killed = new boolean[SOURCES.length];
+        for (int k = -1; k < SOURCES.length; k++) {
+            silence();
+            set(VehicleDoor.class, door, "open", false);
+            setDouble(VehicleAlarm.class, alarm, "startTime", 0.0);
+            t.lightbarSirenMode.set(0);
+            switch (k) {
+                case 0 -> setDouble(VehicleAlarm.class, alarm, "startTime", 1.0);
+                case 1 -> setBool(t, "soundBackMoveOn", true);
+                case 2 -> {
+                    setEngine(t, true);
+                    set(VehicleDoor.class, door, "open", true);
+                }
+                case 3 -> setEngine(t, true);
+                case 4 -> setBool(t, "soundHornOn", true);
+                case 5 -> t.lightbarSirenMode.set(1);
+                default -> { }
+            }
+            boolean[] on = sources(t);
+            boolean alone = true;
+            for (int j = 0; j < on.length; j++) {
+                alone &= on[j] == (j == k || (k == 2 && j == 3));
+            }
+            String name = k < 0 ? "全部關閉" : SOURCES[k];
+            check("案例「" + name + "」：原版六個條件" + (k == 2 ? "只有車門警報與引擎成立（車門警報要先 isEngineRunning）" : k < 0 ? "都不成立" : "只有它成立"), alone);
+            if (!vanilla) {
+                check("案例「" + name + "」：audible() " + (k < 0 ? "false" : "true"), MdcVehicleSoundPrefilter.audible(t) == (k >= 0));
+            }
+            empty.update();
+            boolean same = true;
+            boolean hit = false;
+            for (Connection c : conns) {
+                List<BaseVehicle> want = oracle(c);
+                same &= new ArrayList<>(relevant(real, c, vanilla)).equals(want);
+                hit |= want.contains(t);
+                for (int m = 0; m < SOURCES.length; m++) {
+                    killed[m] |= !minus(c, m).equals(want);
+                }
+            }
+            check("案例「" + name + "」：每條連線（內容與順序）等於原版迴圈；" + (k < 0 ? "沒有連線收到這台車" : "至少一條連線收到這台車"),
+                    same && hit == (k >= 0));
+        }
+        for (int m = 0; m < SOURCES.length; m++) {
+            if (m == 2) {
+                System.out.println("INFO 少了「車門警報」的替身：" + (killed[m] ? "有案例不同" : "沒有案例不同（車門警報成立時引擎一定不是 Idle，這個條件被引擎條件涵蓋）"));
+            } else {
+                check("少了「" + SOURCES[m] + "」的替身預篩：至少一個案例和原版不同", killed[m]);
+            }
+        }
+        silence();
+        setDouble(VehicleAlarm.class, alarm, "startTime", 0.0);
+        t.lightbarSirenMode.set(0);
+    }
+
+    /** 原版六個聲音條件（Connection.isRelevant 的順序）。 */
+    static boolean[] sources(BaseVehicle v) {
+        return new boolean[] {v.isAlarmActive(), v.isBackupBeeperSounding(), v.isDoorAlarmSounding(),
+                v.getEngineState() != BaseVehicle.engineStateTypes.Idle, v.isHornSounding(), v.isSirenSounding()};
+    }
+
+    /** 少了第 m 個條件的替身預篩：依 getVehicles() 順序篩車，再照原版迴圈判斷。 */
+    static List<BaseVehicle> minus(Connection c, int m) {
+        List<BaseVehicle> cand = new ArrayList<>();
+        for (BaseVehicle v : cell.getVehicles()) {
+            boolean[] on = sources(v);
+            on[m] = false;
+            boolean any = false;
+            for (boolean b : on) {
+                any |= b;
+            }
+            if (v.vehicleId != -1 && any) {
+                cand.add(v);
+            }
+        }
+        Set<BaseVehicle> temp = new HashSet<>();
+        for (BaseVehicle v : cand) {
+            if (v.vehicleId != -1 && c.isRelevant(v)) {
+                temp.add(v);
+            }
+        }
+        return new ArrayList<>(temp);
+    }
+
+    /** 全部車靜音、id 照索引；第 0 台車與第 0 條連線放在同一點，其他連線放遠。 */
+    static void silence() throws Exception {
+        for (int i = 0; i < list.size(); i++) {
+            BaseVehicle v = list.get(i);
+            v.vehicleId = (short) i;
+            setEngine(v, false);
+            setBool(v, "soundHornOn", false);
+            setBool(v, "soundBackMoveOn", false);
+            v.setX(100 + 10 * i);
+            v.setY(100);
+        }
+        for (int i = 0; i < conns.size(); i++) {
+            Vector3[] pos = (Vector3[]) get(UdpConnection.class, conns.get(i).getUdpConnection(), "releventPos");
+            pos[0].set(i == 0 ? 100 : 5000 + 1000 * i, i == 0 ? 100 : 5000, 0.0F);
+        }
     }
 
     /** 前提被打破（Manager.update 期間有車的聲音狀態變了）：抽到比對那一輪抓到、本次啟動永久回原版，之後結果又等於原版。 */
@@ -248,6 +395,24 @@ public final class MdcVehicleSoundPrefilterTest {
         Field f = BaseVehicle.class.getDeclaredField(name);
         f.setAccessible(true);
         f.setBoolean(v, value);
+    }
+
+    static void setInt(Class<?> owner, Object target, String name, int value) throws Exception {
+        Field f = owner.getDeclaredField(name);
+        f.setAccessible(true);
+        f.setInt(target, value);
+    }
+
+    static void setFloat(Class<?> owner, Object target, String name, float value) throws Exception {
+        Field f = owner.getDeclaredField(name);
+        f.setAccessible(true);
+        f.setFloat(target, value);
+    }
+
+    static void setDouble(Class<?> owner, Object target, String name, double value) throws Exception {
+        Field f = owner.getDeclaredField(name);
+        f.setAccessible(true);
+        f.setDouble(target, value);
     }
 
     @SuppressWarnings("unchecked")

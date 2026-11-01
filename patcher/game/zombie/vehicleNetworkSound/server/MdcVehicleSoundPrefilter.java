@@ -111,7 +111,7 @@ public final class MdcVehicleSoundPrefilter {
             lastBeat = now;
             beat();
         }
-        if (disabled) {
+        if (disabled || conns == 0) {   // 沒有連線：getVehiclesRelevantToConnection 不會被呼叫，不建清單
             return;
         }
         sampled = (rounds & (MODE == ON ? AUDIT_MASK : OBSERVE_MASK)) == 0;
@@ -244,6 +244,7 @@ public final class MdcVehicleSoundPrefilter {
     static long mismatchesForTest() { return mismatches; }
     static long anomaliesForTest() { return anomalies; }
     static int candidatesForTest() { return candidates.size(); }
+    static long builtForTest() { return built; }
 
     private MdcVehicleSoundPrefilter() {}
 }

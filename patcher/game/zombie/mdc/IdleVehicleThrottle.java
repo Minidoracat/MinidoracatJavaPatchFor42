@@ -13,8 +13,11 @@ import zombie.iso.IsoCell;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.IsoWorld;
 import zombie.network.GameServer;
+import zombie.radio.devices.DeviceData;
 import zombie.vehicles.BaseVehicle;
 import zombie.vehicles.VehicleAlarm;
+import zombie.vehicles.VehiclePart;
+import zombie.vehicles.VehicleParts;
 
 /**
  * W89 閒置車降頻（2026-11-01；docs/patches.md 2cx）。
@@ -27,7 +30,16 @@ import zombie.vehicles.VehicleAlarm;
  * {@link #add}。伺服器主執行緒上、{@code vehicleId >= 0} 而且 {@link #idle} 成立的車，只在
  * {@code ((frameCounter + vehicleId) & (N-1)) == 0} 的幀放進 bucket，其他幀整台跳過四段（同一個 bucket，伺服器 frameMod＝1）。
  *
+ * <p><b>收音機／CD</b>：開著的裝置（{@code drainBatteryUpdateHack} 的寫法：{@code getDeviceData() != null && getIsTurnedOn()}）每幀
+ * {@code DeviceData.update} 扣 {@code 1.25×getMultiplier()} 的計數器（播放、訊號、聲音、靜電），跳幀會吃掉而不是延後，所以有裝置開著就不算閒置。
+ * 掃零件的結果以 vehicleId 快取，只在這一幀本來就會更新（輪到它或暖機中）或快取是「開著」時重掃；沒人時被打開的收音機最多晚 N−1 幀被發現。
+ *
+ * <p><b>暖機</b>：連續閒置滿 {@link #WARMUP_MS}（牆鐘，每幀取一次）才開始降頻，任何一幀不閒置就重算。
+ * {@code VehiclePedestrianContactTracking.postUpdate} 只在 postupdate 推進接觸時鐘、3.5 物理秒後才清舊接觸；剛撞過人的車若立刻降頻，
+ * 接觸紀錄老化慢 N 倍，再開動撞同一個角色會被判成持續接觸。5 秒 ≥ 3.5 物理秒（slomo 1），期間閒置車不能新增接觸（速度 &lt; 0.05 就提早回傳）。
+ *
  * <p><b>模式</b>（{@code -Dmdc.idleVehicleThrottle}，需重啟）：{@code 2|observe}（預設）一律放行，對「會跳」的車記這一幀與下一幀的指紋；
+ * observe 只在每台車每 16 個輪次抽一個輪次記錄（{@link #observeSampled}），成本約 1/16；
  * {@code 1|on} 跳過，每 4096 次跳過抽一次放行並比對下一幀，{@code pos} 不一致就本次啟動永久回原版；{@code 0|off} 直接 {@code add}；
  * 未知值當 observe。{@code -Dmdc.idleVehicleThrottleN}：2 的次方 1–64，預設 8。helper 例外照原版 {@code add} 並停用。
  *
@@ -47,18 +59,23 @@ public final class IdleVehicleThrottle {
     static final String RAW_N = System.getProperty("mdc.idleVehicleThrottleN");
     static final int N = parseN(RAW_N);
     private static final int MASK = N - 1;
+    private static final int SHIFT = Integer.numberOfTrailingZeros(N);
+    static final long WARMUP_MS = 5_000L;
+    private static final long NONE = Long.MIN_VALUE;
 
     private static final String TAG = "[MinidoracatJavaPatch][IdleVehicleThrottle] ";
     private static final long HEARTBEAT_MS = 300_000L;
     static final int AUDIT_MASK = 4095;
     private static final int PRED_SAMPLE_MASK = 255;
+    static final int OBS_ROUND_MASK = 15;
+    private static final int OBS_TIME_MASK = 255;
     private static final int PARTS_SAMPLE_MASK = 63;
     private static final int TOP = 5;
 
     /** state 指紋各位元的名字（位元 0–3 引擎狀態序號、4–6 授權序號，其餘一位一個）。 */
     static final String[] STATE_NAMES = {"engine", "engine", "engine", "engine", "auth", "auth", "auth", "isEnable",
             "physicActiveCheck", "constraintChangedTime", "alarm", "needPartsUpdate", "lightbar", "siren", "inCell",
-            "mechanicUI", "jniIsCollide", "passenger", "tow", "removed", "animals", "noSquare"};
+            "mechanicUI", "jniIsCollide", "passenger", "tow", "removed", "animals", "noSquare", "device"};
 
     private static volatile boolean disabled;
     private static boolean started;
@@ -66,6 +83,9 @@ public final class IdleVehicleThrottle {
     private static long lastBeat;
     private static long frames, visits, idles, actives, wouldSkip, skipped, skipSeen, audits;
     private static long compared, posDiff, stateDiff, partsDiff, predNs, predN, anomalies, fallbacks, records;
+    private static long warmups, devOnHits, devScans, obsOps, obsNs, obsN, recordsTotal;
+    private static long frameMs;
+    private static long testClock = Long.MIN_VALUE;   // 測試固定的牆鐘；Long.MIN_VALUE＝用真的時間
     private static final long[] STATE_BITS = new long[STATE_NAMES.length];
     private static final StringBuilder posTop = new StringBuilder();
     private static int posTopN;
@@ -80,6 +100,11 @@ public final class IdleVehicleThrottle {
     private static int[] fpState = new int[0];
     private static float[] fpBattery = new float[0];
     private static boolean[] fpAudit = new boolean[0];
+    // 每台車的快取，以 vehicleId 為索引、identityHashCode 防重用：裝置開著、連續閒置起點（NONE＝不在閒置）。
+    private static boolean[] slotUsed = new boolean[0];
+    private static int[] slotIdent = new int[0];
+    private static boolean[] slotDev = new boolean[0];
+    private static long[] idleSince = new long[0];
 
     static int parseMode(String raw) {
         if (raw == null) {
@@ -135,14 +160,21 @@ public final class IdleVehicleThrottle {
         if (vid < 0) {
             return false;
         }
-        if (vid < fpFrame.length && fpFrame[vid] != Long.MIN_VALUE) {
-            if (fpFrame[vid] == frame - 1 && fpIdent[vid] == System.identityHashCode(v)) {
-                compare(v, vid);
+        grow(vid);
+        int ident = System.identityHashCode(v);
+        if (fpFrame[vid] != NONE) {
+            if (fpFrame[vid] == frame - 1 && fpIdent[vid] == ident) {
+                timedCompare(v, vid);
                 if (disabled) {
                     return false;
                 }
             }
-            fpFrame[vid] = Long.MIN_VALUE;
+            fpFrame[vid] = NONE;
+        }
+        if (!slotUsed[vid] || slotIdent[vid] != ident) {
+            slotUsed[vid] = true;
+            slotIdent[vid] = ident;
+            idleSince[vid] = NONE;
         }
         boolean idle;
         if ((visits & PRED_SAMPLE_MASK) == 0) {
@@ -154,25 +186,88 @@ public final class IdleVehicleThrottle {
             idle = idle(v);
         }
         if (!idle) {
+            idleSince[vid] = NONE;
+            actives++;
+            return false;
+        }
+        boolean turn = ((frame + vid) & MASK) == 0;
+        long since = idleSince[vid];
+        boolean warm = since == NONE || frameMs - since < WARMUP_MS;
+        if (turn || warm || slotDev[vid]) {   // 這一幀本來就會更新，或快取是開著（才能發現關掉）
+            devScans++;
+            slotDev[vid] = devicesOn(v);
+        }
+        if (slotDev[vid]) {
+            idleSince[vid] = NONE;
+            devOnHits++;
             actives++;
             return false;
         }
         idles++;
-        if (((frame + vid) & MASK) == 0) {
+        if (warm) {
+            if (since == NONE) {
+                idleSince[vid] = frameMs;
+            }
+            warmups++;
+            return false;
+        }
+        if (turn) {
             return false;
         }
         wouldSkip++;
         if (MODE == OBSERVE) {
-            record(v, vid, frame, false);
+            if (observeSampled(frame, vid)) {
+                timedRecord(v, vid, frame, false);
+            }
             return false;
         }
         if ((++skipSeen & AUDIT_MASK) == 0) {
             audits++;
-            record(v, vid, frame, true);
+            timedRecord(v, vid, frame, true);
             return false;
         }
         skipped++;
         return true;
+    }
+
+    /** observe 的抽樣：每台車每 16 個輪次（一個輪次 N 幀）抽一個輪次記錄。 */
+    static boolean observeSampled(long frame, int vid) {
+        return (((frame + vid) >> SHIFT) & OBS_ROUND_MASK) == 0;
+    }
+
+    /** 有開著的裝置（收音機、CD）：照 {@code BaseVehicle.drainBatteryUpdateHack} 的零件迴圈。 */
+    static boolean devicesOn(BaseVehicle v) {
+        VehicleParts parts = v.getParts();
+        for (int i = 0, n = parts.size(); i < n; i++) {
+            VehiclePart part = parts.get(i);
+            DeviceData d = part.getDeviceData();
+            if (d != null && d.getIsTurnedOn()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void timedRecord(BaseVehicle v, int vid, long frame, boolean audit) {
+        if ((++obsOps & OBS_TIME_MASK) == 0) {
+            long t0 = System.nanoTime();
+            record(v, vid, frame, audit);
+            obsNs += System.nanoTime() - t0;
+            obsN++;
+        } else {
+            record(v, vid, frame, audit);
+        }
+    }
+
+    private static void timedCompare(BaseVehicle v, int vid) {
+        if ((++obsOps & OBS_TIME_MASK) == 0) {
+            long t0 = System.nanoTime();
+            compare(v, vid);
+            obsNs += System.nanoTime() - t0;
+            obsN++;
+        } else {
+            compare(v, vid);
+        }
     }
 
     /**
@@ -230,12 +325,13 @@ public final class IdleVehicleThrottle {
         bits |= (v.isRemovedFromWorld() ? 1 : 0) << 19;
         bits |= (v.getAnimals().isEmpty() ? 0 : 1) << 20;
         bits |= (v.getCurrentSquare() == null || v.chunk == null ? 1 : 0) << 21;
+        bits |= (devicesOn(v) ? 1 : 0) << 22;
         return bits;
     }
 
     private static void record(BaseVehicle v, int vid, long frame, boolean audit) {
-        grow(vid);
         records++;
+        recordsTotal++;
         fpFrame[vid] = frame;
         fpIdent[vid] = System.identityHashCode(v);
         int p = vid * 6;
@@ -323,12 +419,18 @@ public final class IdleVehicleThrottle {
         fpState = Arrays.copyOf(fpState, n);
         fpBattery = Arrays.copyOf(fpBattery, n);
         fpAudit = Arrays.copyOf(fpAudit, n);
+        slotUsed = Arrays.copyOf(slotUsed, n);
+        slotIdent = Arrays.copyOf(slotIdent, n);
+        slotDev = Arrays.copyOf(slotDev, n);
+        idleSince = Arrays.copyOf(idleSince, n);
+        Arrays.fill(idleSince, old, n, NONE);
     }
 
     private static void newFrame(long frame) {
         curFrame = frame;
         frames++;
-        long now = System.currentTimeMillis();
+        long now = nowMs();
+        frameMs = now;
         if (!started) {
             started = true;
             lastBeat = now;
@@ -370,13 +472,16 @@ public final class IdleVehicleThrottle {
                 + " skipped=" + skipped + " audits=" + audits + " compared=" + compared
                 + " posDiff=" + posDiff + " stateDiff=" + stateDiff + " partsDiff=" + partsDiff
                 + " stateFields=" + (bits.isEmpty() ? "-" : bits)
+                + " warmup=" + warmups + " devOn=" + devOnHits + " devScans=" + devScans
                 + " predUsAvg=" + (predN == 0 ? 0 : Math.round(predNs / (double) predN / 10.0) / 100.0)
+                + " obsUsAvg=" + (obsN == 0 ? 0 : Math.round(obsNs / (double) obsN / 10.0) / 100.0)
                 + " orphanTow=" + orphanTow + " fallback=" + fallbacks + " anomalies=" + anomalies + " disabled=" + disabled
                 + " posTop=" + (posTop.isEmpty() ? "-" : posTop);
         lastBeatLine = line;
         log(line);
         frames = visits = idles = actives = wouldSkip = skipped = audits = compared = 0;
         posDiff = stateDiff = partsDiff = predNs = predN = 0;
+        warmups = devOnHits = devScans = obsNs = obsN = 0;
         Arrays.fill(STATE_BITS, 0);
         posTop.setLength(0);
         posTopN = 0;
@@ -426,8 +531,17 @@ public final class IdleVehicleThrottle {
         DebugLog.log(TAG + s);
     }
 
+    private static long nowMs() {
+        return testClock == Long.MIN_VALUE ? System.currentTimeMillis() : testClock;
+    }
+
     static void forceBeatForTest() {
-        lastBeat = System.currentTimeMillis() - HEARTBEAT_MS;
+        lastBeat = nowMs() - HEARTBEAT_MS;
+    }
+
+    /** 測試推進牆鐘（暖機）：第一次呼叫起改用固定的時間，之後只有這裡會讓它前進；下一幀生效。 */
+    static void advanceClockForTest(long ms) {
+        testClock = nowMs() + ms;
     }
 
     static boolean disabledForTest() { return disabled; }
@@ -438,6 +552,8 @@ public final class IdleVehicleThrottle {
     static long stateDiffForTest() { return stateDiff; }
     static long comparedForTest() { return compared; }
     static long anomaliesForTest() { return anomalies; }
+    static long recordsForTest() { return recordsTotal; }
+    static long warmupsForTest() { return warmups; }
 
     private IdleVehicleThrottle() {}
 }
