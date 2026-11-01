@@ -27,8 +27,8 @@ import zombie.network.GameServer;
  * <p><b>模式</b>（{@code -Dmdc.animalLoopSoundGate}，需重啟）：{@code 2|observe}（預設）回原版 iterator，每 64 幀包一層量整段 µs；
  * {@code 1|on} 回空 iterator；{@code 0|off} 原版；未知值當 observe。observe 與 on 都每 256 幀稽核一次：{@code SoundManager.instance}
  * 是原版 {@code SoundManager}、每隻不在鉤子上的動物 emitter 是 {@code DummyCharacterSoundEmitter}、runloop／walkloop 的
- * {@code AnimalSoundState.eventInstance == 0}；不成立記 anomalies，on 就本次啟動永久回原版。helper 例外同樣回原版並停用。
- * 心跳每 5 分鐘一行，停用後照印。
+ * {@code AnimalSoundState.eventInstance == 0}；不成立記 anomalies，on 就本次啟動永久回原版。helper 例外同樣回原版並停用（先停用再記錄）；
+ * 日誌鏈本身的例外只記 anomalies、不外拋。心跳每 5 分鐘一行，停用後照印。
  */
 public final class AnimalLoopSoundGate {
 
@@ -63,11 +63,16 @@ public final class AnimalLoopSoundGate {
         };
     }
 
-    /** {@code IsoCell.ProcessObjects} 唯一的 {@code objectList.iterator()}。 */
+    /**
+     * {@code IsoCell.ProcessObjects} 唯一的 {@code objectList.iterator()}。診斷（心跳、稽核、記錄）全在 try 內、任何例外只記 anomalies 並停用；
+     * 原版 {@code set.iterator()} 在 try 外。
+     */
     public static Iterator<?> iterator(Set<?> set) {
         if (MODE == OFF || !GameServer.server) {
             return set.iterator();
         }
+        boolean skip = false;
+        boolean time = false;
         try {
             long f = ++frames;
             tick();
@@ -76,21 +81,25 @@ public final class AnimalLoopSoundGate {
             }
             if (!disabled) {
                 objects = set.size();
-                if (MODE == ON) {
-                    skipped++;
-                    return Collections.emptyIterator();
-                }
-                if ((f & TIME_MASK) == 0) {
-                    TIMED.it = set.iterator();
-                    TIMED.t0 = System.nanoTime();
-                    return TIMED;
-                }
+                skip = MODE == ON;
+                time = !skip && (f & TIME_MASK) == 0;
             }
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
-            disable("helper exception " + e);
+        } catch (Throwable t) {
+            skip = false;
+            time = false;
+            failed(t);
         }
-        return set.iterator();
+        if (skip) {
+            skipped++;
+            return Collections.emptyIterator();
+        }
+        Iterator<?> it = set.iterator();
+        if (time) {
+            TIMED.it = it;
+            TIMED.t0 = System.nanoTime();
+            return TIMED;
+        }
+        return it;
     }
 
     private static void audit(Set<?> set) {
@@ -153,6 +162,20 @@ public final class AnimalLoopSoundGate {
         log("DISABLED（本次啟動永久回原版）reason=" + reason + " frames=" + frames + " audits=" + audits);
     }
 
+    /** helper 自己的例外：先停用（之後一律回原版 iterator），再記錄；組訊息或記錄失敗都不外拋。 */
+    private static void failed(Throwable t) {
+        boolean first = !disabled;
+        disabled = true;
+        anomalies++;
+        if (first) {
+            try {
+                log("DISABLED（本次啟動永久回原版）reason=helper exception " + t + " frames=" + frames + " audits=" + audits);
+            } catch (Throwable ignored) {
+                anomalies++;
+            }
+        }
+    }
+
     private static void beat() {
         String line = "beat mode=" + modeName() + " frames=" + frames + " objects=" + objects + " animals=" + animals
                 + " loopUsAvg=" + (loopSamples == 0 ? 0 : loopNs / loopSamples / 1000) + " loopUsMax=" + loopMaxNs / 1000
@@ -167,8 +190,13 @@ public final class AnimalLoopSoundGate {
         return MODE == OFF ? "off" : MODE == ON ? "on" : "observe";
     }
 
+    /** 記錄不外拋：日誌鏈（格式化、輸出）的例外只記 anomalies，不影響原版呼叫。 */
     private static void log(String s) {
-        DebugLog.log(TAG + s);
+        try {
+            DebugLog.log(TAG + s);
+        } catch (Throwable ignored) {
+            anomalies++;
+        }
     }
 
     /** observe 抽樣：包原版 iterator，第一次 {@code hasNext()} 回 false 時記下整段迴圈的時間。 */

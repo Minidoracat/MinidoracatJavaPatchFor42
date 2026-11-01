@@ -35,8 +35,8 @@ import zombie.network.GameServer;
  * </ul>
  *
  * <p><b>模式</b>（{@code -Dmdc.animalProbes}，三個探針共用，需重啟）：{@code 2|observe}（預設，{@code on} 也當 observe）量測；
- * {@code 0|off} 原樣轉呼叫、不計數。只在伺服器生效。心跳每 5 分鐘一行（由每幀必經的 a0 驅動）。探針自己的例外只記 anomalies，
- * 原版呼叫不在 try 內（例外照原版上拋）。
+ * {@code 0|off} 原樣轉呼叫、不計數。只在伺服器生效。心跳每 5 分鐘一行（由每幀必經的 a0 驅動）。探針自己的例外（含心跳、格式化與日誌鏈）
+ * 只記 anomalies、前 5 次記一行例外類別與訊息，不外拋；原版呼叫不在 try 內（例外照原版上拋）。
  */
 public final class MdcAnimalProbes {
 
@@ -122,8 +122,8 @@ public final class MdcAnimalProbes {
                 fluidScans++;
                 rcSum += rc;
             }
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
+        } catch (Throwable t) {
+            anomaly("F1", t);
         }
         return entities;
     }
@@ -147,9 +147,9 @@ public final class MdcAnimalProbes {
             }
             boolean timed = (simSeen++ & SIM_TIME_MASK) == 0;
             long t0 = timed ? System.nanoTime() : 0L;
-            simAnimals++;
             boolean unseen = unseen(a);
             boolean still = still(a);
+            simAnimals++;
             if (unseen) {
                 simUnseen++;
             }
@@ -167,8 +167,8 @@ public final class MdcAnimalProbes {
                 simNs += System.nanoTime() - t0;
                 simTimed++;
             }
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
+        } catch (Throwable t) {
+            anomaly("sim", t);
         }
     }
 
@@ -196,19 +196,32 @@ public final class MdcAnimalProbes {
                 && !a.isOnFire() && !a.isDead() && !a.isOnHook() && !a.fromMeta;
     }
 
+    /** 首次生效與心跳；整段不外拋（例外只記 anomalies），狀態先更新再記錄，失敗也不會每幀重試。 */
     private static void tick() {
-        long now = System.currentTimeMillis();
-        if (!started) {
-            started = true;
-            lastBeat = now;
-            log("首次生效 mode=" + modeName() + " raw=" + RAW
-                    + "（-Dmdc.animalProbes=0|off 不量、2|observe 量虛擬動物、液體容器與動物降頻候選；純觀測；心跳每 5 分鐘一行）");
-        }
-        if (now - lastBeat >= HEARTBEAT_MS) {
-            lastBeat = now;
-            try {
+        try {
+            long now = System.currentTimeMillis();
+            if (!started) {
+                started = true;
+                lastBeat = now;
+                log("首次生效 mode=" + modeName() + " raw=" + RAW
+                        + "（-Dmdc.animalProbes=0|off 不量、2|observe 量虛擬動物、液體容器與動物降頻候選；純觀測；心跳每 5 分鐘一行）");
+            }
+            if (now - lastBeat >= HEARTBEAT_MS) {
+                lastBeat = now;
                 beat();
-            } catch (RuntimeException | LinkageError e) {
+            }
+        } catch (Throwable t) {
+            anomaly("beat", t);
+        }
+    }
+
+    /** 探針自己的例外：計數，前 5 次記一行例外類別與訊息；本身不外拋。 */
+    private static void anomaly(String where, Throwable t) {
+        anomalies++;
+        if (anomalies <= 5) {
+            try {
+                log("anomaly #" + anomalies + " " + where + " " + t.getClass().getName() + ": " + t.getMessage());
+            } catch (Throwable ignored) {
                 anomalies++;
             }
         }
@@ -251,9 +264,9 @@ public final class MdcAnimalProbes {
         String scan;
         try {
             scan = scanVirtual();
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
-            scan = "scan=" + e.getClass().getSimpleName();
+        } catch (Throwable t) {
+            anomaly("scan", t);
+            scan = "scan=" + t.getClass().getSimpleName();
         }
         lastScan = scan;
         String line = "beat mode=" + modeName() + " uptimeS=" + ManagementFactory.getRuntimeMXBean().getUptime() / 1000
@@ -266,11 +279,11 @@ public final class MdcAnimalProbes {
                 + " wouldPct=" + pct(simWould, simAnimals)
                 + " pregStress=" + (simFrames == 0 ? "0" : String.format(Locale.ROOT, "%.1f", (double) simPregStress / simFrames))
                 + " simUsAvg=" + avgUs(simNs, simTimed) + " anomalies=" + anomalies;
-        lastBeatLine = line;
-        log(line);
         vaCalls = vaNs = vaMaxNs = 0;
         fluidCalls = bucketSum = bucketMax = fluidScans = rcSum = fluidScanNs = 0;
         simFrames = simAnimals = simUnseen = simStill = simWould = simPregStress = simNs = simTimed = 0;
+        lastBeatLine = line;
+        log(line);
     }
 
     private static String avgUs(long ns, long n) {
@@ -285,14 +298,24 @@ public final class MdcAnimalProbes {
         return MODE == OFF ? "off" : "observe";
     }
 
+    /** 記錄不外拋：日誌鏈（格式化、輸出）的例外只記 anomalies，不影響原版呼叫。 */
     private static void log(String s) {
-        DebugLog.log(TAG + s);
+        try {
+            DebugLog.log(TAG + s);
+        } catch (Throwable ignored) {
+            anomalies++;
+        }
     }
 
     static void forceBeatForTest() {
+        armBeatForTest();
+        tick();
+    }
+
+    /** 下一次 a0 就印心跳。 */
+    static void armBeatForTest() {
         started = true;
         lastBeat = System.currentTimeMillis() - HEARTBEAT_MS;
-        tick();
     }
 
     static long anomaliesForTest() { return anomalies; }

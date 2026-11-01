@@ -93,9 +93,10 @@ import zombie.debug.DebugLog;
  * 一次 {@code sendUpdateToClient} 期間同一條連線的 {@code getChunkGridWidth}、玩家是否在載具內都不變（迴圈 body 只讀連線狀態、
  * 不處理封包），所以 {@link #alignedRadius}、{@link #anyPlayerInVehicle} 在 {@code AnimalRequestGate.getPacket}（每次
  * {@code sendUpdateToClient} 開頭必經，遞迴的 pending 也會再經過）呼叫 {@link #beginConnection} 時算一次，之後同一條連線的每隻動物
- * 直接用。計數器改普通 long（唯一呼叫點在主執行緒，心跳也在同一條執行緒）。{@code 2|observe}（預設）照原版每對重算，並與快取逐次比對，
- * 不一致記 {@code hoistMismatch}；{@code 1|on} 用快取，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；{@code 0|off}
- * 每對重算（原版）。換連線時快取在下一次 {@code beginConnection} 更新；連線不是快取的那條就照原版重算。
+ * 直接用。計數器改普通 long（唯一呼叫點在主執行緒，心跳也在同一條執行緒）。{@code 2|observe}（預設）照原版每對重算，每 16 次
+ * {@code beginConnection} 抽一輪（那條連線這一輪的每一對）與快取比對，不一致記 {@code hoistMismatch}，其餘輪不算快取、不比對；
+ * {@code 1|on} 每輪都算快取並使用，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；{@code 0|off} 每對重算（原版）。
+ * 換連線時快取在下一次 {@code beginConnection} 更新；連線不是快取的那條就照原版重算。
  *
  * <p><b>刻意不做的事</b>：
  * <ul>
@@ -176,13 +177,19 @@ public final class AnimalRelevancyGate {
     static final String HOIST_RAW = System.getProperty("mdc.animalRelevancyHoist");
     static final int HOIST = parseHoist(HOIST_RAW);
     static final int HOIST_AUDIT_MASK = 4095;
-    /** 目前快取的連線（{@link #beginConnection} 寫入；hoist off 或停用時是 null）與它的兩個常數。 */
+    /** observe 每 16 次 {@link #beginConnection} 抽一輪比對（比照 W89 observe 的 1/16）。 */
+    static final int HOIST_OBSERVE_EVERY = 16;
+    /**
+     * 目前快取的連線（{@link #beginConnection} 寫入；hoist off、停用、observe 沒抽到的輪是 null）與它的兩個常數。
+     * 最多釘住一條 {@code UdpConnection}：下一次 begin 就換掉；伺服器清空時沒有人觸發 {@code sendUpdateToClient}，
+     * 會留到下一位玩家進來。
+     */
     private static UdpConnection hoistConn;
     private static float hoistAligned;
     private static boolean hoistInVehicle;
     private static boolean hoistStarted;
     private static boolean hoistDisabled;
-    private static long hoistBegins, hoistHits, hoistSeen, hoistAudits, hoistMismatch;
+    private static long hoistBegins, hoistRounds, hoistHits, hoistSeen, hoistAudits, hoistMismatch;
 
     static int parseHoist(String raw) {
         if (raw == null) {
@@ -197,7 +204,7 @@ public final class AnimalRelevancyGate {
 
     /**
      * W93：{@code AnimalRequestGate.getPacket}（{@code sendUpdateToClient} 兩個 reliability 分支的開頭）每次呼叫一次，
-     * 把這條連線的對齊半徑與載具判定算好。不拋例外（兩個計算各自 catch）。
+     * 把這條連線的對齊半徑與載具判定算好（observe 只有抽到的輪才算）。不拋例外（兩個計算各自 catch、日誌不外拋）。
      */
     public static void beginConnection(UdpConnection connection) {
         if (HOIST == HOIST_OFF || MODE == MODE_OFF || hoistDisabled) {
@@ -206,13 +213,15 @@ public final class AnimalRelevancyGate {
         if (!hoistStarted) {
             hoistStarted = true;
             log("hoist 首次生效 mode=" + hoistModeName() + " raw=" + HOIST_RAW
-                    + "（-Dmdc.animalRelevancyHoist=0|off 每對重算、1|on 用每條連線的快取、2|observe 兩路都算並比對；併入本 tag 心跳）");
+                    + "（-Dmdc.animalRelevancyHoist=0|off 每對重算、1|on 用每條連線的快取、2|observe 每 " + HOIST_OBSERVE_EVERY
+                    + " 輪抽一輪兩路都算並比對；併入本 tag 心跳）");
         }
         hoistBegins++;
         hoistConn = null;
-        if (connection == null) {
+        if (connection == null || (HOIST == HOIST_OBSERVE && hoistBegins % HOIST_OBSERVE_EVERY != 0)) {
             return;
         }
+        hoistRounds++;
         hoistAligned = alignedRadius(connection);
         hoistInVehicle = anyPlayerInVehicle(connection);
         hoistConn = connection;
@@ -377,11 +386,13 @@ public final class AnimalRelevancyGate {
                     + " anomalies=" + anomalies
                     + " hoist=" + hoistModeName()
                     + " hoistBegins=" + hoistBegins
+                    + " hoistRounds=" + hoistRounds
+                    + " hoistObserveEvery=" + HOIST_OBSERVE_EVERY
                     + " hoistHits=" + hoistHits
                     + " hoistAudits=" + hoistAudits
                     + " hoistMismatch=" + hoistMismatch
                     + " hoistDisabled=" + hoistDisabled);
-        } catch (RuntimeException | LinkageError ignored) {
+        } catch (Throwable ignored) {
             anomalies++;
         }
     }
@@ -393,7 +404,7 @@ public final class AnimalRelevancyGate {
     private static void log(String s) {
         try {
             DebugLog.log(TAG + s);
-        } catch (RuntimeException | LinkageError ignored) {
+        } catch (Throwable ignored) {
             anomalies++;
         }
     }
@@ -423,6 +434,8 @@ public final class AnimalRelevancyGate {
         return anomalies;
     }
 
+    static long hoistBeginsForTest() { return hoistBegins; }
+    static long hoistRoundsForTest() { return hoistRounds; }
     static long hoistHitsForTest() { return hoistHits; }
     static long hoistAuditsForTest() { return hoistAudits; }
     static long hoistMismatchForTest() { return hoistMismatch; }

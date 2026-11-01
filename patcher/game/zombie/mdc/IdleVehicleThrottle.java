@@ -49,6 +49,7 @@ import zombie.vehicles.VehicleParts;
  * observe 只在每台車每 16 個輪次抽一個輪次記錄（{@link #observeSampled}），成本約 1/16；
  * {@code 1|on} 跳過，每 4096 次跳過抽一次放行並比對下一幀，{@code pos} 不一致就本次啟動永久回原版；{@code 0|off} 直接 {@code add}；
  * 未知值當 observe。{@code -Dmdc.idleVehicleThrottleN}：2 的次方 1–64，預設 8。helper 例外照原版 {@code add} 並停用。
+ * {@code off} 時動物仍先經 W95 sim 探針（{@code MdcAnimalProbes.sim}，只計數），要完全原版另加 {@code -Dmdc.animalProbes=off}。
  *
  * <p><b>指紋</b>：{@code pos}＝x、y、z、{@code jniTransform.origin}、{@code current}／{@code chunk} 的身分；{@code state}＝閒置條件用到的
  * 欄位（見 {@link #STATE_NAMES}）加上是否還在 {@code cell.vehicles}；{@code parts}＝每 64 次抽一次電瓶電量。下一幀 state 變了就算

@@ -39,7 +39,9 @@ import zombie.network.GameServer;
  *   <li>sim：一條連線（relevantRange 7 → 半徑 66 格），4 隻動物：近的、遠而閒置、遠而在走、遠而閒置且懷孕壓力 90；只在 frame % 16 == 0 的幀數，
  *       wouldPct 50、pregStress 1；不在主執行緒、frame 17 不數。</li>
  * </ul>
- * off 一律原樣轉呼叫、不計數。用法：{@code MdcAnimalProbesTest observe|off}。
+ * sim 的例外（動物替身的 {@code getCurrentState} 拋）：不計入 animals（計數在兩個判斷之後）、anomalies 1、記一行例外類別與訊息。
+ * off 一律原樣轉呼叫、不計數。{@code logthrow}（配 observe）：真的 DebugLog 輸出導到會拋例外的串流，首次生效、心跳與 anomaly 記錄爆掉時
+ * a0 照原版呼叫（哨兵被清掉）、F1 回原版同一個陣列、例外不外拋。用法：{@code MdcAnimalProbesTest observe|off|logthrow}。
  */
 public final class MdcAnimalProbesTest {
 
@@ -48,7 +50,15 @@ public final class MdcAnimalProbesTest {
     public static void main(String[] args) throws Exception {
         zombie.core.random.RandStandard.INSTANCE.init();
         String mode = args[0];
+        if (mode.equals("logthrow")) {
+            logThrow();
+            finish(mode);
+            return;
+        }
         boolean off = mode.equals("off");
+        java.io.ByteArrayOutputStream logBuf = new java.io.ByteArrayOutputStream();
+        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
+        zombie.debug.DebugLog.getInstance().setStdOut(logBuf);
         check("模式與參數一致（" + MdcAnimalProbes.modeName() + "）", MdcAnimalProbes.MODE == (off ? MdcAnimalProbes.OFF : MdcAnimalProbes.OBSERVE));
         GameServer.server = true;
         GameServer.mainThread = Thread.currentThread();
@@ -152,12 +162,112 @@ public final class MdcAnimalProbesTest {
         } else {
             check("off：anomalies 0", MdcAnimalProbes.anomaliesForTest() == 0);
         }
+
+        // sim 的例外：still() 讀狀態時拋；不計入 animals、記 anomaly 與例外類別訊息
+        ProbeAnimal boom = animal(1070.0F, AnimalIdleState.instance(), false);
+        boom.boom = true;
+        long animals0 = MdcAnimalProbes.simAnimalsForTest();
+        frameCounter.setLong(MovingObjectUpdateScheduler.instance, 48L);
+        MdcAnimalProbes.sim(boom);
+        String log = logBuf.toString(java.nio.charset.StandardCharsets.UTF_8);
+        if (!off) {
+            check("sim 例外：不計入 animals（" + (MdcAnimalProbes.simAnimalsForTest() - animals0) + "）、anomalies 1、記一行例外類別與訊息",
+                    MdcAnimalProbes.simAnimalsForTest() == animals0 && MdcAnimalProbes.anomaliesForTest() == 1
+                            && log.contains("[MinidoracatJavaPatch][AnimalProbes] anomaly #1 sim java.lang.IllegalStateException: <test> state boom"));
+        } else {
+            check("off：sim 不呼叫判斷、不記 anomaly、整個 JVM 沒有本 tag 的記錄", MdcAnimalProbes.anomaliesForTest() == 0
+                    && !log.contains("[MinidoracatJavaPatch][AnimalProbes]"));
+        }
         finish(mode);
+    }
+
+    /** 日誌鏈拋例外：首次生效、心跳、anomaly 的記錄爆掉時，a0／F1 的原版呼叫照常完成。 */
+    static void logThrow() throws Exception {
+        check("logthrow 配 observe（" + MdcAnimalProbes.modeName() + "）", MdcAnimalProbes.MODE == MdcAnimalProbes.OBSERVE);
+        GameServer.server = true;
+        GameServer.mainThread = Thread.currentThread();
+        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
+        zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+        });
+        Throwable self = null;
+        try {
+            zombie.debug.DebugLog.log("[MdcAnimalProbesTest] self-check");
+        } catch (Throwable e) {
+            self = e;
+        }
+        check("自驗：DebugLog.log 真的拋例外（" + self + "）", self instanceof IllegalStateException);
+        Field done = AnimalZones.class.getDeclaredField("doneVirtualAnimals");
+        done.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Set<Object> doneSet = (Set<Object>) done.get(AnimalZones.getInstance());
+        AnimalManagerWorker worker = alloc(AnimalManagerWorker.class);
+        set(AnimalManagerWorker.class, worker, "loadedCells", new ArrayList<AnimalCell>());
+        set(AnimalManagerWorker.class, null, "instance", worker);
+
+        doneSet.add("sentinel");
+        Throwable t = null;
+        try {
+            MdcAnimalProbes.updateVirtualAnimals();
+        } catch (Throwable e) {
+            t = e;
+        }
+        check("首次生效記錄拋例外：a0 照原版呼叫（哨兵被清掉）、例外不外拋（" + t + "）、記下 anomalies",
+                t == null && doneSet.isEmpty() && MdcAnimalProbes.vaCallsForTest() == 1 && MdcAnimalProbes.anomaliesForTest() >= 1);
+
+        // anomaly 記錄也爆掉：sim 的例外
+        UdpEngine engine = alloc(UdpEngine.class);
+        set(UdpEngine.class, engine, "connections", new ArrayList<UdpConnection>());
+        GameServer.udpEngine = engine;
+        Field frameCounter = MovingObjectUpdateScheduler.class.getDeclaredField("frameCounter");
+        frameCounter.setAccessible(true);
+        frameCounter.setLong(MovingObjectUpdateScheduler.instance, 16L);
+        ProbeAnimal boom = animal(1070.0F, AnimalIdleState.instance(), false);
+        boom.boom = true;
+        long a0 = MdcAnimalProbes.anomaliesForTest();
+        t = null;
+        try {
+            MdcAnimalProbes.sim(boom);
+        } catch (Throwable e) {
+            t = e;
+        }
+        check("anomaly 記錄拋例外：sim 例外不外拋（" + t + "）、anomalies 增加", t == null && MdcAnimalProbes.anomaliesForTest() > a0);
+
+        MdcAnimalProbes.armBeatForTest();
+        doneSet.add("sentinel");
+        t = null;
+        try {
+            MdcAnimalProbes.updateVirtualAnimals();
+        } catch (Throwable e) {
+            t = e;
+        }
+        String line = MdcAnimalProbes.lastBeatLine;
+        check("心跳記錄拋例外：a0 照原版呼叫（哨兵被清掉）、例外不外拋（" + t + "）、心跳行有組出來（" + line + "）",
+                t == null && doneSet.isEmpty() && line != null && line.startsWith("beat "));
+
+        java.lang.reflect.Constructor<?> bucketCtor =
+                Class.forName("zombie.entity.EntityBucket$IsoObjectBucket").getDeclaredConstructor(int.class);
+        bucketCtor.setAccessible(true);
+        EntityBucket bucket = (EntityBucket) bucketCtor.newInstance(3);
+        boolean same = true;
+        for (int i = 0; i < 64; i++) {
+            same &= MdcAnimalProbes.fluidEntities(bucket) == bucket.getEntities();
+        }
+        check("F1 照回原版同一個陣列（日誌壞掉時也一樣）", same);
     }
 
     /** 狀態由測試指定（原版 getCurrentState 走 ECS）。其餘條件都是欄位讀取，Unsafe 配置後是 null／false。 */
     static final class ProbeAnimal extends IsoAnimal {
         State state;
+        boolean boom;
 
         ProbeAnimal() {
             super(null);
@@ -165,6 +275,9 @@ public final class MdcAnimalProbesTest {
 
         @Override
         public State getCurrentState() {
+            if (boom) {
+                throw new IllegalStateException("<test> state boom");
+            }
             return state;
         }
     }

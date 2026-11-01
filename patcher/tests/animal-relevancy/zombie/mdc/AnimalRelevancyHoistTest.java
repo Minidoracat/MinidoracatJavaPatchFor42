@@ -16,9 +16,10 @@ import zombie.vehicles.BaseVehicle;
  *   <li>等價：grid 0／12–20（奇偶、clamp 邊界、未同步）× 步行／載具／沒有玩家 × 有無 coop connectArea，每種 400 個隨機動物座標：
  *       {@code beginConnection} 過的連線 A 與一模一樣但沒 begin 過的連線 B（走每對重算），判定逐筆相同、rejected／passthrough／suppressed
  *       的增量相同。</li>
- *   <li>on 真的用快取（hoistHits 增加），observe 每對都比對（hoistAudits 增加、hits 0），off 都不動。</li>
+ *   <li>on 每輪都算快取並真的使用（hoistHits 增加）；observe 只在每 16 次 begin 抽到的那輪比對（60 輪抽 3 輪、audits 恰為抽到輪數 × 400、
+ *       hits 0；沒抽到的輪不比對，判定已含在上面逐筆相同）；off 都不動。</li>
  *   <li>換連線：begin(13) 後 begin(19)，19 的判定與重算相同；回頭判 13（不是快取的那條）照原版重算、不算命中。</li>
- *   <li>違反前提（begin 之後同一輪內玩家上車）：observe 第一對就記 hoistMismatch、判定照重算；on 在每 4096 對的抽查抓到並停用，
+ *   <li>違反前提（begin 之後同一輪內玩家上車）：observe（抽到的輪）第一對就記 hoistMismatch、判定照重算；on 在每 4096 對的抽查抓到並停用，
  *       之後每對重算；off 不比對。再 begin 一次（下一輪）快取更新。</li>
  * </ul>
  *
@@ -40,6 +41,8 @@ public final class AnimalRelevancyHoistTest {
         int scenarios = 0;
         long hitsBefore = AnimalRelevancyGate.hoistHitsForTest();
         long auditsBefore = AnimalRelevancyGate.hoistAuditsForTest();
+        long beginsBefore = AnimalRelevancyGate.hoistBeginsForTest();
+        long roundsBefore = AnimalRelevancyGate.hoistRoundsForTest();
         for (int grid : new int[]{0, 12, 13, 14, 15, 16, 17, 18, 19, 20}) {
             for (int who = 0; who < 3; who++) {          // 0 步行、1 載具、2 沒有玩家
                 for (int coop = 0; coop < 2; coop++) {
@@ -79,12 +82,19 @@ public final class AnimalRelevancyHoistTest {
                 + "rejected／passthrough／suppressed 增量相同", allSame);
         long hits = AnimalRelevancyGate.hoistHitsForTest() - hitsBefore;
         long audits = AnimalRelevancyGate.hoistAuditsForTest() - auditsBefore;
+        long begins = AnimalRelevancyGate.hoistBeginsForTest() - beginsBefore;
+        long rounds = AnimalRelevancyGate.hoistRoundsForTest() - roundsBefore;
+        long every = AnimalRelevancyGate.HOIST_OBSERVE_EVERY;
+        long sampled = (beginsBefore + scenarios) / every - beginsBefore / every;
         if (mode.equals("on")) {
-            check("on：快取真的被用（hits=" + hits + "，每 4096 對抽查 audits=" + audits + "）", hits > scenarios * 390L && audits > 0 && audits < 10);
+            check("on：每輪都算快取（rounds=" + rounds + "／begins=" + begins + "）且真的被用（hits=" + hits + "，每 4096 對抽查 audits=" + audits + "）",
+                    begins == scenarios && rounds == scenarios && hits > scenarios * 390L && audits > 0 && audits < 10);
         } else if (mode.equals("observe")) {
-            check("observe：每對都比對、不用快取（audits=" + audits + " hits=" + hits + "）", hits == 0 && audits == scenarios * 400L);
+            check("observe：每 " + every + " 次 begin 抽一輪（" + begins + " 次 begin 抽 " + rounds + " 輪，預期 " + sampled + "），抽到的輪每對比對"
+                            + "（audits=" + audits + "＝輪數×400）、沒抽到的輪不比對、不用快取（hits=" + hits + "）",
+                    begins == scenarios && sampled == 3 && rounds == sampled && audits == rounds * 400L && hits == 0);
         } else {
-            check("off：不快取不比對（audits=" + audits + " hits=" + hits + "）", hits == 0 && audits == 0);
+            check("off：不快取不比對（begins=" + begins + " audits=" + audits + " hits=" + hits + "）", begins == 0 && rounds == 0 && hits == 0 && audits == 0);
         }
         check("hoistMismatch 0、沒有停用、anomalies 0", AnimalRelevancyGate.hoistMismatchForTest() == 0
                 && !AnimalRelevancyGate.hoistDisabledForTest() && AnimalRelevancyGate.anomalyCount() == 0);
@@ -112,7 +122,7 @@ public final class AnimalRelevancyHoistTest {
         // 違反前提：begin 之後同一輪內玩家上車
         UdpConnection v = conn(15, 0, false);
         UdpConnection fresh = conn(15, 1, false);
-        AnimalRelevancyGate.beginConnection(v);
+        beginRound(v);
         v.players[0] = fresh.players[0];
         float ring15 = (15 / 2) * 8.0F + 3.0F;
         int pairs = 0;
@@ -138,12 +148,21 @@ public final class AnimalRelevancyHoistTest {
             check("off：不比對、判定照重算（mismatch=" + mismatch + "）", mismatch == 0 && firstMatchesFresh);
         }
         if (!mode.equals("on")) {
-            AnimalRelevancyGate.beginConnection(v);
+            beginRound(v);
             long m0 = AnimalRelevancyGate.hoistMismatchForTest();
             AnimalRelevancyGate.relevantTo(v, 1000.0F + ring15, 1000.0F, 70.0F);
             check(mode + "：下一輪 begin 後快取更新，不再 mismatch", AnimalRelevancyGate.hoistMismatchForTest() == m0);
         }
         finish(mode);
+    }
+
+    /** begin 一輪且確定這輪有算快取：observe 沒抽到就再 begin，直到抽到（最多 16 次）；on／off 只 begin 一次。 */
+    static void beginRound(UdpConnection c) {
+        long r = AnimalRelevancyGate.hoistRoundsForTest();
+        AnimalRelevancyGate.beginConnection(c);
+        while (AnimalRelevancyGate.HOIST == AnimalRelevancyGate.HOIST_OBSERVE && AnimalRelevancyGate.hoistRoundsForTest() == r) {
+            AnimalRelevancyGate.beginConnection(c);
+        }
     }
 
     static long[] counters() {

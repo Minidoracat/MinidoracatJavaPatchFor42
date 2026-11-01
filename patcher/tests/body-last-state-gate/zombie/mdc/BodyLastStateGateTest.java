@@ -16,7 +16,10 @@ import zombie.network.GameServer;
  * 經 helper 呼叫後比對 {@code bodyPartsLastState}：observe／off 與原版一樣抄進去；on 在伺服器上不抄、在客戶端（{@code GameServer.server}
  * false）照原版抄；玩家與動物分開計數，observe 每 64 次量一次。
  *
- * <p>用法：{@code BodyLastStateGateTest vanilla|off|observe|on}。vanilla 的 classpath 不含 dist：只驗原版會抄（helper 要跳過的就是這件事）。
+ * <p>{@code logthrow}（配 observe）：真的 DebugLog 輸出導到會拋例外的串流，第 1024 次（首次生效）與第 2048 次（心跳）呼叫的記錄爆掉時，
+ * 那一次照原版抄寫、例外不外拋、記下 anomalies。
+ *
+ * <p>用法：{@code BodyLastStateGateTest vanilla|off|observe|on|logthrow}。vanilla 的 classpath 不含 dist：只驗原版會抄（helper 要跳過的就是這件事）。
  */
 public final class BodyLastStateGateTest {
 
@@ -31,6 +34,11 @@ public final class BodyLastStateGateTest {
         if (mode.equals("vanilla")) {
             player.setBodyPartsLastState();
             check("原版：setBodyPartsLastState 把三個部位的包紮／咬傷／割傷／抓傷抄進 lastState", copied(player));
+            finish(mode);
+            return;
+        }
+        if (mode.equals("logthrow")) {
+            logThrow(player, animal);
             finish(mode);
             return;
         }
@@ -64,6 +72,61 @@ public final class BodyLastStateGateTest {
                     && line.contains(" animals=127") && line.contains(" skipped=" + (on ? 128 : 0)));
         }
         finish(mode);
+    }
+
+    /** 日誌鏈拋例外：首次生效（第 1024 次）與心跳（第 2048 次）的記錄爆掉時，那次仍照原版抄寫。 */
+    static void logThrow(BodyDamage player, BodyDamage animal) throws Exception {
+        check("logthrow 配 observe（" + BodyLastStateGate.modeName() + "）", BodyLastStateGate.MODE == BodyLastStateGate.OBSERVE);
+        explodeLog();
+        for (int i = 1; i < 1024; i++) {
+            BodyLastStateGate.setBodyPartsLastState(animal);
+        }
+        BodyDamage first = body(alloc(IsoPlayer.class));
+        Throwable t = call(first);
+        check("首次生效記錄拋例外（第 1024 次）：例外不外拋（" + t + "）、照原版抄寫、記下 anomalies（" + BodyLastStateGate.anomaliesForTest() + "）",
+                t == null && copied(first) && BodyLastStateGate.anomaliesForTest() >= 1);
+        BodyLastStateGate.armBeatForTest();
+        for (int i = 1025; i < 2048; i++) {
+            BodyLastStateGate.setBodyPartsLastState(player);
+        }
+        long a0 = BodyLastStateGate.anomaliesForTest();
+        BodyDamage beat = body(alloc(IsoPlayer.class));
+        t = call(beat);
+        String line = BodyLastStateGate.lastBeatLine;
+        check("心跳記錄拋例外（第 2048 次）：例外不外拋（" + t + "）、照原版抄寫、心跳行有組出來（" + line + "）、記下 anomalies",
+                t == null && copied(beat) && line != null && line.startsWith("beat ") && BodyLastStateGate.anomaliesForTest() > a0);
+    }
+
+    static Throwable call(BodyDamage bd) {
+        try {
+            BodyLastStateGate.setBodyPartsLastState(bd);
+            return null;
+        } catch (Throwable e) {
+            return e;
+        }
+    }
+
+    /** 真的 DebugLog 開到 All、輸出導到一寫就拋例外的串流；先自驗 logger 真的會拋。 */
+    static void explodeLog() {
+        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
+        zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+        });
+        Throwable self = null;
+        try {
+            zombie.debug.DebugLog.log("[BodyLastStateGateTest] self-check");
+        } catch (Throwable e) {
+            self = e;
+        }
+        check("自驗：DebugLog.log 真的拋例外（" + self + "）", self instanceof IllegalStateException);
     }
 
     /** 3 個部位：0 包紮、1 咬傷＋割傷、2 抓傷；lastState 全 false。 */

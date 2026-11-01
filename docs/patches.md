@@ -4903,7 +4903,7 @@ console（首次呼叫一行生效狀態；每次改走 non pvp 一行，玩家�
 **模式與 kill switch**：`-Dmdc.idleVehicleThrottle=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。
 - `observe`：一律放行；對「會跳」的車抽樣記指紋（每台車每 16 個輪次抽一個輪次，一個輪次 N 幀，記錄次數是會跳次數的 1/16），下一幀再比：`pos`（x、y、z、`jniTransform.origin`、目前格子與 chunk 的身分）、`state`（閒置條件用到的欄位、裝置是否開著、是否還在 `cell.vehicles`）、`parts`（每 64 次抽一次電瓶電量）。指紋以 `vehicleId` 為索引並存 `System.identityHashCode`，id 被別台車重用時不比。state 變了算 `stateDiff`（下一幀判斷就不成立，最多延後 1 幀；`device` 位元除外：裝置以快取每 N 幀重掃，最多 N−1 幀，見「不處理」）；state 沒變而 pos 變了才算 `posDiff`（on 會延後到下一個輪次）。
 - `on`：跳過；每 4096 次跳過抽一次照原版放行、下一幀比指紋，`posDiff` 就本次啟動永久回原版並記一行。
-- `off`：直接呼叫原版 `add`，不計數、不記 log。
+- `off`：直接呼叫原版 `add`，不計數、不記 log。動物仍先經 W95 sim 探針（[2dd](#2dd)，只計數），要完全原版另加 `-Dmdc.animalProbes=off`。
 
 console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
 
@@ -4994,7 +4994,7 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 
 **做法與手術**（併在 W40／W41／W45／W73 既有的 `IsoCell` ClassPatch，新 helper `zombie/mdc/AnimalLoopSoundGate`）：`ProcessObjects(Ljava/util/Iterator;)V` offset 10 唯一的 `invokeinterface java/util/Set.iterator()`（前面 `aload_0`→`getfield objectList`，後面 `astore_2`）同形改道 `AnimalLoopSoundGate.iterator(Set)Iterator`，`expectedHits` 1。on 時回 `Collections.emptyIterator()`，迴圈直接結束，之後照原版跑 `updateZombieVocals`；不是方法中段 return，原版迴圈與 frames 都不動。
 
-**模式與 kill switch**：`-Dmdc.animalLoopSoundGate=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 回原版 iterator，每 64 幀包一層量整段迴圈（第一次 `hasNext()` 回 false 時記時間）；observe 與 on 都每 256 幀稽核一次：`SoundManager.instance` 的類別是原版 `SoundManager`、每隻不在鉤子上的動物 emitter 是 `DummyCharacterSoundEmitter`、有 runloop／walkloop 聲音的 slot `getEventInstance() == 0`；不成立記 anomalies（前 5 筆印細節），on 就本次啟動永久回原版。helper 例外同樣回原版並停用。off 完全原版、不計數、不記 log。
+**模式與 kill switch**：`-Dmdc.animalLoopSoundGate=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 回原版 iterator，每 64 幀包一層量整段迴圈（第一次 `hasNext()` 回 false 時記時間）；observe 與 on 都每 256 幀稽核一次：`SoundManager.instance` 的類別是原版 `SoundManager`、每隻不在鉤子上的動物 emitter 是 `DummyCharacterSoundEmitter`、有 runloop／walkloop 聲音的 slot `getEventInstance() == 0`；不成立記 anomalies（前 5 筆印細節），on 就本次啟動永久回原版。helper 例外同樣回原版並停用（先設停用再記錄，記錄失敗也回原版 iterator）。診斷（心跳、稽核、記錄）都在 try 內，原版 `set.iterator()` 在 try 外；日誌鏈（格式化、輸出）拋例外只記 anomalies、不外拋。off 完全原版、不計數、不記 log。
 
 console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
 
@@ -5003,11 +5003,11 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 [MinidoracatJavaPatch][AnimalLoopSoundGate] DISABLED（本次啟動永久回原版）reason=<emitter=…|runloop eventInstance!=0 …|SoundManager.instance=…|helper exception …> frames=<n> audits=<n>
 ```
 
-`objects` 是最近一幀的物件數，`animals` 是最近一次稽核的不在鉤子上動物數，`loopUsAvg × FPS` 就是 on 之後每秒省下的時間；`anomalies` 必須是 0。
+`objects` 是最近一幀的物件數，`animals` 是最近一次稽核的不在鉤子上動物數，`loopUsAvg × FPS` 就是 on 之後每秒省下的時間；`anomalies` 必須是 0（日誌鏈失敗也算在內）。
 
 **守門與驗證**：
-- SmokeCheck：原版前提——`ProcessObjects` 恰 1 個 `Set.iterator` 且語境如上、迴圈只呼叫 `isOnHook`／`updateVocalProperties`／`updateLoopingSounds`；`IsoAnimal` 的子類別不覆寫這六個方法（普查負對照：多一個子類覆寫 `updateLoopingSounds` 就紅）；`eventInstance` 全 jar 恰 3 個 putfield（`start` 1、`stop` 2）；`IsoGameCharacter.emitter` 是 final、全 jar 恰 2 個 putfield 都在 `<init>(IsoCell,FFF)`；`SoundManager.instance` 全 jar 恰 2 個寫入（`GameServer.main` 與客戶端 `GameWindow`），`GameServer.main` 那個是 `new SoundManager()`；14 個原版方法本體 SHA 鎖（`LOOP_SOUND_LOCKED`，各配負對照）：`ProcessObjects`、`isOnHook`、`updateVocalProperties`、三個 looping 方法、`getAnimalSoundState`、`AnimalSoundState.isPlaying`／`start`／`stop`、`SoundManager.isListenerInRange`、`DummyCharacterSoundEmitter.playVocals`、`IsoGameCharacter.<init>(IsoCell,FFF)`、`getEmitter`。手術後 `ProcessObjects` 只差改道（W40 的「IsoCell 其餘方法不變」把它列為例外）；helper 先看 `GameServer.server`、回空 iterator 只有一處而且在稽核與停用判斷之後。
-- `AnimalLoopSoundGateTest`（`build.ps1` [9zzf/10]，observe、on、off、jar 原版四個 JVM）：真 `IsoCell.ProcessObjects`，objectList 放 5 隻動物（1 隻在鉤子上，覆寫兩個聲音方法只計數）與 1 台車、跑 512 幀：observe／off 與原版一樣每幀對 4 隻各一次，on 0 次；zombieList 放一個不是殭屍的物件時四個組態都在 `updateZombieVocals` 拋 `ClassCastException`（迴圈之後照原版跑）；observe 量到 8 次迴圈時間；第 256、512 幀稽核、anomalies 0，稽核讀 runloop 狀態但不改它。三種違反前提（emitter 換成 `CharacterSoundEmitter`、runloop `eventInstance` 非 0、`SoundManager.instance` 換成 `DummySoundManager`）：observe 每次都在下一次稽核記 anomalies、不停用；on 第一次就停用並回到原版迴圈；心跳照印；off 不稽核。jar 原版負對照：每幀都跑整段迴圈。
+- SmokeCheck：原版前提——`ProcessObjects` 恰 1 個 `Set.iterator` 且語境如上、迴圈只呼叫 `isOnHook`／`updateVocalProperties`／`updateLoopingSounds`；`IsoAnimal` 的子類別不覆寫這六個方法（普查負對照：多一個子類覆寫 `updateLoopingSounds` 就紅）；`eventInstance` 全 jar 恰 3 個 putfield（`start` 1、`stop` 2）；`IsoGameCharacter.emitter` 是 final、全 jar 恰 2 個 putfield 都在 `<init>(IsoCell,FFF)`；`SoundManager.instance` 全 jar 恰 2 個寫入（`GameServer.main` 與客戶端 `GameWindow`），`GameServer.main` 那個是 `new SoundManager()`；14 個原版方法本體 SHA 鎖（`LOOP_SOUND_LOCKED`，各配負對照）：`ProcessObjects`、`isOnHook`、`updateVocalProperties`、三個 looping 方法、`getAnimalSoundState`、`AnimalSoundState.isPlaying`／`start`／`stop`、`SoundManager.isListenerInRange`、`DummyCharacterSoundEmitter.playVocals`、`IsoGameCharacter.<init>(IsoCell,FFF)`、`getEmitter`。手術後 `ProcessObjects` 只差改道（W40 的「IsoCell 其餘方法不變」把它列為例外）；helper 先看 `GameServer.server`、回空 iterator 只有一處而且在稽核與停用判斷之後，原版 `set.iterator()` 2 處（off、其餘）都不在 try 內；W92–W95 四個 helper 的每個 `DebugLog.log` 都在 try 內。
+- `AnimalLoopSoundGateTest`（`build.ps1` [9zzf/10]，observe、on、off、兩個 logthrow、jar 原版六個 JVM）：真 `IsoCell.ProcessObjects`，objectList 放 5 隻動物（1 隻在鉤子上，覆寫兩個聲音方法只計數）與 1 台車、跑 512 幀：observe／off 與原版一樣每幀對 4 隻各一次，on 0 次；zombieList 放一個不是殭屍的物件時四個組態都在 `updateZombieVocals` 拋 `ClassCastException`（迴圈之後照原版跑）；observe 量到 8 次迴圈時間；第 256、512 幀稽核、anomalies 0，稽核讀 runloop 狀態但不改它。三種違反前提（emitter 換成 `CharacterSoundEmitter`、runloop `eventInstance` 非 0、`SoundManager.instance` 換成 `DummySoundManager`）：observe 每次都在下一次稽核記 anomalies、不停用；on 第一次就停用並回到原版迴圈；心跳照印；off 不稽核。另有兩個 `logthrow` JVM（on、observe）：真的 DebugLog 開到 All、輸出導到一寫就拋例外的串流（先自驗 logger 真的會拋），首次生效、心跳與停用三種記錄都爆掉時 `ProcessObjects` 照常跑完：on 在前提不成立的第 256 幀停用、observe 在稽核時 helper 自己拋例外（objectList 的 iterator 拋一次）停用，兩者那一幀就回原版 iterator、4 隻都照原版呼叫。jar 原版負對照：每幀都跑整段迴圈。
 
 **部署**：manifest 新增 `zombie/mdc/AnimalLoopSoundGate.class`、`AnimalLoopSoundGate$Timed.class`，`IsoCell.class` 換新。
 
@@ -5022,20 +5022,20 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 
 **做法**（不加新手術，`expectedHits` 維持 6）：W14 的 `AnimalRequestGate.getPacket`（offset 12／31，每次 `sendUpdateToClient` 在動物迴圈之前必經，遞迴的 pending 也會再經過）先呼叫 `AnimalRelevancyGate.beginConnection(connection)`：算好這條連線的對齊半徑與載具判定存進 static 欄位。`relevantTo` 的連線就是快取那條時直接用，否則照原版重算。W13 的計數器全部改成普通 long（判定次數、心跳節拍不變）。
 
-**模式與 kill switch**：`-Dmdc.animalRelevancyHoist=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟；W13 自己的 `-Dmdc.animalRelevancy` 不變，W13 off 時這刀也不動。observe 每對照原版重算，並與快取比對兩個常數，不一致記 `hoistMismatch`（前 5 筆印細節）；on 用快取，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；off 每對重算、不快取不比對。
+**模式與 kill switch**：`-Dmdc.animalRelevancyHoist=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟；W13 自己的 `-Dmdc.animalRelevancy` 不變，W13 off 時這刀也不動。observe 每對照原版重算；每 16 次 `beginConnection` 抽一輪（比照 W89 observe 的 1/16）算快取，那條連線這一輪的每一對都與快取比對兩個常數，不一致記 `hoistMismatch`（前 5 筆印細節），沒抽到的輪不算快取、不比對，所以 observe 的額外成本約是每對多算一次的 1/16；on 每輪都算快取並使用，每 4096 對抽一對重算比對，不一致就本次啟動永久回每對重算；off 每對重算、不快取不比對。快取最多釘住一條 `UdpConnection`（下一次 begin 就換掉；伺服器清空時留到下一位玩家進來）。日誌鏈拋例外只記 anomalies、不外拋。
 
-console（併入 W13 的 `[MinidoracatJavaPatch][AnimalRelevancy]` 心跳，同一行多 6 欄；首次 `beginConnection` 印一行生效、停用時一行）：
+console（併入 W13 的 `[MinidoracatJavaPatch][AnimalRelevancy]` 心跳，同一行多 8 欄；首次 `beginConnection` 印一行生效、停用時一行）：
 
 ```text
-[MinidoracatJavaPatch][AnimalRelevancy] mode=<n> calls=<n> rejected=<n> suppressed=<n> passthrough=<n> anomalies=<n> hoist=<observe|on|off> hoistBegins=<n> hoistHits=<n> hoistAudits=<n> hoistMismatch=<n> hoistDisabled=<true|false>
+[MinidoracatJavaPatch][AnimalRelevancy] mode=<n> calls=<n> rejected=<n> suppressed=<n> passthrough=<n> anomalies=<n> hoist=<observe|on|off> hoistBegins=<n> hoistRounds=<n> hoistObserveEvery=16 hoistHits=<n> hoistAudits=<n> hoistMismatch=<n> hoistDisabled=<true|false>
 [MinidoracatJavaPatch][AnimalRelevancy] hoist DISABLED（本次啟動永久回原版）reason=cached connection constants changed within sendUpdateToClient hits=<n> audits=<n>
 ```
 
-`hoistBegins` 是 `beginConnection` 次數（每條連線每幀至少 1），`hoistHits` 是用快取的對數，`hoistAudits` 是重算比對的對數；`hoistMismatch` 必須是 0。W13 的計數是累計值（原本就是），不隨心跳歸零。
+`hoistBegins` 是 `beginConnection` 次數（每條連線每幀至少 1），`hoistRounds` 是有算快取的輪數（on 等於 `hoistBegins`，observe 約是 1/`hoistObserveEvery`），`hoistHits` 是用快取的對數，`hoistAudits` 是重算比對的對數；`hoistMismatch` 必須是 0。W13 的計數是累計值（原本就是），不隨心跳歸零。
 
 **守門與驗證**：
 - SmokeCheck：原版前提——`sendUpdateToClient` 兩個 `getPacket` 都在 `RelevantTo` 之前、對連線只呼叫上述 4 個方法；6 個原版方法本體 SHA 鎖（`RELEVANCY_HOIST_LOCKED`，各配負對照）：`sendUpdateToClient`、`UdpConnection.RelevantTo`／`getChunkGridWidth`／`getRelevantRange`／`getPlayerAt`、`IsoGameCharacter.getVehicle`。helper 契約：`getPacket` 在原版 `getPacket` 之前恰呼叫 1 次 `beginConnection`；`beginConnection` 與比對都只呼叫既有的 `alignedRadius`／`anyPlayerInVehicle`（同一份算法）；W13 原有的 helper 契約照舊。
-- `AnimalRelevancyHoistTest`（`build.ps1` [9zzg/10]，observe、on、off 三個 JVM；W13 是預設 enforce）：真 `UdpConnection.RelevantTo`，60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × 有無 coop connectArea）各 400 個隨機動物座標，`beginConnection` 過的連線與一模一樣但沒 begin 的連線（每對重算）判定逐筆相同、三個計數器增量相同；on 真的用快取（hits 每對都有、抽查 5 次），observe 每對比對、不用快取，off 都不動；換連線：begin(13)→begin(19) 後 19 的判定與重算相同、回頭判 13 照原版重算不算命中；違反前提（begin 之後同一輪內玩家上車）：observe 第一對就記 mismatch、判定照重算（載具內環帶照送），on 先用到舊快取（環帶擋下）、在抽查抓到並停用、之後每對重算且再 begin 也不快取，下一輪 begin 後快取更新不再 mismatch。原本的 `AnimalRelevancyGateTest` 三個模式照舊（它不呼叫 `beginConnection`，走每對重算）。
+- `AnimalRelevancyHoistTest`（`build.ps1` [9zzg/10]，observe、on、off 三個 JVM；W13 是預設 enforce）：真 `UdpConnection.RelevantTo`，60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × 有無 coop connectArea）各 400 個隨機動物座標，`beginConnection` 過的連線與一模一樣但沒 begin 的連線（每對重算）判定逐筆相同、三個計數器增量相同；on 每輪都算快取並真的使用（60 輪都算、hits 每對都有、抽查 5 次），observe 每 16 次 begin 抽一輪（60 次 begin 抽 3 輪，audits 恰為 3 × 400，沒抽到的輪不比對、判定已含在逐筆相同裡）、不用快取，off 都不動；換連線：begin(13)→begin(19) 後 19 的判定與重算相同、回頭判 13 照原版重算不算命中；違反前提（begin 之後同一輪內玩家上車）：observe 在抽到的輪第一對就記 mismatch、判定照重算（載具內環帶照送），on 先用到舊快取（環帶擋下）、在抽查抓到並停用、之後每對重算且再 begin 也不快取，下一輪 begin 後快取更新不再 mismatch。原本的 `AnimalRelevancyGateTest` 三個模式照舊（它不呼叫 `beginConnection`，走每對重算）。
 
 **部署**：`AnimalRelevancyGate.class`、`AnimalRequestGate.class` 換新，manifest 不增減。
 
@@ -5050,19 +5050,19 @@ console（併入 W13 的 `[MinidoracatJavaPatch][AnimalRelevancy]` 心跳，同�
 
 **做法與手術**（併在 W83／W91 既有的 `IsoPlayer` ClassPatch，新 helper `zombie/mdc/BodyLastStateGate`）：`postupdateInternal()V` offset 121 唯一的 `invokevirtual BodyDamage.setBodyPartsLastState()V`（前面 `aload_0`→`getBodyDamage`，後面 `return`）同形改道 `BodyLastStateGate.setBodyPartsLastState(BodyDamage)V`，`expectedHits` 1。伺服器 on 時直接回傳，其他情況照原版。W83 的「IsoPlayer 其餘方法不變」把 `postupdateInternal` 加進例外，由本刀的語境鎖與「手術後只差這個呼叫」鎖住。
 
-**模式與 kill switch**：`-Dmdc.bodyLastStateSkip=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 照原版呼叫，依 `getParentChar()` 分玩家／動物計數，每 64 次量一次 µs；on 在伺服器跳過（客戶端照原版）；off 完全原版、不計數。沒有稽核與停用（跳過的東西在伺服器上沒有任何讀者，SmokeCheck 守前提）。
+**模式與 kill switch**：`-Dmdc.bodyLastStateSkip=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 照原版呼叫，依 `getParentChar()` 分玩家／動物計數，每 64 次量一次 µs；on 在伺服器跳過（客戶端照原版）；off 完全原版、不計數。沒有稽核與停用（跳過的東西在伺服器上沒有任何讀者，SmokeCheck 守前提）。心跳與記錄（格式化、輸出）包在不外拋的邊界內，例外只記 anomalies；原版呼叫不在 try 內。
 
 console（首次生效一行、每 5 分鐘一行 beat）：
 
 ```text
-[MinidoracatJavaPatch][BodyLastStateGate] beat mode=<observe|on> players=<n> animals=<n> skipped=<n> usAvg=<µs> samples=<n>
+[MinidoracatJavaPatch][BodyLastStateGate] beat mode=<observe|on> players=<n> animals=<n> skipped=<n> usAvg=<µs> samples=<n> anomalies=<n>
 ```
 
-`players`／`animals` 是這 5 分鐘兩類的 postupdate 次數（也就是 postupdate 的玩家／動物拆分），`usAvg × (players+animals) / 300` 是 on 之後每秒省下的時間。
+`players`／`animals` 是這 5 分鐘兩類的 postupdate 次數（也就是 postupdate 的玩家／動物拆分），`usAvg × (players+animals) / 300` 是 on 之後每秒省下的時間；`anomalies` 是心跳與記錄自己的失敗數，必須是 0。
 
 **守門與驗證**：
 - SmokeCheck：原版前提——`postupdateInternal` 恰 1 個 `setBodyPartsLastState` 且語境如上；`getBodyPartsLastState` 全 jar 只有 `Bandages.update` 呼叫、`setBodyPartsLastState` 的呼叫者恰為上述 4 個、`bodyPartsLastState` 欄位只在建構子與兩個存取方法；`Bandages.update` 開頭是伺服器早退；4 個原版方法本體 SHA 鎖（`BODY_LAST_STATE_LOCKED`，各配負對照）：`postupdateInternal`、`setBodyPartsLastState`、`getBodyPartsLastState`、`Bandages.update`。手術後只差改道；helper 先看 `GameServer.server`，三個原版呼叫（off／客戶端、observe、抽樣）都不在 try 內。
-- `BodyLastStateGateTest`（`build.ps1` [9zzh/10]，observe、on、off、jar 原版四個 JVM）：真 `BodyDamage.setBodyPartsLastState`（3 個部位：包紮、咬傷＋割傷、抓傷）經 helper 呼叫後：observe／off 與原版一樣抄進 lastState，on 在伺服器上不抄；客戶端（`GameServer.server=false`）一律照原版抄；玩家 1 次、動物 127 次分開計數，observe 抽樣 2 次；心跳。jar 原版負對照：原版會抄。
+- `BodyLastStateGateTest`（`build.ps1` [9zzh/10]，observe、on、off、logthrow、jar 原版五個 JVM）：真 `BodyDamage.setBodyPartsLastState`（3 個部位：包紮、咬傷＋割傷、抓傷）經 helper 呼叫後：observe／off 與原版一樣抄進 lastState，on 在伺服器上不抄；客戶端（`GameServer.server=false`）一律照原版抄；玩家 1 次、動物 127 次分開計數，observe 抽樣 2 次；心跳。`logthrow` JVM（observe）：DebugLog 輸出導到會拋例外的串流，第 1024 次（首次生效）與第 2048 次（心跳）呼叫的記錄爆掉時，那一次照原版抄寫、例外不外拋、記下 anomalies。jar 原版負對照：原版會抄。
 
 **部署**：manifest 新增 `zombie/mdc/BodyLastStateGate.class`，`IsoPlayer.class` 換新。
 
@@ -5078,7 +5078,7 @@ console（首次生效一行、每 5 分鐘一行 beat）：
 - **F1 液體容器**：新 ClassPatch `FluidContainerUpdateSystem`，`updateSimulation()V` offset 19 唯一的 `invokevirtual EntityBucket.getEntities()`（前面 `aload_0`→`getfield fluidContainerEntities`，後面 `astore_2`）同形改道 `MdcAnimalProbes.fluidEntities(EntityBucket)ImmutableArray`，`expectedHits` 1。回傳原版同一個陣列，記 bucket 大小；每 64 次掃一次陣列數 rainCatcher > 0 的實體，並量這次唯讀掃描的 µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，所以這個比例就是索引能省的部分）。
 - **sim 動物降頻候選**：不加手術，W89 的 `IdleVehicleThrottle.add`（[2cx](#2cx)）入口對每隻 `IsoAnimal` 呼叫 `MdcAnimalProbes.sim`，之後照 W89 原路徑放進 bucket（不改 W89 對車的任何行為）。只在主執行緒、每 16 幀抽一幀：「沒人收得到」＝每條連線 `!RelevantTo(x, y, (getRelevantRange()−2)×10 + 16)`（原版送出半徑再加 16 格）；「沒在移動」＝狀態是 `AnimalIdleState`、沒有路徑、沒在做行為、沒被驚動、沒有回應中的聲音、不在車上、沒被抱或牽、沒被吸引、沒在打架、沒著火、活著、不在鉤子上、不是剛從 meta 轉回。記兩者同時成立的比例 `wouldPct`，以及其中懷孕且壓力 > 80 的平均隻數 `pregStress`。
 
-**模式與 kill switch**：`-Dmdc.animalProbes=2|observe`（程式預設；`on` 與未知值也當 observe）、`0|off`，需重啟。只在伺服器生效。原版呼叫都不在 try 內（例外照原版上拋）；探針自己的例外只記 anomalies。off 原樣轉呼叫、不計數、不記 log。
+**模式與 kill switch**：`-Dmdc.animalProbes=2|observe`（程式預設；`on` 與未知值也當 observe）、`0|off`，需重啟。只在伺服器生效。原版呼叫都不在 try 內（例外照原版上拋）；探針自己的例外（含首次生效、心跳、格式化與日誌鏈）只記 anomalies，前 5 次各記一行例外類別與訊息（`anomaly #<n> <F1|sim|scan|beat> <類別>: <訊息>`），不外拋。sim 在兩個判斷都完成後才計入 `animals`，例外不會讓 `wouldPct` 偏低。off 原樣轉呼叫、不計數、不記 log。
 
 console（首次生效一行、每 5 分鐘一行 beat，由每幀必經的 a0 驅動）：
 
@@ -5089,8 +5089,8 @@ console（首次生效一行、每 5 分鐘一行 beat，由每幀必經的 a0 �
 **判讀**：`vaUsAvg × FPS` 是虛擬動物每秒耗時，`va`／`vaIdle`／`cells` 隨 `uptimeS` 上升就是「AnimalCell 整場不卸載」在累積；`(bucketAvg − rcAvg) / bucketAvg` 是 F1 索引能濾掉的比例、`fluidScanUsAvg × fluidCalls / 300` 約是可省的上限；`wouldPct` 就是降頻比例 f（研究估中間約 38 ms/s，範圍 7–116），`pregStress` 給服主判斷流產機率變 1/4 的影響量級。`animals` 是抽樣幀的平均動物數。
 
 **守門與驗證**：
-- SmokeCheck：原版前提——`updateThread` 恰 1 個 `updateVirtualAnimals` 且語境如上、全 jar 只有這裡呼叫；`updateSimulation` 恰 1 個 `getEntities` 且語境如上；6 個原版方法本體 SHA 鎖（`ANIMAL_PROBES_LOCKED`，各配負對照）：`AnimalZones.updateVirtualAnimals`、`VirtualAnimal.update`（idle 的定義）、`FluidContainerUpdateSystem.updateSimulation`／`updateEntity`（只對 rainCatcher > 0 做事）、`FluidContainer.getRainCatcher`／`isQualifiesForMetaStorage`。手術後兩處只差改道；W56 的「IsoWorld 非目標方法不變」把 `updateThread` 列為例外，`FluidContainerUpdateSystem` 其餘方法不變。helper 契約：a0 原版呼叫 2 處、F1 原版呼叫 1 處都不在 try 內；`sim`／`unseen`／`still` 沒有 putfield、不呼叫 setter；W89 `add` 在第一個 `bucket.add` 之前恰呼叫 1 次 `sim`。W89 原有的守門與 `IdleVehicleThrottleTest` 全部照舊。
-- `MdcAnimalProbesTest`（`build.ps1` [9zzi/10]，observe、off 兩個 JVM）：a0 照原版呼叫（原版開頭會清掉 `doneVirtualAnimals`，放進去的哨兵被清掉）；loadedCells 掃描（2 個 cell 其中一個沒有 chunks、3 個有內容的 chunk、3 隻虛擬動物 2 隻 idle、1 個足跡）；F1 64 次都回原版同一個陣列、第 64 次抽樣數到 5 個實體中的 2 個 rainCatcher > 0（0、負數、沒有液體容器的不算）；sim 一條連線、4 隻動物（近的、遠而閒置、遠而在走、遠而閒置且懷孕壓力 90），只數 frame % 16 == 0 的幀、別的執行緒不數，`wouldPct` 50、`pregStress` 1，動物狀態與座標不變；心跳欄位；off 不計數、原版照樣被呼叫。
+- SmokeCheck：原版前提——`updateThread` 恰 1 個 `updateVirtualAnimals` 且語境如上、全 jar 只有這裡呼叫；`updateSimulation` 恰 1 個 `getEntities` 且語境如上；6 個原版方法本體 SHA 鎖（`ANIMAL_PROBES_LOCKED`，各配負對照）：`AnimalZones.updateVirtualAnimals`、`VirtualAnimal.update`（idle 的定義）、`FluidContainerUpdateSystem.updateSimulation`／`updateEntity`（只對 rainCatcher > 0 做事）、`FluidContainer.getRainCatcher`／`isQualifiesForMetaStorage`。手術後兩處只差改道；W56 的「IsoWorld 非目標方法不變」把 `updateThread` 列為例外，`FluidContainerUpdateSystem` 其餘方法不變。helper 契約：a0 原版呼叫 2 處、F1 原版呼叫 1 處都不在 try 內；`sim`／`unseen`／`still` 沒有 putfield、不呼叫 setter；W89 `add` 在第一個 `bucket.add` 之前恰呼叫 1 次 `sim`（所以 W89 `off` 時動物仍先經這個只計數的探針，要完全原版另加 `-Dmdc.animalProbes=off`）。W89 原有的守門與 `IdleVehicleThrottleTest` 全部照舊。
+- `MdcAnimalProbesTest`（`build.ps1` [9zzi/10]，observe、off、logthrow 三個 JVM）：a0 照原版呼叫（原版開頭會清掉 `doneVirtualAnimals`，放進去的哨兵被清掉）；loadedCells 掃描（2 個 cell 其中一個沒有 chunks、3 個有內容的 chunk、3 隻虛擬動物 2 隻 idle、1 個足跡）；F1 64 次都回原版同一個陣列、第 64 次抽樣數到 5 個實體中的 2 個 rainCatcher > 0（0、負數、沒有液體容器的不算）；sim 一條連線、4 隻動物（近的、遠而閒置、遠而在走、遠而閒置且懷孕壓力 90），只數 frame % 16 == 0 的幀、別的執行緒不數，`wouldPct` 50、`pregStress` 1，動物狀態與座標不變；心跳欄位；sim 的例外（動物替身的 `getCurrentState` 拋）不計入 animals、anomalies 1、記一行例外類別與訊息；off 不計數、原版照樣被呼叫、沒有本 tag 的記錄。`logthrow` JVM（observe）：DebugLog 輸出導到會拋例外的串流，首次生效、心跳與 anomaly 記錄爆掉時 a0 照原版呼叫（哨兵被清掉）、F1 回原版同一個陣列、例外不外拋。
 
 **部署**：manifest 新增 `zombie/characters/animals/MdcAnimalProbes.class` 與 `FluidContainerUpdateSystem.class`，`IsoWorld.class`、`IdleVehicleThrottle.class` 換新。W92–W95 合計 180 → 185 個 class（83 個 patched class、262 個命中點、102 個 helper）。
 

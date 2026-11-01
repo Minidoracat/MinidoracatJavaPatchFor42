@@ -859,7 +859,7 @@ Assert-Ok "NearVehicleSneakGateTest（off，kill switch）"
 java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.NearVehicleSneakGateTest vanilla
 Assert-Ok "NearVehicleSneakGateTest（vanilla，jar 原版負對照）"
 
-Write-Host "[9zzf/10] 動物循環音迴圈在伺服器整段跳過（W92）：真 IsoCell.ProcessObjects（dist 手術後與 jar 原版），5 隻動物（1 隻在鉤子上）＋1 台車 × 512 幀：observe／off 每幀對 4 隻各一次、on 0 次並照原版跑 updateZombieVocals，observe 每 64 幀量一次迴圈；第 256、512 幀稽核 anomalies 0；emitter 不是 Dummy、runloop eventInstance 非 0、SoundManager.instance 不是 SoundManager 三種違反前提：observe 記 anomalies、on 第一次就停用並回到原版迴圈，心跳照印；原版負對照（jar：每幀都跑整段迴圈）..."
+Write-Host "[9zzf/10] 動物循環音迴圈在伺服器整段跳過（W92）：真 IsoCell.ProcessObjects（dist 手術後與 jar 原版），5 隻動物（1 隻在鉤子上）＋1 台車 × 512 幀：observe／off 每幀對 4 隻各一次、on 0 次並照原版跑 updateZombieVocals，observe 每 64 幀量一次迴圈；第 256、512 幀稽核 anomalies 0；emitter 不是 Dummy、runloop eventInstance 非 0、SoundManager.instance 不是 SoundManager 三種違反前提：observe 記 anomalies、on 第一次就停用並回到原版迴圈，心跳照印；日誌鏈拋例外（首次生效、心跳、停用）時 ProcessObjects 照常跑完、停用那幀就回原版 iterator（on 前提不成立、observe helper 自己拋例外）；原版負對照（jar：每幀都跑整段迴圈）..."
 $alsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest observe
 Assert-Ok "AnimalLoopSoundGateTest（observe，出貨組態）"
@@ -867,10 +867,14 @@ java -Xverify:all "-Dmdc.animalLoopSoundGate=on" -cp $alsCp zombie.mdc.AnimalLoo
 Assert-Ok "AnimalLoopSoundGateTest（on，跳過迴圈）"
 java -Xverify:all "-Dmdc.animalLoopSoundGate=off" -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest off
 Assert-Ok "AnimalLoopSoundGateTest（off，kill switch）"
+java -Xverify:all "-Dmdc.animalLoopSoundGate=on" -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest logthrow
+Assert-Ok "AnimalLoopSoundGateTest（logthrow on，日誌拋例外＋前提不成立停用）"
+java -Xverify:all -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest logthrow
+Assert-Ok "AnimalLoopSoundGateTest（logthrow observe，日誌拋例外＋helper 例外停用）"
 java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.AnimalLoopSoundGateTest vanilla
 Assert-Ok "AnimalLoopSoundGateTest（vanilla，jar 原版負對照）"
 
-Write-Host "[9zzg/10] W13 每條連線的常數提到迴圈外（W93）：60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × coop）各 400 個隨機動物，beginConnection 過的連線與每對重算的判定逐筆相同、rejected／passthrough／suppressed 增量相同；on 真的用快取、observe 每對比對、off 不動；換連線時快取跟著 begin；begin 後同一輪內上車：observe 第一對記 mismatch、on 抽查抓到並停用、下一輪 begin 後快取更新..."
+Write-Host "[9zzg/10] W13 每條連線的常數提到迴圈外（W93）：60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × coop）各 400 個隨機動物，beginConnection 過的連線與每對重算的判定逐筆相同、rejected／passthrough／suppressed 增量相同；on 每輪都用快取、observe 每 16 次 begin 抽一輪比對（60 輪抽 3 輪、沒抽到的輪不比對）、off 不動；換連線時快取跟著 begin；begin 後同一輪內上車：observe 抽到的輪第一對記 mismatch、on 抽查抓到並停用、下一輪 begin 後快取更新..."
 $arhCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $arhCp zombie.mdc.AnimalRelevancyHoistTest observe
 Assert-Ok "AnimalRelevancyHoistTest（observe，出貨組態）"
@@ -879,7 +883,7 @@ Assert-Ok "AnimalRelevancyHoistTest（on，用快取）"
 java -Xverify:all "-Dmdc.animalRelevancyHoist=off" -cp $arhCp zombie.mdc.AnimalRelevancyHoistTest off
 Assert-Ok "AnimalRelevancyHoistTest（off，kill switch：每對重算）"
 
-Write-Host "[9zzh/10] 伺服器跳過 setBodyPartsLastState（W94）：真 BodyDamage.setBodyPartsLastState（3 個部位），observe／off 照原版抄、on 在伺服器不抄、客戶端照抄，玩家／動物分開計數、observe 每 64 次量一次，心跳；原版負對照（jar：原版會抄）..."
+Write-Host "[9zzh/10] 伺服器跳過 setBodyPartsLastState（W94）：真 BodyDamage.setBodyPartsLastState（3 個部位），observe／off 照原版抄、on 在伺服器不抄、客戶端照抄，玩家／動物分開計數、observe 每 64 次量一次，心跳；日誌鏈拋例外（首次生效、心跳）那次照原版抄寫；原版負對照（jar：原版會抄）..."
 $blsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $blsCp zombie.mdc.BodyLastStateGateTest observe
 Assert-Ok "BodyLastStateGateTest（observe，出貨組態）"
@@ -887,15 +891,19 @@ java -Xverify:all "-Dmdc.bodyLastStateSkip=on" -cp $blsCp zombie.mdc.BodyLastSta
 Assert-Ok "BodyLastStateGateTest（on，伺服器跳過）"
 java -Xverify:all "-Dmdc.bodyLastStateSkip=off" -cp $blsCp zombie.mdc.BodyLastStateGateTest off
 Assert-Ok "BodyLastStateGateTest（off，kill switch）"
+java -Xverify:all -cp $blsCp zombie.mdc.BodyLastStateGateTest logthrow
+Assert-Ok "BodyLastStateGateTest（logthrow observe，日誌拋例外照原版抄寫）"
 java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.BodyLastStateGateTest vanilla
 Assert-Ok "BodyLastStateGateTest（vanilla，jar 原版負對照）"
 
-Write-Host "[9zzi/10] 動物與液體容器純觀測（W95）：a0 照原版呼叫 updateVirtualAnimals、loadedCells 掃描（cell／chunk／idle／moving／足跡）；F1 回原版同一個陣列、抽樣數 rainCatcher > 0；sim 只在主執行緒每 16 幀數一幀（沒人收得到而且閒置的比例、懷孕壓力 > 80）；off 原樣轉呼叫不計數..."
+Write-Host "[9zzi/10] 動物與液體容器純觀測（W95）：a0 照原版呼叫 updateVirtualAnimals、loadedCells 掃描（cell／chunk／idle／moving／足跡）；F1 回原版同一個陣列、抽樣數 rainCatcher > 0；sim 只在主執行緒每 16 幀數一幀（沒人收得到而且閒置的比例、懷孕壓力 > 80），sim 例外不計入 animals 並記例外類別訊息；日誌鏈拋例外（首次生效、心跳、anomaly）時 a0／F1 照原版完成；off 原樣轉呼叫不計數..."
 $apCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
 java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest observe
 Assert-Ok "MdcAnimalProbesTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.animalProbes=off" -cp $apCp zombie.characters.animals.MdcAnimalProbesTest off
 Assert-Ok "MdcAnimalProbesTest（off，kill switch）"
+java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest logthrow
+Assert-Ok "MdcAnimalProbesTest（logthrow observe，日誌拋例外照原版完成）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

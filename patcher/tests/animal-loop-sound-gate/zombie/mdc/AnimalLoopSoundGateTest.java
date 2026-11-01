@@ -27,7 +27,11 @@ import zombie.network.GameServer;
  * 照原版跑 updateZombieVocals；observe 量得到迴圈時間；第 256、512 幀稽核、anomalies 0。接著三種違反前提（emitter 換成會出聲的、
  * eventInstance 非 0、SoundManager.instance 換成別的類別）：observe 只記 anomalies，on 在下一次稽核停用並回到原版迴圈，心跳照印。
  *
- * <p>用法：{@code AnimalLoopSoundGateTest vanilla|off|observe|on}。vanilla 的 classpath 不含 dist：只驗原版每幀都跑整段迴圈（負對照）。
+ * <p>{@code logthrow}（配 {@code -Dmdc.animalLoopSoundGate=on} 與 {@code observe} 各跑一次）：把真的 DebugLog 輸出導到會拋例外的串流，
+ * 首次生效、心跳、停用三種記錄都爆掉時 {@code ProcessObjects} 照常跑完：on 在前提不成立的稽核幀停用並回原版 iterator（那幀照原版呼叫 4 隻），
+ * observe 在稽核時 helper 自己拋例外（objectList 的 iterator 拋一次）也先停用、回原版 iterator。
+ *
+ * <p>用法：{@code AnimalLoopSoundGateTest vanilla|off|observe|on|logthrow}。vanilla 的 classpath 不含 dist：只驗原版每幀都跑整段迴圈（負對照）。
  */
 public final class AnimalLoopSoundGateTest {
 
@@ -42,7 +46,7 @@ public final class AnimalLoopSoundGateTest {
         GameServer.server = true;
         SoundManager.instance = alloc(SoundManager.class);
         IsoCell cell = alloc(IsoCell.class);
-        Set<IsoMovingObject> objects = new HashSet<>();
+        ThrowOnceSet objects = new ThrowOnceSet();
         set(IsoCell.class, cell, "objectList", objects);
         ArrayList<Object> zombies = new ArrayList<>();
         set(IsoCell.class, cell, "zombieList", zombies);
@@ -56,6 +60,11 @@ public final class AnimalLoopSoundGateTest {
         boolean patched = !vanilla;
         Method processObjects = IsoCell.class.getDeclaredMethod("ProcessObjects", Iterator.class);
         processObjects.setAccessible(true);
+        if (mode.equals("logthrow")) {
+            logThrow(processObjects, cell, objects, animals);
+            finish(mode + "-" + AnimalLoopSoundGate.modeName());
+            return;
+        }
         if (patched) {
             int want = mode.equals("off") ? AnimalLoopSoundGate.OFF : mode.equals("on") ? AnimalLoopSoundGate.ON : AnimalLoopSoundGate.OBSERVE;
             check("模式與參數一致（" + AnimalLoopSoundGate.modeName() + "）", AnimalLoopSoundGate.MODE == want);
@@ -118,6 +127,94 @@ public final class AnimalLoopSoundGateTest {
                     && line.contains(" animals=4") && line.contains(" disabled=" + mode.equals("on")));
         }
         finish(mode);
+    }
+
+    /** 日誌鏈拋例外：首次生效、心跳、停用三種記錄爆掉時原版呼叫照常完成。 */
+    static void logThrow(Method processObjects, IsoCell cell, ThrowOnceSet objects, CountingAnimal[] animals) throws Exception {
+        boolean on = AnimalLoopSoundGate.MODE == AnimalLoopSoundGate.ON;
+        check("logthrow 只配 on 或 observe（" + AnimalLoopSoundGate.modeName() + "）", AnimalLoopSoundGate.MODE != AnimalLoopSoundGate.OFF);
+        explodeLog();
+        int perFrame = on ? 0 : 4;
+        int before = loopCalls;
+        Throwable t = frame(processObjects, cell, objects);
+        check("首次生效記錄拋例外：ProcessObjects 照常跑完（" + t + "）、迴圈照模式（" + (loopCalls - before) + " 次）、沒有停用、記下 anomalies",
+                t == null && loopCalls - before == perFrame && !AnimalLoopSoundGate.disabledForTest() && AnimalLoopSoundGate.anomaliesForTest() >= 1);
+        for (int f = 2; f <= 10; f++) {
+            frame(processObjects, cell, objects);
+        }
+        AnimalLoopSoundGate.forceBeatForTest();
+        before = loopCalls;
+        t = frame(processObjects, cell, objects);
+        String line = AnimalLoopSoundGate.lastBeatLine;
+        check("心跳記錄拋例外：ProcessObjects 照常跑完（" + t + "）、迴圈照模式、心跳行有組出來（" + line + "）",
+                t == null && loopCalls - before == perFrame && line != null && line.startsWith("beat ") && !AnimalLoopSoundGate.disabledForTest());
+        // 心跳把 frames 歸 0：再跑 255 幀，下一幀就是第 256 幀（稽核）
+        for (int f = 1; f < 256; f++) {
+            frame(processObjects, cell, objects);
+        }
+        if (on) {
+            Field emitter = IsoGameCharacter.class.getDeclaredField("emitter");
+            emitter.setAccessible(true);
+            emitter.set(animals[1], alloc(CharacterSoundEmitter.class));
+        } else {
+            objects.armed = true;
+        }
+        before = loopCalls;
+        t = frame(processObjects, cell, objects);
+        check((on ? "on：第 256 幀稽核抓到前提不成立" : "observe：第 256 幀稽核時 helper 自己拋例外") + "，anomaly／停用記錄都拋例外："
+                        + "ProcessObjects 照常跑完（" + t + "）、已停用、這幀就回原版 iterator（呼叫 " + (loopCalls - before) + " 次）",
+                t == null && AnimalLoopSoundGate.disabledForTest() && loopCalls - before == 4 && !objects.armed);
+        before = loopCalls;
+        t = frame(processObjects, cell, objects);
+        check("停用後下一幀照原版迴圈", t == null && loopCalls - before == 4);
+    }
+
+    /** 跑一幀；回傳 ProcessObjects 拋出的例外（沒有就 null）。參數 iterator 先取好，避免消耗 objectList 預備好的那次例外。 */
+    static Throwable frame(Method processObjects, IsoCell cell, ThrowOnceSet objects) throws Exception {
+        Iterator<IsoMovingObject> arg = new ArrayList<IsoMovingObject>().iterator();
+        try {
+            processObjects.invoke(cell, arg);
+            return null;
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            return e.getCause();
+        }
+    }
+
+    /** 真的 DebugLog 開到 All、輸出導到一寫就拋例外的串流；先自驗 logger 真的會拋。 */
+    static void explodeLog() {
+        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
+        zombie.debug.DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                throw new IllegalStateException("<test> logger exploded");
+            }
+        });
+        Throwable self = null;
+        try {
+            zombie.debug.DebugLog.log("[AnimalLoopSoundGateTest] self-check");
+        } catch (Throwable e) {
+            self = e;
+        }
+        check("自驗：DebugLog.log 真的拋例外（" + self + "）", self instanceof IllegalStateException);
+    }
+
+    /** objectList 替身：{@code armed} 時下一次 {@code iterator()} 拋一次例外（模擬稽核時 helper 自己失敗）。 */
+    static final class ThrowOnceSet extends HashSet<IsoMovingObject> {
+        boolean armed;
+
+        @Override
+        public Iterator<IsoMovingObject> iterator() {
+            if (armed) {
+                armed = false;
+                throw new IllegalStateException("<test> audit iterator boom");
+            }
+            return super.iterator();
+        }
     }
 
     static void runFrames(Method processObjects, IsoCell cell, Set<IsoMovingObject> objects, int n) throws Exception {

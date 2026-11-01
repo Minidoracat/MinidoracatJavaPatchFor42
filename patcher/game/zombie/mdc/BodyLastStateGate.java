@@ -17,7 +17,8 @@ import zombie.network.GameServer;
  * <p><b>改什麼</b>：那個呼叫同形改道 {@link #setBodyPartsLastState}：伺服器 on 時跳過，其他情況照原版。
  *
  * <p><b>模式</b>（{@code -Dmdc.bodyLastStateSkip}，需重啟）：{@code 2|observe}（預設）照原版呼叫，分玩家／動物計數，每 64 次量一次 µs；
- * {@code 1|on} 跳過；{@code 0|off} 原版；未知值當 observe。心跳每 5 分鐘一行。
+ * {@code 1|on} 跳過；{@code 0|off} 原版；未知值當 observe。心跳每 5 分鐘一行。心跳與記錄（格式化、輸出）在不外拋的邊界內，
+ * 例外只記 anomalies；原版呼叫不在 try 內。
  */
 public final class BodyLastStateGate {
 
@@ -33,7 +34,7 @@ public final class BodyLastStateGate {
 
     private static boolean started;
     private static long lastBeat;
-    private static long calls, players, animals, skipped, sampleNs, samples;
+    private static long calls, players, animals, skipped, sampleNs, samples, anomalies;
     static String lastBeatLine;
 
     static int parseMode(String raw) {
@@ -75,42 +76,59 @@ public final class BodyLastStateGate {
         samples++;
     }
 
+    /** 首次生效與心跳；整段不外拋（例外只記 anomalies），狀態先更新再記錄，失敗也不會每次重試。 */
     private static void tick() {
-        long now = System.currentTimeMillis();
-        if (!started) {
-            started = true;
-            lastBeat = now;
-            log("首次生效 mode=" + modeName() + " raw=" + RAW
-                    + "（-Dmdc.bodyLastStateSkip=0|off 原版、1|on 伺服器跳過、2|observe 只量；心跳每 5 分鐘一行）");
-        }
-        if (now - lastBeat >= HEARTBEAT_MS) {
-            lastBeat = now;
-            beat();
+        try {
+            long now = System.currentTimeMillis();
+            if (!started) {
+                started = true;
+                lastBeat = now;
+                log("首次生效 mode=" + modeName() + " raw=" + RAW
+                        + "（-Dmdc.bodyLastStateSkip=0|off 原版、1|on 伺服器跳過、2|observe 只量；心跳每 5 分鐘一行）");
+            }
+            if (now - lastBeat >= HEARTBEAT_MS) {
+                lastBeat = now;
+                beat();
+            }
+        } catch (Throwable t) {
+            anomalies++;
         }
     }
 
     private static void beat() {
         String line = "beat mode=" + modeName() + " players=" + players + " animals=" + animals + " skipped=" + skipped
                 + " usAvg=" + (samples == 0 ? "0" : String.format(Locale.ROOT, "%.2f", sampleNs / 1000.0 / samples))
-                + " samples=" + samples;
+                + " samples=" + samples + " anomalies=" + anomalies;
+        players = animals = skipped = sampleNs = samples = 0;
         lastBeatLine = line;
         log(line);
-        players = animals = skipped = sampleNs = samples = 0;
     }
 
     static String modeName() {
         return MODE == OFF ? "off" : MODE == ON ? "on" : "observe";
     }
 
+    /** 記錄不外拋：日誌鏈的例外只記 anomalies。 */
     private static void log(String s) {
-        DebugLog.log(TAG + s);
+        try {
+            DebugLog.log(TAG + s);
+        } catch (Throwable ignored) {
+            anomalies++;
+        }
     }
 
     static void forceBeatForTest() {
-        started = true;
-        lastBeat = System.currentTimeMillis() - HEARTBEAT_MS;
+        armBeatForTest();
         tick();
     }
+
+    /** 下一次 tick（第 1024 的倍數次呼叫）就印心跳。 */
+    static void armBeatForTest() {
+        started = true;
+        lastBeat = System.currentTimeMillis() - HEARTBEAT_MS;
+    }
+
+    static long anomaliesForTest() { return anomalies; }
 
     static long playersForTest() { return players; }
     static long animalsForTest() { return animals; }

@@ -8820,11 +8820,12 @@ public final class SmokeCheck {
                 !procExpected.equals(methodText(vProc))
                         && procExpected.equals(methodText(method(distJava, cell, "ProcessObjects", "(Ljava/util/Iterator;)V"))));
         MethodNode hIt = method(distJava, loopGate, "iterator", "(Ljava/util/Set;)Ljava/util/Iterator;");
-        failed += check("W92 helper 契約：先判斷 GameServer.server；回空 iterator 只有 1 處；原版 set.iterator() 3 處（off／抽樣量時間／其餘），"
-                        + "回空 iterator 前必經稽核與停用判斷",
+        failed += check("W92 helper 契約：先判斷 GameServer.server；回空 iterator 只有 1 處；原版 set.iterator() 2 處（off／其餘，含抽樣量時間），"
+                        + "都不在 try 內；回空 iterator 前必經稽核與停用判斷",
                 countExactFields(hIt, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1
                         && countExactCalls(hIt, Opcodes.INVOKESTATIC, "java/util/Collections", "emptyIterator", itDesc) == 1
-                        && countExactCalls(hIt, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 3
+                        && countExactCalls(hIt, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 2
+                        && callsInTry(hIt, Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", itDesc) == 0
                         && firstCallIndex(hIt, Opcodes.INVOKESTATIC, loopGate, "audit", "(Ljava/util/Set;)V")
                                 < firstCallIndex(hIt, Opcodes.INVOKESTATIC, "java/util/Collections", "emptyIterator", itDesc));
         failed += shaLocks(jar, "W92", LOOP_SOUND_LOCKED);
@@ -8962,6 +8963,19 @@ public final class SmokeCheck {
                                 < firstCallIndex(hAdd, Opcodes.INVOKEVIRTUAL, "zombie/MovingObjectUpdateSchedulerUpdateBucket", "add",
                                         "(Lzombie/iso/IsoMovingObject;)V"));
         failed += shaLocks(jar, "W95", ANIMAL_PROBES_LOCKED);
+        // 診斷碼不得把日誌鏈的例外帶進原版流程：四個 helper 的每個 DebugLog.log 都在 try 內（log() 與 W13 心跳 catch Throwable）
+        boolean logsGuarded = true;
+        StringBuilder unguarded = new StringBuilder();
+        for (String h : new String[]{loopGate, relGate, lastGate, probes}) {
+            for (MethodNode m : classNode(distJava, h).methods) {
+                int all = countExactCalls(m, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V");
+                if (all != callsInTry(m, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V")) {
+                    logsGuarded = false;
+                    unguarded.append(' ').append(h).append('.').append(m.name);
+                }
+            }
+        }
+        failed += check("W92–W95 helper 契約：每個 DebugLog.log 都在 try 內（日誌鏈例外不外拋）" + unguarded, logsGuarded);
         return failed;
     }
 

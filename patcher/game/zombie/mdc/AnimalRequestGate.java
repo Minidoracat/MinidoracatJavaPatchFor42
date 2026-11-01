@@ -209,12 +209,13 @@ public final class AnimalRequestGate {
      * <p>捕獲值由 {@link #filterRequests} 消費後<b>立即清除</b>（見該方法 finally）：
      * 這樣「捕獲缺失」永遠退化成 {@code null}→跳過範圍檢查（fail-open 到保守側），
      * 而不是沿用<b>上一個連線</b>的位置去判定——後者會用錯誤玩家座標放行/拒絕快照。
-     * 附帶效果是不長期釘住 {@code UdpConnection} 物件圖（含其 1 MB buffer）。
+     * 附帶效果是本 ThreadLocal 不長期釘住 {@code UdpConnection} 物件圖（含其 1 MB buffer）。例外：W93 的
+     * {@code AnimalRelevancyGate.hoistConn} 最多釘一條（下一次 begin 就換掉），伺服器清空時留到下一位玩家進來。
      * <b>這個保證要成立，`filterRequests` 的每一條 Long-key 路徑都必須經過該 finally</b>
      * ——包含兩把 kill switch 都 off 的組態（否則 both-off 下這裡每次 set 都不會被清）。
      *
      * <p>W93（docs/patches.md 2db）：同一個入口先呼叫 {@code AnimalRelevancyGate.beginConnection}，把這條連線的對齊半徑與載具判定
-     * 算一次（它自己 catch，不會拋）。這是每次 {@code sendUpdateToClient}（含遞迴的 pending）在動物迴圈之前必經的點。
+     * 算一次（它自己 catch、日誌不外拋，不會拋）。這是每次 {@code sendUpdateToClient}（含遞迴的 pending）在動物迴圈之前必經的點。
      */
     public static INetworkPacket getPacket(UdpConnection connection, PacketTypes.PacketType type) {
         AnimalRelevancyGate.beginConnection(connection);
