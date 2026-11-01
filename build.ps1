@@ -149,6 +149,10 @@ $helperEntries = @(
     'zombie/mdc/WorldMapVisibilityIndex.class',
     'zombie/mdc/MapFolderGuard.class',
     'zombie/mdc/PveDeathLog.class',
+    'zombie/mdc/IdleVehicleThrottle.class',
+    'zombie/vehicleNetworkSound/server/MdcVehicleSoundPrefilter.class',
+    'zombie/vehicleNetworkSound/server/MdcVehicleSoundPrefilter$1.class',
+    'zombie/mdc/NearVehicleSneakGate.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -808,6 +812,44 @@ java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.j
 Assert-Ok "PveDeathLogTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.pveDeathLog=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" off
 Assert-Ok "PveDeathLogTest（off，原版負對照）"
+
+Write-Host "[9zzc/10] 閒置車降頻（W89）：真 MovingObjectUpdateScheduler.startFrame（dist 手術後與 jar 原版），閒置條件 19 項逐項翻轉的真值表；observe 每台車每幀都 add、會跳次數＝每 N 幀 N−1 次、只改位置算 posDiff、位置與狀態都改算 stateDiff、心跳（vehicles／orphanTow／posTop）；on N=8 與 N=4 每 N 幀閒置車恰好 1 次、活動車每幀，第一次稽核狀態也變了不停用、第二次只改位置就停用、停用後照原版且心跳照印 disabled=true；helper 例外照原版 add 並停用；off 原樣轉呼叫；原版負對照每台車每幀都 add..."
+# observe＝出貨組態；on／on N=4／on-throw；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版）。測試自驗 argv、模式、N 與 scheduler 來源。
+$ivtCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest observe 8
+Assert-Ok "IdleVehicleThrottleTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.idleVehicleThrottle=on" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest on 8
+Assert-Ok "IdleVehicleThrottleTest（on，N=8）"
+java -Xverify:all "-Dmdc.idleVehicleThrottle=1" "-Dmdc.idleVehicleThrottleN=4" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest on 4
+Assert-Ok "IdleVehicleThrottleTest（on，N=4）"
+java -Xverify:all "-Dmdc.idleVehicleThrottle=on" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest on-throw 8
+Assert-Ok "IdleVehicleThrottleTest（on，helper 例外回原版）"
+java -Xverify:all "-Dmdc.idleVehicleThrottle=off" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest off 8
+Assert-Ok "IdleVehicleThrottleTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.IdleVehicleThrottleTest vanilla 8
+Assert-Ok "IdleVehicleThrottleTest（vanilla，jar 原版負對照）"
+
+Write-Host "[9zzd/10] 車輛聲音網路相關性預篩（W90）：300 台隨機車（引擎、喇叭、倒車蜂鳴、vehicleId=-1）× 12 條隨機連線 × 600 輪，真 Manager.update 的一輪開始＋真 getVehiclesRelevantToConnection 逐條（內容與順序）等於原版迴圈；observe 每 16 輪、on 每 256 輪比對；一輪開始後改車的狀態（違反前提）在比對那一輪抓到並停用、停用後等於原版、心跳照印；off 不比對不印；原版負對照（jar 的 Manager）..."
+$vspCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest observe
+Assert-Ok "MdcVehicleSoundPrefilterTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.vehicleSoundPrefilter=on" -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest on
+Assert-Ok "MdcVehicleSoundPrefilterTest（on，預篩）"
+java -Xverify:all "-Dmdc.vehicleSoundPrefilter=off" -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest off
+Assert-Ok "MdcVehicleSoundPrefilterTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest vanilla
+Assert-Ok "MdcVehicleSoundPrefilterTest（vanilla，jar 原版負對照）"
+
+Write-Host "[9zze/10] checkIsNearVehicle 只在潛行時跑（W91）：真 checkIsNearVehicle 八種組合（潛行 × 3.5 格內有車 × 呼叫前 nearWallCrouching）呼叫後的玩家狀態等於原版；潛行照原版、不潛行 on 跳過；原版加了副作用的替身 observe 第一次、on 抽查時抓到並停用，停用後照原版、心跳照印；off 每次呼叫原版；原版負對照（jar：潛行而且車在 3.5 格內才寫）..."
+$nvsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest observe
+Assert-Ok "NearVehicleSneakGateTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.nearVehicleSneakGate=on" -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest on
+Assert-Ok "NearVehicleSneakGateTest（on，不潛行時跳過）"
+java -Xverify:all "-Dmdc.nearVehicleSneakGate=off" -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest off
+Assert-Ok "NearVehicleSneakGateTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.NearVehicleSneakGateTest vanilla
+Assert-Ok "NearVehicleSneakGateTest（vanilla，jar 原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

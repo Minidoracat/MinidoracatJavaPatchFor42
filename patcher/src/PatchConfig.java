@@ -1688,6 +1688,14 @@ public final class PatchConfig {
         playerLos.redirects.add(new Patcher.Site(Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator",
                 "()Ljava/util/Iterator;", losFilter, "iterator"));
         playerLos.expectedHits = 2;
+        // ---- W91 checkIsNearVehicle 只在潛行時跑（docs/patches.md 2cz；併在 W83 的 IsoPlayer ClassPatch）----
+        // updateInternal2 兩處 invokevirtual IsoPlayer.checkIsNearVehicle()Z（javap offset 897、1263，前面 aload_0、後面都接 pop，
+        // 回傳值沒人用）同形改道 NearVehicleSneakGate：潛行時照原版呼叫，不潛行時 on 直接回 false（原版不潛行時零寫入）。
+        // -Dmdc.nearVehicleSneakGate=2|observe（預設）／1|on／0|off。
+        Patcher.MethodOps playerNearVehicle = isoPlayer.method("updateInternal2", "()Z");
+        playerNearVehicle.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "checkIsNearVehicle",
+                "()Z", "zombie/mdc/NearVehicleSneakGate", "checkIsNearVehicle"));
+        playerNearVehicle.expectedHits = 2;
         patches.add(isoPlayer);
 
         // ---- W85 只把動物附近的載具送進 native 尋路（docs/patches.md 2ct；BaseVehicle 三個方法併在上面 W3-4 的 ClassPatch）----
@@ -1703,6 +1711,41 @@ public final class PatchConfig {
                 "()Ljava/util/Set;", vehScope, "getVehicles"));
         pfMain.expectedHits = 1;
         patches.add(pfNativePatch);
+
+        // ---- W89 閒置車降頻（docs/patches.md 2cx）----
+        // startFrame 唯一的 invokevirtual MovingObjectUpdateSchedulerUpdateBucket.add(IsoMovingObject)（javap offset 132，前面
+        // getUpdateOrderIndex→aaload→aload_3，後面 goto 50）同形改道 IdleVehicleThrottle.add（receiver 前置）：伺服器主執行緒上閒置的車
+        // 每 N 幀才放進 bucket，preupdate／frameStep／update／postupdate 一起跳過（postupdate 走同一個 bucket）。MovingObjectUpdateScheduler
+        // 原本沒有 ClassPatch。-Dmdc.idleVehicleThrottle=2|observe（預設）／1|on／0|off；-Dmdc.idleVehicleThrottleN（2 的次方，預設 8）。
+        Patcher.ClassPatch scheduler = new Patcher.ClassPatch("zombie/MovingObjectUpdateScheduler");
+        Patcher.MethodOps startFrame = scheduler.method("startFrame", "()V");
+        startFrame.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/MovingObjectUpdateSchedulerUpdateBucket", "add",
+                "(Lzombie/iso/IsoMovingObject;)V", "zombie/mdc/IdleVehicleThrottle", "add"));
+        startFrame.expectedHits = 1;
+        patches.add(scheduler);
+
+        // ---- W90 車輛聲音網路相關性預篩（docs/patches.md 2cy）----
+        // Manager.update 唯一的 getfield UdpEngine.connections（offset 3）換成 helper（一輪開始：篩出 vehicleId != -1 且聲音半徑 > 0
+        // 的車）；getVehiclesRelevantToConnection 唯一的 IsoCell.getVehicles()（offset 12）改道回傳篩好的清單；updateConnection 唯一的
+        // Connection.getUdpConnection()（offset 17）改道記下這一輪的連線（比對用）。helper 在 zombie/vehicleNetworkSound/server 才呼叫得到
+        // package-private 的 isRelevant。Manager 原本沒有 ClassPatch。-Dmdc.vehicleSoundPrefilter=2|observe（預設）／1|on／0|off。
+        String soundPkg = "zombie/vehicleNetworkSound/server/";
+        String soundPre = soundPkg + "MdcVehicleSoundPrefilter";
+        Patcher.ClassPatch soundManager = new Patcher.ClassPatch(soundPkg + "Manager");
+        Patcher.MethodOps soundUpdate = soundManager.method("update", "()V");
+        soundUpdate.fieldGetRedirects.add(new Patcher.FieldGetRedirect("zombie/core/raknet/UdpEngine", "connections",
+                "Ljava/util/List;", soundPre, "connections"));
+        soundUpdate.expectedHits = 1;
+        Patcher.MethodOps soundConn = soundManager.method("updateConnection", "(Lzombie/core/raknet/UdpConnection;)V");
+        soundConn.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, soundPkg + "Connection", "getUdpConnection",
+                "()Lzombie/core/raknet/UdpConnection;", soundPre, "getUdpConnection"));
+        soundConn.expectedHits = 1;
+        Patcher.MethodOps soundRelevant = soundManager.method("getVehiclesRelevantToConnection",
+                "(L" + soundPkg + "Connection;Ljava/util/Set;)V");
+        soundRelevant.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getVehicles",
+                "()Ljava/util/Set;", soundPre, "getVehicles"));
+        soundRelevant.expectedHits = 1;
+        patches.add(soundManager);
 
         return patches;
     }

@@ -73,6 +73,7 @@ workflow `wave3-triple-analysis` 輸出。
 - **Helper 語意**：`GameServer.server` → 計數後直接 `return true`（跳過 no-op 的 setTargetAlpha，true/false 行為等價取最省）；非 server → 用全 public API（getPoly/getGridSquare/isCouldSee/
   isIntersectingSquare）逐指令複刻原 private 方法當 fallback（部署面只有 server，此路徑實際不可達，但 LoadCheck/行為測試要求等價）。
 - **預期**：每秒 5 萬–25 萬次 ServerMap.getGridSquare 查找歸零，1–3%，與車數線性。
+- **W89 之後的判讀**（2026-11-01）：`serverSkipped` 是實際跑的 `BaseVehicle.update` 次數。W89（[patches.md 2cx](patches.md#2cx)）off／observe 時約等於載入車數 × FPS；切 on 後約 (閒置車 ÷ N ＋ 活動車) × FPS，不能再拿它推算載入車數（改看 W89 beat 的 `vehicles`）。心跳要等計數到 2^18 的倍數且距上次滿 5 分鐘才印，計數變慢時每行可能比 5 分鐘晚一個計數窗（數十秒到數分鐘），「缺行」要以 W89 beat 的 `skipped` 一起判斷。
 
 ## 暫緩（GO-WITH-CARE，等本波計數器落地後決策）
 

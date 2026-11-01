@@ -3921,6 +3921,7 @@ public final class SmokeCheck {
         failed += checkWorldMapVisibilityIndex(jar, distJava);
         failed += checkMapFolderGuard(jar, distJava);
         failed += checkPveDeathLog(jar, distJava);
+        failed += checkVehicleUpdateCuts(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -7841,7 +7842,7 @@ public final class SmokeCheck {
         Map<String, Set<String>> fakeDecl = declarersUnder(withFake, obj, watched);
         failed += check("W83 覆寫普查負對照：多一個 IsoZombie 子類覆寫 setTargetAlpha(IF)V → 宣告者不同、普查變紅",
                 !fakeDecl.equals(wantDeclarers) && fakeDecl.get("setTargetAlpha(IF)V").contains(fake.name));
-        // 手術後：兩個呼叫同形改道，其餘指令與 frames 不變；IsoPlayer 其餘方法不變
+        // 手術後：兩個呼叫同形改道，其餘指令與 frames 不變；IsoPlayer 其餘方法不變（updateInternal2 是 W91 的命中點，由 checkVehicleUpdateCuts 鎖）
         MethodNode p = method(distJava, player, "updateLOS", "()V");
         String expected = methodText(v)
                 .replace("INVOKEVIRTUAL " + player + ".getCell " + cellDesc,
@@ -7849,14 +7850,16 @@ public final class SmokeCheck {
                 .replace("INVOKEINTERFACE java/util/Set.iterator " + itDesc + " (itf)",
                         "INVOKESTATIC " + helper + ".iterator (Ljava/util/Set;)Ljava/util/Iterator;");
         boolean othersSame = classNodeFromJar(jar, player).methods.stream()
-                .filter(m -> !(m.name.equals("updateLOS") && m.desc.equals("()V"))).allMatch(m -> {
+                .filter(m -> !(m.name.equals("updateLOS") && m.desc.equals("()V"))
+                        && !(m.name.equals("updateInternal2") && m.desc.equals("()Z"))).allMatch(m -> {
                     try {
                         return methodText(m).equals(methodText(method(distJava, player, m.name, m.desc)));
                     } catch (Exception e) {
                         return false;
                     }
                 });
-        failed += check("W83 手術後：updateLOS 的 getCell／Set.iterator 同形改道 PlayerLosFilter，其餘指令與 frames 不變；IsoPlayer 其餘方法不變",
+        failed += check("W83 手術後：updateLOS 的 getCell／Set.iterator 同形改道 PlayerLosFilter，其餘指令與 frames 不變；IsoPlayer 其餘方法"
+                        + "（W91 的 updateInternal2 除外）不變",
                 !expected.equals(methodText(v)) && methodText(p).equals(expected) && othersSame);
         MethodNode hIt = method(distJava, helper, "iterator", "(Ljava/util/Set;)Ljava/util/Iterator;");
         MethodNode hCell = method(distJava, helper, "getCell", "(L" + player + ";)Lzombie/iso/IsoCell;");
@@ -8366,6 +8369,380 @@ public final class SmokeCheck {
                     got.equals(lock[3]) && !mutation.equals("none") && !sha256Hex(methodText(body)).equals(lock[3]));
         }
         return failed;
+    }
+
+    /**
+     * W89 閒置車降頻的原版前提（42.21，去 debug 的 methodText SHA-256），{class, name, desc, sha}。研究 §4c 的 1–8 項：startFrame 與伺服器
+     * 回 FULL（1、2）、update／postupdate 走同一個 bucket（3）、跳過的四段本體與 ECS frameStep（4）、會動就會讓 isEnable 變 true（5）、
+     * 授權是 Server 就沒有客戶端能推（6）、Idle 引擎沒有每幀工作、耗電照遊戲時間（7）、車仍釘在 FULL（8）；再加閒置條件讀的 getter
+     * （純讀取、沒有副作用）與 O(全部車) 的拖車重連。
+     */
+    static final String[][] IDLE_VEHICLE_LOCKED = {
+            {"zombie/MovingObjectUpdateScheduler", "startFrame", "()V", "f6dbc411b6c84f5b67e29cadfad250d1a4afd1fe03e219a0dfb5f13238f8dff5"},
+            {"zombie/MovingObjectUpdateScheduler", "getUpdateSchedulerSimulationLevelForObject",
+                    "(Lzombie/iso/IsoMovingObject;F)Lzombie/UpdateSchedulerSimulationLevel;",
+                    "7d2479cb7a9264fbdfe7b6609be27b9a213c89994cbcdd8f623ca667c52cbe00"},
+            {"zombie/UpdateSchedulerSimulationLevel", "getFrameMod", "()I", "f0fe31180d7d5fd02b18765a3f19b03c4d5b8d58bd5e39a2c8386874dcc1b6bd"},
+            {"zombie/MovingObjectUpdateScheduler", "update", "()V", "ab998fda2eec1bb15e6f419e5be622277fa5adf469754b15126a46ba9c1705d4"},
+            {"zombie/MovingObjectUpdateScheduler", "postupdate", "()V", "8e6908375728f9a6cf89e95a50762f1d57705742e120b9e3fb2e292f19562c0f"},
+            {"zombie/MovingObjectUpdateSchedulerUpdateBucket", "update", "(I)V", "81d074ad97fd3acc442dcd0972b4993cc1f58ec16b2f97e25be88605de60c9c1"},
+            {"zombie/MovingObjectUpdateSchedulerUpdateBucket", "postupdate", "(I)V",
+                    "e7f8937e47e7fa7cbc233d6a33f8ac4a23edcfd0ef0846edfb51bdc1931248c3"},
+            {"zombie/MovingObjectUpdateSchedulerUpdateBucket", "add", "(Lzombie/iso/IsoMovingObject;)V",
+                    "fadacf1cfbccb4a72b18454fb3efafad0282ddc55a01ca54f9bc93abbc7c03ee"},
+            {"zombie/vehicles/BaseVehicle", "update", "()V", "aba48244ac37136c0a5d9b8303eabbd7cf858155784fd8d6a8f565dbf97ad4dc"},
+            {"zombie/vehicles/BaseVehicle", "postupdate", "()V", "9a0cebc19da0cb45e57b66bb24bbb7b851a357f1e2f73dc0906e4e110a550666"},
+            {"zombie/vehicles/BaseVehicle", "shouldAnimRecorderBeActive", "()Z", "6e966828a2229cf8a69cab2b2befef73dd79c4aaea70ea132309e225ecb0eb66"},
+            {"zombie/iso/IsoMovingObject", "update", "()V", "608cfb0faa8c2dab03e692960b1773ac130a9241ea1478807e305df0dcfa0ef5"},
+            {"zombie/iso/IsoMovingObject", "preupdate", "()V", "4ed2e793ab60e4acaeeb6c836345a39fb76032759bdf9588c8b88c69075ebab4"},
+            {"zombie/characters/ecs/ECSEntity", "frameStep", "()V", "678fed6cbfdac91045dc89576aafdcb0975a93cbc09b09cdcd4d70f6b803b1a4"},
+            {"zombie/vehicles/BaseVehicle", "setPhysicsActive", "(Z)V", "5e88424e48e11f2f92ca7b0d7948c0d8f921a6f460a6ca4fb663153cb1e6ba03"},
+            {"zombie/vehicles/BaseVehicle", "setPhysicsActive", "(ZZ)V", "07017fb998f7a78942cc3df1c16390aedff124039adcc7b7bcb5a8b2b806edf0"},
+            {"zombie/vehicles/BaseVehicle", "constraintChanged", "()V", "24872ddc1ddcd468f2bd9bdac0072a1d0687f2336f10790e38a58f66421768d5"},
+            {"zombie/vehicles/BaseVehicle", "applyImpulseFromHitObject", "(Lzombie/iso/IsoObject;F)V",
+                    "1b99b9eb3692fec3a29c8bbf5d43162d2a79276b0b58dfb91df224e68f421b30"},
+            {"zombie/vehicles/BaseVehicle", "applyImpulseFromHitPlant", "(Lzombie/iso/IsoObject;F)V",
+                    "926fae758c1b654c1788a16df50f851ca1cce7fab24e4ef8a063e03019c3b361"},
+            {"zombie/vehicles/BaseVehicle", "applyImpulseGeneric", "(FFFFFFF)V", "0bbccb865607d384f8642ec61ff6a2efb518b1c078973fdea911c99c931f65b7"},
+            {"zombie/network/packets/vehicle/VehiclePhysicsPacket", "processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                    "7c20ac2eb3c2569b0c4371a557ce37b2d94638f78607cbc27b130347418975e4"},
+            {"zombie/vehicles/BaseVehicle", "hasAuthorization", "(Lzombie/core/raknet/UdpConnection;)Z",
+                    "a44e5e352cf853f5bcf3a60c6e2bca4a1c0b1167fac864de59ba46adcae85587"},
+            {"zombie/vehicles/VehicleEngine", "update", "()V", "a526764eacec764e5da52ba3a3db1fbc2fec07c46a4a6d8c86a34a497e4cfcaa"},
+            {"zombie/vehicles/VehicleAlarm", "update", "()V", "578d26d2b9bb65a8d05eaf11e4682dffbe5b2c722ba2094578c4c53b2c8beb07"},
+            {"zombie/vehicles/VehicleAlarm", "isActive", "()Z", "aa0f1b665a3691f8598937d587d6973fc2c10db40af35c88d2ed7b344090c94a"},
+            {"zombie/vehicles/BaseVehicle", "drainBatteryUpdateHack", "()V", "93a14c4cd464b8773ee19c7b698db36f251fe024ab73e285c8b8fd23997266a9"},
+            {"zombie/vehicles/VehicleParts", "updatePart", "(Lzombie/vehicles/VehiclePart;)Z",
+                    "66595b44924398ff1c0f17721775a1f36b1ad9c04150e1cc247724ba084be8da"},
+            {"zombie/radio/devices/DeviceData", "update", "(ZZ)V", "4d864f7f62bb3a2a43bdd1a2d0cb0dda6fcc497c7521a3af4e2d788000d465bc"},
+            {"zombie/vehicles/BaseVehicle", "getMinimumSimulationLevel", "()Lzombie/UpdateSchedulerSimulationLevel;",
+                    "8d7cdda40ffacf8be6e3c6239ecb2699f6bbc1a287fe46a0edaa8dee4c895c07"},
+            {"zombie/vehicles/BaseVehicle", "getController", "()Lzombie/core/physics/CarController;",
+                    "c548763eb88c0c7c3ec9b8b6bc2350687942a18164a6900ac48a3a97bf73a2cf"},
+            {"zombie/vehicles/BaseVehicle", "getMaxPassengers", "()I", "2b99195df3cb7bf734f0e254cd46445b2b7dfde00b5ff27466d934aa707e58da"},
+            {"zombie/vehicles/BaseVehicle", "getPassenger", "(I)Lzombie/vehicles/BaseVehicle$Passenger;",
+                    "682a0d355a613c86c41acc4194d905e1bac1cb8b67db5997f5f6a439881845a0"},
+            {"zombie/vehicles/BaseVehicle", "getAnimals", "()Ljava/util/ArrayList;", "20c208c49c4eceadd7aa0278d3e4114525510a4ea05f155a4c1ad1369e27c00c"},
+            {"zombie/vehicles/BaseVehicle", "getVehicleTowing", "()Lzombie/vehicles/BaseVehicle;",
+                    "15ff74f09b3e701d2dc50d97484d0dc69cd5b45b6caa9d7b81203108ed4ebe9b"},
+            {"zombie/vehicles/BaseVehicle", "getVehicleTowedBy", "()Lzombie/vehicles/BaseVehicle;",
+                    "587b5b281b793b841a449fb1a1e69d3f0c46e4592479167ae741a6b7a70f917b"},
+            {"zombie/vehicles/BaseVehicle", "getEngineState", "()Lzombie/vehicles/BaseVehicle$engineStateTypes;",
+                    "1cf6170850acbcc3d3e9dbc8bed5bc4a41dd0b89f53389fc70f40f8759b2e5e4"},
+            {"zombie/vehicles/VehiclePartOwner", "getEngine", "()Lzombie/vehicles/VehiclePart;",
+                    "bb3aa49f295f9f1df1099d6ebe15c4df847060f2ea1f102e7d9b4b3bcce3b154"},
+            {"zombie/vehicles/VehicleParts", "getEngine", "()Lzombie/vehicles/VehiclePart;",
+                    "cf76e078351e58f5315d0bdc34b06ab480eec7a4b48c355c05f0ad5602df7cba"},
+            {"zombie/vehicles/VehicleEngine", "getState", "()Lzombie/vehicles/BaseVehicle$engineStateTypes;",
+                    "6afd9f7b645075bb10709d5413ce6c0745c94fa447ac04f518b09237d510f40c"},
+            {"zombie/vehicles/BaseVehicle", "getVehicleAlarmObject", "()Lzombie/vehicles/VehicleAlarm;",
+                    "48e3bbde383456e9c4ba5221028a0ad19e5da05c81b1adbd1937390629664e46"},
+            {"zombie/vehicles/BaseVehicle", "needPartsUpdate", "()Z", "95b86ed772669b71295bf05a9eba0fd61bcdaedf8025702b4d73e5d59d8e41ee"},
+            {"zombie/vehicles/BaseVehicle", "isMechanicUIOpen", "()Z", "f46ffac9ad5498971b0afed79a74aff5c4a40c6c6c2def74366280e6c717ed6e"},
+            {"zombie/vehicles/BaseVehicle", "isRemovedFromWorld", "()Z", "c9d27babecec56077ee8d278281d3424b4cb02a408819aa4e8824a5e7ba398d4"},
+            {"zombie/vehicles/LightbarLightsMode", "isEnable", "()Z", "1df2c8c528f8d9f9756c207bfac08263f18e16b1bd969d8aecad760f3a8c09e1"},
+            {"zombie/vehicles/LightbarSirenMode", "isEnable", "()Z", "34c10999b8dfe5d4224dae3f7b24b3b2c09f21a4a9cc61ae2211b131bb02b644"},
+            {"zombie/vehicles/BaseVehicle", "tryReconnectToTowedVehicle", "()V", "63dc0365450174adb06c96036e79f1c9bce9319687ad70d9f052decbb3e38c5e"},
+    };
+
+    /**
+     * W90 的原版前提：這一輪的呼叫圖（Manager 三個方法與建構子的 HashSet tempVehicles）、isRelevant 與它讀的六個聲音條件
+     * （伺服器上 isListenerInRange 恆 true）、update 期間只讀車的 VehicleState.update／sendNew 與 Connection 兩個方法。
+     */
+    static final String[][] VEHICLE_SOUND_LOCKED = {
+            {"zombie/vehicleNetworkSound/server/Manager", "update", "()V", "d7f27ec73adc58190594eca7814ff3b2db997707fd970fa3457b4fad98ea6712"},
+            {"zombie/vehicleNetworkSound/server/Manager", "updateConnection", "(Lzombie/core/raknet/UdpConnection;)V",
+                    "c16e6dc0228453a19f6b189679c4c6981f38286120354df13aaa0f969c393da4"},
+            {"zombie/vehicleNetworkSound/server/Manager", "getVehiclesRelevantToConnection",
+                    "(Lzombie/vehicleNetworkSound/server/Connection;Ljava/util/Set;)V",
+                    "e2145883e03c999cea39d67bff5d5dc6bb419eeeaa0622a9193c6fb1dcf73ff8"},
+            {"zombie/vehicleNetworkSound/server/Manager", "<init>", "()V", "fb4e08dd216253c417c8dc9fb4f903904f7b1bbcd985119d2fd2ba744e93996a"},
+            {"zombie/vehicleNetworkSound/server/Connection", "isRelevant", "(Lzombie/vehicles/BaseVehicle;)Z",
+                    "bc7c9e74db623f1c2a68295f2ee61fd08427e45374ca0661269903ea77e04738"},
+            {"zombie/vehicleNetworkSound/server/Connection", "updateVehicle", "(Lzombie/vehicles/BaseVehicle;)V",
+                    "bc778737d0e201fd98e2be73aab2636e202e3f53d928064b4f0bee63ebab97c6"},
+            {"zombie/vehicleNetworkSound/server/Connection", "forgetIrrelevantVehicles", "(Lgnu/trove/set/hash/TShortHashSet;)V",
+                    "173800f1d57d9b5851ff34620532e8ea5c51c808df48f93f507a4d36cf78e482"},
+            {"zombie/vehicleNetworkSound/server/Connection", "getUdpConnection", "()Lzombie/core/raknet/UdpConnection;",
+                    "ccd093e95d0136e6e55e699fb42276fa29a2e9724d5a50ba17d2076816b38e94"},
+            {"zombie/vehicleNetworkSound/server/VehicleState", "update", "(Lzombie/vehicles/BaseVehicle;Lzombie/core/raknet/UdpConnection;)V",
+                    "68027e00b133010a8f303ed6a5dd3dc78afe637f374f425c0eb66b74deebb4ae"},
+            {"zombie/vehicleNetworkSound/server/VehicleState", "sendNew", "(Lzombie/core/raknet/UdpConnection;)V",
+                    "e6f1ec186ba255ce86e0acdedaca6b658169b5c61febd7c2c8bb05dcee245de3"},
+            {"zombie/vehicles/BaseVehicle", "isAlarmActive", "()Z", "e900e6d12c8278cdc8c5098c0a65626e81f83d79028765d9a20d1e38315eb68c"},
+            {"zombie/vehicles/BaseVehicle", "isBackupBeeperSounding", "()Z", "34db9c611ae2dfa721d00b14a90014c2508e11c61251680a620f49ae3e78c2a4"},
+            {"zombie/vehicles/BaseVehicle", "isDoorAlarmSounding", "()Z", "09c4d3ff5cb1e48ff247a83cfeebcba320321b3ce9f01ea37bee1e69561b049d"},
+            {"zombie/vehicles/BaseVehicle", "getEngineState", "()Lzombie/vehicles/BaseVehicle$engineStateTypes;",
+                    "1cf6170850acbcc3d3e9dbc8bed5bc4a41dd0b89f53389fc70f40f8759b2e5e4"},
+            {"zombie/vehicles/BaseVehicle", "isHornSounding", "()Z", "046cdca7c3288c5fd80fd07ff1a87dde9c73f17063809487f4e2d67b90ccf88d"},
+            {"zombie/vehicles/BaseVehicle", "isSirenSounding", "()Z", "62b29ef6560b475b04b943d743f948458b31939b44a95a196b877f0507a73858"},
+            {"zombie/vehicles/BaseVehicle", "isListenerInRange", "(F)Z", "0e665c945e7f673387e598a56d419a7713e65208a307f136097960607e5f42eb"},
+            {"zombie/vehicleSound/VehicleSoundOwner", "hasAlarm", "()Z", "9c90656c058721eaea04c7a7a4b3475a7b28ff514162337fa71234e4f2032918"},
+            {"zombie/vehicleSound/VehicleSoundOwner", "hasSiren", "()Z", "33c1ec0eb1cf77f4f7bd98d7a7462e21fd4648920473a43ca689f9cab5621ed3"},
+            {"zombie/vehicles/BaseVehicle", "isSirenActive", "()Z", "c8115fef0f8f3c1418b6e85f9eb45bce8dbf35ebb38b71071d031c336f6ca2c9"},
+            {"zombie/iso/IsoCell", "getVehicles", "()Ljava/util/Set;", "d6336fcf5a324308e46c5271b179cdb91d1cf5d5d42c88040901dec9db072961"},
+    };
+
+    /** W91 的原版前提：checkIsNearVehicle 只在 sneaking 時寫 nearWallCrouching，isSneaking／isNearWallCrouching 是純讀取，DistTo 純計算。 */
+    static final String[][] NEAR_VEHICLE_LOCKED = {
+            {"zombie/characters/IsoGameCharacter", "checkIsNearVehicle", "()Z", "5c0bcde0612b709c59c296661383d3dd8f2598b67114af59357f6eadba771562"},
+            {"zombie/characters/IsoGameCharacter", "isSneaking", "()Z", "a3be7234328eafcbc8b0aa212294ded6bdce373a9ee7111f3e4874191c48af45"},
+            {"zombie/characters/IsoGameCharacter", "isNearWallCrouching", "()Z", "280ad5eb6afb0840791692f57315e22038553f4c48fff48b61fc591f20aabcdc"},
+            {"zombie/iso/IsoMovingObject", "DistTo", "(Lzombie/iso/IsoMovingObject;)F", "87ab4d70da6a28fdd1c19e707f703a18db4e557aa8212a69630c09289b005179"},
+            {"zombie/iso/IsoCell", "getVehicles", "()Ljava/util/Set;", "d6336fcf5a324308e46c5271b179cdb91d1cf5d5d42c88040901dec9db072961"},
+    };
+
+    /** W89（2cx）／W90（2cy）／W91（2cz）：原版前提、同形手術、helper 契約。任一前提變紅＝先重新分析等價或撤刀，不改斷言讓它變綠。 */
+    static int checkVehicleUpdateCuts(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String sched = "zombie/MovingObjectUpdateScheduler";
+        String bucket = "zombie/MovingObjectUpdateSchedulerUpdateBucket";
+        String mov = "zombie/iso/IsoMovingObject";
+        String veh = "zombie/vehicles/BaseVehicle";
+        String addDesc = "(L" + mov + ";)V";
+        String throttle = "zombie/mdc/IdleVehicleThrottle";
+        String throttleDesc = "(L" + bucket + ";L" + mov + ";)V";
+        JarIndex index = JarIndex.load(jar);
+
+        // ---- W89 ----
+        MethodNode vStart = methodFromJar(jar, sched, "startFrame", "()V");
+        AbstractInsnNode add = firstCall(vStart, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc);
+        AbstractInsnNode aa = add == null ? null : prevReal(prevReal(add));
+        failed += check("W89 vanilla 前提：bucket.add 全 jar 只有 startFrame 呼叫 1 次（getUpdateOrderIndex→aaload→aload_3→add→goto）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc).equals(List.of(sched + ".startFrame()V"))
+                        && add != null && isVar(prevReal(add), Opcodes.ALOAD, 3) && aa.getOpcode() == Opcodes.AALOAD
+                        && isCall(prevReal(aa), Opcodes.INVOKEVIRTUAL, "zombie/UpdateSchedulerSimulationLevel", "getUpdateOrderIndex", "()I")
+                        && nextReal(add).getOpcode() == Opcodes.GOTO);
+        // frameStep 對車只更新 FrameKeeperComponent.frameNo（只有 frameStep 自己讀）並巡訪 ECSFrameStep 元件；全 jar 只有 CharacterInputComponent
+        // 實作 ECSFrameStep，BaseVehicle 是 final、它與 IsoMovingObject／IsoObject 都不覆寫 frameStep／registerECSComponents。
+        String frameStepIf = "zombie/characters/ecs/componentmods/ECSFrameStep";
+        Set<String> frameSteppers = frameStepImplementers(index.classes(), frameStepIf);
+        boolean ecsOk = frameSteppers.equals(Set.of("zombie/characters/component/CharacterInputComponent"))
+                && (index.classes().get(veh).access & Opcodes.ACC_FINAL) != 0;
+        for (String c : List.of(veh, mov, "zombie/iso/IsoObject")) {
+            ecsOk &= declaredMethod(index.classes().get(c), "frameStep", "()V") == null
+                    && declaredMethod(index.classes().get(c), "registerECSComponents", "()V") == null;
+        }
+        failed += check("W89 vanilla 前提：ECSFrameStep 只有 CharacterInputComponent 實作（實際 " + frameSteppers + "）；BaseVehicle 是 final，"
+                        + "它與 IsoMovingObject／IsoObject 不覆寫 frameStep／registerECSComponents（跳過 frameStep 只讓 frameNo 落後）",
+                ecsOk);
+        Map<String, ClassNode> withFake = new HashMap<>(index.classes());
+        ClassNode fakeStep = new ClassNode();
+        fakeStep.name = "zombie/mdc/W89FakeFrameStep";
+        fakeStep.superName = "java/lang/Object";
+        fakeStep.interfaces.add(frameStepIf);
+        withFake.put(fakeStep.name, fakeStep);
+        failed += check("W89 ECSFrameStep 普查負對照：多一個實作 ECSFrameStep 的類別 → 普查變紅",
+                !frameStepImplementers(withFake, frameStepIf).equals(frameSteppers));
+        MethodNode pStart = method(distJava, sched, "startFrame", "()V");
+        String startExpected = methodText(vStart).replace("INVOKEVIRTUAL " + bucket + ".add " + addDesc,
+                "INVOKESTATIC " + throttle + ".add " + throttleDesc);
+        failed += check("W89 手術後：startFrame 唯一的 bucket.add 同形改道 IdleVehicleThrottle.add，其餘指令與 frames 不變；"
+                        + "MovingObjectUpdateScheduler 其餘方法不變",
+                !startExpected.equals(methodText(vStart)) && startExpected.equals(methodText(pStart))
+                        && otherMethodsSame(jar, distJava, sched, "startFrame", "()V"));
+        MethodNode hAdd = method(distJava, throttle, "add", throttleDesc);
+        failed += check("W89 helper 契約：add 呼叫原版 bucket.add 2 處（off／一般路徑與判斷後），都不在 try 內（例外照原版上拋）",
+                countExactCalls(hAdd, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc) == 2
+                        && callsInTry(hAdd, Opcodes.INVOKEVIRTUAL, bucket, "add", addDesc) == 0);
+        failed += shaLocks(jar, "W89", IDLE_VEHICLE_LOCKED);
+
+        // ---- W90 ----
+        String pkg = "zombie/vehicleNetworkSound/server/";
+        String mgr = pkg + "Manager";
+        String conn = pkg + "Connection";
+        String pre = pkg + "MdcVehicleSoundPrefilter";
+        String udp = "zombie/core/raknet/UdpConnection";
+        String engine = "zombie/core/raknet/UdpEngine";
+        String relDesc = "(L" + conn + ";Ljava/util/Set;)V";
+        String updConnDesc = "(L" + udp + ";)V";
+        String getUdpDesc = "()L" + udp + ";";
+        MethodNode vUpd = methodFromJar(jar, mgr, "update", "()V");
+        MethodNode vConn = methodFromJar(jar, mgr, "updateConnection", updConnDesc);
+        MethodNode vRel = methodFromJar(jar, mgr, "getVehiclesRelevantToConnection", relDesc);
+        AbstractInsnNode connsGet = null;
+        int connsGets = 0;
+        for (AbstractInsnNode in : vUpd.instructions) {
+            if (isField(in, Opcodes.GETFIELD, engine, "connections", "Ljava/util/List;")) {
+                connsGet = in;
+                connsGets++;
+            }
+        }
+        AbstractInsnNode getUdp = firstCall(vConn, Opcodes.INVOKEVIRTUAL, conn, "getUdpConnection", getUdpDesc);
+        AbstractInsnNode getVeh = firstCall(vRel, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getVehicles", "()Ljava/util/Set;");
+        AbstractInsnNode relevant = firstCall(vRel, Opcodes.INVOKEVIRTUAL, conn, "isRelevant", "(L" + veh + ";)Z");
+        failed += check("W90 vanilla 前提：Manager.update 恰 1 個 GETFIELD UdpEngine.connections（GameServer.udpEngine→connections→List.iterator）；"
+                        + "updateConnection 恰 1 個 getUdpConnection（aload_3→呼叫→aload_1）；getVehiclesRelevantToConnection 恰 1 個 IsoCell.getVehicles"
+                        + "（currentCell→呼叫→Set.iterator）、恰 1 個 isRelevant、迴圈先比 vehicleId == -1；呼叫鏈只有 update→updateConnection→它",
+                connsGets == 1 && isField(prevReal(connsGet), Opcodes.GETSTATIC, "zombie/network/GameServer", "udpEngine", "L" + engine + ";")
+                        && isCall(nextReal(connsGet), Opcodes.INVOKEINTERFACE, "java/util/List", "iterator", "()Ljava/util/Iterator;")
+                        && countExactCalls(vConn, Opcodes.INVOKEVIRTUAL, conn, "getUdpConnection", getUdpDesc) == 1
+                        && isVar(prevReal(getUdp), Opcodes.ALOAD, 3) && isVar(nextReal(getUdp), Opcodes.ALOAD, 1)
+                        && countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getVehicles", "()Ljava/util/Set;") == 1
+                        && isField(prevReal(getVeh), Opcodes.GETFIELD, "zombie/iso/IsoWorld", "currentCell", "Lzombie/iso/IsoCell;")
+                        && isCall(nextReal(getVeh), Opcodes.INVOKEINTERFACE, "java/util/Set", "iterator", "()Ljava/util/Iterator;")
+                        && countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, conn, "isRelevant", "(L" + veh + ";)Z") == 1
+                        && relevant != null
+                        && isField(prevReal(prevReal(prevReal(prevReal(prevReal(prevReal(relevant)))))), Opcodes.GETFIELD, veh, "vehicleId", "S")
+                        && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, mgr, "getVehiclesRelevantToConnection", relDesc)
+                                .equals(List.of(mgr + ".updateConnection" + updConnDesc))
+                        && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, mgr, "updateConnection", updConnDesc).equals(List.of(mgr + ".update()V")));
+        String updExpected = methodText(vUpd).replace("GETFIELD " + engine + ".connections : Ljava/util/List;",
+                "INVOKESTATIC " + pre + ".connections (L" + engine + ";)Ljava/util/List;");
+        String connExpected = methodText(vConn).replace("INVOKEVIRTUAL " + conn + ".getUdpConnection " + getUdpDesc,
+                "INVOKESTATIC " + pre + ".getUdpConnection (L" + conn + ";)L" + udp + ";");
+        String relExpected = methodText(vRel).replace("INVOKEVIRTUAL zombie/iso/IsoCell.getVehicles ()Ljava/util/Set;",
+                "INVOKESTATIC " + pre + ".getVehicles (Lzombie/iso/IsoCell;)Ljava/util/Set;");
+        failed += check("W90 手術後：三處同形改道 MdcVehicleSoundPrefilter（connections／getUdpConnection／getVehicles），其餘指令與 frames 不變；"
+                        + "Manager 其餘方法不變",
+                !updExpected.equals(methodText(vUpd)) && updExpected.equals(methodText(method(distJava, mgr, "update", "()V")))
+                        && !connExpected.equals(methodText(vConn))
+                        && connExpected.equals(methodText(method(distJava, mgr, "updateConnection", updConnDesc)))
+                        && !relExpected.equals(methodText(vRel))
+                        && relExpected.equals(methodText(method(distJava, mgr, "getVehiclesRelevantToConnection", relDesc)))
+                        && otherMethodsSame(jar, distJava, mgr, "update", "()V", "updateConnection", updConnDesc,
+                                "getVehiclesRelevantToConnection", relDesc));
+        MethodNode hConns = method(distJava, pre, "connections", "(L" + engine + ";)Ljava/util/List;");
+        MethodNode hVeh = method(distJava, pre, "getVehicles", "(Lzombie/iso/IsoCell;)Ljava/util/Set;");
+        MethodNode hUdp = method(distJava, pre, "getUdpConnection", "(L" + conn + ";)L" + udp + ";");
+        int hConnsGets = 0;
+        for (AbstractInsnNode in : hConns.instructions) {
+            hConnsGets += isField(in, Opcodes.GETFIELD, engine, "connections", "Ljava/util/List;") ? 1 : 0;
+        }
+        failed += check("W90 helper 契約：connections 讀原版欄位 1 次並回傳它；getVehicles 第一個呼叫就是原版 IsoCell.getVehicles（恰 1 次）；"
+                        + "getUdpConnection 恰呼叫原版 1 次",
+                hConnsGets == 1 && callNames(hVeh).get(0).equals("zombie/iso/IsoCell.getVehicles")
+                        && countExactCalls(hVeh, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoCell", "getVehicles", "()Ljava/util/Set;") == 1
+                        && countExactCalls(hUdp, Opcodes.INVOKEVIRTUAL, conn, "getUdpConnection", getUdpDesc) == 1);
+        failed += shaLocks(jar, "W90", VEHICLE_SOUND_LOCKED);
+
+        // ---- W91 ----
+        String player = "zombie/characters/IsoPlayer";
+        String gate = "zombie/mdc/NearVehicleSneakGate";
+        MethodNode vInt2 = methodFromJar(jar, player, "updateInternal2", "()Z");
+        failed += check("W91 vanilla 前提：updateInternal2 恰 2 個 checkIsNearVehicle()，前後語境都是 checkIsNearWall→pop→aload_0→呼叫→pop→aload_0→updateExt"
+                        + "（回傳值沒人用）",
+                nearVehicleCtx(vInt2));
+        MethodNode int2Mutated = methodFromJar(jar, player, "updateInternal2", "()Z");
+        AbstractInsnNode firstNear = firstCall(int2Mutated, Opcodes.INVOKEVIRTUAL, player, "checkIsNearVehicle", "()Z");
+        int2Mutated.instructions.set(nextReal(firstNear), new InsnNode(Opcodes.NOP));
+        failed += check("W91 語境負對照：第一個 checkIsNearVehicle 後面的 pop 換成 NOP（回傳值被用到）→ 語境鎖變紅",
+                !nearVehicleCtx(int2Mutated));
+        List<String> nearWatched = List.of("isSneaking()Z", "checkIsNearVehicle()Z", "isNearWallCrouching()Z");
+        Map<String, Set<String>> nearDecl = declarersUnder(index.classes(), player, nearWatched);
+        failed += check("W91 vanilla 前提：IsoPlayer 與全 jar 子類（含 IsoAnimal）不覆寫 isSneaking／checkIsNearVehicle／isNearWallCrouching"
+                        + "（實際 " + nearDecl + "）；BaseVehicle 不覆寫 DistTo(IsoMovingObject)",
+                nearDecl.isEmpty() && declaredMethod(index.classes().get(veh), "DistTo", "(L" + mov + ";)F") == null);
+        Map<String, ClassNode> withFakePlayer = new HashMap<>(index.classes());
+        ClassNode fakePlayer = new ClassNode();
+        fakePlayer.name = "zombie/mdc/W91FakeAnimal";
+        fakePlayer.superName = "zombie/characters/animals/IsoAnimal";
+        fakePlayer.methods.add(new MethodNode(Opcodes.ACC_PUBLIC, "isSneaking", "()Z", null, null));
+        withFakePlayer.put(fakePlayer.name, fakePlayer);
+        failed += check("W91 覆寫普查負對照：多一個 IsoAnimal 子類覆寫 isSneaking()Z → 普查變紅",
+                !declarersUnder(withFakePlayer, player, nearWatched).isEmpty());
+        String int2Expected = methodText(vInt2).replace("INVOKEVIRTUAL " + player + ".checkIsNearVehicle ()Z",
+                "INVOKESTATIC " + gate + ".checkIsNearVehicle (L" + player + ";)Z");
+        failed += check("W91 手術後：updateInternal2 兩處 checkIsNearVehicle 同形改道 NearVehicleSneakGate，其餘指令與 frames 不變",
+                !int2Expected.equals(methodText(vInt2)) && int2Expected.equals(methodText(method(distJava, player, "updateInternal2", "()Z"))));
+        MethodNode hNear = method(distJava, gate, "checkIsNearVehicle", "(L" + player + ";)Z");
+        failed += check("W91 helper 契約：原版 checkIsNearVehicle 4 處（off、停用、潛行、抽查），都不在 try 內；跳過前先呼叫 isSneaking",
+                countExactCalls(hNear, Opcodes.INVOKEVIRTUAL, player, "checkIsNearVehicle", "()Z") == 4
+                        && callsInTry(hNear, Opcodes.INVOKEVIRTUAL, player, "checkIsNearVehicle", "()Z") == 0
+                        && countExactCalls(hNear, Opcodes.INVOKEVIRTUAL, player, "isSneaking", "()Z") == 1);
+        failed += shaLocks(jar, "W91", NEAR_VEHICLE_LOCKED);
+        return failed;
+    }
+
+    /** 直接宣告實作 iface 的類別。 */
+    static Set<String> frameStepImplementers(Map<String, ClassNode> classes, String iface) {
+        Set<String> out = new java.util.TreeSet<>();
+        for (ClassNode cn : classes.values()) {
+            if (cn.interfaces.contains(iface)) {
+                out.add(cn.name);
+            }
+        }
+        return out;
+    }
+
+    /** cls 除了 skip（name, desc 成對）以外的方法，手術後與原版逐指令相同。 */
+    static boolean otherMethodsSame(Path jar, Path distJava, String cls, String... skip) throws Exception {
+        for (MethodNode m : classNodeFromJar(jar, cls).methods) {
+            boolean skipped = false;
+            for (int i = 0; i < skip.length; i += 2) {
+                skipped |= m.name.equals(skip[i]) && m.desc.equals(skip[i + 1]);
+            }
+            if (!skipped && !methodText(m).equals(methodText(method(distJava, cls, m.name, m.desc)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 落在任一 try 區塊內的精確呼叫數。 */
+    static int callsInTry(MethodNode m, int opcode, String owner, String name, String desc) {
+        int n = 0;
+        for (AbstractInsnNode in : m.instructions) {
+            if (isCall(in, opcode, owner, name, desc)) {
+                int at = m.instructions.indexOf(in);
+                for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                    if (m.instructions.indexOf(t.start) <= at && at < m.instructions.indexOf(t.end)) {
+                        n++;
+                        break;
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    /** 原版本體 SHA 鎖，每個鎖配 {@link #wmIndexMutate} 負對照（W86 寫法）。 */
+    static int shaLocks(Path jar, String tag, String[][] locks) throws Exception {
+        int failed = 0;
+        Map<String, ClassNode> cache = new HashMap<>();
+        for (String[] lock : locks) {
+            ClassNode cn = cache.get(lock[0]);
+            if (cn == null) {
+                cn = new ClassNode();
+                try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+                    new ClassReader(jf.getInputStream(jf.getJarEntry(lock[0] + ".class")).readAllBytes()).accept(cn, ClassReader.SKIP_DEBUG);
+                }
+                cache.put(lock[0], cn);
+            }
+            String what = lock[0].substring(lock[0].lastIndexOf('/') + 1) + "." + lock[1] + lock[2];
+            MethodNode body = declaredMethod(cn, lock[1], lock[2]);
+            String got = body == null ? "missing" : sha256Hex(methodText(body));
+            failed += check(tag + " vanilla 前提：" + what + " 本體（去 debug 的 methodText SHA-256）與 42.21 相同", got.equals(lock[3]));
+            if (!got.equals(lock[3])) {
+                System.out.println("  實際 SHA：" + got);
+            }
+            String mutation = body == null ? "none" : wmIndexMutate(body);
+            failed += check(tag + " SHA 鎖負對照：" + what + " " + mutation + " → SHA 鎖變紅",
+                    got.equals(lock[3]) && !mutation.equals("none") && !sha256Hex(methodText(body)).equals(lock[3]));
+        }
+        return failed;
+    }
+
+    /** W91：updateInternal2 恰 2 個 checkIsNearVehicle()，每個都在 checkIsNearWall→pop→aload_0→呼叫→pop→aload_0→updateExt 之間。 */
+    static boolean nearVehicleCtx(MethodNode m) {
+        String player = "zombie/characters/IsoPlayer";
+        List<AbstractInsnNode> calls = new ArrayList<>();
+        for (AbstractInsnNode in : m.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, player, "checkIsNearVehicle", "()Z")) {
+                calls.add(in);
+            }
+        }
+        boolean ok = calls.size() == 2;
+        for (AbstractInsnNode c : calls) {
+            AbstractInsnNode before = prevReal(prevReal(c));
+            ok &= isVar(prevReal(c), Opcodes.ALOAD, 0) && nextReal(c).getOpcode() == Opcodes.POP
+                    && before.getOpcode() == Opcodes.POP
+                    && isCall(prevReal(before), Opcodes.INVOKEVIRTUAL, player, "checkIsNearWall", "()F")
+                    && isVar(nextReal(nextReal(c)), Opcodes.ALOAD, 0)
+                    && isCall(nextReal(nextReal(nextReal(c))), Opcodes.INVOKEVIRTUAL, player, "updateExt", "()V");
+        }
+        return ok;
     }
 
     /** root 本身與它在 classes 裡的所有子類別中，宣告 watched（name+desc）各方法的類別。 */

@@ -4663,7 +4663,7 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行）：
 **不處理**：`getDetectionRange` 在伺服器略過（研究的刀 2，刀 1 上線後收益不到 0.5 ms）；每幀快照加空間網格（刀 3，要看本刀上線後 dump 裡 `updateLOS` 是否仍大於 3%）；`ServerLOS.findData` 在 `isCouldSee`、`doServerZombieLOS`、`IsoDeadBody` 等其他呼叫點的線性掃描；客戶端與非 `BusyInMain` 的呼叫來源一律照原版。
 
 **守門與驗證**：
-- SmokeCheck：原版前提——`updateLOS` 恰 1 個 `getCell`、1 個 `Set.iterator`，`aload_0→getCell→getObjectList→iterator→astore 9` 直線、迭代器只存 slot 9 一次且每個 `aload 9` 緊接 `hasNext`／`next`；**原版本體 SHA 鎖**（去 debug 的 methodText SHA-256，沿用 W31／W73 寫法）鎖住視窗外物件在原版迴圈裡實際會到達的 33 個方法：`IsoPlayer.updateLOS()`、`ServerLOS.isCouldSee`／`findData`／`updateLOS(IsoPlayer)`、`IsoObject.getCell`、`IsoCell.getObjectList`、`IsoMovingObject.getX/Y/Z`／`getCurrentSquare`、`IsoUtils.DistanceTo`、`Type.tryCastTo`、`IsoPlayer.isSeeEveryone`／`getAttachedAnimals`／`getPlayerIndex`、`IsoGameCharacter.isAsleep`／`getDetectionRange` 與它呼叫的 `getWornItemsHearingMultiplier`、`CharacterTraits.get`、`Stats.get`、`IsoZombie.isReanimatedForGrappleOnly`、`IGrappleableWrapper.getGrappledBy`（default method）、`IsoGameCharacter.getWrappedGrappleable`（兩個簽章）、`BaseGrappleable.getGrappledBy`、`ServerOptions.getInstance`、`BooleanConfigOption.getValue`、`IsoObject.setAlpha(IF)`／`setTargetAlpha(IF)`／`setAlphaAndTarget(IF)`／`setAlphaAndTarget(F)`／`getTargetAlpha(I)`／`getTargetAlpha()`，任一變了就紅（印出實際 SHA，但要先重新分析，不是改值讓它變綠）；負對照在記憶體裡的原版 `updateLOS` 迴圈頭插一筆 `putfield ticksSinceSeenZombie`，呼叫集合照舊相同、SHA 鎖必須變紅。迴圈本體（slot 9 之後到迴圈出口）66 個呼叫的多重集合保留為診斷；伺服器路徑 `couldSee` 只來自 `ServerLOS.isCouldSee(this, current)`，slot 21（canSee）其餘 3 次寫入只在 `bClient`／`!bServer` 守衛下；`isCouldSee` 指紋（`findData` 1 次、`bipush 48`／`96` 各 2、`LosUtil.sizeZ` 2 次且第一個接 `iconst_2; idiv`、`visible` 為 `[[[Z`）；PlayerData 欄位型別、`BusyInMain` 存在、`playersMain` 是 ArrayList、`findData` 取第一筆；`ServerLOS.updateLOS` 在 `player.updateLOS()` 前後設 `BusyInMain`／`ReadyInMain`、全 jar 只有它讀 `BusyInMain`，`px`／`py`／`pz` 只在 `LOSThread.calcLOS` 寫、`calcLOS` 只在 `WaitingInLOS` 時呼叫；`setTargetAlpha`／`setAlpha` 頭部 server guard、`getTargetAlpha(int)` server 回 1、`setAlphaAndTarget`／`getTargetAlpha()` 只轉呼叫兩參數版；**覆寫普查**：全 jar `IsoObject` 子類（objectList 裡的物件都在內）對上述讀取與 alpha 方法、`getGrappledBy`、`getWrappedGrappleable`、`getWornItemsHearingMultiplier` 共 19 個方法的宣告者與 42.21 相同（`IsoDeadBody` 也宣告 `getWrappedGrappleable`，但 grapple-only 分支只對 `IsoZombie` 呼叫 `getGrappledBy`），`BaseGrappleable` 子類不覆寫 `getGrappledBy`，`ServerOptions$BooleanServerOption` 直接繼承 `BooleanConfigOption` 且它與子類不覆寫 `getValue`（負對照：多一個覆寫 `setTargetAlpha(IF)` 的 `IsoZombie` 子類，普查必須變紅）；`getX/Y/Z`、`getCurrentSquare`、`IsoCell.getObjectList` 是純欄位讀取。手術後只有兩個呼叫同形改道、`IsoPlayer` 其餘方法不變；helper 先建原版迭代器、`Filter.hasNext` 只經底層 `hasNext`／`next` 取元素，`Plain` 的 `hasNext`／`next` 各只委派底層同名方法一次、不碰 `ServerLOS`。
+- SmokeCheck：原版前提——`updateLOS` 恰 1 個 `getCell`、1 個 `Set.iterator`，`aload_0→getCell→getObjectList→iterator→astore 9` 直線、迭代器只存 slot 9 一次且每個 `aload 9` 緊接 `hasNext`／`next`；**原版本體 SHA 鎖**（去 debug 的 methodText SHA-256，沿用 W31／W73 寫法）鎖住視窗外物件在原版迴圈裡實際會到達的 33 個方法：`IsoPlayer.updateLOS()`、`ServerLOS.isCouldSee`／`findData`／`updateLOS(IsoPlayer)`、`IsoObject.getCell`、`IsoCell.getObjectList`、`IsoMovingObject.getX/Y/Z`／`getCurrentSquare`、`IsoUtils.DistanceTo`、`Type.tryCastTo`、`IsoPlayer.isSeeEveryone`／`getAttachedAnimals`／`getPlayerIndex`、`IsoGameCharacter.isAsleep`／`getDetectionRange` 與它呼叫的 `getWornItemsHearingMultiplier`、`CharacterTraits.get`、`Stats.get`、`IsoZombie.isReanimatedForGrappleOnly`、`IGrappleableWrapper.getGrappledBy`（default method）、`IsoGameCharacter.getWrappedGrappleable`（兩個簽章）、`BaseGrappleable.getGrappledBy`、`ServerOptions.getInstance`、`BooleanConfigOption.getValue`、`IsoObject.setAlpha(IF)`／`setTargetAlpha(IF)`／`setAlphaAndTarget(IF)`／`setAlphaAndTarget(F)`／`getTargetAlpha(I)`／`getTargetAlpha()`，任一變了就紅（印出實際 SHA，但要先重新分析，不是改值讓它變綠）；負對照在記憶體裡的原版 `updateLOS` 迴圈頭插一筆 `putfield ticksSinceSeenZombie`，呼叫集合照舊相同、SHA 鎖必須變紅。迴圈本體（slot 9 之後到迴圈出口）66 個呼叫的多重集合保留為診斷；伺服器路徑 `couldSee` 只來自 `ServerLOS.isCouldSee(this, current)`，slot 21（canSee）其餘 3 次寫入只在 `bClient`／`!bServer` 守衛下；`isCouldSee` 指紋（`findData` 1 次、`bipush 48`／`96` 各 2、`LosUtil.sizeZ` 2 次且第一個接 `iconst_2; idiv`、`visible` 為 `[[[Z`）；PlayerData 欄位型別、`BusyInMain` 存在、`playersMain` 是 ArrayList、`findData` 取第一筆；`ServerLOS.updateLOS` 在 `player.updateLOS()` 前後設 `BusyInMain`／`ReadyInMain`、全 jar 只有它讀 `BusyInMain`，`px`／`py`／`pz` 只在 `LOSThread.calcLOS` 寫、`calcLOS` 只在 `WaitingInLOS` 時呼叫；`setTargetAlpha`／`setAlpha` 頭部 server guard、`getTargetAlpha(int)` server 回 1、`setAlphaAndTarget`／`getTargetAlpha()` 只轉呼叫兩參數版；**覆寫普查**：全 jar `IsoObject` 子類（objectList 裡的物件都在內）對上述讀取與 alpha 方法、`getGrappledBy`、`getWrappedGrappleable`、`getWornItemsHearingMultiplier` 共 19 個方法的宣告者與 42.21 相同（`IsoDeadBody` 也宣告 `getWrappedGrappleable`，但 grapple-only 分支只對 `IsoZombie` 呼叫 `getGrappledBy`），`BaseGrappleable` 子類不覆寫 `getGrappledBy`，`ServerOptions$BooleanServerOption` 直接繼承 `BooleanConfigOption` 且它與子類不覆寫 `getValue`（負對照：多一個覆寫 `setTargetAlpha(IF)` 的 `IsoZombie` 子類，普查必須變紅）；`getX/Y/Z`、`getCurrentSquare`、`IsoCell.getObjectList` 是純欄位讀取。手術後只有兩個呼叫同形改道、`IsoPlayer` 其餘方法不變（W91 的命中點 `updateInternal2` 除外，由 [2cz](#2cz) 鎖住）；helper 先建原版迭代器、`Filter.hasNext` 只經底層 `hasNext`／`next` 取元素，`Plain` 的 `hasNext`／`next` 各只委派底層同名方法一次、不碰 `ServerLOS`。
 - `PlayerLosFilterTest`（`build.ps1` [9zx/10]，vanilla、observe、on、off、violation、phase50、phase64 七個 JVM，全部帶 `-XX:hashCode=2`（identity hash 固定，兩個 JVM 的 HashSet 迭代順序相同）與 `-XX:-OmitStackTraceInFastThrow`，手術後的六個另帶 `-Dmdc.playerLosFilter.seed=83`，測試用同一個 xorshift64* 照種子重算每次抽到什麼）：vanilla 的 classpath 不含 dist，跑 jar 原版 `updateLOS` 把每次呼叫寫成一行 trace，observe／on／off 跑 dist 手術後的版本、同一批世界逐行比對 1,105 次呼叫：例外類別與訊息、`TestZombieSpotPlayer`／`spotted` 呼叫序列、spottedList／lastSpotted、viewer 與 stats 的全部基本型別欄位、每個物件的全部基本型別欄位、GameTime 倍率。世界涵蓋視窗四邊 ±1 格與 z 上下界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物（含牽著的）、survivor、睡著、PlayerData 重複（同一位玩家兩筆：第一筆是真的視窗與 visible，第二筆視窗移開 300 格、visible 另一份全 false，所以取到第二筆就會略過看得見的目標；另有第一筆不是 `BusyInMain`、第二筆是的情況，必須 fallback notBusy）／缺少、status 不是 `BusyInMain`、`TestZombieSpotPlayer` 中加入元素／移除正在處理的元素／移除別的元素（CME，含被改的是最後一個元素）、null 與非 `IsoMovingObject` 元素、非主執行緒。替身只在出口：viewer 覆寫 `TestZombieSpotPlayer` 記錄（殭屍不往下呼叫，`IsoZombie` 是 final，真的 `spotted`／`ZombieControl` 要完整世界與網路）與 `getDetectionRange`（真的要 traits 與穿戴物品；伺服器上不影響分支），玩家與動物目標覆寫 `spotted` 記錄；測試 JVM 建不起 `SandboxOptions`（`isFakeDead`）與殭屍的 `StateMachineComponent`，所以同樓層 7 格內的殭屍一律 ghost、殭屍不設 target，近處分支裡 `ticksSinceSeenZombie` 那段與 music 的 target 分支沒有走到（它們都在視窗內，本刀原樣放行）。observe、on、off 都與原版逐行相同，notBusy／noData／thread 三種 fallback 都走過；observe 與 on 的 `audits`、`plains` 等於照種子重算的精確值（`engaged=899` 時 18 與 12），亂數狀態與測試的副本同步，`mismatches=0`，比對有實際呼叫 `isCouldSee`；off 計數全 0、不記 log。另外直接呼叫 `getCell`／`iterator` 640 次（視窗內外各 8 個殭屍），逐次照種子預測並驗證：原版計時那 15 次拿到 `Plain`、走完全部元素且 `isCouldSee` 計數不變，比對那 10 次對 8 個視窗外各呼叫一次，其餘 615 次 observe 拿到的就是原版迭代器本身（同一個物件）、on 拿到只交出自己與視窗內 8 個的過濾迭代器。violation（on）：`TestZombieSpotPlayer` 中把 PlayerData 往 +x 挪 30 格，讓建立迭代器時在視窗外的殭屍變成看得見；照種子預測，在看到漂移下的原版計時與過濾之前抽到比對的 5 次不漂移（零 mismatch），過濾的 244 次它被略過（前提被破壞時 on 與原版不同），1 次原版計時全部放行、原版處理到它但不比對，第 251 次是漂移下的第一次比對：全部放行、原版處理到它並記 mismatch、本次啟動停用、停用行帶玩家與座標，之後同樣的漂移下回到原版。phase50／phase64（on）：50 或 64 位玩家各有自己的 PlayerData，每輪照固定順序各跑一次 `updateLOS`，只有第 4 位（50 人）或第 5 位（64 人）在迴圈中漂移——舊的「序號 &63」抽樣在這兩個位置永遠抽不到比對；隨機抽樣下分別在第 164 輪與第 87 輪抓到並停用，停用行是那一位，其間其他玩家被比對 133 次與 83 次、零 mismatch。另外以 8 個手改的 helper（視窗 x 上下界、y 上界、z 上下界各縮一格，略過自己，略過 null，PlayerData 取最後一筆）跑 on，全部與原版不同（差 3–782 行）；跑 observe 時行為仍是原版（差 0），5 個視窗界 mutant 由比對抓到 mismatch，略過自己與略過 null 不影響 observe（observe 從不過濾、比對時全部放行），取最後一筆在 observe 下行為也是原版，這次的比對沒有落在重複 PlayerData 的呼叫上。
 
 **退場**：官方讓伺服器的 `updateLOS` 只走視窗內的物件（或有空間索引）時撤刀；SmokeCheck 的原版本體 SHA 鎖、覆寫普查或 `isCouldSee` 指紋變紅時先重新分析等價，不改 SHA 讓它變綠。
@@ -4884,6 +4884,102 @@ console（首次呼叫一行生效狀態；每次改走 non pvp 一行，玩家�
 - 實機 E2E（本機專用伺服器＋兩個客戶端，伺服器 ini `PVP=false`、`AnnounceDeath=true`、`PVPLogToolChat=true`、`PVPLogToolFile=true`）：伺服器 Lua 把 B 的 `attackedBy` 設成 A（或殭屍、或 null），再 `setHealth(0)`＋`die()`，走和正式服失溫死亡同一條 `die()` → `Kill(getAttackedBy())` → `DoDeath`。原版：pvp.txt `[IMPORTANT] Kill: "A" … killed "B" …`，A、B 兩端聊天都是 `Kill: "A" killed "B"`，user.txt 沒有 died（紅燈）。on：pvp.txt 0 行 Kill，user.txt `user B died at … (non pvp)`，兩端聊天 `B is dead.`，console 一行 `[PveDeathLog] PVP=false: B died with attackedBy=A`。off：回到原版的 Kill 行與 Kill 公告。on 時 `attackedBy` 是殭屍或 null：user.txt died、聊天 `is dead.`、沒有 Kill 行、沒有 `[PveDeathLog] PVP=false` 行（與原版相同）。伺服器只把遠端玩家血量設 0 不會走到 `die()`，所以情境直接呼叫 `die()`。
 
 **退場**：官方讓 `DoDeath` 在 PVP 關閉時不走 `logKill`（或 `attackedBy` 有時效、碰撞在 PVP 關閉時不設 `attackedBy`）時撤刀；SmokeCheck 鎖了原版 `DoDeath` 本體，官方改這個方法時會變紅，先重估再決定。
+
+<a id="2cx"></a>
+## 2cx. 閒置車降頻（W89，server，預設 observe）
+
+**成本**：伺服器上 `MovingObjectUpdateScheduler.getUpdateSchedulerSimulationLevelForObject` 開頭 `!isEnabled || GameServer.server` 就回 FULL（frameMod 1），所以每輛載入的車每幀都跑 `preupdate`、`frameStep`、`update`、`postupdate`；原版連客戶端都把車釘在 FULL（`BaseVehicle.getMinimumSimulationLevel`）。2026-11-01 晚峰（45–47 人、約 2,090 輛載入車、FPS 9.2）60 份主執行緒 dump 有 12 份停在 `BaseVehicle.update`（約 20%），大多是沒人、熄火、沒在動的車：每幀約 23 次格子查詢、2×2 的作物查詢、掃全部零件找開著的燈，結果和上一幀相同。
+
+**做法**：`startFrame()` 把物件放進 bucket 時，伺服器主執行緒上「閒置」的車只在 `((frameCounter + vehicleId) & (N−1)) == 0` 的幀放進去（`-Dmdc.idleVehicleThrottleN`，2 的次方 1–64，預設 8；用 `vehicleId` 錯開輪次），其他幀四段一起跳過（`postupdate(I)` 走同一個 bucket，伺服器 frameMod 1）。閒置＝下面全部成立，全是 public 欄位或純讀取的 getter，每幀重算：`CarController` 存在且 `isEnable` 是 false、`physicActiveCheck` 與 `constraintChangedTime` 都是 −1、授權是 `Server`（伺服器的 `VehiclePhysicsPacket.processServer` 要 `hasAuthorization` 才收位置，沒有客戶端能推這台車）、每個座位沒人、拖車內沒有動物、沒拖也沒被拖、引擎 `Idle`、警報沒在響、燈條與警笛關、`needPartsUpdate` 是 false、沒開機修介面、沒有 `jniIsCollide`、有目前格子與 chunk、還在世界裡。上車、發動、警報、被推（授權改變）、被撞（`applyImpulse*` 讓 `isEnable` 變 true）、掛拖車（`constraintChanged`）都讓下一幀的判斷不成立，最多延後 1 幀就回到每幀更新。
+
+**on 時會延後的事**（N=8、10 FPS 時最多 0.7 秒，不改最終狀態）：有人在閒置車底下種的作物被壓毀、不在 `cell.vehicles` 的車加入移除清單、油量超過容量的修正、殭屍撞車的世界聲音、頭燈在電瓶耗盡後熄滅（耗電本身照遊戲時間）、找到拖車對象後的重連（找不到時每幀 O(全部車) 的掃描也跟著降成 1/N）、外部程式只改 `jniTransform` 不改授權時的位置同步（observe 的 `posDiff` 就是在量它）。`frameStep` 對車只把 `FrameKeeperComponent.frameNo` 設成這一幀（只有 `frameStep` 自己讀，用來擋同一幀跑兩次）並巡訪 `ECSFrameStep` 元件；全 jar 只有 `CharacterInputComponent` 實作它，車沒有，所以跳過只讓 `frameNo` 落後。不補 `GameTime.perObjectMultiplier`：閒置條件排除了用每幀 multiplier 累加的效果（警報閃燈、拖車、動物），頭燈、收音機、引擎冷卻都用遊戲時間戳。
+
+**手術**（新 ClassPatch `zombie/MovingObjectUpdateScheduler`，新 helper `zombie/mdc/IdleVehicleThrottle`）：`startFrame()V` offset 132 唯一的 `invokevirtual MovingObjectUpdateSchedulerUpdateBucket.add(IsoMovingObject)V`（前面 `getUpdateOrderIndex`→`aaload`→`aload_3`，後面 `goto`）同形改道 `IdleVehicleThrottle.add(bucket, obj)`，`expectedHits` 1，堆疊形狀與指令長度不變、frames 不動；是呼叫端改道，不碰 `BaseVehicle`。不是車、不在伺服器、不在主執行緒、`vehicleId < 0`、off、停用後都直接呼叫原版 `add`；helper 例外照原版 `add` 並停用。
+
+**模式與 kill switch**：`-Dmdc.idleVehicleThrottle=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。
+- `observe`：一律放行，對「會跳」的車這一幀記指紋、下一幀再比：`pos`（x、y、z、`jniTransform.origin`、目前格子與 chunk 的身分）、`state`（閒置條件用到的欄位加上是否還在 `cell.vehicles`）、`parts`（每 64 次抽一次電瓶電量）。指紋以 `vehicleId` 為索引並存 `System.identityHashCode`，id 被別台車重用時不比。state 變了算 `stateDiff`（下一幀判斷就不成立，最多延後 1 幀）；state 沒變而 pos 變了才算 `posDiff`（on 會延後到下一個輪次）。
+- `on`：跳過；每 4096 次跳過抽一次照原版放行、下一幀比指紋，`posDiff` 就本次啟動永久回原版並記一行。
+- `off`：直接呼叫原版 `add`，不計數、不記 log。
+
+console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
+
+```text
+[MinidoracatJavaPatch][IdleVehicleThrottle] 首次生效 mode=<observe|on> raw=<值> N=<n> rawN=<值>（-Dmdc.idleVehicleThrottle=0|off 原版、1|on 閒置車每 N 幀更新一次、2|observe 只量；心跳每 5 分鐘一行）
+[MinidoracatJavaPatch][IdleVehicleThrottle] beat mode=<observe|on> N=<n> vehicles=<n> frames=<n> visits=<n> idle=<n> active=<n> wouldSkip=<n> skipPct=<%> skipped=<n> audits=<n> compared=<n> posDiff=<n> stateDiff=<n> partsDiff=<n> stateFields=<欄位:次數,…> predUsAvg=<µs> orphanTow=<n> fallback=<n> anomalies=<n> disabled=<true|false> posTop=<vid:腳本@x,y,z(欄位);…>
+[MinidoracatJavaPatch][IdleVehicleThrottle] DISABLED（本次啟動永久回原版）reason=<原因> at <vid:腳本@x,y,z> skipped=<n> audits=<n>
+```
+
+欄位：`vehicles` 是 beat 當下 `IsoCell.getVehicles()` 的車數；`frames`、`visits`（車·幀）、`idle`、`active`、`wouldSkip`（閒置而且不是自己的輪次）、`skipped`（on 實際跳過）、`audits`、`compared`（指紋比對次數）、三種 diff 都是這 5 分鐘的值；`stateFields` 是 `stateDiff` 裡哪個條件變了；`predUsAvg` 是閒置判斷一次的成本（每 256 次抽一次計時）；`orphanTow` 是 `vehicleTowingId != -1` 但拖車物件是 null 的車（beat 時以反射數一次，它們原版每幀都 O(全部車) 找拖車對象）；`posTop` 是這 5 分鐘前 5 筆 `posDiff`。
+
+**判讀**：`posDiff` 必須是 0（不是 0 就看 `posTop` 哪台車、哪個欄位）；`skipPct` 預期 80% 以上；`stateDiff` 是車剛被喚醒（看 `stateFields`）；`partsDiff` 是照遊戲時間的耗電，預期中。observe 一個晚峰都符合再問服主切 on；切 on 後同時段重跑 dense dump，`BaseVehicle.update` 預期從 12/60 降到 2–4/60，降不到一半就回 observe。**W3-4 心跳的 `serverSkipped` 從此是實際跑的 `BaseVehicle.update` 次數**：off／observe 時約等於載入車數 × FPS，on 時約 (閒置車 ÷ N ＋ 活動車) × FPS，不能再拿它推算載入車數（改看本刀的 `vehicles`）。第七輪研究估 N=8 約省主執行緒 150 ms/s（區間 84–260，推論）。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——全 jar `MovingObjectUpdateSchedulerUpdateBucket.add` 只有 `startFrame` 呼叫 1 次，語境 `getUpdateOrderIndex`→`aaload`→`aload_3`→呼叫→`goto`；`ECSFrameStep` 只有 `CharacterInputComponent` 實作，`BaseVehicle` 是 final，它與 `IsoMovingObject`／`IsoObject` 不覆寫 `frameStep`／`registerECSComponents`（普查配負對照：多一個實作的類別就紅）；46 個原版方法本體 SHA 鎖（`IDLE_VEHICLE_LOCKED`，每個配 `wmIndexMutate` 負對照）：`startFrame`、`getUpdateSchedulerSimulationLevelForObject`、`getFrameMod`、scheduler 與 bucket 的 `update`／`postupdate`、bucket `add`、`BaseVehicle.update`／`postupdate`／`shouldAnimRecorderBeActive`、`IsoMovingObject.update`／`preupdate`、`ECSEntity.frameStep`、`setPhysicsActive` 兩個、`constraintChanged`、三個 `applyImpulse*`、`VehiclePhysicsPacket.processServer`、`hasAuthorization`、`VehicleEngine.update`、`VehicleAlarm.update`／`isActive`、`drainBatteryUpdateHack`、`VehicleParts.updatePart`、`DeviceData.update(ZZ)`、`getMinimumSimulationLevel`（仍回 FULL；官方開放車輛降頻時提醒重估）、閒置條件讀的 getter 與 `tryReconnectToTowedVehicle`。手術後 `startFrame` 只差那一個呼叫、scheduler 其餘方法不變；helper 的兩個原版 `add` 都不在 try 內。
+- `IdleVehicleThrottleTest`（`build.ps1` [9zzc/10]，observe、on、on N=4、on-throw、off、jar 原版六個 JVM，帶 `-Xverify:all`，自驗 argv、模式、N 與 scheduler 來源）：跑真 `startFrame`，64 台閒置車＋4 台活動車。閒置條件 19 項逐項翻轉的真值表；observe 每台車每幀都放行、會跳次數＝每台每 N 幀 N−1 次、只改位置算 `posDiff`、位置與狀態都改算 `stateDiff`、心跳欄位（`vehicles`、`orphanTow`、`posTop`）；on 每 N 幀閒置車恰好 1 次、活動車每幀，第一次稽核狀態也變了不停用、第二次只改位置就停用、停用後照原版且心跳照印 `disabled=true`；helper 例外照原版放行並停用；off 每幀全部放行；jar 原版負對照每台車每幀都放行。
+
+**部署**：manifest 新增 `zombie/mdc/IdleVehicleThrottle.class` 與 `zombie/MovingObjectUpdateScheduler.class`。
+
+**不處理**：作物壓毀、移除清單、油量夾值、殭屍撞車聲音的延後（上面那張表）只用 observe 量位置一類，其他類沒有欄位直接量；本機實機 E2E（上車開走、步行推車、撞停著的車、打破車窗觸發警報、掛拖車、開著頭燈熄火）還沒跑，切 on 前要跑。
+
+**退場**：官方讓伺服器上的車降頻、或閒置路徑變便宜時重估；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對閒置路徑，不改斷言或 SHA 讓它變綠。
+
+<a id="2cy"></a>
+## 2cy. 車輛聲音網路相關性預篩（W90，server，預設 observe）
+
+**成本**：`vehicleNetworkSound.server.Manager.update`（`IngameState.UpdateStuff` 每幀呼叫）對每條連線呼叫 `getVehiclesRelevantToConnection`，每次走完整個 `IsoCell.getVehicles()`，`vehicleId != -1` 的車都呼叫 `Connection.isRelevant`：連線數 × 車數，46 條連線 × 約 2,090 輛約每幀 9.6 萬次。`isRelevant` 的聲音半徑只看車本身：警報（500）、倒車蜂鳴（150）、車門警報（50）、引擎不是 Idle（200）、喇叭（500）、警笛（500）；半徑大於 0 才用連線的 `RelevantTo`。這版 jar 的 `isRelevant` 本身沒有呼叫 `isListenerInRange`，它在五個聲音條件裡，伺服器上開頭就回 true。11-01 晚峰 dump 有 2/60 停在 `isRelevant`。
+
+**做法**：每次 `Manager.update` 開頭，依 `getVehicles()` 的原迭代順序篩出 `vehicleId != -1` 而且半徑大於 0（六個條件任一成立；半徑都是正數）的車放進一份清單；每條連線的 `getVehiclesRelevantToConnection` 拿這份清單代替全部車，原版迴圈的判斷（`vehicleId`、`isRelevant`）照跑。`tempVehicles` 是 `HashSet`，插入順序與原版相同，所以內容與迭代順序都相同。`Manager.update` 期間車的聲音狀態不變：`VehicleState.update`／`sendNew` 與 `Connection.updateVehicle`／`forgetIrrelevantVehicles` 只讀車、送封包。
+
+**手術**（新 ClassPatch `zombie/vehicleNetworkSound/server/Manager`，新 helper `zombie/vehicleNetworkSound/server/MdcVehicleSoundPrefilter`，放在同一個 package 才呼叫得到 package-private 的 `isRelevant`／`getUdpConnection`）：
+- `update()V` offset 3 唯一的 `getfield UdpEngine.connections`（前面 `getstatic GameServer.udpEngine`、後面 `List.iterator`）以 `fieldGetRedirects` 換成 `connections(UdpEngine)`：一輪開始（建清單、心跳），回傳原欄位，`expectedHits` 1。
+- `updateConnection(UdpConnection)V` offset 17 唯一的 `invokevirtual Connection.getUdpConnection()` 改道 `getUdpConnection(Connection)`：記下這一輪正在處理的連線（比對用），回傳原值，`expectedHits` 1。
+- `getVehiclesRelevantToConnection(Connection,Set)V` offset 12 唯一的 `invokevirtual IsoCell.getVehicles()`（前面 `getfield IsoWorld.currentCell`、後面 `Set.iterator`）改道 `getVehicles(IsoCell)`：on 時回傳篩好的清單（以 `ArrayList` 為底的 `AbstractSet`），其他時候回原版 Set，`expectedHits` 1。
+
+**模式與 kill switch**：`-Dmdc.vehicleSoundPrefilter=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 每 16 輪兩邊都算：每條連線用原版迴圈與篩好的清單各算一次 `tempVehicles` 會放進的車，逐一比對（內容與順序），回原版的 Set；on 用篩好的清單，每 256 輪比對一輪；不一致或 helper 例外就本次啟動永久回原版。off 完全原版、不計數、不記 log。
+
+console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
+
+```text
+[MinidoracatJavaPatch][VehicleSoundPrefilter] 首次生效 mode=<observe|on> raw=<值>（…）
+[MinidoracatJavaPatch][VehicleSoundPrefilter] beat mode=<observe|on> rounds=<n> connAvg=<n> built=<n> vehAvg=<n> candAvg=<n> compares=<n> mismatches=<n> vanillaUsAvg=<µs> prefUsAvg=<µs> anomalies=<n> disabled=<true|false>
+[MinidoracatJavaPatch][VehicleSoundPrefilter] DISABLED（本次啟動永久回原版）reason=mismatch at <i> expected=<vid> got=<vid> expectedN=<n> gotN=<n> rounds=<n> compares=<n>
+```
+
+欄位：`rounds` 是這 5 分鐘的 `Manager.update` 次數，`connAvg` 每輪連線數，`built` 建清單的輪數（observe 只在抽到的輪建），`vehAvg`／`candAvg` 是建清單時的全部車數與篩後車數，`compares` 是逐連線比對次數，`vanillaUsAvg`／`prefUsAvg` 是一次比對裡原版迴圈與篩後迴圈各花的時間（每條連線）。`mismatches` 必須是 0；`candAvg ÷ vehAvg` 越小、`vanillaUsAvg − prefUsAvg` 越大，on 越值得。研究估約省 30 ms/s（區間 4–100，推論）。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`Manager.update` 恰 1 個 `getfield UdpEngine.connections`、`updateConnection` 恰 1 個 `getUdpConnection`（`aload_3`→呼叫→`aload_1`）、`getVehiclesRelevantToConnection` 恰 1 個 `IsoCell.getVehicles` 與 1 個 `isRelevant`、迴圈先比 `vehicleId == -1`；全 jar 呼叫鏈只有 `update`→`updateConnection`→`getVehiclesRelevantToConnection`；21 個原版方法本體 SHA 鎖（`VEHICLE_SOUND_LOCKED`，各配負對照）：Manager 三個方法與建構子（`tempVehicles` 是 `HashSet`）、`isRelevant`、`updateVehicle`、`forgetIrrelevantVehicles`、`getUdpConnection`、`VehicleState.update`／`sendNew`、六個聲音條件與它們讀的 `hasAlarm`／`hasSiren`／`isSirenActive`、`isListenerInRange`、`IsoCell.getVehicles`。手術後三處只差改道、Manager 其餘方法不變；helper 三個入口各只呼叫原版一次。
+- `MdcVehicleSoundPrefilterTest`（`build.ps1` [9zzd/10]，observe、on、off、jar 原版四個 JVM）：300 台隨機車（引擎 Running／Idle、喇叭、倒車蜂鳴、`vehicleId = -1`）× 12 條隨機位置的連線 × 600 輪；每輪先跑真 `Manager.update()`（沒登記連線的 Manager，送封包前就返回，只觸發改道的一輪開始），再照 `updateConnection` 的順序呼叫改道與私有的 `getVehiclesRelevantToConnection`，結果逐條（內容與順序）等於原版迴圈；observe 每 16 輪、on 每 256 輪比對；一輪開始之後把全部車發動（違反前提）在比對那一輪抓到並停用、停用後等於原版、心跳照印；off 不比對不印；jar 原版負對照證明比對基準就是原版的結果。警報、車門警報、警笛三個條件測試沒有造（要電瓶與車門零件），由 SHA 鎖守住。
+
+**部署**：manifest 新增 `MdcVehicleSoundPrefilter.class`、`MdcVehicleSoundPrefilter$1.class` 與 `Manager.class`。
+
+**退場**：官方讓聲音相關性不再逐連線掃全部車時撤刀；SmokeCheck 的語境或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
+
+<a id="2cz"></a>
+## 2cz. `checkIsNearVehicle` 只在潛行時跑（W91，server，預設 observe）
+
+**成本**：`IsoPlayer.updateInternal2` 兩處（javap offset 897、1263）`invokevirtual checkIsNearVehicle()Z` 後面都接 `pop`，回傳值沒人用。`IsoGameCharacter.checkIsNearVehicle` 每位玩家每幀走完整個 `getVehicles()` 算 `DistTo`，唯一的寫入是 `sneaking` 時 `setNearWallCrouching(true)`；不潛行時什麼都不寫（不會設成 false）。玩家數 × 車數；10-28／10-29 晚峰 dump 合計 3/176，約 10–16 ms/s。
+
+**做法與手術**（併在 W83 既有的 `IsoPlayer` ClassPatch，新 helper `zombie/mdc/NearVehicleSneakGate`）：`updateInternal2()Z` 兩處 `checkIsNearVehicle()`（前後語境都是 `checkIsNearWall`→`pop`→`aload_0`→呼叫→`pop`→`aload_0`→`updateExt`）同形改道 `NearVehicleSneakGate.checkIsNearVehicle(IsoPlayer)`，`expectedHits` 2。潛行時照原版呼叫；不潛行時 on 直接回 false（回傳值反正被 pop）。W83 的「IsoPlayer 其餘方法不變」改成把 `updateInternal2` 列為例外，由本刀的語境鎖與「手術後只差兩個呼叫」鎖住。
+
+**模式與 kill switch**：`-Dmdc.nearVehicleSneakGate=2|observe`（程式預設，未設與未知值都是）、`1|on`、`0|off`，需重啟。observe 照原版呼叫，不潛行時確認呼叫前後 `nearWallCrouching` 不變；on 不潛行時跳過，每 4096 次跳過抽一次照原版呼叫並做同樣檢查；變了就本次啟動永久回原版。off 完全原版、不計數、不記 log。
+
+console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停用時一行）：
+
+```text
+[MinidoracatJavaPatch][NearVehicleSneakGate] beat mode=<observe|on> calls=<n> sneaking=<n> skipped=<n> checked=<n> mismatches=<n> anomalies=<n> disabled=<true|false>
+[MinidoracatJavaPatch][NearVehicleSneakGate] DISABLED（本次啟動永久回原版）reason=nearWallCrouching <舊>→<新> while not sneaking, player=<onlineID> skipped=<n> checked=<n>
+```
+
+`calls` 是這 5 分鐘的呼叫次數（每位玩家每幀 1 次），`sneaking` 是潛行時照原版的次數，`skipped` 是 on 跳過的次數，`checked` 是不潛行時照原版呼叫並檢查的次數；`mismatches` 必須是 0。
+
+**守門與驗證**：
+- SmokeCheck：原版前提——`updateInternal2` 恰 2 個 `checkIsNearVehicle()` 且語境如上（負對照：第一個後面的 `pop` 換成 NOP 就紅）；`IsoPlayer` 與全 jar 子類（含 `IsoAnimal`）不覆寫 `isSneaking`／`checkIsNearVehicle`／`isNearWallCrouching`、`BaseVehicle` 不覆寫 `DistTo(IsoMovingObject)`（普查負對照：多一個 `IsoAnimal` 子類覆寫 `isSneaking` 就紅）；5 個原版方法本體 SHA 鎖（`NEAR_VEHICLE_LOCKED`：`checkIsNearVehicle`、`isSneaking`、`isNearWallCrouching`、`DistTo`、`IsoCell.getVehicles`，各配負對照）。手術後 `updateInternal2` 只差兩個呼叫；helper 的四個原版呼叫（off、停用、潛行、抽查）都不在 try 內。
+- `NearVehicleSneakGateTest`（`build.ps1` [9zze/10]，observe、on、off、jar 原版四個 JVM）：真 `checkIsNearVehicle` 八種組合（潛行 × 3.5 格內有車 × 呼叫前 `nearWallCrouching`）呼叫後的玩家狀態等於原版；潛行照原版、不潛行 on 跳過；原版加了「不潛行也翻轉 `nearWallCrouching`」副作用的替身玩家，observe 第一次、on 在抽查時抓到並停用，停用後照原版、心跳照印；off 每次照原版呼叫；jar 原版負對照：潛行而且車在 3.5 格內才寫。
+
+**部署**：manifest 新增 `zombie/mdc/NearVehicleSneakGate.class`，`IsoPlayer.class` 換新。W89–W91 合計 174 → 180 個 class（含 W88 共 82 個 patched class、258 個命中點、98 個 helper）。
+
+**退場**：官方拿掉這兩個呼叫或讓 `checkIsNearVehicle` 只在潛行時跑時撤刀；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對，不改斷言或 SHA 讓它變綠。
 
 ---
 
