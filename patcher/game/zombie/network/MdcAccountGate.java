@@ -34,6 +34,8 @@ import zombie.debug.DebugLog;
  * vanilla 的 PriorityLogin（role≥priority）豁免照舊保留。
  * kill switch：{@code -Dmdc.accountGate=0}。
  * 例外一律 fail-open（回 vanilla 結果並記 log）——登入閘門壞掉不該把全服鎖在門外。
+ * W97（2026-11-06）共用這個改道點：委派 vanilla 之前先呼叫 {@link MdcSteamIpBan#check}（Steam 模式的直連也查 bannedip），
+ * 它有自己的開關 {@code -Dmdc.steamIpBan}，{@code -Dmdc.accountGate=0} 不會關掉它。
  */
 public final class MdcAccountGate {
 
@@ -48,9 +50,13 @@ public final class MdcAccountGate {
     /** whitelist 一列：帳號名＋是否具 PriorityLogin（依 lastConnection 由新到舊）。 */
     record Row(String username, boolean priority) {}
 
-    /** LoginPacket／GoogleAuthKeyPacket 內 authClient(String,String,String,long,int) 的改道目標。 */
+    /** LoginPacket／GoogleAuthKeyPacket 內 authClient(String,String,String,long,int) 的改道目標（先判 W97 的 Steam 模式 IP 封鎖）。 */
     public static ServerWorldDatabase.LogonResult authClient(ServerWorldDatabase db, String user, String pass,
                                                              String ip, long steamID, int authType) {
+        ServerWorldDatabase.LogonResult ipBanned = MdcSteamIpBan.check(db, user, ip, steamID);
+        if (ipBanned != null) {
+            return ipBanned;
+        }
         ServerWorldDatabase.LogonResult r = db.authClient(user, pass, ip, steamID, authType);
         if (!ENABLED || !r.authorized) {
             return r;

@@ -3925,6 +3925,8 @@ public final class SmokeCheck {
         failed += checkPveDeathLog(jar, distJava);
         failed += checkVehicleUpdateCuts(jar, distJava);
         failed += checkAnimalCuts(jar, distJava);
+        failed += checkTeleportWatch(jar, distJava);
+        failed += checkSteamIpBan(jar, distJava);
 
         // ---- W74 尋路執行緒觀測（docs/patches.md 2ci）----
         // 存在理由：判讀依賴原版每輪先跑 chunk／格子／載具／請求四個任務佇列（8 個 poll）、再 PathfindNative.update()、
@@ -9263,5 +9265,199 @@ public final class SmokeCheck {
                 && nullReturns == 1 && onlyLogInTry);
         return failed;
     }
+
+    /** W96：helper 依賴的原版本體（取樣器的取樣、重設與車輛判斷；AntiCheatSpeed 先 resetMovable 再比速度；登入時間；原版踢人）。 */
+    static final String[][] TELEPORT_WATCH_LOCKED = {
+            {"zombie/characters/NetworkCharacterAI$SpeedChecker", "set", "(FFZLzombie/vehicles/BaseVehicle;)V",
+                    "a0e3825c3b82dce5de4ba4d55d03a7898d071964a18209481e32ec979580ecae"},
+            {"zombie/characters/NetworkCharacterAI$SpeedChecker", "reset", "()V", "c6b5f922b877407883587366df472669aecf94653b66000c198825d23f07241d"},
+            {"zombie/characters/NetworkCharacterAI$SpeedChecker", "isVehicle", "()Z", "dc8c235a6ffc7c6ba383fe669ea329375232dd0d3d21a8d972986c3968221eb5"},
+            {"zombie/characters/NetworkCharacterAI", "resetSpeedLimiter", "()V", "2d6e85cd681b0799bdfe9605ac65eaf449bfc8d3266dd7642e2b89232666db12"},
+            {"zombie/network/anticheats/AntiCheatSpeed", "validate",
+                    "(Lzombie/core/raknet/UdpConnection;Lzombie/network/packets/INetworkPacket;)Ljava/lang/String;",
+                    "477bd98fb7c29e198834a74e3bf3674af971e372e0048a3d8bc130ad566bb25c"},
+            {"zombie/network/packets/character/PlayerPacket", "resetMovable", "()V", "762956aa378fe8666434b3e33c5cf5f4c25a08cb54545410dd5aecabaec1a7ce"},
+            {"zombie/core/raknet/UdpConnection", "setFullyConnected", "()V", "7c44a6e8c5deefcf3c15aebf27240662b3bd241569ead2197d38dc8c655122f2"},
+            {"zombie/network/anticheats/AntiCheat", "doKickUser", "(Lzombie/core/raknet/UdpConnection;Ljava/lang/String;Ljava/lang/String;)V",
+                    "f6fdffd5675beaa3f93291b40caa7f9e8136498232d5d1cd86c9841a775f367f"},
+    };
+
+    /**
+     * W96 步行瞬移觀測與踢人（docs/patches.md 2de）：存在理由（取樣器只有步行與車輛兩個呼叫點、伺服器傳送只有 sendTeleport 重設玩家的取樣器、
+     * 登入時間只有建構子與 setFullyConnected 寫）、原版本體 SHA 鎖、兩個掛點的同形手術、helper 契約（原版 set／resetSpeedLimiter 在 try 外、
+     * 例外型別、每個 log 都在 try 內）。任一前提變紅＝先重新核對判斷，不改斷言。
+     */
+    static int checkTeleportWatch(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String sc = "zombie/characters/NetworkCharacterAI$SpeedChecker";
+        String setDesc = "(FFZLzombie/vehicles/BaseVehicle;)V";
+        String pp = "zombie/network/packets/character/PlayerPacket";
+        String gs = "zombie/network/GameServer";
+        String npa = "zombie/characters/NetworkPlayerAI";
+        String helper = "zombie/mdc/TeleportWatch";
+        String tpDesc = "(Lzombie/characters/IsoPlayer;FFF)V";
+        failed += check("W96 存在理由：全 jar 呼叫 SpeedChecker.set 的只有 PlayerPacket.resetMovable 與 VehiclePhysicsPacket.resetMovable（多了＝新的取樣來源要重估）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, sc, "set", setDesc).equals(List.of(
+                        pp + ".resetMovable()V", "zombie/network/packets/vehicle/VehiclePhysicsPacket.resetMovable()V")));
+        failed += check("W96 存在理由：全 jar 對 NetworkPlayerAI.resetSpeedLimiter 的呼叫只有 GameServer.sendTeleport（伺服器傳送都經過它）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, npa, "resetSpeedLimiter", "()V").equals(List.of(gs + ".sendTeleport" + tpDesc)));
+        List<String> stamp = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/core/raknet/UdpConnection", "setConnectionTimestamp", "(J)V");
+        failed += check("W96 存在理由：全 jar 呼叫 UdpConnection.setConnectionTimestamp 的只有建構子與 setFullyConnected（login＝connectionTimestamp−15000）" + stamp,
+                stamp.size() == 2 && stamp.contains("zombie/core/raknet/UdpConnection.setFullyConnected()V")
+                        && stamp.stream().filter(s -> s.startsWith("zombie/core/raknet/UdpConnection.<init>")).count() == 1);
+        for (String sub : new String[]{pp + "Reliable", pp + "Unreliable"}) {
+            failed += check("W96 存在理由：" + sub.substring(sub.lastIndexOf('/') + 1) + " 沒有覆寫 resetMovable（兩種步行封包都走 PlayerPacket 的掛點）",
+                    declaredMethod(classNodeFromJar(jar, sub), "resetMovable", "()V") == null);
+        }
+        String acs = "zombie/network/anticheats/AntiCheatSpeed";
+        String validateDesc = "(Lzombie/core/raknet/UdpConnection;Lzombie/network/packets/INetworkPacket;)Ljava/lang/String;";
+        failed += check("W96 存在理由：全 jar 呼叫 resetMovable 的只有 AntiCheatSpeed.validate（begin 掛在它頭部，記下的連線就是送出這包的連線）",
+                jarWideCallers(jar, Opcodes.INVOKEINTERFACE, acs + "$IAntiCheat", "resetMovable", "()V").equals(List.of(acs + ".validate" + validateDesc)));
+        for (String owner : new String[]{pp, pp + "Reliable", pp + "Unreliable"}) {
+            failed += check("W96 存在理由：沒有人以具體型別 " + owner.substring(owner.lastIndexOf('/') + 1) + " 直接呼叫 resetMovable（那種呼叫不經過 begin）",
+                    jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, owner, "resetMovable", "()V").isEmpty());
+        }
+        failed += shaLocks(jar, "W96", TELEPORT_WATCH_LOCKED);
+
+        MethodNode vReset = methodFromJar(jar, pp, "resetMovable", "()V");
+        MethodNode pReset = method(distJava, pp, "resetMovable", "()V");
+        String fromSet = "INVOKEVIRTUAL " + sc + ".set " + setDesc;
+        String toSet = "INVOKESTATIC " + helper + ".set (L" + sc + ";FFZLzombie/vehicles/BaseVehicle;)V";
+        failed += check("W96 手術後：resetMovable 唯一的 SpeedChecker.set 同形改道 TeleportWatch.set，其餘指令不變；PlayerPacket 其他方法不變",
+                methodText(vReset).split(java.util.regex.Pattern.quote(fromSet), -1).length == 2
+                        && methodText(pReset).equals(methodText(vReset).replace(fromSet, toSet))
+                        && otherMethodsSame(jar, distJava, pp, "resetMovable", "()V"));
+        String beginDesc = "(Lzombie/core/raknet/UdpConnection;Lzombie/network/packets/INetworkPacket;)V";
+        MethodNode pValidate = method(distJava, acs, "validate", validateDesc);
+        failed += check("W96 手術後：AntiCheatSpeed.validate 頭部 aload_1／aload_2→TeleportWatch.begin，其餘指令不變；AntiCheatSpeed 其他方法不變",
+                headCallSlotsOk(pValidate, helper, "begin", beginDesc, 1, 2)
+                        && methodText(pValidate).equals("    ALOAD 1\n    ALOAD 2\n    INVOKESTATIC " + helper + ".begin " + beginDesc + "\n"
+                        + methodText(methodFromJar(jar, acs, "validate", validateDesc)))
+                        && otherMethodsSame(jar, distJava, acs, "validate", validateDesc));
+        String fromReset = "INVOKEVIRTUAL " + npa + ".resetSpeedLimiter ()V";
+        String toReset = "INVOKESTATIC " + helper + ".resetSpeedLimiter (L" + npa + ";)V";
+        String vTp = methodText(methodFromJar(jar, gs, "sendTeleport", tpDesc));
+        failed += check("W96 手術後：sendTeleport 唯一的 resetSpeedLimiter 同形改道 TeleportWatch.resetSpeedLimiter，其餘指令不變",
+                vTp.split(java.util.regex.Pattern.quote(fromReset), -1).length == 2
+                        && methodText(method(distJava, gs, "sendTeleport", tpDesc)).equals(vTp.replace(fromReset, toReset)));
+
+        ClassNode h = classNode(distJava, helper);
+        MethodNode hSet = declaredMethod(h, "set", "(L" + sc + ";FFZLzombie/vehicles/BaseVehicle;)V");
+        MethodNode hReset = declaredMethod(h, "resetSpeedLimiter", "(L" + npa + ";)V");
+        failed += check("W96 helper 契約：set 的三條路徑各呼叫原版 SpeedChecker.set 一次（off、反射不成立、正常）且都不在 try 內；"
+                        + "resetSpeedLimiter 呼叫原版恰一次、不在 try 內；全 class 只有 judge 呼叫 AntiCheat.doKickUser 兩次（自己的跳動、foreign 的送出者）",
+                hSet != null && countExactCalls(hSet, Opcodes.INVOKEVIRTUAL, sc, "set", setDesc) == 3
+                        && callsInTry(hSet, Opcodes.INVOKEVIRTUAL, sc, "set", setDesc) == 0
+                        && hReset != null && countExactCalls(hReset, Opcodes.INVOKEVIRTUAL, npa, "resetSpeedLimiter", "()V") == 1
+                        && callsInTry(hReset, Opcodes.INVOKEVIRTUAL, npa, "resetSpeedLimiter", "()V") == 0
+                        && classWideCalls(h, Opcodes.INVOKESTATIC, "zombie/network/anticheats/AntiCheat", "doKickUser",
+                                "(Lzombie/core/raknet/UdpConnection;Ljava/lang/String;Ljava/lang/String;)V") == 2);
+        String bad = teleportHandlerViolations(h);
+        failed += check("W96 helper 契約：catch 只有 RuntimeException／LinkageError／ReflectiveOperationException／NumberFormatException（沒有 Throwable、Error、catch-all），"
+                + "每個 DebugLog.log 都在含 RuntimeException＋LinkageError 的 try 內" + bad, bad.isEmpty());
+        ClassNode widened = classNode(distJava, helper);
+        ClassNode unguarded = classNode(distJava, helper);
+        MethodNode wSet = declaredMethod(widened, "set", "(L" + sc + ";FFZLzombie/vehicles/BaseVehicle;)V");
+        MethodNode uBeat = declaredMethod(unguarded, "beat", "(J)V");
+        boolean mutable = wSet != null && !wSet.tryCatchBlocks.isEmpty() && uBeat != null && !uBeat.tryCatchBlocks.isEmpty();
+        if (mutable) {
+            wSet.tryCatchBlocks.get(0).type = "java/lang/Throwable";
+            uBeat.tryCatchBlocks.clear();
+        }
+        failed += check("W96 例外型別鎖負對照：set 的 catch 放寬成 Throwable、beat 的 log 拿掉 try 都會紅",
+                mutable && !teleportHandlerViolations(widened).isEmpty() && !teleportHandlerViolations(unguarded).isEmpty());
+        return failed;
+    }
+
+    /**
+     * W96 例外型別：診斷碼只吞 RuntimeException／LinkageError（反射讀欄位另加 ReflectiveOperationException，解析旗標用
+     * NumberFormatException），Error 照常外拋；每個 DebugLog.log 都在含 RuntimeException＋LinkageError 的 try 內。回傳違規描述（空字串＝通過）。
+     */
+    static String teleportHandlerViolations(ClassNode cn) {
+        Set<String> allowed = Set.of("java/lang/RuntimeException", "java/lang/LinkageError", "java/lang/ReflectiveOperationException",
+                "java/lang/NumberFormatException");
+        StringBuilder bad = new StringBuilder();
+        for (MethodNode m : cn.methods) {
+            for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                if (!allowed.contains(t.type)) {
+                    bad.append(' ').append(m.name).append(" catch=").append(t.type);
+                }
+            }
+            for (AbstractInsnNode in : m.instructions) {
+                if (isCall(in, Opcodes.INVOKESTATIC, "zombie/debug/DebugLog", "log", "(Ljava/lang/String;)V")) {
+                    int at = m.instructions.indexOf(in);
+                    Set<String> types = new java.util.TreeSet<>();
+                    for (TryCatchBlockNode t : m.tryCatchBlocks) {
+                        if (m.instructions.indexOf(t.start) <= at && at < m.instructions.indexOf(t.end)) {
+                            types.add(String.valueOf(t.type));
+                        }
+                    }
+                    if (!types.contains("java/lang/RuntimeException") || !types.contains("java/lang/LinkageError")) {
+                        bad.append(' ').append(m.name).append(" log handlers=").append(types);
+                    }
+                }
+            }
+        }
+        return bad.toString();
+    }
+
+    /** W97：helper 照抄原版 authClient 的 bannedip 查詢、沿用 LoginPacket 對封鎖結果的處理、Relay 判斷同 BanSystem。 */
+    static final String[][] STEAM_IP_BAN_LOCKED = {
+            {"zombie/network/ServerWorldDatabase", "authClient",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)Lzombie/network/ServerWorldDatabase$LogonResult;",
+                    "d41f27a0f7404b6de83be1d579fe8220ab3036bd81d5c03b10b2d86e9874851a"},
+            {"zombie/network/packets/connection/LoginPacket", "processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                    "686871358decc3e9b382c6fe957e52214d827ad36108901e0060d3d19946d67a"},
+            {"zombie/network/packets/connection/GoogleAuthKeyPacket", "processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                    "8dd8c7521e3a647461a4b7002cca58a7cd37b4165654681dd94fd6093b450f88"},
+            {"zombie/network/BanSystem", "isIpUsedBySteamRelayConnection", "(Ljava/lang/String;)Z",
+                    "267464e92c0d3f37d0a152d996a1671aa4787adbd887177d94aae11bf637b291"},
+    };
+
+    /**
+     * W97 Steam 模式也擋 bannedip（docs/patches.md 2df）：存在理由（原版 authClient 的 bannedip 查詢在 isSteamModeEnabled 為真時跳過）、
+     * 原版本體 SHA 鎖、helper 用同一句 SQL、W23 gate 先判 W97 再委派原版。
+     */
+    static int checkSteamIpBan(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String swdb = "zombie/network/ServerWorldDatabase";
+        String authDesc = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)L" + swdb + "$LogonResult;";
+        String sql = "SELECT reason FROM bannedip WHERE ip = ?";
+        MethodNode auth = methodFromJar(jar, swdb, "authClient", authDesc);
+        MethodInsnNode firstSteam = null;
+        LdcInsnNode query = null;
+        for (AbstractInsnNode in : auth.instructions) {
+            if (firstSteam == null && in instanceof MethodInsnNode mi
+                    && isCall(mi, Opcodes.INVOKESTATIC, "zombie/core/znet/SteamUtils", "isSteamModeEnabled", "()Z")) {
+                firstSteam = mi;
+            } else if (in instanceof LdcInsnNode ldc && sql.equals(ldc.cst)) {
+                query = ldc;
+            }
+        }
+        boolean guarded = false;
+        if (firstSteam != null && query != null && nextReal(firstSteam) instanceof JumpInsnNode j && j.getOpcode() == Opcodes.IFNE) {
+            int q = auth.instructions.indexOf(query);
+            guarded = auth.instructions.indexOf(firstSteam) < q && q < auth.instructions.indexOf(j.label);
+        }
+        failed += check("W97 存在理由：原版 authClient 第一個 isSteamModeEnabled 接 ifne，跳過「" + sql + "」（Steam 模式不查 IP；官方改成也查就撤刀）",
+                guarded);
+        failed += shaLocks(jar, "W97", STEAM_IP_BAN_LOCKED);
+        MethodNode reason = method(distJava, "zombie/network/MdcSteamIpBan", "bannedReason", "(L" + swdb + ";Ljava/lang/String;)Ljava/lang/String;");
+        boolean sameSql = false;
+        for (AbstractInsnNode in : reason.instructions) {
+            sameSql |= in instanceof LdcInsnNode ldc && sql.equals(ldc.cst);
+        }
+        failed += check("W97 helper 用原版同一句 SQL", sameSql);
+        MethodNode gate = method(distJava, "zombie/network/MdcAccountGate", "authClient", "(L" + swdb + ";" + authDesc.substring(1));
+        String checkDesc = "(L" + swdb + ";Ljava/lang/String;Ljava/lang/String;J)L" + swdb + "$LogonResult;";
+        failed += check("W97 W23 gate：先呼叫 MdcSteamIpBan.check 恰一次、在委派原版 authClient 之前",
+                countExactCalls(gate, Opcodes.INVOKESTATIC, "zombie/network/MdcSteamIpBan", "check", checkDesc) == 1
+                        && firstCallIndex(gate, Opcodes.INVOKESTATIC, "zombie/network/MdcSteamIpBan", "check", checkDesc)
+                        < firstCallIndex(gate, Opcodes.INVOKEVIRTUAL, swdb, "authClient", authDesc));
+        return failed;
+    }
+
     private SmokeCheck() {}
 }

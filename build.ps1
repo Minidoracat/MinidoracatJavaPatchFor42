@@ -157,6 +157,9 @@ $helperEntries = @(
     'zombie/mdc/AnimalLoopSoundGate$Timed.class',
     'zombie/mdc/BodyLastStateGate.class',
     'zombie/characters/animals/MdcAnimalProbes.class',
+    'zombie/mdc/TeleportWatch.class',
+    'zombie/mdc/TeleportWatch$State.class',
+    'zombie/network/MdcSteamIpBan.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -904,6 +907,24 @@ java -Xverify:all "-Dmdc.animalProbes=off" -cp $apCp zombie.characters.animals.M
 Assert-Ok "MdcAnimalProbesTest（off，kill switch）"
 java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest logthrow
 Assert-Ok "MdcAnimalProbesTest（logthrow observe，日誌拋例外照原版完成）"
+
+Write-Host "[9zzj/10] 步行瞬移觀測與踢人（W96）：真 PlayerPacket.resetMovable 與 AntiCheatSpeed.validate（dist 手術後與 jar 原版）＋配置的玩家、連線與真 SpeedChecker，每一包與直接呼叫原版 set 的雙胞胎比位置、是否在車上與速度；登入後基準點、寬限期只豁免第一次達門檻的跳動（含看連線的登入時間）、下車那一次（車輛上限內才豁免）、伺服器傳送後、進出 (0,0) 不重開寬限期也照判、送出的連線有權限只計數、20 格／秒以下不記、別條連線送的封包記 foreign 而且不當被冒用者的起點、沒經過 begin 不判；正式服 7 個帳號的回歸（Player-O 6174.87／591.90 would-kick、149.71 below，Player-P、Player-Q、Player-R 74 s exempt(grace)，Player-R 199／613 s、10-04 來回、Player-S would-kick，Player-U 上線那一秒不記）；判斷順序表（Player-T 被車撞 exempt(hitVehicle)）、寬限期與踢人處置函式；kick 對沒完全連上的連線記 would-kick(notConnected) 不踢；off 不記不建帳..."
+$twCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $twCp zombie.mdc.TeleportWatchTest observe
+Assert-Ok "TeleportWatchTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.teleportWatch=kick" -cp $twCp zombie.mdc.TeleportWatchTest kick
+Assert-Ok "TeleportWatchTest（kick）"
+java -Xverify:all "-Dmdc.teleportWatch=off" -cp $twCp zombie.mdc.TeleportWatchTest off
+Assert-Ok "TeleportWatchTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.TeleportWatchTest vanilla
+Assert-Ok "TeleportWatchTest（vanilla，jar 原版負對照）"
+
+Write-Host "[9zzk/10] Steam 模式也擋 bannedip（W97）：真 SQLite（原版 DDL）判斷表（Steam 模式 × 位址 × 連線型別）、有理由／理由 NULL／沒有這一列、查詢失敗放行；封鎖結果與原版非 Steam 模式 authClient 逐欄相同、原版 Steam 模式不查（負對照）；找連線要 SteamID 與位址都相同..."
+$sibCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+java -Xverify:all -cp $sibCp zombie.network.MdcSteamIpBanTest on
+Assert-Ok "MdcSteamIpBanTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.steamIpBan=off" -cp $sibCp zombie.network.MdcSteamIpBanTest off
+Assert-Ok "MdcSteamIpBanTest（off，kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark

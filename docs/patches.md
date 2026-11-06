@@ -5102,6 +5102,87 @@ console（首次生效一行、每 5 分鐘一行 beat，由每幀必經的 a0 �
 
 **退場**：拿到數字、服主裁定之後，a0／sim 併入要做的那一刀或撤掉，F1 依比例決定要不要做索引；SmokeCheck 變紅時先重新核對，不改斷言或 SHA 讓它變綠。
 
+<a id="2de"></a>
+## 2de. 步行瞬移觀測與踢人（W96，server，預設 observe）
+
+**事件**：2026-11-06 正式服一個帳號（Player-O）用外掛瞬移三次，反作弊記到 `Anti-cheat="Speed" … PlayerPacketReliable: speed=6174.87 > limit=20`、`149.71`、`591.90`，`action="Log"`。本服 `AntiCheatSpeed=3`（只記 log），他在服上停留 43 分鐘、破壞兩處據點，管理員手動封鎖 SteamID 才停。
+
+**原版機制**（42.21.0）：
+- 每一包步行封包（`PlayerPacketReliable`／`PlayerPacketUnreliable`）在處理前先跑 `AntiCheatSpeed.validate`，它先呼叫 `PlayerPacket.resetMovable()` 把封包位置交給玩家的 `NetworkCharacterAI$SpeedChecker.set`，再拿取樣器的速度比上限。
+- `SpeedChecker.set` 每秒最多取樣一次：速度＝上一個取樣點到這一包位置的距離 × 1000 ÷ 兩次取樣相隔的毫秒。兩次取樣之間的封包沿用上一次的速度，所以一次瞬移會讓接下來約一秒內的每一包都不合格。
+- `reset()` 之後 15 秒不取樣，第一次取樣只記位置（基準點）。`reset()` 在玩家物件建立（登入、重生）與 `GameServer.sendTeleport` 時執行；伺服器自己發起的傳送（`/teleport`、`/teleportto`、`/teleportplayer`、管理面板的傳送、安全屋踢出、NoClip 反作弊拉回）全都經過 `sendTeleport`，所以不會被算成瞬移。伺服器 Lua 的 `teleportTo`／`setX` 只改伺服器端的座標、不送給客戶端，取樣器只看封包位置，也不受影響；客戶端自己 `teleportTo`（MOD 或外掛）則不會重設。
+- 步行上限是 20 格／秒；坐在車上，或封包帶著撞到自己的車而且位置在那台車的軌跡附近時，改用 `SpeedLimit`。角色有 TeleportToPlayer、TeleportToCoordinates、TeleportPlayerToAnotherPlayer、UseFastMoveCheat 任一權限時完全不檢查。
+- 不合格時只依選項處理，而且這一包不處理。取樣器已經記下新的位置，下一次取樣的距離正常就放行：設成 3（只記 log）時，伺服器約一秒後就接受瞬移後的位置。設成 2（踢）時以「不合格的封包數」累計，滿 4 就踢（每 150 秒減 1），一次瞬移後一秒內的每一包都算；登入後的位置修正、網路延遲後的追趕也會一次累計好幾包。
+
+**正式服資料**（2026-08-30 起 413 輪 log，ServerAnalyze 查）：`PlayerPacketReliable` 觸發 1,481 次、92 個帳號。外掛以外超過 150 的有 5 個帳號，其中兩個在登入後 16、27 秒（推測是登入後的位置修正，速度 563、2,808），一個在同一分鐘有車輛物理異常、原版用的上限是 150（被車撞），兩個疑似外掛：一個同時段送了健康作弊指令，另一個的客戶端回報的位置每 2–7 秒在原地和 9,000 多格外的點之間來回（推測是改過的客戶端回報假位置）。另有一個帳號上線那一秒位置跳到 4,000 多格外又跳回（推測是封包到達順序），落在原版重設後不取樣的 15 秒內。外掛的第二次瞬移只有 592。單看速度分不出外掛：150、300、1,000 都會踢到登入後的位置修正。
+
+**做法**：沿用原版同一次取樣，另外判斷。權限、踢人、log 的帳號一律看送出這包的連線（原版 `AntiCheatSpeed` 也是看 `connection.getRole()`）。封包裡的玩家不是這條連線自己的玩家時（`foreign`），這次取樣不算在那位玩家頭上，也不當他的起點：記一行 `foreign`（帶送出的連線與那位玩家），速度達門檻時 `action=` 照第 6 步處置送出的連線（不看車輛與寬限期：正常的客戶端只送自己的玩家）；那位玩家自己的下一次取樣改從他上一次自己的取樣點與時間算速度。沒經過 `validate` 頭部（不知道送出的連線）的取樣不判，計 anomalies。其餘只看速度超過 20（原版會記的那些）的取樣，依序：
+1. 送出的連線有上述原版免檢的權限：只計數、不記 log。
+2. 這一包在車上，或上一個取樣點是車上的取樣（下車後第一次步行取樣，起點是車的位置），而且速度不超過原版的車輛上限 `SpeedLimit`：`exempt(vehicle)`（原版下車那一次比的是步行上限 20，本刀放寬到車輛上限）。超過就往下判，下車後立刻瞬移不能靠這條過。
+3. 被車撞而原版改用車輛上限：`exempt(hitVehicle)`，不看速度（Player-T 就是被出錯的車撞飛，856 格／秒）。
+4. 速度低於門檻（預設 150 格／秒）：`below`。
+5. 寬限期內、而且是這次重設後第一次達門檻的跳動：`exempt(grace)`。寬限期是原版重設後的基準點起 60 秒（預設），或登入、伺服器傳送後 15 秒（原版不取樣）＋60 秒（重設時坐在車上、基準點由車輛封包取走時靠這兩個時間補上）。登入、重生、伺服器傳送都會重設，所以三者都有寬限期；只有真的重設（新的玩家物件、伺服器傳送）後的第一次取樣算基準點，客戶端送的座標不會重開寬限期。登入後的位置修正只跳一次，寬限期內第二次跳動照樣判，重連或被伺服器傳送後只能白跳一次。
+6. 其餘：observe 記 `would-kick`；kick 用原版反作弊的 `AntiCheat.doKickUser` 踢送出的連線（寫 userlog Kicked、送 `UI_Policy_Kick`、斷線）。連線沒有完全連上時記 `would-kick(notConnected)`、角色有 CantBeKickedByAnticheat 時記 `would-kick(cantBeKicked)`，兩者原版 `AntiCheat.act` 同樣不踢。
+
+每次取樣最多一行（原版逐包記）；kick 行一律印，其他行每次啟動最多 2000 行；每 10 分鐘一行 beat。速度達門檻的跳動若在 60 秒內落回上一個還沒配對的起跳點附近（半徑是起跳距離的 10%，至少 50 格），那一行標 `back=#<起跳那行的編號>/<秒>`：客戶端回報假位置時常是「跳到遠處、幾秒內又跳回原地」，兩下都會很大，成對標出來方便人看（起跳那行沒印時編號是 0）。只看步行封包：`VehiclePhysicsPacket` 自己呼叫 `set`（載具封包一般玩家常觸發，不拿來踢人）。依賴 `AntiCheatSpeed` 不是 4（停用時原版不呼叫 `resetMovable`，本刀沒有輸出）。
+
+**限制**：被車撞的豁免不看速度，有已知的繞過條件（細節不在此公開）。`foreign` 那種封包本刀只負責不算錯人、達門檻時處置送出的連線，原版照樣處理封包內容（伺服器端驗證另案處理，細節不在此公開）。寬限期每次重設可以白跳一次（重連、被伺服器傳送後），會記 `exempt(grace)` 行。
+
+**手術**（新 ClassPatch `AntiCheatSpeed`、`PlayerPacket`，既有的 `GameServer` ClassPatch 加一個方法）：
+- `AntiCheatSpeed.validate(UdpConnection,INetworkPacket)Ljava/lang/String;`：頭部 headCall `aload_1`／`aload_2`→`TeleportWatch.begin(UdpConnection, INetworkPacket)`，記下送出這包的連線與步行封包（全 jar 只有它呼叫 `resetMovable`），`expectedHits` 1。
+- `PlayerPacket.resetMovable()V`：唯一的 `invokevirtual NetworkCharacterAI$SpeedChecker.set(FFZLBaseVehicle;)V`（javap offset 54，方法最後一個呼叫）同形改道 `TeleportWatch.set(SpeedChecker, float, float, boolean, BaseVehicle)`，`expectedHits` 1。helper 先讀取樣器上一個取樣點、時間與是否在車上（反射，class init 時取欄位，找不到就本次啟動照原版），原樣呼叫一次原版 `set`，`lastTime` 或位置改變（＝有新取樣）才判斷。
+- `GameServer.sendTeleport(IsoPlayer,FFF)V`：唯一的 `invokevirtual NetworkPlayerAI.resetSpeedLimiter()V`（offset 58）同形改道 `TeleportWatch.resetSpeedLimiter(NetworkPlayerAI)`，原樣重設後記下伺服器傳送的時間（寬限期與 log 的 `tp=`；這位玩家還沒有步行取樣時也建一份狀態），`expectedHits` 1。
+
+**模式與 kill switch**：`-Dmdc.teleportWatch=2|observe`（程式預設，未知值也是）、`1|kick|on`、`0|off`（照原版，不建狀態、不記 log）；`-Dmdc.teleportWatchSpeed`（格／秒，預設 150，須大於 20）、`-Dmdc.teleportWatchGraceSec`（預設 60）。都要重啟。原版 `set`／`resetSpeedLimiter` 在 try 外各恰呼叫一次；判斷與 log 只 catch `RuntimeException`／`LinkageError`（讀欄位另加 `ReflectiveOperationException`）計 anomalies，Error 照常外拋。封包與 RCON 指令都在主執行緒處理，狀態不加鎖。
+
+console（首次生效一行；每次超過 20 的取樣一行；每 10 分鐘一行 beat）：
+
+```text
+[MinidoracatJavaPatch][TeleportWatch] 首次生效（-Dmdc.teleportWatch=0|off 照原版、1|kick 踢人）mode=observe limit=150.0 graceSec=60 reflect=ok
+[MinidoracatJavaPatch][TeleportWatch] would-kick user="<帳號>" steamid=<SteamID> speed=<格/秒> dist=<格> dtMs=<ms> from=<x>,<y> to=<x>,<y> packet=PlayerPacketReliable login=<s> spawn=<s> base=<s> tp=<s|-> veh=<s|-> back=<#n/s|-> gapMs=<ms> ping=<ms> mode=observe limit=150.0 (#<n>)
+[MinidoracatJavaPatch][TeleportWatch] foreign sender="<送出的帳號>" steamid=<SteamID> player="<被冒用的帳號>" speed=<格/秒> dist=<格> dtMs=<ms> from=<x>,<y> to=<x>,<y> packet=<封包> action=<-|would-kick|kick|would-kick(notConnected)|would-kick(cantBeKicked)> mode=observe limit=150.0 (#<n>)
+[MinidoracatJavaPatch][TeleportWatch] beat samples=<n> wouldKick=<n> kicked=<n> exempt=<n> adminSkipped=<n> foreign=<n> lines=<n> players=<n> anomalies=<n> mode=observe
+```
+
+欄位：`login` 是距登入（`setFullyConnected`）秒數，`spawn` 是距這個玩家物件第一包步行封包（或第一次伺服器傳送），`base` 是距原版基準點，`tp` 是距最近一次伺服器傳送，`veh` 是距最近一次車上的取樣（下車），`back` 是這一下跳回哪一行的起跳點、相隔幾秒，`gapMs` 是這次取樣期間最大的封包間隔（大＝網路延遲後的追趕）。
+
+**判讀**：observe 期間看 `would-kick` 行：都是外掛就可以開 kick；有正常玩家，看 `gapMs`、`base`、`veh` 判斷是哪一種漏網的情況，再調門檻或寬限期。`below` 行是門檻以下的分布，`exempt(grace)` 行是登入後位置修正的大小（同一次重設後出現第二行 would-kick、`base` 很小，就是位置修正跳了兩次）。出現 `foreign` 行就是有連線送別人的步行封包，看 `sender`；正常客戶端不會這樣送。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——全 jar 呼叫 `SpeedChecker.set` 的只有 `PlayerPacket.resetMovable` 與 `VehiclePhysicsPacket.resetMovable`；呼叫 `resetMovable` 的只有 `AntiCheatSpeed.validate`（頭部記下的連線就是送出這包的連線），也沒有人以 `PlayerPacket`／`PlayerPacketReliable`／`PlayerPacketUnreliable` 的具體型別直接呼叫它；對 `NetworkPlayerAI.resetSpeedLimiter` 的呼叫只有 `GameServer.sendTeleport`；寫 `connectionTimestamp` 的只有建構子與 `setFullyConnected`（`login` 的依據）；兩種步行封包都沒覆寫 `resetMovable`。8 個原版方法本體 SHA 鎖（`TELEPORT_WATCH_LOCKED`，各配負對照）：`SpeedChecker.set`／`reset`／`isVehicle`、`NetworkCharacterAI.resetSpeedLimiter`、`AntiCheatSpeed.validate`、`PlayerPacket.resetMovable`、`UdpConnection.setFullyConnected`、`AntiCheat.doKickUser`。手術後 `validate` 只多頭部三條指令、`resetMovable` 與 `sendTeleport` 只差改道，`AntiCheatSpeed`、`PlayerPacket` 其他方法不變。helper 契約：`set` 的三條路徑（off、反射失敗、正常）各呼叫一次原版 `set`、都不在 try 內；`resetSpeedLimiter` 恰一次原版呼叫、不在 try 內；全 class 只有兩處 `doKickUser`（自己的跳動、`foreign` 的送出者）；catch 型別只有上述幾種、每個 `DebugLog.log` 都在 try 內（負對照：把 catch 放寬成 Throwable、拿掉 beat 的 try 都會紅）。
+- `TeleportWatchTest`（`build.ps1` [9zzj/10]，observe、kick、off、vanilla 四個 JVM，自驗 argv 與類別來源）：跑真的 `PlayerPacket.resetMovable` 與 `AntiCheatSpeed.validate`（observe／kick／off 是 dist 手術後，vanilla 是 jar 原版），玩家是配置出來的 `IsoPlayer` 加真的 `NetworkPlayerComponent`／`NetworkPlayerAI`／`SpeedChecker`，每位玩家有自己的配置連線（擁有他、沒完全連上），取樣時間用反射控制。每一包都和直接呼叫原版 `set` 的雙胞胎比位置、是否在車上與速度（改道不改原版結果）。情境：玩家物件剛建立不取樣、基準點、寬限期內 600 格、20 格／秒以下不記、下車那一次 60 格（豁免）與下車後 6000 格（不豁免）、伺服器傳送後的基準點與寬限期、同一次重設內進出 (0,0) 不重開寬限期而且照判、伺服器傳送建立的狀態第一包不算封包間隔、送出的連線有權限只計數、看連線登入時間的寬限期（30 秒前登入 → exempt(grace)）、沒經過 `begin` 不判；另一條連線經真的 `validate` 送這位玩家的封包 → `foreign` 行（帶送出的連線、達門檻 `action=would-kick`），他自己的下一次取樣從他自己的起點算（回原處不記、在別人送的位置旁邊或停在那裡都照判）。判斷順序表、`foreign` 處置函式、寬限期函式（基準點 59／61 秒、登入與伺服器傳送 74／76 秒）、踢人處置函式（沒完全連上、CantBeKickedByAnticheat 都不踢）。回歸表（正式服 7 個帳號，代號 Player-O～U）：Player-O 6174.87、591.90 → would-kick，149.71 → below；Player-P 2808（登入後 27 秒）、Player-Q 563（16 秒）→ exempt(grace)；Player-R 12048 在 74 秒 → exempt(grace)、199／613 秒 → would-kick；Player-S 2974（233／594 秒）→ would-kick；Player-T 856（被車撞）→ exempt(hitVehicle)（判斷函式）。另兩筆照正式服的位移與時間、座標換成假的：Player-R 10-04 在原地與 9,000 多格外的點之間來回（原地 → 遠處 → 遠處 230 格 → 原地附近 61 格 → 走回原地 → 遠處 → 原地，距登入 613 秒）→ 5 行 would-kick，兩次跳回原地各標 `back=` 指回自己的起跳那行，遠處到遠處、走回原地不標；Player-U 上線那一秒的來回（約 4,557 格又跳回）在原版重設後 15 秒內 → 不取樣、不記。kick 對沒完全連上的連線記 `would-kick(notConnected)`、不踢（真的踢人由本機 E2E 的 kick 輪驗）；off 零行、不建狀態。
+
+**部署**：manifest 新增 `zombie/mdc/TeleportWatch.class`、`TeleportWatch$State.class`、patched `zombie/network/anticheats/AntiCheatSpeed.class`、`zombie/network/packets/character/PlayerPacket.class`，`GameServer.class` 多一個命中點。
+
+**退場**：官方讓 `AntiCheatSpeed` 不再逐包累計、或自己排除登入後的位置修正時重估；SmokeCheck 鎖了取樣器與 `validate` 的本體，官方改它們時會變紅，先重新核對判斷。
+
+<a id="2df"></a>
+## 2df. Steam 模式也擋 IP 封鎖（W97，server，預設 on）
+
+**原版缺陷**：`ServerWorldDatabase.authClient(String,String,String,long,int)` 只在 `!SteamUtils.isSteamModeEnabled()` 時查 `bannedip`，Steam 模式完全跳過。`/banip`（`BanSystem.BanIP`）只寫 `bannedip`；`/banuser … -ip`（`BanUserByIP`）另外封鎖並踢掉當下那個帳號，但寫進 `bannedip` 的位址同樣不擋之後的登入。所以 Steam 模式的伺服器封了 IP，同一個 IP 換一個 Steam 帳號照樣進得來。原版自己知道 Steam Relay 連線拿不到真 IP：`BanIP` 拒絕封鎖正在被 Relay 連線使用的位址，`BanUserByIP` 拒絕封鎖 Relay 連線的玩家。
+
+**修補**：W23 已把兩個登入封包（`LoginPacket`、`GoogleAuthKeyPacket`）的 `authClient` 呼叫改道到 `MdcAccountGate.authClient`（[2ak](#2ak)），它在委派原版之前先呼叫 `MdcSteamIpBan.check`，沒有新的手術。Steam 模式、位址不是 `127.0.0.1`／`localhost`（與原版同樣的豁免），而且正在登入的連線（SteamID 與位址都相同的那一條）是直連（`ConnectionType.UDPRakNet`）時，用原版同一句 SQL（`SELECT reason FROM bannedip WHERE ip = ?`）查；查到就回原版非 Steam 分支同樣的結果（`authorized=false`、`bannedReason`、`Roles.getDefaultForBanned()`），之後由原版 `LoginPacket` 記 `access denied: user "…" is banned`、送 `AccessDenied` 並斷線。Relay 連線（`ConnectionType.Steam`）、找不到連線、非 Steam 模式都照原版。連線型別既不是直連也不是 Relay（native 還沒回報，`Disconnected`）時不查、放行，記一行 `skip type=…`，免得直連其實都落在這裡而看不出來。
+
+**限制**：只擋直連。玩家改用 Steam Relay 連線（位址是共用的轉送位址）時擋不到，要配 SteamID 封鎖或防火牆。IP 封鎖會擋到同一個位址的所有人（家人、網咖、電信業者的共用 IP）。
+
+**開關**：`-Dmdc.steamIpBan=0|off` 照原版（需重啟）；與 W23 的 `-Dmdc.accountGate` 各自獨立。查詢或找連線失敗一律放行並記一行 `fail-open`（同 W23：登入閘門壞掉不該把全服鎖在門外）；記 log 失敗不改變擋或放的結果。
+
+console：
+
+```text
+[MinidoracatJavaPatch][SteamIpBan] 首次生效（-Dmdc.steamIpBan=0|off 照原版）mode=on steam=true
+[MinidoracatJavaPatch][SteamIpBan] deny user="<帳號>" ip=<位址> steamid=<SteamID> type=UDPRakNet (denied=<n> checked=<n> relaySkipped=<n> noConnection=<n> otherType=<n>)
+[MinidoracatJavaPatch][SteamIpBan] skip type=Disconnected user="<帳號>" (otherType=<n>)
+```
+
+**守門與驗證**：
+- SmokeCheck：存在理由——原版 `authClient` 第一個 `isSteamModeEnabled` 後接 `ifne`，跳過 `bannedip` 查詢（官方改成 Steam 模式也查就撤刀）；4 個原版方法本體 SHA 鎖（`STEAM_IP_BAN_LOCKED`，各配負對照）：`ServerWorldDatabase.authClient`、`LoginPacket.processServer`、`GoogleAuthKeyPacket.processServer`、`BanSystem.isIpUsedBySteamRelayConnection`；helper 用原版同一句 SQL；`MdcAccountGate.authClient` 恰一次 `MdcSteamIpBan.check`、在委派原版之前。W23 原有的守門照舊。
+- `MdcSteamIpBanTest`（`build.ps1` [9zzk/10]，on、off 兩個 JVM）：記憶體 SQLite（建表與原版 DDL 相同）。判斷表（Steam 模式 × 位址 × 連線型別：只有 Steam 模式＋非本機位址＋直連才查）；位址在表內擋（reason 是 NULL 時 `bannedReason` 是空字串）、不在表內放行；Relay、找不到連線、本機位址、非 Steam 模式即使在表內也放行；封鎖結果與原版非 Steam 模式 `authClient` 對同一個位址回的結果逐欄相同；原版 Steam 模式不查（負對照）；找連線要 SteamID 與位址都相同；查詢失敗（連線已關）放行、`failedOpen` +1。
+
+**部署**：manifest 新增 `zombie/network/MdcSteamIpBan.class`，`MdcAccountGate.class` 換新。部署前先看一次 `bannedip`（`SELECT ip, username, reason FROM bannedip`）：Steam 模式以前寫進去的列從沒生效過，上線後全部開始擋，其中可能有已經換人用的浮動 IP。W96–W97 合計 185 → 190 個 class（85 個 patched class、265 個命中點、105 個 helper）。
+
+**退場**：官方讓 Steam 模式也查 `bannedip` 時撤刀（SmokeCheck 的存在理由會紅）。
+
 ---
 
 <a id="3"></a>

@@ -944,6 +944,8 @@ public final class PatchConfig {
         // 帳號名，其餘回 MaxAccountsReached；不刪資料。helper 放 zombie.network：
         // ServerWorldDatabase.conn 是 package-private。kill switch：-Dmdc.accountGate=0；
         // 身分 key 預設 steamId（vanilla 語意，家庭共享子帳號各算各的）；-Dmdc.accountGate.key=owner 整個家庭合計。
+        // W97（docs/patches.md 2df）不加手術：同一個 MdcAccountGate.authClient 先呼叫 MdcSteamIpBan.check，Steam 模式的直連也查 bannedip
+        // （原版只在非 Steam 模式查）。-Dmdc.steamIpBan=0|off 照原版。
         String accountGate = "zombie/network/MdcAccountGate";
         String authClientDesc = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)"
                 + "Lzombie/network/ServerWorldDatabase$LogonResult;";
@@ -1782,6 +1784,33 @@ public final class PatchConfig {
                 "()Lzombie/entity/util/ImmutableArray;", "zombie/characters/animals/MdcAnimalProbes", "fluidEntities"));
         fluidUpdate.expectedHits = 1;
         patches.add(fluidSystem);
+
+        // ---- W96 步行瞬移觀測與踢人（docs/patches.md 2de）----
+        // AntiCheatSpeed.validate(UdpConnection, INetworkPacket) 頭部 aload_1／aload_2→TeleportWatch.begin：記下送出這包的連線與封包（全 jar 只有
+        // validate 呼叫 resetMovable；權限、踢人、log 都用送出的連線，封包的玩家不是這條連線的就記 foreign、不算在那位玩家頭上）。
+        // PlayerPacket.resetMovable() 唯一的 invokevirtual NetworkCharacterAI$SpeedChecker.set(FFZLBaseVehicle;)V（javap offset 54，
+        // 方法最後一個呼叫、接 return）同形改道 TeleportWatch.set：先讀取樣器的上一個取樣點，原樣呼叫一次原版 set，有新取樣才判斷。
+        // GameServer.sendTeleport 唯一的 invokevirtual NetworkPlayerAI.resetSpeedLimiter()（offset 58）改道 TeleportWatch.resetSpeedLimiter：
+        // 原樣重設後記伺服器傳送的時間。VehiclePhysicsPacket 自己的 set 不改（只看步行）。AntiCheatSpeed、PlayerPacket 原本都沒有 ClassPatch。
+        // -Dmdc.teleportWatch=2|observe（預設）／1|kick／0|off；-Dmdc.teleportWatchSpeed（預設 150）、-Dmdc.teleportWatchGraceSec（預設 60）。
+        String tpWatch = "zombie/mdc/TeleportWatch";
+        Patcher.ClassPatch antiCheatSpeed = new Patcher.ClassPatch("zombie/network/anticheats/AntiCheatSpeed");
+        Patcher.MethodOps speedValidate = antiCheatSpeed.method("validate",
+                "(Lzombie/core/raknet/UdpConnection;Lzombie/network/packets/INetworkPacket;)Ljava/lang/String;");
+        speedValidate.headCall = new Patcher.HeadCall(tpWatch, "begin",
+                "(Lzombie/core/raknet/UdpConnection;Lzombie/network/packets/INetworkPacket;)V", new int[]{1, 2});
+        speedValidate.expectedHits = 1;
+        patches.add(antiCheatSpeed);
+        Patcher.ClassPatch playerPacket = new Patcher.ClassPatch("zombie/network/packets/character/PlayerPacket");
+        Patcher.MethodOps resetMovable = playerPacket.method("resetMovable", "()V");
+        resetMovable.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/NetworkCharacterAI$SpeedChecker",
+                "set", "(FFZLzombie/vehicles/BaseVehicle;)V", tpWatch, "set"));
+        resetMovable.expectedHits = 1;
+        patches.add(playerPacket);
+        Patcher.MethodOps sendTeleport = gameServer.method("sendTeleport", "(Lzombie/characters/IsoPlayer;FFF)V");
+        sendTeleport.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/NetworkPlayerAI",
+                "resetSpeedLimiter", "()V", tpWatch, "resetSpeedLimiter"));
+        sendTeleport.expectedHits = 1;
 
         return patches;
     }
