@@ -20,10 +20,32 @@ The categorized catalog with report status is in the [README](../README.md#patch
 <a id="0"></a>
 ## 0. Core mechanism: why "installed = active" (server and client)
 
-The PZ launch classpath lists `java/.` before `java/projectzomboid.jar`, so the JVM resolves loose
-`.class` files before jar entries. Dropping a modified class at its original package path under
-`java/` makes **our version replace vanilla on the next restart** without touching the jar;
-deleting the loose file fully reverts it.
+Since 42.22, `projectzomboid.jar` is a signed jar (`META-INF/PROJECTZ.SF`/`.EC`, a SHA-256 per entry). The JVM
+checks signers per package within a class loader: an unsigned loose class in a package that also has classes
+from the signed jar throws `SecurityException` (`ClassLoader.checkCerts`). So the approach used up to 42.21 —
+dropping modified `.class` files under `serverfiles/java/`, where the classpath lists `java/.` before the jar —
+no longer works.
+
+The server patch set now ships as one **Java agent jar** (`mdc-javapatch-agent.jar`, installed by `install.sh`
+into `serverfiles/mdc-javapatch/`). At startup the launch gate (`run-with-pfguard.sh`) checks the SHA-256 of the
+agent jar and of the game jar; only if both match does it add `-javaagent:…` to `JAVA_TOOL_OPTIONS` for the game
+JVM. The agent (`zombie.mdc.MdcAgent`) replaces the bytes of the official classes, as they load, with the versions
+patched at build time. The official jar and its signature are untouched, and replaced classes keep the official
+ProtectionDomain. Helpers that must live in a vanilla package (package-private access) are defined with
+`MethodHandles.Lookup.defineClass`, anchored on a vanilla class of the same package (same ProtectionDomain); all
+other helpers live in our own packages (e.g. `zombie.mdc`) and load from the agent jar.
+
+- **All or nothing**: the agent patches only if the game jar's SHA-256 equals the build base and every payload
+  entry's SHA matches; otherwise it replaces nothing (vanilla game) and does not block startup
+  (console `[mdc-agent] DISARMED`). A game update that replaces the jar disables the agent by itself, so a new jar
+  can no longer run with stale patches.
+- **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
+  string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
+  jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.
+- **Removal**: `uninstall.sh` moves `serverfiles/mdc-javapatch/` aside to `patch-disabled-*`; the next start is
+  vanilla, with no JVM configuration to rewrite. A running JVM is unaffected: the agent jar is opened at startup and
+  stays readable after the move, so the loose-class era's "cold path hits `NoClassDefFoundError` after deletion"
+  hazard is gone. Kill switch: `-Dmdc.agent=off`.
 
 Patches are not recompiled decompiler output (that path is full of decompiler artifacts). They are
 **bytecode patches**: ASM reads the vanilla class from the jar and applies only
@@ -49,8 +71,10 @@ method entry) and **tail call** (a static call inserted before each `RETURN`); e
 | Per-method hit-count check | PZ update adds/removes a call site or renames a method → build fails; no misaligned patch is produced |
 | LoadCheck link verification + helper signature assertions | Redirect target missing or signature mismatch |
 | CheckClassAdapter JVMS data-flow verification | Any stack/frame error (verifier-level, run offline first) |
-| `install.sh` three gates | Corrupted artifact (payload SHA), game already updated (vanilla jar SHA differs → refuse), file conflicts |
-| `uninstall.sh` | Exact removal from the manifest; one-step rollback |
+| `install.sh` three gates | Corrupted artifact (agent jar SHA), game already updated (jar SHA differs from the build base → refuse), duplicate installs and leftover loose classes |
+| Launch gate + agent | Both SHAs are checked again at every start; on mismatch the server starts vanilla. The agent also checks the jar SHA itself, all or nothing |
+| `AgentLoadCheck` | Loads and verifies every class under the official signed jar + `-javaagent`, signers unchanged, `IntegrityReport` reports original; the kill-switch and wrong-jar paths are actually run |
+| `uninstall.sh` | Moves the install directory aside atomically; one-step rollback |
 
 ---
 
@@ -5756,7 +5780,11 @@ Console:
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 
-1. **Boot health**: no `VerifyError` / `ClassFormatError` / `NoSuchMethodError` in the console; if present, uninstall immediately.
+1. **Boot health**: (a) the console shows `[mdc-javagate] AGENT ARMED` and `[mdc-agent] ARMED`, and `patched=` on the `[mdc-agent]` line equals
+   the `patched` count in this build's `dist/agent-manifest.txt`; `AGENT DISARMED` or `[mdc-agent] DISARMED`/`PARTIAL`/`NOT APPLIED` means the
+   patches are not active (the reason is on the same line). (b) The version line ends in `agents=1` (the official `IntegrityReport` result; the jar
+   still reports original). (c) No `VerifyError` / `ClassFormatError` / `NoSuchMethodError` / `SecurityException`; if present, run `uninstall.sh`
+   and restart (or add `-Dmdc.agent=off` to the JVM options).
 2. **Log-noise suppression**: the messages in section 1 no longer appear (#2/#4/#6 normally show within minutes of boot).
 3. **No over-suppression**: in debug mode, ItemPickInfo diagnostics, other SpriteConfig warnings and anticheat `is not valid` still print.
 4. **Behavior**: animal panel (admin cheat) shows stress recovering ~2× faster and gunshot increments ~1/3.
@@ -5803,8 +5831,10 @@ Console:
     calls/s at ~2.1 µs ⇒ ceiling ≈ 0.11% of the main loop, not worth the global RNG shift and untested shared-instance path of `on`;
     `-Dmdc.itemWeightMemo=on` was never to be set.
 16. **PZ update** (order matters):
-    1. **Run `uninstall.sh` before updating** — loose classes aren't in the Steam depot, so `app_update` replaces the jar but leaves stale patched classes
-       shadowing it; the same-source gate only blocks reinstalls. With unattended update automation, uninstall as soon as a new version is known.
+    1. **Since 42.22 there is no race to uninstall before updating**: at every start the agent compares the whole game jar's SHA-256 and stays off
+       once the jar changes (console `[mdc-javagate] AGENT DISARMED`); the server starts vanilla. Running `uninstall.sh` as soon as a new version is
+       known is still recommended so the console doesn't report DISARMED at every start. Loose-class installs up to 42.21 were different: stale
+       patched classes shadowed the new jar (the launch gate moves them aside), so uninstall had to happen right away.
     2. Re-fetch the jar → `build.ps1`.
     3. **A passing hit-count check ≠ correct patch site**: confirm constant patches with `javap` on surrounding instructions (42.20: `respondToSound` still had
        exactly one `20.0f`, so a stale offset would pass yet patch the flee distance — see 2b); for redirects confirm owner/method didn't move (42.20: the

@@ -12,6 +12,8 @@
 #
 # Since 2026-09-28 the wrapper also gates the Java loose-class patch before anything else (see the
 # "Java loose-class startup gate" block): a mismatch moves the patch aside and launches vanilla.
+# Since 2026-11-10 (PZ 42.22 signs projectzomboid.jar) the Java patch ships as one agent jar instead of
+# loose classes; the "Java agent startup gate" block decides whether the game JVM gets -javaagent.
 set -euo pipefail
 
 root="${PFG_ROOT:-/home/pzserver/scripts/pfguard}"
@@ -129,6 +131,66 @@ else
         || javagate_say "WARNING: ${loose_total} loose .class files under ${java_dir}/zombie but no patch-manifest.txt -- not verified, not moved"
 fi
 
+# ---- Java agent startup gate (added 2026-11-10 for PZ 42.22's signed jar) ---------------------------
+# 42.22 signs projectzomboid.jar: a class loaded from java/ next to classes of the same package from the
+# signed jar throws SecurityException, so the patch can no longer be loose classes. It ships as one agent
+# jar (deploy/install.sh puts it in <serverfiles>/mdc-javapatch/) that swaps class bytes while the official
+# jar loads them. The game JVM only gets -javaagent (through JAVA_TOOL_OPTIONS) when
+#   1) the agent jar's SHA256 equals agent-manifest.txt (complete, unedited payload), and
+#   2) java/projectzomboid.jar's SHA256 equals the jar the agent was built against.
+# Any mismatch launches vanilla Java and leaves the files where they are: without the flag they are inert.
+# The agent re-checks the jar itself and stays vanilla on a mismatch. An inherited JAVA_TOOL_OPTIONS keeps
+# its other options but loses any -javaagent naming this agent, so a DISARMED launch cannot carry it in.
+agent_dir="${PFG_AGENT_DIR:-${serverfiles}/mdc-javapatch}"
+agent_jar="${agent_dir}/mdc-javapatch-agent.jar"
+agent_manifest="${agent_dir}/agent-manifest.txt"
+java_tool_options=""
+read -r -a inherited_jto <<<"${JAVA_TOOL_OPTIONS:-}"   # whitespace split, no globbing
+for opt in "${inherited_jto[@]}"; do
+    [[ "${opt}" == -javaagent:*mdc-javapatch-agent* ]] && continue
+    java_tool_options="${java_tool_options:+${java_tool_options} }${opt}"
+done
+
+# Prints a short status and returns 0 when both gates pass; prints the reason otherwise.
+agentgate_verify() {
+    local key value agent_sha="" base_sha="" live
+    [[ -f "${agent_manifest}" && -r "${agent_manifest}" ]] \
+        || { printf 'agent manifest unreadable: %s' "${agent_manifest}"; return 1; }
+    while IFS=$'\t' read -r key value || [[ -n "${key}" ]]; do
+        value="${value%$'\r'}"
+        case "${key}" in
+            agent) agent_sha="${value}" ;;
+            jar) base_sha="${value}" ;;
+        esac
+    done <"${agent_manifest}"
+    [[ "${agent_sha}" =~ ^[0-9a-f]{64}$ && "${base_sha}" =~ ^[0-9a-f]{64}$ ]] \
+        || { printf 'malformed agent manifest: %s' "${agent_manifest}"; return 1; }
+    [[ -f "${agent_jar}" && -r "${agent_jar}" ]] || { printf 'agent jar missing: %s' "${agent_jar}"; return 1; }
+    live="$(sha256sum <"${agent_jar}")"
+    [[ "${live%% *}" == "${agent_sha}" ]] || { printf 'agent jar SHA mismatch: %s' "${agent_jar}"; return 1; }
+    [[ -r "${game_jar}" ]] || { printf 'jar missing or unreadable: %s' "${game_jar}"; return 1; }
+    live="$(sha256sum <"${game_jar}")"
+    [[ "${live%% *}" == "${base_sha}" ]] \
+        || { printf 'game jar sha256 %s differs from agent build base %s (game updated?)' "${live:0:8}" "${base_sha:0:8}"; return 1; }
+    printf 'jar sha256 %s' "${base_sha:0:8}"
+}
+
+if [[ -e "${agent_manifest}" || -e "${agent_jar}" ]]; then
+    if agentgate_result="$(agentgate_verify)"; then
+        java_tool_options="-javaagent:${agent_jar}${java_tool_options:+ ${java_tool_options}}"
+        printf '[mdc-javagate] AGENT ARMED: %s (%s)\n' "${agent_jar}" "${agentgate_result}"
+    else
+        javagate_say "AGENT DISARMED: ${agentgate_result} -- launching VANILLA Java (rebuild and reinstall the patch for this jar)"
+        [[ "${PFG_DRY_RUN:-0}" != 1 ]] || exit 78
+    fi
+fi
+# env(1) arguments that set JAVA_TOOL_OPTIONS for the game, or unset it when nothing is left.
+if [[ -n "${java_tool_options}" ]]; then
+    JTO_ENV=("JAVA_TOOL_OPTIONS=${java_tool_options}")
+else
+    JTO_ENV=(-u JAVA_TOOL_OPTIONS)
+fi
+
 # Steam repair is independent of the PathFind observer. Remove an inherited copy
 # before evaluating the gate, so an invalid/off repair can never leak through.
 audit=""
@@ -192,7 +254,7 @@ disarmed() {
     cd "${serverfiles}"
     local rest; rest="$(inherited_preload)"
     # Mirror the official launcher's intent with a real absolute path for libjsig.
-    exec env LD_PRELOAD="${jsig}${rest:+:${rest}}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
+    exec env "${JTO_ENV[@]}" LD_PRELOAD="${jsig}${rest:+:${rest}}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
         ./ProjectZomboid64 "${GAME_ARGS[@]}"
 }
 
@@ -230,5 +292,5 @@ printf '[mdc-pfguard] startup gate PASS: preloading %s (tuning entries: %d)\n' "
 cd "${serverfiles}"
 rest="$(inherited_preload)"
 preload="${observer}:${jsig}${rest:+:${rest}}"
-exec env "${TUNING_ENV[@]}" LD_PRELOAD="${preload}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
+exec env "${JTO_ENV[@]}" "${TUNING_ENV[@]}" LD_PRELOAD="${preload}" LD_AUDIT="${audit}" MDC_STEAMFIX="${steam_enabled}" \
     ./ProjectZomboid64 "${GAME_ARGS[@]}"

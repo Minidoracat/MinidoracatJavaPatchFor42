@@ -267,6 +267,57 @@ jg_check "javagate: loose classes without manifest -> warn only, nothing moved" 
 rm -rf "${jg_java}/zombie"
 gate_run exec "${jg[@]}"
 jg_check "javagate: vanilla install (no manifest, no loose classes) -> silent" 0 '^AUDIT=' jg_silent
+
+echo
+echo "=== Java agent startup gate: agent jar SHA + game jar SHA; mismatch launches vanilla, files stay"
+# The fake game now reports what the JVM would see: JAVA_TOOL_OPTIONS (or "unset") and LD_AUDIT.
+printf '#!/bin/sh\nprintf "JTO=[%%s] AUDIT=%%s\\n" "${JAVA_TOOL_OPTIONS-unset}" "$LD_AUDIT"\n' >"${gate_server}/ProjectZomboid64"
+ag_dir="${gate_server}/mdc-javapatch"
+ag_jar="${ag_dir}/mdc-javapatch-agent.jar"
+ag_install() { # a fresh install that matches the current fake game jar, like deploy/install.sh leaves it
+    rm -rf "${ag_dir}"; mkdir -p "${ag_dir}"
+    printf 'agent-v1' >"${ag_jar}"
+    {
+        printf 'version\tabc1234\nbuilt\t2026-11-10T00:00\n'
+        printf 'agent\t%s\n' "$(jg_sha <"${ag_jar}")"
+        printf 'jar\t%s\n' "$(jg_sha <"${jg_java}/projectzomboid.jar")"
+    } >"${ag_dir}/agent-manifest.txt"
+}
+ag_kept() { [[ -f "${ag_jar}" && -f "${ag_dir}/agent-manifest.txt" ]]; }
+jg_base_jar; ag_install
+gate_run exec
+jg_check "agent gate: matching install -> ARMED, game JVM gets -javaagent" 0 \
+    "^JTO=\[-javaagent:${ag_jar}\] " eval 'grep -q "AGENT ARMED: .*jar sha256 [0-9a-f]\{8\}" "${log}" && ag_kept'
+gate_run exec JAVA_TOOL_OPTIONS="-javaagent:/old/mdc-javapatch-agent.jar -Dfoo=1"
+jg_check "agent gate: inherited options kept, stale copy of this agent dropped" 0 \
+    "^JTO=\[-javaagent:${ag_jar} -Dfoo=1\] " ag_kept
+jg_jar 'zombie/A.class=orig-A-42.23'
+gate_run exec JAVA_TOOL_OPTIONS="-javaagent:${ag_jar} -Dfoo=1"
+jg_check "agent gate: game jar updated -> DISARMED, vanilla JVM, files stay" 0 \
+    'AGENT DISARMED: game jar sha256 [0-9a-f]{8} differs from agent build base [0-9a-f]{8} \(game updated\?\)' \
+    eval 'grep -q "^JTO=\[-Dfoo=1\] " "${log}" && ag_kept'
+gate_run exec
+jg_check "agent gate: DISARMED with nothing inherited -> JAVA_TOOL_OPTIONS unset" 0 '^JTO=\[unset\] ' ag_kept
+jg_base_jar; ag_install; printf 'agent-v1-edited' >"${ag_jar}"
+gate_run exec
+jg_check "agent gate: edited agent jar -> DISARMED" 0 'AGENT DISARMED: agent jar SHA mismatch' \
+    eval 'grep -q "^JTO=\[unset\] " "${log}"'
+ag_install; printf 'version\tabc1234\njar\tnot-a-sha\n' >"${ag_dir}/agent-manifest.txt"
+gate_run exec
+jg_check "agent gate: malformed manifest -> DISARMED" 0 'AGENT DISARMED: malformed agent manifest' \
+    eval 'grep -q "^JTO=\[unset\] " "${log}"'
+ag_install; rm -f "${ag_jar}"
+gate_run exec
+jg_check "agent gate: agent jar missing -> DISARMED" 0 'AGENT DISARMED: agent jar missing' \
+    eval 'grep -q "^JTO=\[unset\] " "${log}"'
+ag_install; jg_jar 'zombie/A.class=orig-A-42.23'
+gate_run dry
+jg_check "agent gate: dry run DISARMED -> exit 78, nothing launched" 78 'AGENT DISARMED: game jar sha256' \
+    eval '! grep -q "^JTO=" "${log}" && ag_kept'
+rm -rf "${ag_dir}"
+gate_run exec
+jg_check "agent gate: no agent install -> silent, JAVA_TOOL_OPTIONS unset" 0 '^JTO=\[unset\] ' \
+    eval '! grep -q "AGENT" "${log}"'
 rm -rf "${gate_root}"
 expect clean 0 clean
 assert_log clean-guarded 'guard_alloc=[1-9]'

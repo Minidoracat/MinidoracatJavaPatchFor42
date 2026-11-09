@@ -5,8 +5,13 @@
 <a id="0"></a>
 ## 0. 總機制：為什麼「裝了就生效」
 
-PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之前——JVM 找 class
-先找散檔（loose class）再找 jar。所以把修改過的 `.class` 按原路徑放進 `serverfiles/java/`，**下次重啟就以我們的版本取代原版**，不動 jar 本體；刪掉散檔即完全回退。
+42.22 起 `projectzomboid.jar` 是簽章 jar（`META-INF/PROJECTZ.SF`／`.EC`，每個 entry 有 SHA-256）。JVM 對同一個 class loader 裡同一個 package 的 class 比對簽章者：沒有簽章者的 loose class 和 jar 內的 class 混在同一個 package，就丟 `SecurityException`（`ClassLoader.checkCerts`）。所以 42.21 以前「把改過的 `.class` 按原路徑放進 `serverfiles/java/`、classpath `java/.` 排在 jar 前面」的做法已經不能用。
+
+現在伺服器修補整包是一個 **Java agent jar**（`mdc-javapatch-agent.jar`，`install.sh` 裝到 `serverfiles/mdc-javapatch/`）。開服時啟動閘（`run-with-pfguard.sh`）先驗 agent jar 與遊戲 jar 的 SHA-256，都對才用 `JAVA_TOOL_OPTIONS=-javaagent:…` 把它帶進遊戲 JVM；agent（`zombie.mdc.MdcAgent`）在官方 jar 的 class 載入時，把 bytes 換成建置期手術好的版本。官方 jar 與它的簽章不動，換上的 class 保留官方的 ProtectionDomain。要讀 package-private 成員、放在原版 package 的 helper，以同 package 的原版 class 為錨、用 `MethodHandles.Lookup.defineClass` 定義（同一個 ProtectionDomain）；其餘 helper 在我們自己的 package（例如 `zombie.mdc`），直接從 agent jar 載入。
+
+- **全有或全無**：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對，agent 才換；任何一步不符就一個 class 都不換（原版遊戲），也不擋開服（console `[mdc-agent] DISARMED`）。遊戲更新換了 jar，agent 自己就不啟用，不會再有「新 jar＋舊修補」混跑。
+- **官方完整性檢查照常運作**：42.22 的 `IntegrityReport` 把 `agents=1` 附在版本字串（console、`statistics`、Prometheus `pz_info`），jar 判原版。我們不改 jar、不改 `IntegrityReport`、也不藏 agent；建置期 `AgentLoadCheck` 釘住這兩個結果。
+- **移除**：`uninstall.sh` 把 `serverfiles/mdc-javapatch/` 整個搬到 `patch-disabled-*`，下次開服就是原版；不用重寫 JVM 設定。執行中的 JVM 不受影響：agent jar 在開服時就開著，搬走後照常可讀，沒有 loose class 時代「刪檔後冷路徑 `NoClassDefFoundError`」的問題。kill switch：`-Dmdc.agent=off`。
 
 修改不是重編譯反編譯原始碼（那條路充滿反編譯器假象），而是**bytecode 手術**：用 ASM 讀 jar 內的原版 class，只做兩種「堆疊形狀與指令長度都不變」的修改，原 class 的 StackMapFrames／max stack 原樣保留，JVM 驗證器看到的結構與原版同構：
 
@@ -21,8 +26,10 @@ PZ 伺服器啟動 classpath 是 `java/.` 排在 `java/projectzomboid.jar` 之�
 | 逐方法命中數守門 | PZ 更新後呼叫點增減／方法改名→建置直接失敗，不會產出錯位 patch |
 | LoadCheck 連結驗證＋helper 簽名斷言 | 改道目標方法缺失／簽名不符 |
 | CheckClassAdapter JVMS 資料流驗證 | 任何堆疊／frame 層面的錯誤（JVM verifier 等級，離線先跑） |
-| install.sh 三道閘 | 產物損壞（payload SHA）、遊戲已更新（jar 原版 SHA 不同源即拒裝）、檔案衝突 |
-| uninstall.sh | 依 manifest 精確移除，一鍵回退 |
+| install.sh 三道閘 | 產物損壞（agent jar SHA）、遊戲已更新（jar SHA 與建置基準不同即拒裝）、重複安裝與殘留 loose class |
+| 啟動閘＋agent | 開服時再驗一次兩個 SHA，不符就以原版開服；agent 自己也比對 jar SHA，全有或全無 |
+| AgentLoadCheck | 官方簽章 jar＋`-javaagent` 下載入並驗證全部 class、簽章者不變、`IntegrityReport` 判原版；kill switch 與 jar 不同兩條路都真的跑過 |
+| uninstall.sh | 安裝目錄整個原子搬走，一鍵回退 |
 
 ---
 
@@ -5190,7 +5197,7 @@ console：
 <a id="3"></a>
 ## 3. 部署後驗證清單
 
-1. **開機健檢**：console 無 `VerifyError`/`ClassFormatError`/`NoSuchMethodError`（有＝立刻 uninstall）。
+1. **開機健檢**：(a) console 有 `[mdc-javagate] AGENT ARMED`、`[mdc-agent] ARMED`，`[mdc-agent]` 那行的 `patched=` 等於這次 build `dist/agent-manifest.txt` 的 `patched` 筆數；看到 `AGENT DISARMED`、`[mdc-agent] DISARMED`／`PARTIAL`／`NOT APPLIED` 就是沒有生效（原因印在同一行）。(b) 版本行是 `… agents=1`（官方 `IntegrityReport` 的正常結果，jar 仍判原版）。(c) 無 `VerifyError`／`ClassFormatError`／`NoSuchMethodError`／`SecurityException`；有就執行 `uninstall.sh` 後重啟（或 JVM 參數加 `-Dmdc.agent=off`）。
 2. **抑噪生效**：上表 7 種訊息不再出現（開機幾分鐘內原本必有 2/4/6）。
 3. **未誤攔**（反向）：debug 模式下 ItemPickInfo 診斷訊息、SpriteConfig 其他名稱警告、anticheat `is not valid` 仍會輸出。
 4. **行為觀察**：動物面板（admin cheat）壓力恢復約快一倍、槍聲增量約 1/3。（殭屍 `zombiesCulled` 觀察項隨 2a 一併移除。）
@@ -5246,8 +5253,7 @@ console：
    ⚠️ 本項不是「等條件達成再開」——條件已量測且**未達標**。若日後要重啟評估，必須先有新的呼叫速率量測（例如遊戲更新改了 `Moodle.Update` 的走訪方式），單憑命中率不足以翻案；且 `on` 期**無法自帶對照組**（`vanillaNs` 只在 miss 走 factory 時累加，on 模式 miss ≈ 型別數且須撞上 `(attempts & TIMING_MASK)==0` 才取樣 ⇒ `vanillaSamples` 幾乎必為 0），對照基準只能用 observe 期歷史值 2.1 µs 比 `on` 期 `memoNsAvg`。下次重建若確認仍無收益，可考慮整刀退役（redirect＋helper 一併移除）。
 
 16. **PZ 更新**（順序不可調換）：
-   1. **更新前先 `uninstall.sh`**——loose class 不在 Steam depot 內，`app_update` 只換 jar
-      **不會刪掉它們**，殘留的舊 patched class 仍會覆蓋新 jar。同源閘只擋重新安裝，擋不住殘留。本伺服器的 update／monitor cron 是全自動的，**沒有人工介入視窗**，得知新版就要立刻執行。
+   1. **42.22 起不必搶在更新前 `uninstall.sh`**：agent 開服時比對整份遊戲 jar 的 SHA-256，jar 一換就不啟用（console `[mdc-javagate] AGENT DISARMED`），伺服器以原版開服。仍建議得知新版就先 `uninstall.sh`，讓 console 不必每次開服都報 DISARMED。42.21 以前的 loose class 安裝不一樣：殘留的舊 patched class 會覆蓋新 jar（啟動閘會搬走它們），得知新版就要立刻 uninstall。
    2. 重拉 jar → `build.ps1`。
    3. **命中數守門通過 ≠ 座標仍有效**——守門只數數量、不驗語境。常數手術必須另外用 `javap`
       確認該常數的前後指令（見 2b 的 42.20 實例：`respondToSound` 內仍剛好有一個 `20.0f`，舊座標會通過守門卻改到逃跑距離）。redirect 手術則確認 owner／method 未被搬家（見第 1 節 42.20 實例：consistency log 搬到 `INetworkPacket.logInconsistentPacket`）。

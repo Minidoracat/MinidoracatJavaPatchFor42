@@ -20,8 +20,9 @@ if (-not (Test-Path "$R\work\projectzomboid.jar")) {
     throw "缺 work\projectzomboid.jar —— 先從伺服器拉取（scp <your-server>:/home/pzserver/serverfiles/java/projectzomboid.jar work\）"
 }
 
-Remove-Item -Recurse -Force "$R\work\out", "$R\work\gen", "$R\work\smoke-dumps", "$R\dist\java" -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$R\work\out", "$R\work\gen", "$R\dist\java" | Out-Null
+Remove-Item -Recurse -Force "$R\work\out", "$R\work\gen", "$R\work\smoke-dumps", "$R\work\agent-classes", "$R\work\agentcheck", "$R\dist\java" -ErrorAction SilentlyContinue
+Remove-Item -Force "$R\dist\mdc-javapatch-agent.jar", "$R\dist\agent-manifest.txt" -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$R\work\out", "$R\work\gen", "$R\work\agent-classes", "$R\work\agentcheck", "$R\dist\java" | Out-Null
 
 # 版本指紋（生成而非手寫——手寫會忘記更新，說謊的版本號比沒有更糟）
 $gitSha = (& git rev-parse --short HEAD 2>$null)
@@ -55,6 +56,9 @@ Assert-Ok "PatchInfoGen"
 javac -encoding UTF-8 -cp "$R\work\projectzomboid.jar" -d "$R\dist\java" `
     ((Get-ChildItem "$R\patcher\game" -Recurse -Filter *.java).FullName + (Get-ChildItem "$R\work\gen" -Recurse -Filter *.java).FullName)
 Assert-Ok "javac runtime helpers"
+# 正式服載入器（Java agent）：只用 JDK，不對遊戲 jar 編譯；打包時才和 dist\java 合成 agent jar
+javac -encoding UTF-8 -d "$R\work\agent-classes" (Get-ChildItem "$R\patcher\agent" -Recurse -Filter *.java).FullName
+Assert-Ok "javac agent"
 
 Write-Host "[3/10] 編譯全部行為測試與 benchmark..."
 javac -encoding UTF-8 -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" -d "$R\work\out" `
@@ -198,9 +202,29 @@ if ($unlisted -or $missing) {
     throw "manifest 完整性守門失敗"
 }
 
+Write-Host "[4b/10] 打包正式服 agent jar（dist\mdc-javapatch-agent.jar＋agent-manifest.txt）..."
+java -cp "$R\work\out;$ASM_CP" AgentJarBuilder "$R\work\projectzomboid.jar" "$R\dist\java" "$R\dist\manifest.txt" `
+    "$R\work\agent-classes" $gitSha $builtAt "$R\dist\mdc-javapatch-agent.jar" "$R\dist\agent-manifest.txt"
+Assert-Ok "AgentJarBuilder"
+
 Write-Host "[5/10] 連結驗證（-Xverify:all）..."
 java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$TJ" "$R\dist\manifest.txt"
 Assert-Ok "LoadCheck"
+
+Write-Host "[5b/10] 正式服載入路徑驗證（官方簽章 jar＋-javaagent，-Xverify:all）：armed／off／遊戲 jar 不同就不啟用..."
+# 工具單獨放一個目錄：classpath 上不要有 work\out 的測試 class 混進遊戲 package
+Copy-Item "$R\work\out\AgentLoadCheck.class" "$R\work\agentcheck\" -Force
+$agentJar = "-javaagent:$R\dist\mdc-javapatch-agent.jar"
+java -Xverify:all $agentJar -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" armed
+Assert-Ok "AgentLoadCheck（armed：換上全部手術 class、簽章者不變、IntegrityReport 判原版）"
+java -Xverify:all $agentJar "-Dmdc.agent=off" -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" off
+Assert-Ok "AgentLoadCheck（-Dmdc.agent=off kill switch：一個都不換）"
+# 遊戲更新的情境：classpath 上的 projectzomboid.jar 不是建置基準（拿 bytes 不同的測試 jar 改名頂替）
+$mismatchDir = "$R\work\agent-mismatch"
+New-Item -ItemType Directory -Force $mismatchDir | Out-Null
+Copy-Item $TJ "$mismatchDir\projectzomboid.jar" -Force
+java -Xverify:all $agentJar -cp "$R\work\agentcheck;$mismatchDir\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" disarmed
+Assert-Ok "AgentLoadCheck（遊戲 jar 不是建置基準：不啟用、原版）"
 
 Write-Host "[6/10] JVMS 資料流驗證（CheckClassAdapter）..."
 java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$TJ" "$R\dist\manifest.txt"
@@ -942,4 +966,4 @@ java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBench
 Assert-Ok "FastIdentityArrayRemovalBenchmark"
 
 Copy-Item "$R\deploy\install.sh", "$R\deploy\uninstall.sh" "$R\dist\" -Force
-Write-Host "完成：dist\java（loose classes）＋ dist\manifest.txt ＋ install/uninstall.sh"
+Write-Host "完成：dist\mdc-javapatch-agent.jar ＋ agent-manifest.txt ＋ manifest.txt（逐 class）＋ install/uninstall.sh（dist\java 是測試用的中間產物）"
