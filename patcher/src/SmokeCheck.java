@@ -2266,109 +2266,67 @@ public final class SmokeCheck {
                         "se/krka/kahlua/vm/KahluaTable", "rawset",
                         "(Ljava/lang/Object;Ljava/lang/Object;)V") == 0);
 
-        // ---- W20 衣物同步守衛 ----
+        // ---- W20 衣物同步觀測（(c) SyncVisuals mismatch）----
         String csgCls = "zombie/mdc/ClothingSyncGuard";
         String scpCls = "zombie/network/packets/SyncClothingPacket";
         String idCls = "zombie/network/packets/SyncClothingPacket$ItemDescription";
         String svpCls = "zombie/network/packets/SyncVisualsPacket";
         String ivCls = "zombie/core/skinnedmodel/visual/ItemVisual";
         String w20Ic = "zombie/core/ImmutableColor";
-        String pidCls = "zombie/network/fields/character/PlayerID";
+        String cpCls = "zombie/network/fields/character/ConnectionPlayer";
         // (a) ContainerIdProbe 已於 2026-09-27 退役（每 session 0–3 次 square-null，原版低頻現象）。
-        String wornCtorDesc = "(Lzombie/characters/WornItems/WornItem;)V";
         String svpParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
         String getPlayerDesc = "()Lzombie/characters/IsoPlayer;";
-        // vanilla 前提 (b)：ctor 對 baseTexture/textureChoice 有守衛（IFNONNULL 恰 2）、
-        // getVisual 恰 5、getTint 恰 1 且無守衛＝TIS 自己防兩行漏第三行的結構事實。
-        // TIS 補上守衛（IFNONNULL 變 3）＝本刀 (b) 撤刀訊號，建置紅提醒。
-        MethodNode vIdCtor = methodFromJar(jar, idCls, "<init>", wornCtorDesc);
-        failed += check("W20 vanilla (b)：ctor getVisual=5、getTint=1、IFNONNULL=2（tint 獨漏守衛）",
+        // (b) tint 修復＋W20-2＋onClothingSet 於 42.22.2 對版退役：原版 ctor 只取一次 getVisual（存區域變數）、
+        // null 時 baseTexture/textureChoice 給 -1，之後 tint 為 null 補 ImmutableColor.white＝本刀 enforce 的行為。
+        // 此錨紅＝TIS 又改了這段，重估是否復活 (b)。
+        MethodNode vIdCtor = methodFromJar(jar, idCls, "<init>", "(Lzombie/characters/WornItems/WornItem;)V");
+        failed += check("W20 (b) 退役依據：ItemDescription ctor getVisual=1、IFNULL=1、getTint=1、white 補值=1；SyncClothingPacket 兩個 class 不出貨",
                 countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem",
-                        "getVisual", "()L" + ivCls + ";") == 5
-                && countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint",
-                        "()L" + w20Ic + ";") == 1
-                && countOpcode(vIdCtor, Opcodes.IFNONNULL) == 2);
-        // vanilla 前提 (b)：write 無條件解參考 tint（GETFIELD tint 恰 4）＝ctor 若被繞過
-        // （tint 存成 null），write 是第二個 NPE 點——enforce white 保序列化的存在理由。
-        MethodNode vIdWrite = methodFromJar(jar, idCls, "write",
-                "(Lzombie/core/network/ByteBufferWriter;)V");
-        failed += check("W20 vanilla (b)：write 內 GETFIELD tint 恰 4（第二 NPE 點）",
-                countExactFields(vIdWrite, Opcodes.GETFIELD, idCls, "tint", "L" + w20Ic + ";") == 4);
-        // vanilla 前提（禁止過濾的行為錨）：process 會把封包未列出的 worn item 從遠端
-        // WornItems.remove——「lambda 過濾整件」＝遠端脫裝，此錨紅時重估該結論。
-        MethodNode vScpProcess = methodFromJar(jar, scpCls, "process", "()V");
-        failed += check("W20 vanilla：process 內 WornItems.remove(InventoryItem) 恰 1（過濾＝脫裝的行為錨）",
-                countExactCalls(vScpProcess, Opcodes.INVOKEVIRTUAL,
-                        "zombie/characters/WornItems/WornItems", "remove",
-                        "(Lzombie/inventory/InventoryItem;)V") == 1);
-        // vanilla 前提 (c)：parse 內 getPlayer 恰 3、error(Object) 恰 1、getItemVisuals 恰 1
+                        "getVisual", "()L" + ivCls + ";") == 1
+                && countOpcode(vIdCtor, Opcodes.IFNULL) == 1
+                && countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint", "()L" + w20Ic + ";") == 1
+                && countExactFields(vIdCtor, Opcodes.GETSTATIC, w20Ic, "white", "L" + w20Ic + ";") == 1
+                && !Files.exists(distJava.resolve(scpCls + ".class"))
+                && !Files.exists(distJava.resolve(idCls + ".class")));
+        // vanilla 前提 (c)：parse 內 getPlayer 恰 1（42.22 起存進區域變數）、error(Object) 恰 1、getItemVisuals 恰 1
         // （server 本地重建 vs wire count 的比對結構）。
         MethodNode vSvpParse = methodFromJar(jar, svpCls, "parse", svpParseDesc);
-        failed += check("W20 vanilla (c)：parse getPlayer=3、DebugType.error(Object)=1、getItemVisuals=1",
-                countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 3
+        failed += check("W20 vanilla (c)：parse ConnectionPlayer.getPlayer=1、DebugType.error(Object)=1、getItemVisuals=1",
+                countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, cpCls, "getPlayer", getPlayerDesc) == 1
                 && countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "error", "(Ljava/lang/Object;)V") == 1
                 && countExactCalls(vSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
                         "getItemVisuals", "(Lzombie/core/skinnedmodel/visual/ItemVisuals;)V") == 1);
-        MethodNode vScpSet = methodFromJar(jar, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
-        MethodNode pScpSet = method(distJava, scpCls, "set", "(Lzombie/characters/IsoPlayer;)V");
-        failed += check("W20 手術後 (b)：SyncClothingPacket.set 頭部 aload_1→onClothingSet、真指令恰 +2",
-                headCallSlotsOk(pScpSet, csgCls, "onClothingSet", "(Lzombie/characters/IsoPlayer;)V", 1)
-                && realInsnCount(pScpSet) == realInsnCount(vScpSet) + 2);
-        MethodNode pIdCtor = method(distJava, idCls, "<init>", wornCtorDesc);
-        failed += check("W20 手術後 (b)：ctor tintOf 改道 x1、原 getTint 歸零（真指令對帳併入 W20-2 的 +2）",
-                countExactCalls(pIdCtor, Opcodes.INVOKESTATIC, csgCls, "tintOf",
-                        "(L" + ivCls + ";)L" + w20Ic + ";") == 1
-                && countExactCalls(pIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint",
-                        "()L" + w20Ic + ";") == 0);
         MethodNode pSvpParse = method(distJava, svpCls, "parse", svpParseDesc);
-        failed += check("W20 手術後 (c)：parse parsePlayer x3＋onVisualsMismatch x1、原呼叫歸零、真指令不變",
+        failed += check("W20 手術後 (c)：parse parsePlayer x1＋onVisualsMismatch x1、原呼叫歸零、真指令不變",
                 countExactCalls(pSvpParse, Opcodes.INVOKESTATIC, csgCls, "parsePlayer",
-                        "(L" + pidCls + ";)Lzombie/characters/IsoPlayer;") == 3
+                        "(L" + cpCls + ";)Lzombie/characters/IsoPlayer;") == 1
                 && countExactCalls(pSvpParse, Opcodes.INVOKESTATIC, csgCls, "onVisualsMismatch",
                         "(Lzombie/debug/DebugType;Ljava/lang/Object;)V") == 1
-                && countExactCalls(pSvpParse, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 0
+                && countExactCalls(pSvpParse, Opcodes.INVOKEVIRTUAL, cpCls, "getPlayer", getPlayerDesc) == 0
                 && countExactCalls(pSvpParse, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "error", "(Ljava/lang/Object;)V") == 0
                 && realInsnCount(pSvpParse) == realInsnCount(vSvpParse));
-        // 負對照：write() 也讀 getPlayer/getItemVisuals，redirect 是 method-scope——write 未動。
+        // 負對照：redirect 是 method-scope——write 未動。
         MethodNode vSvpWrite = methodFromJar(jar, svpCls, "write",
                 "(Lzombie/core/network/ByteBufferWriter;)V");
         MethodNode pSvpWrite = method(distJava, svpCls, "write",
                 "(Lzombie/core/network/ByteBufferWriter;)V");
         failed += check("W20 負對照：SyncVisualsPacket.write 未被改動（getPlayer 數與真指令數同）",
-                countExactCalls(pSvpWrite, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc)
-                        == countExactCalls(vSvpWrite, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc)
+                countExactCalls(pSvpWrite, Opcodes.INVOKEVIRTUAL, cpCls, "getPlayer", getPlayerDesc)
+                        == countExactCalls(vSvpWrite, Opcodes.INVOKEVIRTUAL, cpCls, "getPlayer", getPlayerDesc)
                 && realInsnCount(pSvpWrite) == realInsnCount(vSvpWrite));
-        // helper 契約：tintOf 的 getTint 委派恰 2（off 直通＋非 null 主路徑）、white 引用恰 2
-        // （nullVisual/nullTint 兩個 enforce 出口）；onVisualsMismatch 的 error 委派恰 1
-        // （唯一出口，off/observe 同一 sink）；parsePlayer 的 getPlayer 委派恰 1。
-        MethodNode gTintOf = method(distJava, csgCls, "tintOf", "(L" + ivCls + ";)L" + w20Ic + ";");
+        // helper 契約：onVisualsMismatch 的 error 委派恰 1（唯一出口，off/observe 同一 sink）；
+        // parsePlayer 的 getPlayer 委派恰 1。
         MethodNode gMismatch = method(distJava, csgCls, "onVisualsMismatch",
                 "(Lzombie/debug/DebugType;Ljava/lang/Object;)V");
         MethodNode gParsePlayer = method(distJava, csgCls, "parsePlayer",
-                "(L" + pidCls + ";)Lzombie/characters/IsoPlayer;");
-        failed += check("W20 helper 契約：tintOf 委派2/white 引用2；mismatch error 出口1；parsePlayer 委派1",
-                countExactCalls(gTintOf, Opcodes.INVOKEVIRTUAL, ivCls, "getTint", "()L" + w20Ic + ";") == 2
-                && countExactFields(gTintOf, Opcodes.GETSTATIC, w20Ic, "white", "L" + w20Ic + ";") == 2
-                && countExactCalls(gMismatch, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
+                "(L" + cpCls + ";)Lzombie/characters/IsoPlayer;");
+        failed += check("W20 helper 契約：mismatch error 出口1；parsePlayer 委派1",
+                countExactCalls(gMismatch, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType",
                         "error", "(Ljava/lang/Object;)V") == 1
-                && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, pidCls, "getPlayer", getPlayerDesc) == 1);
-
-        // ---- W20-2：ItemDescription ctor 頭部 headCall 捕 WornItem（nullVisual 歸因）----
-        // ctor 頭部 aload_1 只碰參數不碰 uninitializedThis；真指令 +2；tintOf 改道不受影響。
-        failed += check("W20-2 手術後：ctor 頭部 aload_1→onItemDescription、真指令恰 +2、tintOf 仍 x1",
-                headCallSlotsOk(pIdCtor, csgCls, "onItemDescription", wornCtorDesc, 1)
-                && realInsnCount(pIdCtor) == realInsnCount(vIdCtor) + 2
-                && countExactCalls(pIdCtor, Opcodes.INVOKESTATIC, csgCls, "tintOf",
-                        "(L" + ivCls + ";)L" + w20Ic + ";") == 1);
-        MethodNode gOnItemDesc = method(distJava, csgCls, "onItemDescription", wornCtorDesc);
-        failed += check("W20-2 helper 契約：onItemDescription 純 ThreadLocal.set（零 NEW、零 DebugLog、零 invokevirtual on WornItem）",
-                countOpcode(gOnItemDesc, Opcodes.NEW) == 0
-                && countCallsToOwner(gOnItemDesc, "zombie/debug/DebugLog") == 0
-                && countCallsToOwner(gOnItemDesc, "zombie/characters/WornItems/WornItem") == 0
-                && countExactCalls(gOnItemDesc, Opcodes.INVOKEVIRTUAL, "java/lang/ThreadLocal",
-                        "set", "(Ljava/lang/Object;)V") == 1);
+                && countExactCalls(gParsePlayer, Opcodes.INVOKEVIRTUAL, cpCls, "getPlayer", getPlayerDesc) == 1);
 
         // 42.21.0 官方已修：IsoThumpable.setHealth 加 getObjectIndex 守衛，抑噪 #9（syncIsoObject println 改道）
         // 與其結構斷言隨 patch 退役。
@@ -3865,8 +3823,11 @@ public final class SmokeCheck {
                         && w67Caps == 1);
 
         // ---- W69 實體 ID 撞號時照常移除（docs/patches.md 2ce；掛在 W35 的 GameEntity ClassPatch）----
-        // 存在理由：getEntityNetID 地板一律算序號 0；伺服器 UnregisterEntity 拿到別的實體就丟 Stored entity mismatch、
-        // ID 表沒有它就直接 return（不離開 engine）。TIS 修掉任一條時紅＝重估撤刀。
+        // 存在理由（42.22.2 重估）：42.21 的「地板一律算序號 0」與「ID 表沒有它就 return、不離開 engine」已由 TIS 修掉
+        // （getEntityNetID 不再呼叫 isFloor；UnregisterEntity 開頭先 Engine.removeEntity）。仍成立的是：序號只在下次
+        // getEntityNetID 才換、checkEntityIDChange 遇到新號被佔只記錯誤不放入，同格物件被移走後排後面的先換號就撞號，
+        // 移除它時原版丟 Stored entity mismatch（佔號物件的登記被拿掉）；ID 未登記時原版離開 engine 但不取消登記、不轉存。
+        // 下列任一條紅＝TIS 又改了這段，重估撤刀。
         String w69Mgr = "zombie/entity/GameEntityManager";
         String w69Ge = "zombie/entity/GameEntity";
         String w69Guard = "zombie/entity/MdcEntityIdGuard";
@@ -3882,13 +3843,17 @@ public final class SmokeCheck {
                         && w69Next != null && w69Next.getOpcode() == Opcodes.ATHROW;
             }
         }
-        failed += check("W69 vanilla 前提：UnregisterEntity(GameEntity,Z) 恰一處 new RuntimeException(\"Stored entity mismatch\") 並 athrow，兩條分支各一次 LongMap.remove",
+        failed += check("W69 vanilla 前提：UnregisterEntity(GameEntity,Z) 恰一處 new RuntimeException(\"Stored entity mismatch\") 並 athrow，兩條分支各一次 LongMap.remove，開頭先 Engine.removeEntity 一次",
                 w69Mismatch == 1 && w69Throws
-                        && countExactCalls(w69Unreg, Opcodes.INVOKEVIRTUAL, "zombie/entity/util/LongMap", "remove", "(J)Ljava/lang/Object;") == 2);
+                        && countExactCalls(w69Unreg, Opcodes.INVOKEVIRTUAL, "zombie/entity/util/LongMap", "remove", "(J)Ljava/lang/Object;") == 2
+                        && countExactCalls(w69Unreg, Opcodes.INVOKEVIRTUAL, "zombie/entity/Engine", "removeEntity", "(L" + w69Ge + ";)V") == 1);
         MethodNode w69NetId = methodFromJar(jar, "zombie/iso/IsoObject", "getEntityNetID", "()J");
-        failed += check("W69 vanilla 前提：IsoObject.getEntityNetID 以 isFloor 決定序號（地板一律 0）並經 checkEntityIDChange 換號",
-                countExactCalls(w69NetId, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "isFloor", "()Z") == 1
-                        && countExactCalls(w69NetId, Opcodes.INVOKESTATIC, w69Mgr, "checkEntityIDChange", "(L" + w69Ge + ";JJ)V") == 1);
+        MethodNode w69Change = methodFromJar(jar, w69Mgr, "checkEntityIDChange", "(L" + w69Ge + ";JJ)V");
+        failed += check("W69 vanilla 前提：getEntityNetID 不再看 isFloor（42.22 地板用實際序號），序號變了才經 checkEntityIDChange 換號；換號遇到新號被佔只記錯誤（put 恰 1、error 恰 2）",
+                countExactCalls(w69NetId, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoObject", "isFloor", "()Z") == 0
+                        && countExactCalls(w69NetId, Opcodes.INVOKESTATIC, w69Mgr, "checkEntityIDChange", "(L" + w69Ge + ";JJ)V") == 1
+                        && countExactCalls(w69Change, Opcodes.INVOKEVIRTUAL, "zombie/entity/util/LongMap", "put", "(JLjava/lang/Object;)Ljava/lang/Object;") == 1
+                        && countExactCalls(w69Change, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType", "error", "(Ljava/lang/String;[Ljava/lang/Object;)V") == 2);
         List<String> w69Callers = jarWideCallers(jar, Opcodes.INVOKESTATIC, w69Mgr, "UnregisterEntity", w69Desc);
         failed += check("W69 呼叫點清冊：全 jar 對 UnregisterEntity(GameEntity,Z) 只有 GameEntity.removeFromWorld(Z) 與單參數多載各 1（實際 " + w69Callers + "）",
                 w69Callers.equals(List.of(w69Ge + ".removeFromWorld(Z)V", w69Mgr + ".UnregisterEntity(L" + w69Ge + ";)V")));
@@ -6956,9 +6921,10 @@ public final class SmokeCheck {
         return inside;
     }
 
-    /** W73：42.21.0 原版 IsoThumpable.update()V／IsoObject.getObjectIndex()I 的 debuglessMethodText SHA-256（跳過等價性的依據）。 */
+    /** W73：原版 IsoThumpable.update()V（42.21.0 起未變）／IsoObject.getObjectIndex()I（42.22.2）的 debuglessMethodText SHA-256（跳過等價性的依據）。 */
     static final String W73_THUMP_UPDATE_SHA = "f5e87bcfbb5ebe99d9b9530c424f2395381db0c7beb5e9ee4bc5347c254881ce";
-    static final String W73_OBJECT_INDEX_SHA = "f82a5485a7a2e36f101e67cda4189ebd3b3f44a1950683bd1d5cd65dc24817a0";
+    // 42.22.2：getObjectIndex 改成 getObjects()Ljava/util/List; ＋ List.indexOf（42.21.0 是 PZArrayList，SHA f82a5485…），重估後換釘
+    static final String W73_OBJECT_INDEX_SHA = "5add6b9bddb3755b66b8ca3034efd179166b31fad4a1ebeaf65a31c563945b8e";
 
     /**
      * W73 IsoObject 每幀更新閘（docs/patches.md 2ch；掛在 W40／W45 的 IsoCell ClassPatch）。
@@ -7018,22 +6984,30 @@ public final class SmokeCheck {
                 realInsnCount(methodFromJar(jar, thump, "getLifeLeft", "()F")) == 3
                 && g[1] instanceof FieldInsnNode gf && gf.owner.equals(thump) && gf.name.equals("lifeLeft")
                 && g[2].getOpcode() == Opcodes.FRETURN);
-        MethodNode getObjects = methodFromJar(jar, "zombie/iso/IsoGridSquare", "getObjects", "()Lzombie/util/list/PZArrayList;");
+        // 42.22.2：PZArrayList 刪除，objects 改成 final List、建構時唯一一次 new ArrayList；ArrayList.indexOf 只呼叫
+        // 參數（被查的 IsoThumpable）的 equals、無寫入——equals 由下一條的繼承鏈普查守住。
+        String sqCls = "zombie/iso/IsoGridSquare";
+        MethodNode getObjects = methodFromJar(jar, sqCls, "getObjects", "()Ljava/util/List;");
         AbstractInsnNode[] go = firstReal(getObjects, 3);
-        int indexWrites = 0;
-        String pz = "zombie/util/list/PZArrayList";
-        for (MethodNode m : List.of(methodFromJar(jar, pz, "indexOf", "(Ljava/lang/Object;)I"),
-                methodFromJar(jar, pz, "indexOf", "(Ljava/lang/Object;Lzombie/util/lambda/Invokers$Params2$Boolean$ICallback;)I"),
-                methodFromJar(jar, pz, "objectsEqual", "(Ljava/lang/Object;Ljava/lang/Object;)Z"))) {
+        ClassNode sqNode = classNodeFromJar(jar, sqCls);
+        int objectsPuts = 0;
+        boolean putIsNewArrayList = true;
+        for (MethodNode m : sqNode.methods) {
             for (AbstractInsnNode in : m.instructions) {
-                int op = in.getOpcode();
-                if (op == Opcodes.PUTFIELD || op == Opcodes.PUTSTATIC || op == Opcodes.ATHROW) indexWrites++;
+                if (in instanceof FieldInsnNode pf && pf.getOpcode() == Opcodes.PUTFIELD && pf.owner.equals(sqCls) && pf.name.equals("objects")) {
+                    objectsPuts++;
+                    putIsNewArrayList &= m.name.equals("<init>")
+                            && isCall(prevReal(in), Opcodes.INVOKESPECIAL, "java/util/ArrayList", "<init>", "(I)V");
+                }
             }
         }
-        failed += check("W73 vanilla 前提：getObjectIndex（SHA 釘）→ IsoGridSquare.getObjects getter → PZArrayList.indexOf／objectsEqual 無寫入、無 throw",
+        boolean objectsFinal = sqNode.fields.stream().anyMatch(f -> f.name.equals("objects")
+                && f.desc.equals("Ljava/util/List;") && (f.access & Opcodes.ACC_FINAL) != 0);
+        failed += check("W73 vanilla 前提：getObjectIndex（SHA 釘）→ IsoGridSquare.getObjects getter → final objects 只在建構子 new ArrayList 一次（ArrayList.indexOf 無寫入）",
                 sha256Hex(debuglessMethodText(jar, obj, "getObjectIndex", "()I")).equals(W73_OBJECT_INDEX_SHA)
                 && realInsnCount(getObjects) == 3 && go[1] instanceof FieldInsnNode of && of.name.equals("objects")
-                && go[2].getOpcode() == Opcodes.ARETURN && indexWrites == 0);
+                && go[2].getOpcode() == Opcodes.ARETURN
+                && objectsFinal && objectsPuts == 1 && putIsNewArrayList);
 
         Map<String, String> superOf = new HashMap<>();
         Set<String> declaresEquals = new HashSet<>();
@@ -7540,9 +7514,12 @@ public final class SmokeCheck {
      * 迴圈頭的讀取（getX/Y/Z、DistanceTo、getCurrentSquare、tryCastTo）、isSeeEveryone、grapple-only 分支（isReanimatedForGrappleOnly、
      * getGrappledBy 經 IGrappleableWrapper default → getWrappedGrappleable → BaseGrappleable）、目標是玩家時讀的 ServerOptions 布林選項、
      * isAsleep、getDetectionRange 與它呼叫的三個讀取、getAttachedAnimals，以及遠處分支與 grapple-only 分支的 alpha 方法。
+     * 42.22.2 對版：只有 updateLOS 變了（42.21 SHA 854e9828…），重估後換釘——迴圈前 lastNumChasingZombies／numChasingZombies
+     * 兩筆寫入改在 !GameServer.server 守衛下（伺服器不再寫），迴圈內只有「看得到的殭屍」分支裡 music 統計四段的區塊排列對調
+     * （moving／not-moving 判定與寫入欄位不變）；迴圈呼叫多重集合 66 個不變，視窗外物件到達的路徑不變。其餘 32 筆與 42.21 相同。
      */
     static final String[][] PLAYER_LOS_LOCKED = {
-        {"zombie/characters/IsoPlayer", "updateLOS", "()V", "854e9828a2204c752405152848b3c9e5e0c5e123009d5d191b4373f3c676f443"},
+        {"zombie/characters/IsoPlayer", "updateLOS", "()V", "4dda69b3d9e9ba99535e35cb80e2c76042105126e8ee02882a2525fd080cd118"},
         {"zombie/network/ServerLOS", "isCouldSee", "(Lzombie/characters/IsoPlayer;Lzombie/iso/IsoGridSquare;)Z", "7c2e5124596645d58413540f8a35d00fa356abede60b0139f564bddf7394a456"},
         {"zombie/network/ServerLOS", "findData", "(Lzombie/characters/IsoPlayer;)Lzombie/network/ServerLOS$PlayerData;", "a37f7ed5bdff485ee61523be7c56aabc3286ea57ebc2fd8a3f6d632ca2525ff6"},
         {"zombie/network/ServerLOS", "updateLOS", "(Lzombie/characters/IsoPlayer;)V", "a7fb1fa4bbcef56b23cb8f1b0b3159e15844e8ef67dd744210f6fa1b25338030"},
@@ -7727,7 +7704,7 @@ public final class SmokeCheck {
                         .append("\", \"").append(got).append("\"},");
             }
         }
-        failed += check("W83 vanilla 前提：" + PLAYER_LOS_LOCKED.length + " 個原版方法本體（去 debug 的 methodText SHA-256）與 42.21 相同"
+        failed += check("W83 vanilla 前提：" + PLAYER_LOS_LOCKED.length + " 個原版方法本體（去 debug 的 methodText SHA-256）與鎖定值相同（42.21 起；updateLOS 於 42.22.2 重估換釘）"
                         + "（變了＝重新分析略過的物件是否仍只有純讀取與伺服器 no-op，不改 SHA 讓它變綠）",
                 shaDrift.length() == 0);
         if (shaDrift.length() > 0) {

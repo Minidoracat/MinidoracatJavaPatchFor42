@@ -17,7 +17,6 @@ import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.objects.IsoThumpable;
 import zombie.network.GameServer;
-import zombie.util.list.PZArrayList;
 
 /**
  * W73 IsoObjectUpdateGate 行為驗證（argv：{@code observe}／{@code on}／{@code off}／{@code unknown}；
@@ -309,7 +308,7 @@ public final class IsoObjectUpdateGateTest {
             setField(IsoThumpable.class, t, "updateAccumulator", 3f);
             if (sqState > 0) {
                 IsoGridSquare sq = raw(IsoGridSquare.class);
-                setField(IsoGridSquare.class, sq, "objects", new PZArrayList<>(IsoObject.class, 2));
+                setField(IsoGridSquare.class, sq, "objects", new ArrayList<IsoObject>(2));
                 sq.chunk = raw(IsoChunk.class);
                 if (sqState == 2) {
                     sq.getObjects().add(t);

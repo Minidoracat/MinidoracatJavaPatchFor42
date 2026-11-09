@@ -30,7 +30,6 @@ import zombie.network.GameServer;
 import zombie.network.PacketTypes;
 import zombie.network.packets.INetworkPacket;
 import zombie.scripting.entity.components.crafting.CraftRecipe;
-import zombie.util.list.PZArrayList;
 import zombie.vehicles.BaseVehicle;
 
 /**
@@ -355,7 +354,7 @@ public final class GameEntityTrafficTest {
         square.x = x;
         square.y = y;
         square.z = 0;
-        PZArrayList<IsoObject> objects = new PZArrayList<>(IsoObject.class, 2);
+        List<IsoObject> objects = new ArrayList<>(2);
         objects.add(object);
         setDeclared(IsoGridSquare.class, square, "objects", objects);
         object.square = square;

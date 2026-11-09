@@ -11,12 +11,14 @@ import zombie.network.GameServer;
 /**
  * W69 實體 ID 撞號時照常移除（2026-10-19；docs/patches.md 2ce）。
  *
- * <p><b>原版缺陷</b>：{@code IsoObject.getEntityNetID} 以「座標＋物件在格子清單的序號」組 ID，但地板一律算序號 0。
- * 玩家後蓋的地板排在牆或家具後面時，排第 0 個的實體與地板同 ID。伺服器移除它時
- * {@code GameEntityManager.UnregisterEntity} 從 {@code idToEntityMap} 拿出的是地板，丟 {@code Stored entity mismatch}：
- * 地板的登記先被拿掉，被移除的實體留在 engine；{@code RemoveItemFromSquarePacket.removeItemFromMap} 停在
- * {@code removeFromSquare} 之前，但移除封包已先送給客戶端（伺服器留著物件，重登後變成拆不掉的殘件）；
- * chunk 卸載時整個 cell 的卸載中斷。ID 為空時原版直接 return，實體同樣留在 engine。
+ * <p><b>原版缺陷</b>：{@code IsoObject.getEntityNetID} 以「座標＋物件在格子清單的序號」組 ID。42.21 地板一律算序號 0，
+ * 玩家後蓋的地板與排第 0 個的實體同 ID（42.22.2 已改成地板也用實際序號）。42.22.2 仍會撞號：序號只在下次
+ * {@code getEntityNetID} 才換，{@code checkEntityIDChange} 遇到新號被佔只記錯誤、不放入；同格前面的物件被移走後，
+ * 排後面的先換號就與還沒換號的前一個同 ID。伺服器移除它時 {@code GameEntityManager.UnregisterEntity} 從
+ * {@code idToEntityMap} 拿出的是別人，丟 {@code Stored entity mismatch}：佔號物件的登記先被拿掉，被移除的實體不取消登記、
+ * 不轉存 MetaEntity；{@code RemoveItemFromSquarePacket.removeItemFromMap} 停在 {@code removeFromSquare} 之前，但移除封包
+ * 已先送給客戶端（伺服器留著物件，重登後變成拆不掉的殘件）；chunk 卸載時整個 cell 的卸載中斷。ID 為空時原版
+ * （42.22.2 起先離開 engine）直接 return，不取消登記也不轉存。
  *
  * <p><b>手術</b>：{@code GameEntity.removeFromWorld(boolean)} 唯一 {@code UnregisterEntity(GameEntity, boolean)}
  * 改道 {@link #unregister}。伺服器上、該 ID 存的不是這個實體時，先把它放進該 ID，交給原版照常移除（離開 engine、
