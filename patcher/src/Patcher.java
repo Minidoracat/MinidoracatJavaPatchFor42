@@ -527,6 +527,7 @@ public final class Patcher {
             default -> throw new IllegalArgumentException("未知 patch 集合: " + args[3]);
         };
         List<String> manifest = new ArrayList<>();
+        List<String> failures = new ArrayList<>();
         MessageDigest sha = MessageDigest.getInstance("SHA-256");
 
         try (JarFile jar = new JarFile(jarPath.toFile())) {
@@ -534,7 +535,8 @@ public final class Patcher {
                 String entryName = p.internalName + ".class";
                 var entry = jar.getEntry(entryName);
                 if (entry == null) {
-                    throw new IllegalStateException("jar 內找不到 " + entryName);
+                    failures.add("jar 內找不到 " + entryName);
+                    continue;
                 }
                 byte[] original = jar.getInputStream(entry).readAllBytes();
                 String origSha = HexFormat.of().formatHex(sha.digest(original));
@@ -543,14 +545,19 @@ public final class Patcher {
                 ClassWriter cw = new ClassWriter(0);   // frames/maxs 原樣保留
                 cr.accept(new PatchingVisitor(cw, p), 0);
 
+                // 遊戲更新對版時一次列出全部漂移，不在第一個不符就停
                 int total = 0;
+                boolean drifted = false;
                 for (MethodOps m : p.methods) {
                     if (m.actualHits != m.expectedHits) {
-                        throw new IllegalStateException(p.internalName + "." + m.name + m.desc
-                                + " 命中數 " + m.actualHits + " != 預期 " + m.expectedHits
-                                + "（build 已漂移？重新分析後更新 PatchConfig）");
+                        failures.add(p.internalName + "." + m.name + m.desc
+                                + " 命中數 " + m.actualHits + " != 預期 " + m.expectedHits);
+                        drifted = true;
                     }
                     total += m.actualHits;
+                }
+                if (drifted) {
+                    continue;
                 }
 
                 byte[] patched = cw.toByteArray();
@@ -562,10 +569,23 @@ public final class Patcher {
                 System.out.printf("patched %-70s %d hits%n", entryName, total);
             }
         }
+        if (!failures.isEmpty()) {
+            failures.forEach(f -> System.err.println("[漂移] " + f));
+            // -Dpatcher.partial=true：遊戲更新對版期間，先寫出沒漂移的 class 與 manifest 給個別測試用，
+            // 結束碼仍非 0，build.ps1 照樣中止（不會出包）
+            if (!Boolean.getBoolean("patcher.partial")) {
+                throw new IllegalStateException(failures.size() + " 處命中數不符或 class 不存在"
+                        + "（build 已漂移？重新分析後更新 PatchConfig）");
+            }
+        }
         Files.createDirectories(manifestPath.getParent());
         // 強制 LF：manifest 會被伺服器端 bash 逐行解析，CRLF 會污染欄位
         Files.writeString(manifestPath, String.join("\n", manifest) + "\n");
         System.out.println("manifest -> " + manifestPath + "（" + manifest.size() + " classes）");
+        if (!failures.isEmpty()) {
+            System.err.println("[partial] " + failures.size() + " 處漂移未寫出，結束碼 3");
+            System.exit(3);
+        }
     }
 
     private Patcher() {}

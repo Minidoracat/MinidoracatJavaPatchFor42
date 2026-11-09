@@ -31,12 +31,23 @@ if (-not $gitSha) { $gitSha = 'nogit' }
 if ((& git status --porcelain --untracked-files=no 2>$null) -or
     (& git status --porcelain -- patcher 2>$null)) { $gitSha = "$gitSha+dirty" }
 $builtAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm')
-$jarSha8 = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower().Substring(0, 8)
+$jarSha = (Get-FileHash -Algorithm SHA256 "$R\work\projectzomboid.jar").Hash.ToLower()
+$jarSha8 = $jarSha.Substring(0, 8)
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
 
 Write-Host "[1/10] 編譯 patcher..."
 javac -encoding UTF-8 -cp $ASM_CP -d "$R\work\out" (Get-ChildItem "$R\patcher\src\*.java").FullName
 Assert-Ok "javac patcher"
+
+# 42.22 起 jar 簽章：loose class 與 jar 內同 package 的 class 簽章者不同會丟 SecurityException。
+# LoadCheck／SmokeCheck／行為測試改用拿掉簽章檔的副本（class bytes 相同）；Patcher 與 PatchInfo 指紋仍讀原 jar。
+$TJ = "$R\work\projectzomboid-unsigned.jar"
+$tjStamp = "$TJ.src-sha256"
+if (-not ((Test-Path $TJ) -and (Test-Path $tjStamp) -and ((Get-Content -Raw $tjStamp).Trim() -eq $jarSha))) {
+    java -cp "$R\work\out" UnsignedTestJar "$R\work\projectzomboid.jar" $TJ
+    Assert-Ok "UnsignedTestJar"
+    [System.IO.File]::WriteAllText($tjStamp, $jarSha)
+}
 
 Write-Host "[2/10] 生成 PatchInfo（版本指紋）＋編譯 runtime helpers（對遊戲 jar）..."
 java -cp "$R\work\out" PatchInfoGen "$R\work\gen" 'server' $gitSha $builtAt $jarSha8
@@ -188,31 +199,31 @@ if ($unlisted -or $missing) {
 }
 
 Write-Host "[5/10] 連結驗證（-Xverify:all）..."
-java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
+java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$TJ" "$R\dist\manifest.txt"
 Assert-Ok "LoadCheck"
 
 Write-Host "[6/10] JVMS 資料流驗證（CheckClassAdapter）..."
-java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$R\work\projectzomboid.jar" "$R\dist\manifest.txt"
+java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$TJ" "$R\dist\manifest.txt"
 Assert-Ok "BytecodeVerify"
 
 Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
 # dumpDir 導離真實 Zomboid 存檔目錄（W8 blocked-path 行為測試會觸發傾印；ZomboidFileSystem
 # 在測試 JVM 能完整初始化，未導向會把垃圾寫進本機 Saves/）
-java "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$R\work\projectzomboid.jar"
+java "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$TJ"
 Assert-Ok "SmokeCheck"
 
 # 退役（2026-09-02）：[8/10] 登入／join 量測 wrapper 的行為與例外 precedence 驗證隨刀
 # 移除（歸因任務已完成，REJOIN_TOTAL 常態 5–13ms）。詳見 docs/patches.md 2i。
 
 Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalTest
 Assert-Ok "FastIdentityArrayRemovalTest"
 
 Write-Host "[9a/10] 容器環守衛（W5）行為驗證（含原版必爆負對照）＋kill switch..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ContainerCycleGuardTest
 Assert-Ok "ContainerCycleGuardTest"
 # 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場
-java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ContainerCycleGuardTest
+java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ContainerCycleGuardTest
 Assert-Ok "ContainerCycleGuardTest（maxDepth=0 kill switch）"
 
 
@@ -220,98 +231,98 @@ Write-Host "[9b/10] chunk 供給併包（W4-1 v2）三模式行為驗證（獨�
 # observe＝預設出貨（佇列一個位元組都不動、只算 would-merge）；enforce＝真併包（守恆／
 # 上限 BATCH／重複放棄／順序／largeArea／預算閘／tick 重置）；off＝純 no-op。測試自驗
 # argv 與實際 mode 相符，property 名稱打錯會炸在測試裡，不會把 observe 版跑三遍假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkRequestPackerTest observe
 Assert-Ok "ChunkRequestPackerTest（observe，預設出貨模式）"
-java "-Dmdc.chunkPacker=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest enforce
+java "-Dmdc.chunkPacker=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkRequestPackerTest enforce
 Assert-Ok "ChunkRequestPackerTest（enforce）"
-java "-Dmdc.chunkPacker=enforce" "-Dmdc.chunkPacker.batch=60" "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest enforce-nobudget
+java "-Dmdc.chunkPacker=enforce" "-Dmdc.chunkPacker.batch=60" "-Dmdc.chunkPacker.windowBudget=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkRequestPackerTest enforce-nobudget
 Assert-Ok "ChunkRequestPackerTest（enforce 但 windowBudget=0＝不併包）"
-java "-Dmdc.chunkPacker=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkRequestPackerTest off
+java "-Dmdc.chunkPacker=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkRequestPackerTest off
 Assert-Ok "ChunkRequestPackerTest（off kill switch）"
 
 Write-Host "[9b2/10] 地面物品過期清除同步（W43）丟棄條件與原版逐項等價＋旋鈕解析..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldItemExpirySyncTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldItemExpirySyncTest
 Assert-Ok "WorldItemExpirySyncTest"
 
 Write-Host "[9c/10] 地圖格載入捕手（W6）行為驗證（含替身必拋負對照）＋kill switch..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkLoadGuardTest
 Assert-Ok "ChunkLoadGuardTest"
 # 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場。
 # 傳 disabled 讓測試自己斷言旋鈕真的生效——只看 exit code 的話，property 名稱打錯會變成
 # 「把 enabled 版再跑一遍、照樣 exit 0」，降級路徑其實從未被測到。
-java "-Dmdc.chunkLoadGuard.enabled=false" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkLoadGuardTest disabled
+java "-Dmdc.chunkLoadGuard.enabled=false" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkLoadGuardTest disabled
 Assert-Ok "ChunkLoadGuardTest（enabled=false kill switch）"
 
 Write-Host "[9d/10] 存檔管線隔離（W9）kill switch off 路徑行為驗證（獨立 JVM）..."
 # enabled 路徑由 SmokeCheck 覆蓋；off 路徑必須真的執行過（緊急降級不該首跑於事故現場）。
 # 測試自驗 property 到位——名稱打錯會炸在測試裡，不會默默跑 enabled 版假綠
-java "-Dmdc.chunkSaveIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ChunkSaveIsolationTest
+java "-Dmdc.chunkSaveIsolation=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkSaveIsolationTest
 Assert-Ok "ChunkSaveIsolationTest（chunkSaveIsolation=0 kill switch）"
 
 # 退役（2026-09-02）：[9e/10] 食材重量記憶化三模式測試隨刀移除（observe 實測收益
 # 0.06–0.18%，永不啟用 on 已定案）。詳見 docs/patches.md 2w。
 
 Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不收名／反作弊放行）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.LogFilterNoiseTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
 
 Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸＋W51 動物 ID 紀錄（四組態，獨立 JVM）..."
 # 出貨、Lua 保險絲關閉、參數守衛關閉、動物 ID 紀錄關閉；每組皆自驗旗標。缺 component 的封包走 42.21 原版 processServer 驗 Reject bytes。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest
 Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
-java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest guard-off
+java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest guard-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionGuard=0 kill switch）"
-java "-Dmdc.netTimedActionArgs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest args-off
+java "-Dmdc.netTimedActionArgs=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest args-off
 Assert-Ok "NetTimedActionGuardTest（netTimedActionArgs=0 kill switch，W10-D 直通）"
-java "-Dmdc.animalIdMiss=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.NetTimedActionGuardTest animal-off
+java "-Dmdc.animalIdMiss=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest animal-off
 Assert-Ok "NetTimedActionGuardTest（animalIdMiss=0 kill switch，W51 不記）"
 
 Write-Host "[9h/10] 動物排序活鎖捕手（W11）行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSortGuardTest
 Assert-Ok "AnimalSortGuardTest（on，出貨組態）"
-java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSortGuardTest off
+java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSortGuardTest off
 Assert-Ok "AnimalSortGuardTest（animalSortGuard=0 kill switch）"
 
 Write-Host "[9i/10] 車輛 DB chunk 索引守衛行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleChunkIndexGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleChunkIndexGuardTest
 Assert-Ok "VehicleChunkIndexGuardTest（on，出貨組態）"
-java "-Dmdc.vehicleChunkIndexGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleChunkIndexGuardTest off
+java "-Dmdc.vehicleChunkIndexGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleChunkIndexGuardTest off
 Assert-Ok "VehicleChunkIndexGuardTest（off，vanilla 路徑）"
 
 Write-Host "[9j/10] 動物同步範圍對齊（W13）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
 # 三個模式都必須真的跑過：enforce 是出貨組態、observe 只量測 `suppressed` 判定差集而
 # 不改行為、off 是緊急降級。測試自驗 argv 與實際 MODE 相符，property 名稱打錯
 # 會炸在測試裡，不會默默把 enforce 版跑三遍假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest enforce
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRelevancyGateTest enforce
 Assert-Ok "AnimalRelevancyGateTest（enforce，出貨組態）"
-java "-Dmdc.animalRelevancy=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest observe
+java "-Dmdc.animalRelevancy=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRelevancyGateTest observe
 Assert-Ok "AnimalRelevancyGateTest（observe，只量測不改行為）"
-java "-Dmdc.animalRelevancy=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRelevancyGateTest off
+java "-Dmdc.animalRelevancy=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRelevancyGateTest off
 Assert-Ok "AnimalRelevancyGateTest（animalRelevancy=0 kill switch）"
 
 Write-Host "[9k/10] 動物 requested 冷卻＋範圍閘（W14）行為驗證（獨立 JVM；模式是 static final）..."
 # 兩把獨立 kill switch 的組合都必須真的跑過：both-enforce 是出貨組態；observe 只計數
 # 不過濾；off 純委派；cooldown-only / range-only 驗證兩刀可獨立降級。測試自驗 argv 與
 # 實際模式相符，property 名稱打錯會炸在測試裡，不會默默把 enforce 版跑五遍假綠。
-java "-Dmdc.animalRequestCooldownMs=6000" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest enforce
+java "-Dmdc.animalRequestCooldownMs=6000" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRequestGateTest enforce
 Assert-Ok "AnimalRequestGateTest（both enforce，出貨組態）"
-java "-Dmdc.animalRequestCooldown=2" "-Dmdc.animalRequestRange=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest observe
+java "-Dmdc.animalRequestCooldown=2" "-Dmdc.animalRequestRange=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRequestGateTest observe
 Assert-Ok "AnimalRequestGateTest（both observe，只計數不過濾）"
-java "-Dmdc.animalRequestCooldown=0" "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest off
+java "-Dmdc.animalRequestCooldown=0" "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRequestGateTest off
 Assert-Ok "AnimalRequestGateTest（both off kill switch，純委派）"
-java "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest cooldown-only
+java "-Dmdc.animalRequestRange=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRequestGateTest cooldown-only
 Assert-Ok "AnimalRequestGateTest（cooldown-only，range 獨立降級）"
-java "-Dmdc.animalRequestCooldown=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalRequestGateTest range-only
+java "-Dmdc.animalRequestCooldown=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalRequestGateTest range-only
 Assert-Ok "AnimalRequestGateTest（range-only，cooldown 獨立降級）"
 
 Write-Host "[9l/10] 主迴圈凍結看門狗（W15）行為驗證（獨立 JVM；時序依 POLL_MS=1000）..."
 # on＝clamp 下限＋凍結偵測＋快照＋恢復不重入＋再凍結重入；off＝kill switch 純早退
 # （零記錄零偵測零快照）；clamp＝門檻上限咬住。測試自驗 argv 與實際模式相符。
-java "-Dmdc.mainLoopWatchdogThresholdMs=500" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest on
+java "-Dmdc.mainLoopWatchdogThresholdMs=500" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.MainLoopWatchdogTest on
 Assert-Ok "MainLoopWatchdogTest（on：clamp 下限＋凍結偵測＋恢復重入）"
-java "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest off
+java "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.MainLoopWatchdogTest off
 Assert-Ok "MainLoopWatchdogTest（off kill switch：零記錄零偵測）"
-java "-Dmdc.mainLoopWatchdogThresholdMs=999999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.MainLoopWatchdogTest clamp
+java "-Dmdc.mainLoopWatchdogThresholdMs=999999" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.MainLoopWatchdogTest clamp
 Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
 
 # 退役（2026-09-02）：[9m/10] W16 動物卸載接手守衛測試隨刀移除（8 天全零遺失，
@@ -320,33 +331,33 @@ Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
 Write-Host "[9n/10] hutch 載入回傳守衛（W17）三模式行為驗證（獨立 JVM）..."
 # ZeroRandom 確定性製造「有空槽但 vanilla 101 次全撞同槽」；enforce force-put、
 # observe 只記不救、off 純委派三路徑都必須真跑，並驗滿舍20隻/第21隻CRITICAL。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest enforce
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest enforce
 Assert-Ok "HutchLoadGuardTest（enforce，預設出貨模式）"
-java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest observe
+java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest observe
 Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
-java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchLoadGuardTest off
+java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest off
 Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
 
 Write-Host "[9n2/10] 雞舍自發同步收件人過濾（W26）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
 # enforce＝預設出貨（真的過濾掉範圍外連線）；observe＝只量測 wouldSkip／wouldSkipBytes、
 # 照樣全量廣播；off＝純委派原版 sync。三個模式都必須真跑過：測試自驗 argv 與實際 MODE
 # 相符，property 名稱打錯會炸在測試裡，不會默默把 enforce 版跑三遍假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest enforce
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchSyncGateTest enforce
 Assert-Ok "HutchSyncGateTest（enforce，預設出貨模式）"
-java "-Dmdc.hutchSyncGate=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest observe
+java "-Dmdc.hutchSyncGate=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchSyncGateTest observe
 Assert-Ok "HutchSyncGateTest（observe，只量測不過濾）"
 # off 同時關掉 W36 廣播過濾＝共用 teleport 簿記也停用，驗證兩把都關時 TeleportPacket.write 純委派。
-java "-Dmdc.hutchSyncGate=0" "-Dmdc.gameEntityRelevancy=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchSyncGateTest off
+java "-Dmdc.hutchSyncGate=0" "-Dmdc.gameEntityRelevancy=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchSyncGateTest off
 Assert-Ok "HutchSyncGateTest（hutchSyncGate=0＋gameEntityRelevancy=0，純委派）"
 
 Write-Host "[9n3/10] GameEntity 廣播收件範圍＋CraftLogic 同步變化閘（W36）三模式行為驗證（獨立 JVM）..."
 # enforce＝預設出貨（遠方連線略過、位置不可信型別全服、wire 與原版逐位元相同；進度整數百分比／
 # in-progress 清單／濕度不變就不送）；observe＝只計數照送；off＝兩把都純委派。測試自驗模式。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest enforce
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.components.crafting.GameEntityTrafficTest enforce
 Assert-Ok "GameEntityTrafficTest（enforce，預設出貨模式）"
-java "-Dmdc.gameEntityRelevancy=2" "-Dmdc.craftLogicSyncGate=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest observe
+java "-Dmdc.gameEntityRelevancy=2" "-Dmdc.craftLogicSyncGate=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.components.crafting.GameEntityTrafficTest observe
 Assert-Ok "GameEntityTrafficTest（observe，只計數照送）"
-java "-Dmdc.gameEntityRelevancy=0" "-Dmdc.craftLogicSyncGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.components.crafting.GameEntityTrafficTest off
+java "-Dmdc.gameEntityRelevancy=0" "-Dmdc.craftLogicSyncGate=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.components.crafting.GameEntityTrafficTest off
 Assert-Ok "GameEntityTrafficTest（兩把 kill switch 全關，純委派）"
 
 Write-Host "[9o/10] 動物 LOS 節流閘（W18）七組態行為驗證（獨立 JVM）..."
@@ -355,395 +366,395 @@ Write-Host "[9o/10] 動物 LOS 節流閘（W18）七組態行為驗證（獨立 
 # ＋同幀一致＋輪轉硬保證（無失明）＋相位分散＋LOD fail-open（frameMod>1 恆 forward）；
 # N=4 主測、出貨組態 N=2、clamp 兩端（0→1 等效全跑、999→16）；off＝純直通計數凍結。
 # MODE 與 N 都自驗防 property 假綠；文字別名（off/enforce/observe）由 parseMode 支援。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest observe
 Assert-Ok "AnimalLosGateTest（observe，預設出貨模式＋錯誤契約）"
-java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=4" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 4
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=4" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest enforce 4
 Assert-Ok "AnimalLosGateTest（enforce N=4，幀輪轉主測）"
-java "-Dmdc.animalLosGate=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 2
+java "-Dmdc.animalLosGate=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest enforce 2
 Assert-Ok "AnimalLosGateTest（enforce N=2，出貨組態＋文字別名）"
-java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 1
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest enforce 1
 Assert-Ok "AnimalLosGateTest（enforce clamp 下限 0→1，等效全跑）"
-java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=999" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest enforce 16
+java "-Dmdc.animalLosGate=1" "-Dmdc.animalLosN=999" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest enforce 16
 Assert-Ok "AnimalLosGateTest（enforce clamp 上限 999→16）"
-java "-Dmdc.animalLosGate=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest off
+java "-Dmdc.animalLosGate=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest off
 Assert-Ok "AnimalLosGateTest（off 文字別名，純直通 kill switch）"
-java "-Dmdc.animalLosGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosGateTest observe
+java "-Dmdc.animalLosGate=bogus" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosGateTest observe
 Assert-Ok "AnimalLosGateTest（未知值 bogus 落回 observe——parseMode 安全預設方向）"
 
 Write-Host "[9o2/10] 動物 LOS 迴圈殼 Scan 三模式行為驗證（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosScanTest observe
 Assert-Ok "AnimalLosScanTest（observe 預設 timing wrapper）"
 # W18-2 完整掃描迴圈本身的單元測試：關掉 W47（W47 與原版的等價由下方 AnimalLosIndexTest 差分負責）。
-java "-Dmdc.animalLosScan=on" "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest on
+java "-Dmdc.animalLosScan=on" "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosScanTest on
 Assert-Ok "AnimalLosScanTest（on fast/delegate/fallback/邊界，W47 關閉）"
-java "-Dmdc.animalLosScan=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosScanTest off
+java "-Dmdc.animalLosScan=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosScanTest off
 Assert-Ok "AnimalLosScanTest（off 直通）"
 
 Write-Host "[9p/10] 車輛永久移除授權守衛（W19 observe）三組態行為驗證（獨立 JVM）..."
 # observe＝預設出貨；1 是尚未實作 enforce 的 observe-alias（授權條件待 observe 數據定案）；
 # off＝純早退。三個 static-final 組態都真跑並自驗 MODE，property 拼錯不得假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRemoveGuardTest observe
 Assert-Ok "VehicleRemoveGuardTest（observe，預設出貨模式）"
-java "-Dmdc.vehicleRemoveGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest enforce
+java "-Dmdc.vehicleRemoveGuard=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRemoveGuardTest enforce
 Assert-Ok "VehicleRemoveGuardTest（mode=1，本版 observe-alias）"
-java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRemoveGuardTest off
+java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRemoveGuardTest off
 Assert-Ok "VehicleRemoveGuardTest（off 文字別名，純早退 kill switch）"
 
 Write-Host "[9q/10] 衣物同步守衛（W20）三組態行為驗證（獨立 JVM）..."
 # observe＝預設出貨（(b) 記錄後拋 NPE 保 vanilla 語意、(c) 資訊超集行）；
 # enforce＝(b) null→white 修復（僅 tint 刀有 enforce 語意）；off＝兩把 kill switch 全關、
 # 純直通/早退。三組態都真跑並自驗模式，property 拼錯不得假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest observe
 Assert-Ok "ClothingSyncGuardTest（observe，預設出貨模式）"
-java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest enforce
+java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest enforce
 Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
-java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ClothingSyncGuardTest off
+java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest off
 Assert-Ok "ClothingSyncGuardTest（兩把 kill switch 全關，純直通）"
 
 Write-Host "[9q2/10] 伺服器角色聲音參數跳過（W34）三態行為驗證（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.EmitterParamGateTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.EmitterParamGateTest observe
 Assert-Ok "EmitterParamGateTest（observe，預設出貨）"
-java "-Dmdc.emitterParamGate=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.EmitterParamGateTest enforce
+java "-Dmdc.emitterParamGate=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.EmitterParamGateTest enforce
 Assert-Ok "EmitterParamGateTest（enforce）"
-java "-Dmdc.emitterParamGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.EmitterParamGateTest off
+java "-Dmdc.emitterParamGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.EmitterParamGateTest off
 Assert-Ok "EmitterParamGateTest（off kill switch）"
 
 Write-Host "[9q3/10] 使用中玩家索引（W35）三態行為驗證（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcUsingPlayerIndexTest observe
 Assert-Ok "MdcUsingPlayerIndexTest（observe，預設出貨）"
-java "-Dmdc.usingPlayerIndex=enforce" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest enforce
+java "-Dmdc.usingPlayerIndex=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcUsingPlayerIndexTest enforce
 Assert-Ok "MdcUsingPlayerIndexTest（enforce）"
-java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcUsingPlayerIndexTest off
+java "-Dmdc.usingPlayerIndex=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcUsingPlayerIndexTest off
 Assert-Ok "MdcUsingPlayerIndexTest（off kill switch）"
 
 Write-Host "[9r2/10] 動物離線補算觀測（W32）＋補算時數上限（W42）＋離線補算根治（W49）＋補算等畜牧區就緒（W56）行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalAwayProbeTest
 Assert-Ok "AnimalAwayProbeTest（出貨組態：觀測＋W42 上限＋W49 自身時鐘與屠體守衛）"
-java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest off
+java "-Dmdc.animalAwayProbe=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalAwayProbeTest off
 Assert-Ok "AnimalAwayProbeTest（animalAwayProbe=0 kill switch）"
-java "-Dmdc.animalCatchUpCap=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest nocap
+java "-Dmdc.animalCatchUpCap=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalAwayProbeTest nocap
 Assert-Ok "AnimalAwayProbeTest（animalCatchUpCap=0，W42 回 vanilla 時數、W49 自身時鐘一併停用）"
-java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest noown
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalAwayProbeTest noown
 Assert-Ok "AnimalAwayProbeTest（animalOwnClock=0，只關 W49 自身時鐘）"
-java "-Dmdc.animalCarcassGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalAwayProbeTest nocarcass
+java "-Dmdc.animalCarcassGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalAwayProbeTest nocarcass
 Assert-Ok "AnimalAwayProbeTest（animalCarcassGuard=0，屠體照原版補算）"
 # W49 累積小時語意：走 dist 內手術後的 IsoAnimal.updateStatsAway（四個改道）。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpAccrualTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpAccrualTest on
 Assert-Ok "AnimalCatchUpAccrualTest（on，出貨組態）"
-java "-Dmdc.animalCatchUpAccrual=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpAccrualTest off
+java "-Dmdc.animalCatchUpAccrual=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpAccrualTest off
 Assert-Ok "AnimalCatchUpAccrualTest（animalCatchUpAccrual=0，原版一次性 age＋午夜 growUp）"
 # W56 補算等畜牧區就緒：nodefer／noown 是原版負對照（chunk 路徑當場補算時看不到槽，zone 路徑被 W42 截成 0h）。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest on
 Assert-Ok "AnimalCatchUpDeferTest（on，出貨組態）"
-java "-Dmdc.animalCatchUpDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest nodefer
+java "-Dmdc.animalCatchUpDefer=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest nodefer
 Assert-Ok "AnimalCatchUpDeferTest（animalCatchUpDefer=0，原版負對照）"
-java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest noown
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest noown
 Assert-Ok "AnimalCatchUpDeferTest（animalOwnClock=0，延後隨 W49 停用）"
-java "-Dmdc.troughZoneRegister=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest notrough
+java "-Dmdc.troughZoneRegister=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest notrough
 Assert-Ok "AnimalCatchUpDeferTest（troughZoneRegister=0，槽進世界照原版不登記）"
-java "-Dmdc.animalCatchUpDeferMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalCatchUpDeferTest deferms0
+java "-Dmdc.animalCatchUpDeferMs=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest deferms0
 Assert-Ok "AnimalCatchUpDeferTest（animalCatchUpDeferMs=0，正式入口 zoneUpdate 排空）"
 
 Write-Host "[9r3/10] 分娩品種守衛（W33）行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.BabyBreedGuardTest
 Assert-Ok "BabyBreedGuardTest（on，出貨組態）"
-java "-Dmdc.babyBreedGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.BabyBreedGuardTest off
+java "-Dmdc.babyBreedGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.BabyBreedGuardTest off
 Assert-Ok "BabyBreedGuardTest（babyBreedGuard=0 kill switch）"
 
 Write-Host "[9r4/10] 動物半建構物件守衛＋apop 先序列化再開檔（W37）行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSpawnGuardTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSpawnGuardTest
 Assert-Ok "AnimalSpawnGuardTest（on，出貨組態）"
-java "-Dmdc.animalSpawnGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSpawnGuardTest off
+java "-Dmdc.animalSpawnGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSpawnGuardTest off
 Assert-Ok "AnimalSpawnGuardTest（animalSpawnGuard=0 kill switch）"
 # off 組態重現原版事故（例外外拋＋apop 截成 0 bytes），on 保留舊檔。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalCellSaveTest on
 Assert-Ok "MdcAnimalCellSaveTest（on，出貨組態）"
-java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalCellSaveTest off
+java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalCellSaveTest off
 Assert-Ok "MdcAnimalCellSaveTest（animalCellSave=0，原版截斷重現）"
 # W49-A3 自身時鐘寫出＋W50 掛鉤屠體存檔（W50 依賴 W37，animalCellSave=0 時一併停用）。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalSaveTest on
 Assert-Ok "MdcAnimalSaveTest（on，出貨組態）"
-java "-Dmdc.animalHookSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest nohook
+java "-Dmdc.animalHookSave=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalSaveTest nohook
 Assert-Ok "MdcAnimalSaveTest（animalHookSave=0 kill switch）"
-java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest noown
+java "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalSaveTest noown
 Assert-Ok "MdcAnimalSaveTest（animalOwnClock=0，時鐘照原版寫存檔當下）"
-java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.characters.animals.MdcAnimalSaveTest nocellsave
+java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalSaveTest nocellsave
 Assert-Ok "MdcAnimalSaveTest（animalCellSave=0，W50 隨 W37 停用）"
 
 Write-Host "[9r5/10] 畜牧區補算快照（W38）＋動物死亡帳本（W39）行為驗證＋kill switch（獨立 JVM）..."
 # W38 off 組態以原版迴圈形狀重現重複補算／漏算；on 每隻恰一次。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalMetaSnapshotTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalMetaSnapshotTest on
 Assert-Ok "AnimalMetaSnapshotTest（on，出貨組態）"
-java "-Dmdc.animalMetaSnapshot=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalMetaSnapshotTest off
+java "-Dmdc.animalMetaSnapshot=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalMetaSnapshotTest off
 Assert-Ok "AnimalMetaSnapshotTest（animalMetaSnapshot=0，原版重現）"
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalDeathLedgerTest on
 Assert-Ok "AnimalDeathLedgerTest（on，出貨組態）"
-java "-Dmdc.animalDeathLedger=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalDeathLedgerTest off
+java "-Dmdc.animalDeathLedger=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalDeathLedgerTest off
 Assert-Ok "AnimalDeathLedgerTest（animalDeathLedger=0）"
 
 Write-Host "[9r6/10] 物品處理清單 null 容錯＋跨執行緒寫入觀測（W40）＋非主執行緒登記改道（W41）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 IsoCell）..."
 # off 組態重現原版：null 處 NPE、之後物品不處理、null 留在清單；on 同幀移除並記錄其他執行緒寫入，
 # 其他執行緒的 AddItem 登記排入佇列、下一次 ProcessItems 補登記；nodefer 回原版直接寫。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest on
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsGuardTest on
 Assert-Ok "ProcessItemsGuardTest（on，出貨組態）"
-java "-Dmdc.processItemsGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest off
+java "-Dmdc.processItemsGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsGuardTest off
 Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
-java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsGuardTest nodefer
+java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsGuardTest nodefer
 Assert-Ok "ProcessItemsGuardTest（processItemsDefer=0，W41 回原版直接寫）"
 
 Write-Host "[9s/10] W10-C 打斷觀測＋動作封包 owner 檢查＋W78 執行者檢查回歸（獨立 JVM）..."
 # 觀測模式不控制 owner／執行者檢查；涵蓋真 wire 偽造取消／Request、合法取消交回原版（含 Fishing 後續事件）與上下文收尾；
 # W78：character＝owner、替別人包紮、nil、非 Request 照原版，character 是別人或不是玩家時 action=null 交回原版 Reject。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe
 Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
-java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest enforce
+java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest enforce
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
-java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest off
+java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest off
 Assert-Ok "MdcTimedActionProbeTest（觀測 off，owner 檢查仍有效）"
-java "-Dmdc.actionOwnerCheck=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe owner-off
+java "-Dmdc.actionOwnerCheck=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe owner-off
 Assert-Ok "MdcTimedActionProbeTest（actionOwnerCheck=0，原版信任邊界負對照）"
-java "-Dmdc.actionExecutorCheck=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcTimedActionProbeTest observe executor-off
+java "-Dmdc.actionExecutorCheck=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe executor-off
 Assert-Ok "MdcTimedActionProbeTest（actionExecutorCheck=0，W78 原版負對照）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、
 # cap／分槽溢位／null 契約）；off＝三處全部回到 vanilla 共用池。測試自驗旗標，property 拼錯不得假綠。
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IoPoolIsolationTest
 Assert-Ok "IoPoolIsolationTest（on，出貨組態）"
-java "-Dmdc.ioPoolIsolation=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IoPoolIsolationTest off
+java "-Dmdc.ioPoolIsolation=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IoPoolIsolationTest off
 Assert-Ok "IoPoolIsolationTest（ioPoolIsolation=0 kill switch）"
 
 Write-Host "[9w/10] 動物同步接收驗證（W29）與原版回退對照..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest enforce
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalUpdateGuardTest enforce
 Assert-Ok "AnimalUpdateGuardTest（預設 enforce，真接收入口、狀態保護、限頻與紀錄故障）"
-java "-Dmdc.animalUpdateGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest off
+java "-Dmdc.animalUpdateGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalUpdateGuardTest off
 Assert-Ok "AnimalUpdateGuardTest（off，原版危險行為對照）"
-java "-Dmdc.animalUpdateGuard=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalUpdateGuardTest unknown
+java "-Dmdc.animalUpdateGuard=bogus" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalUpdateGuardTest unknown
 Assert-Ok "AnimalUpdateGuardTest（未知值仍 enforce）"
 
 Write-Host "[9x/10] processItems 身分索引（W45）：真建構子掛點、真 IsoCell 差分、隨機操作差分、自癒、跨執行緒與原版回退..."
 # on＝出貨組態；observe 一律回原版線性結果並逐次比對；off 由 wrap 原樣回傳原版 ArrayList；
 # collisions 以 -XX:hashCode=2 讓所有 identity hash 相同，驗證全碰撞下索引仍與原版一致。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsIndexTest on
 Assert-Ok "ProcessItemsIndexTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.processItemsIndex=2" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest observe
+java -Xverify:all "-Dmdc.processItemsIndex=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsIndexTest observe
 Assert-Ok "ProcessItemsIndexTest（observe，只比對不改）"
-java -Xverify:all "-Dmdc.processItemsIndex=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest off
+java -Xverify:all "-Dmdc.processItemsIndex=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsIndexTest off
 Assert-Ok "ProcessItemsIndexTest（off，原版 ArrayList）"
-java -Xverify:all -XX:+UnlockExperimentalVMOptions -XX:hashCode=2 -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ProcessItemsIndexTest on collisions
+java -Xverify:all -XX:+UnlockExperimentalVMOptions -XX:hashCode=2 -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsIndexTest on collisions
 Assert-Ok "ProcessItemsIndexTest（on，identity hash 全碰撞）"
 
 Write-Host "[9y/10] 魚群廣播（W31）真 writer/send/decoder、錯誤續送與原版回退..."
-java -Xverify:all -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" on
+java -Xverify:all -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$TJ" on
 Assert-Ok "FishingDataBroadcastTest（on，多收件人與錯誤路徑）"
-java -Xverify:all "-Dmdc.fishingDataBroadcast=0" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+java -Xverify:all "-Dmdc.fishingDataBroadcast=0" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$TJ" off
 Assert-Ok "FishingDataBroadcastTest（0，原版回退）"
-java -Xverify:all "-Dmdc.fishingDataBroadcast=off" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+java -Xverify:all "-Dmdc.fishingDataBroadcast=off" -cp "$R\work\out;$ASM_CP" FishingDataBroadcastTest "$R\dist\java" "$TJ" off
 Assert-Ok "FishingDataBroadcastTest（off，文字別名）"
 
 Write-Host "[9z/10] 聲音封包純觀測：慢呼叫、同批累積與例外隔離..."
-java -Xverify:all "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest observe
+java -Xverify:all "-Dmdc.mainLoopWatchdog=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.sound.MdcWorldSoundProbeTest observe
 Assert-Ok "MdcWorldSoundProbeTest（observe，看門狗停用仍保留批次界線）"
-java -Xverify:all "-Dmdc.worldSoundProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest off
+java -Xverify:all "-Dmdc.worldSoundProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.sound.MdcWorldSoundProbeTest off
 Assert-Ok "MdcWorldSoundProbeTest（off，原版委派）"
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest unarmed
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.sound.MdcWorldSoundProbeTest unarmed
 Assert-Ok "MdcWorldSoundProbeTest（主迴圈武裝前維持原版）"
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.sound.MdcWorldSoundProbeTest logthrow
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.sound.MdcWorldSoundProbeTest logthrow
 Assert-Ok "MdcWorldSoundProbeTest（真 logger 故障與原例外隔離）"
 
 Write-Host "[9za/10] VehicleCollide 歸還後重送授權（W46）：真 processServer＋真 shouldSend 與原版回退..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest on
 Assert-Ok "MdcVehicleCollideResyncTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.vehicleCollideResync=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest off
+java -Xverify:all "-Dmdc.vehicleCollideResync=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.vehicle.MdcVehicleCollideResyncTest off
 Assert-Ok "MdcVehicleCollideResyncTest（0，原版回退）"
 
 Write-Host "[9zb/10] 動物視線空間預篩（W47）：與原版逐次差分、observe、off、位移違反停用..."
 $losScanOn = "-Dmdc.animalLosScan=on"
-java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest on
+java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosIndexTest on
 Assert-Ok "AnimalLosIndexTest（on，出貨組態，4000 個隨機世界與原版差分）"
-java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest observe
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosIndexTest observe
 Assert-Ok "AnimalLosIndexTest（observe，每次比對不改行為）"
-java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest off
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosIndexTest off
 Assert-Ok "AnimalLosIndexTest（0，完全不經 W47）"
-java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest violation-final
+java -Xverify:all $losScanOn -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosIndexTest violation-final
 Assert-Ok "AnimalLosIndexTest（快速路徑最後掃描發現位移並停用）"
-java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLosIndexTest violation-audit
+java -Xverify:all $losScanOn "-Dmdc.animalLosIndex=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLosIndexTest violation-audit
 Assert-Ok "AnimalLosIndexTest（比對發現候選缺漏並停用）"
 
 Write-Host "[9zc/10] 動物聽覺掃描量測（W48）：回傳值與原版同一物件、計數與抽樣對帳、例外原樣上拋、off 不計數..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundProbeTest on
 Assert-Ok "AnimalSoundProbeTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.animalSoundProbe=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest off
+java -Xverify:all "-Dmdc.animalSoundProbe=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundProbeTest off
 Assert-Ok "AnimalSoundProbeTest（0，直接委派不計數）"
 Write-Host "[9zd/10] 動物聽覺空間索引（W48-2）：與原版逐次差分（幀內追加、到期移除、任意結構變動、格線邊界、負座標、null）、observe、off、停用..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundIndexTest on
 Assert-Ok "AnimalSoundIndexTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.animalSoundIndex=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest observe
+java -Xverify:all "-Dmdc.animalSoundIndex=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundIndexTest observe
 Assert-Ok "AnimalSoundIndexTest（observe，每次比對回傳原版）"
-java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest off
+java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundIndexTest off
 Assert-Ok "AnimalSoundIndexTest（0，不包清單全走原版）"
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundIndexTest violation
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundIndexTest violation
 Assert-Ok "AnimalSoundIndexTest（聲音原地改寫由抽樣比對發現並停用）"
-java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalSoundProbeTest on
+java -Xverify:all "-Dmdc.animalSoundIndex=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSoundProbeTest on
 Assert-Ok "AnimalSoundProbeTest（索引 off 時每 64 次抽樣）"
 
 Write-Host "[9ze/10] 分割畫面／重生名稱守衛（W52）：真 ConnectCoopPacket.parse、真 whitelist 查詢與原版回退..."
 # enforce＝出貨組態（0 號改用登入名、1–3 號帳號名在任何副作用前被拒）；observe 只計數照原版；
 # off＝原版冒名重現（負對照）。測試自驗 argv 與實際 MODE 相符，property 拼錯不得假綠。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest enforce
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.connection.MdcCoopNameGuardTest enforce
 Assert-Ok "MdcCoopNameGuardTest（enforce，出貨組態）"
-java -Xverify:all "-Dmdc.coopNameGuard=observe" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest observe
+java -Xverify:all "-Dmdc.coopNameGuard=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.connection.MdcCoopNameGuardTest observe
 Assert-Ok "MdcCoopNameGuardTest（observe，只計數照原版）"
-java -Xverify:all "-Dmdc.coopNameGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.connection.MdcCoopNameGuardTest off
+java -Xverify:all "-Dmdc.coopNameGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.connection.MdcCoopNameGuardTest off
 Assert-Ok "MdcCoopNameGuardTest（off，原版冒名負對照）"
 
 Write-Host "[9zf/10] 步行時縮小車輛相關範圍（W53）：真 isRelevantTo 負對照、圓形 R 邊界、車內與 connectArea 照原版、停車只計數、真 processServer..."
 # observe＝出貨組態（只計數照原版）；on＝縮小（預設 R=64、使用者可選 48、下限 clamp 32）；off＝原版。
 # stillSec=0 那輪驗「停住立即算停著」的轉換，其餘用預設 10 秒驗「未滿不計」。
 # 測試自驗 argv 與實際 MODE／RADIUS／STILL_NS 相符，property 拼錯不得假綠。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest observe 64
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest observe 64
 Assert-Ok "VehicleRelevancyGateTest（observe，出貨組態）"
-java -Xverify:all "-Dmdc.vehicleRelevancy=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 64
+java -Xverify:all "-Dmdc.vehicleRelevancy=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest on 64
 Assert-Ok "VehicleRelevancyGateTest（on，R=64）"
-java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyStillSec=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 64 0
+java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyStillSec=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest on 64 0
 Assert-Ok "VehicleRelevancyGateTest（on，R=64，stillSec=0 停住立即算停著）"
-java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=48" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 48
+java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=48" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest on 48
 Assert-Ok "VehicleRelevancyGateTest（on，R=48）"
-java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=5" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest on 32
+java -Xverify:all "-Dmdc.vehicleRelevancy=on" "-Dmdc.vehicleRelevancyRadius=5" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest on 32
 Assert-Ok "VehicleRelevancyGateTest（on，R=5 夾到下限 32）"
-java -Xverify:all "-Dmdc.vehicleRelevancy=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleRelevancyGateTest off 64
+java -Xverify:all "-Dmdc.vehicleRelevancy=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRelevancyGateTest off 64
 Assert-Ok "VehicleRelevancyGateTest（off，原版）"
 
 Write-Host "[9zg/10] SyncIsoObject 洪流觀測（W58）：原方法恰一次、原版負對照、門檻與 10 秒限頻、beat 清閒置連線、簿記例外隔離、off 不記帳..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SyncIsoObjectProbeTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.SyncIsoObjectProbeTest on
 Assert-Ok "SyncIsoObjectProbeTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.SyncIsoObjectProbeTest off
+java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.SyncIsoObjectProbeTest off
 Assert-Ok "SyncIsoObjectProbeTest（off，只呼叫原方法）"
 
 Write-Host "[9zh/10] 世界地圖隊友點錯位（W59）：真 GameServer／GameClient 往返，掉一次回覆或索取後 on 持續索取、off 與原版計數負對照卡住，沒掉包時索取次數與原版相同..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldMapChangeCountTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldMapChangeCountTest on
 Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.WorldMapChangeCountTest off
+java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldMapChangeCountTest off
 Assert-Ok "WorldMapChangeCountTest（off，原版計數）"
 
 Write-Host "[9zi/10] 動物遺失／複製觀測（W60）：放下動物移走別隻、來源仍在世界、長大撞同 ID、chunk 存檔中重載與雙寫，原方法恰一次、原版負對照、off 不記帳..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLossProbeTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest on
 Assert-Ok "AnimalLossProbeTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.AnimalLossProbeTest off
+java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest off
 Assert-Ok "AnimalLossProbeTest（off，只呼叫原方法）"
 
 Write-Host "[9zj/10] 卡進地下的車交回伺服器時抬回（W64）：真 setNetPlayerAuthorization＋真 shouldSend，下車／碰撞歸還／掉很深都抬回並送完整更新，翻覆掉很深先扶正（保留車頭方向），正常停放、門檻內、交給駕駛、沒有地板、翻覆不到一層照原版..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleSinkRestoreTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleSinkRestoreTest on
 Assert-Ok "VehicleSinkRestoreTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.vehicleSinkRestore=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.VehicleSinkRestoreTest off
+java -Xverify:all "-Dmdc.vehicleSinkRestore=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleSinkRestoreTest off
 Assert-Ok "VehicleSinkRestoreTest（off，原版負對照）"
 
 Write-Host "[9zk/10] 畜牧區同步修補（W66）與安全屋刪除權限（W67）：真 parse／processServer 記錄新增、改名、刪除與實際連帶組，草地通知改送 RegisterZone（原版送出殘留畜牧區新增、客戶端重播刪除負對照），載入撞號補回（原版漏存負對照），外人刪安全屋內的整組被拒、伺服器不刪不轉發並補送回刪除者，成員、屋主、管理員照原版；off 逐位元同原版..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ZoneSyncTest on
 Assert-Ok "ZoneSyncTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.zoneDeleteGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest guardoff
+java -Xverify:all "-Dmdc.zoneDeleteGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ZoneSyncTest guardoff
 Assert-Ok "ZoneSyncTest（guardoff，只關 W67：任何人都刪得掉）"
-java -Xverify:all "-Dmdc.zoneSyncLog=off" "-Dmdc.zoneGrassSync=0" "-Dmdc.zoneLoadRepair=OFF" "-Dmdc.zoneDeleteGuard=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.ZoneSyncTest off
+java -Xverify:all "-Dmdc.zoneSyncLog=off" "-Dmdc.zoneGrassSync=0" "-Dmdc.zoneLoadRepair=OFF" "-Dmdc.zoneDeleteGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ZoneSyncTest off
 Assert-Ok "ZoneSyncTest（off，原版負對照）"
 
 Write-Host "[9zl/10] 實體 ID 撞號時照常移除（W69）：真 removeFromWorld(Z)＋真 UnregisterEntity＋真 Engine，殘件排第 0 個、後蓋地板同 ID 時不丟例外、殘件離開 engine、地板仍在 ID 表（原版丟 Stored entity mismatch、殘件留在 engine 負對照），ID 未登記也離開 engine，正常移除兩邊相同..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcEntityIdGuardTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityIdGuardTest on
 Assert-Ok "MdcEntityIdGuardTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.entityIdGuard=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.entity.MdcEntityIdGuardTest off
+java -Xverify:all "-Dmdc.entityIdGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityIdGuardTest off
 Assert-Ok "MdcEntityIdGuardTest（off，原版負對照）"
 
 Write-Host "[9zm/10] Bandit Raid 劇情無限迴圈（W70）：原版與手術後的真 randomizeDeadSurvivor 迴圈（世界與亂數換替身），1–49 間房逐筆相同；50–100 間房原版停不下來（負對照）、on 照 45 間房跑完、off 跟原版一樣..."
-java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" on
+java -Xverify:all -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$TJ" on
 Assert-Ok "BanditRaidLoopGuardTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$R\work\projectzomboid.jar" off
+java -Xverify:all "-Dmdc.banditRaidLoopGuard=off" -cp "$R\work\out;$ASM_CP" BanditRaidLoopGuardTest "$R\dist\java" "$TJ" off
 Assert-Ok "BanditRaidLoopGuardTest（off，kill switch 回原版）"
 
 Write-Host "[9zn/10] 雞舍內動物產蛋不搜尋畜牧區雞舍（W72）：dist 內手術後的 AnimalData.checkEggs 與 jar 原版 23040 種情境逐筆比對（真畜牧區相連搜尋、雞舍型別比對，只把交配季 SandboxOptions 換成替身），on 只差在雞舍內、原版搜尋自己丟例外那類，雞舍內搜尋只剩每 256 次一次抽樣；observe／off 逐筆相同、搜尋次數相同；改到雞舍外那半邊的 mutant 全抓到，只改雞舍內那半邊的 mutant 與原版相同..."
 # 三個模式各跑一次：測試自驗 argv 與實際 MODE 相符，property 名稱打錯會炸在測試裡。
-java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.HutchEggRegionTest "$TJ" "$R\dist\java" on
 Assert-Ok "HutchEggRegionTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.hutchEggRegion=2" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" observe
+java -Xverify:all "-Dmdc.hutchEggRegion=2" -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.HutchEggRegionTest "$TJ" "$R\dist\java" observe
 Assert-Ok "HutchEggRegionTest（observe，只計數照原版）"
-java -Xverify:all "-Dmdc.hutchEggRegion=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.HutchEggRegionTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+java -Xverify:all "-Dmdc.hutchEggRegion=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.HutchEggRegionTest "$TJ" "$R\dist\java" off
 Assert-Ok "HutchEggRegionTest（off，kill switch 回原版）"
 
 Write-Host "[9zo/10] IsoObject 每幀更新閘（W73）：真 IsoThumpable.update 與閘門逐欄位差分（伺服器／客戶端 × lifeLeft 含 NaN、±Inf、-0、-1 × 格子狀態 × 子類別）、燈的原版負對照、mutant、真 ProcessIsoObject（removeAll、心跳欄位、非主執行緒寫入）、on 抽樣比對與停用、off 不計數..."
 # observe＝出貨組態（照原版逐件 update、只量）；on＝跳過伺服器上 lifeLeft 不是 > -1 的 IsoThumpable；off＝純委派；
 # 未知值落回 observe。測試自驗 argv 與實際 MODE 相符，property 拼錯不得假綠。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest observe
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest observe
 Assert-Ok "IsoObjectUpdateGateTest（observe，出貨組態）"
-java -Xverify:all "-Dmdc.isoObjectGate=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest on
+java -Xverify:all "-Dmdc.isoObjectGate=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest on
 Assert-Ok "IsoObjectUpdateGateTest（on，跳過伺服器空操作 IsoThumpable）"
-java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest off
+java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest off
 Assert-Ok "IsoObjectUpdateGateTest（0，純委派）"
-java -Xverify:all "-Dmdc.isoObjectGate=bogus" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectUpdateGateTest unknown
+java -Xverify:all "-Dmdc.isoObjectGate=bogus" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest unknown
 Assert-Ok "IsoObjectUpdateGateTest（未知值落回 observe）"
 
 Write-Host "[9zp/10] 尋路執行緒觀測（W74）：真 updateThread／findPath／PathRequestTask.execute（native 換成原樣上拋的 UnsatisfiedLinkError），任務照原順序執行、請求進同一佇列、回傳值與參數同一物件、例外原樣上拋、off 零計數，並量每次 findPath 的探針成本..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindProbeTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindProbeTest on
 Assert-Ok "MdcPathfindProbeTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindProbeTest off
+java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindProbeTest off
 Assert-Ok "MdcPathfindProbeTest（off，只委派零計數）"
 
 Write-Host "[9zq/10] 非主執行緒的每幀更新清單移除排回主執行緒（W75）：真 ProcessIsoObject／addToProcessIsoObject／addToProcessIsoObjectRemove（集合換成記錄執行緒的 HashSet），背景呼叫排隊、下一輪頭部生效、背景移除→加回被取消、主執行緒與 mainThread=null 照原版、原版負對照（背景執行緒直接讀寫 Set）、三個 mutant..."
 # on＝出貨組態；off＝純委派（原版負對照）；on＋W73 off 驗證與 isoObjectGate 無關。測試自驗 argv 與實際開關相符。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectRemoveDeferTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectRemoveDeferTest on
 Assert-Ok "IsoObjectRemoveDeferTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.isoObjectRemoveDefer=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectRemoveDeferTest off
+java -Xverify:all "-Dmdc.isoObjectRemoveDefer=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectRemoveDeferTest off
 Assert-Ok "IsoObjectRemoveDeferTest（off，原版負對照）"
-java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectRemoveDeferTest on
+java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectRemoveDeferTest on
 Assert-Ok "IsoObjectRemoveDeferTest（on，W73 off 時照樣運作）"
 
 Write-Host "[9zr/10] 非主執行緒的每幀更新清單加入排回主執行緒（W75-2）：真 IsoButcherHook(IsoCell) 建構子＋真 IsoCell，背景加入下一輪生效並被更新、背景先加後移不在清單、背景移除後主執行緒加入、背景加入後主執行緒移除（取消待加入）、主執行緒與 mainThread=null 照原版、原版負對照、三個 mutant..."
 # on＝出貨組態；off＝isoObjectAddDefer 純委派（原版負對照）；on-removeoff＝W75 off 時這刀照常。測試自驗 argv 與實際開關相符。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectAddDeferTest on
 Assert-Ok "IsoObjectAddDeferTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.isoObjectAddDefer=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest off
+java -Xverify:all "-Dmdc.isoObjectAddDefer=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectAddDeferTest off
 Assert-Ok "IsoObjectAddDeferTest（off，原版負對照）"
-java -Xverify:all "-Dmdc.isoObjectRemoveDefer=0" "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.IsoObjectAddDeferTest on-removeoff
+java -Xverify:all "-Dmdc.isoObjectRemoveDefer=0" "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectAddDeferTest on-removeoff
 Assert-Ok "IsoObjectAddDeferTest（on，W75 與 W73 off 時照常）"
 
 Write-Host "[9zs/10] 建造請求類別白名單（W76）與距離（W77）：真 BuildAction.parse＋真 wire，原版建造類別（含二層 derive）、雙門原點、8 格邊界、樓層差 1、管理員遠距照常建造；非建造全域、ISBuildingObject 本身、metatable 循環、不存在的 Type、9 格、樓層差 2、NaN 不呼叫建構子並記 log，原版 processServer 回 Reject；兩個開關各自 off 為原版負對照..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest both
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcBuildActionGuardTest both
 Assert-Ok "MdcBuildActionGuardTest（兩個開關都開，出貨組態）"
-java -Xverify:all "-Dmdc.buildTypeCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest type-off
+java -Xverify:all "-Dmdc.buildTypeCheck=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcBuildActionGuardTest type-off
 Assert-Ok "MdcBuildActionGuardTest（buildTypeCheck=off，W76 原版負對照）"
-java -Xverify:all "-Dmdc.buildRangeCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.core.MdcBuildActionGuardTest range-off
+java -Xverify:all "-Dmdc.buildRangeCheck=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcBuildActionGuardTest range-off
 Assert-Ok "MdcBuildActionGuardTest（buildRangeCheck=off，W77 原版負對照）"
 
 Write-Host "[9zt/10] UpdateItemSprite 距離（W79）：真 receiveUpdateItemSprite＋真 wire，玩家身旁、20 格邊界、樓層差 1、同機多人任一位在範圍內照原版取格子；21 格、遠處、樓層差 2、都不在範圍內、連線沒有玩家不取格子並記 log；off 原版負對照..."
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.SpriteUpdateGuardTest on
 Assert-Ok "SpriteUpdateGuardTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.spriteUpdateRange=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.SpriteUpdateGuardTest off
+java -Xverify:all "-Dmdc.spriteUpdateRange=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.SpriteUpdateGuardTest off
 Assert-Ok "SpriteUpdateGuardTest（off，原版負對照）"
 
 Write-Host "[9zu/10] 回收的殭屍物件清掉上一輪的網路擁有者（W80）：真 reuseZombie＋helper 對照 jar 內原版（resetForReuse 換同形替身），帶擁有者進池 on 清成 null、原版與 off 照舊，原方法在清之前呼叫、例外原樣上拋、已在池裡照原版早退，心跳帶抑噪 #5 計數..."
 # on＝出貨組態；off＝不清擁有者（原版負對照，計數照常）。測試自驗 argv 與實際開關相符。
-java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.ZombieReuseOwnerTest "$TJ" "$R\dist\java" on
 Assert-Ok "ZombieReuseOwnerTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.ZombieReuseOwnerTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+java -Xverify:all "-Dmdc.zombieReuseOwner=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.ZombieReuseOwnerTest "$TJ" "$R\dist\java" off
 Assert-Ok "ZombieReuseOwnerTest（off，原版負對照）"
 
 Write-Host "[9zv/10] 尋路世界變動批次化閘門（W81）：真 updateThread（native update 照 W74 換成原樣上拋的 UnsatisfiedLinkError），開服第一輪開、關閉時世界任務留在佇列而請求照常、開閘一輪套完超過 10 個 chunk 且 FIFO、開閉邊界、execute 例外同原版、T=0 與原版逐輪相同（含 10 個上限）、W74 計數與 rb／nr、心跳欄位與 refail、staleMsMax 不含閒置且穩定狀態約 T、chunk 移除後又載入的 reload10／reload60、自適應計時（開閘輪結束才起算、hold=max(T, min(上限, 2×開閘輪耗時))、不連續開閘、預設上限 10T 封頂、上限低於 T 等於 T、hold-off 不封頂）與 fixed 負對照、holdMsMax、三個 mutant..."
 # gate-on＝出貨組態（T=1000、探針 on、adaptive、上限 10000 ms）；gate-off＝T=0 原版負對照；probe-off＝探針 off 時閘門照常；adaptive-off＝v1 計時負對照；hold-off＝不封頂（＝v2）。測試自驗 argv 與實際開關相符。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-on
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 on，出貨組態）"
-java -Xverify:all "-Dmdc.pathfindGateMs=0" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-off
+java -Xverify:all "-Dmdc.pathfindGateMs=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindGateTest gate-off
 Assert-Ok "MdcPathfindGateTest（T=0＋探針 on，原版負對照）"
-java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest probe-off
+java -Xverify:all "-Dmdc.pathfindProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindGateTest probe-off
 Assert-Ok "MdcPathfindGateTest（T=1000＋探針 off）"
-java -Xverify:all "-Dmdc.pathfindGateAdaptive=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest adaptive-off
+java -Xverify:all "-Dmdc.pathfindGateAdaptive=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindGateTest adaptive-off
 Assert-Ok "MdcPathfindGateTest（T=1000＋adaptive off，v1 計時負對照）"
-java -Xverify:all "-Dmdc.pathfindGateHoldMaxMs=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.pathfind.nativeCode.MdcPathfindGateTest hold-off
+java -Xverify:all "-Dmdc.pathfindGateHoldMaxMs=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindGateTest hold-off
 Assert-Ok "MdcPathfindGateTest（T=1000＋關閘上限 off，v2 不封頂）"
 
 Write-Host "[9zw/10] 燈具設定同步驗證（W82）：客戶端真 write＋伺服器真 parse＋轉發用的真 write，打掉燈泡、關燈照原版，電量略落後與旁觀者晚到的打燈封包不記 log、讀壞的上一包不殘留；開燈、改可改裝、電池、裝或換燈泡、電量、耗電、顏色都不寫入伺服器、轉發伺服器值並每包記一行 log；距離：x、y 正負差 51 的連線打燈或關燈不寫入並記 outOfRange=true，每軸剛好 50、差 3 層、同機一遠一近照收，判距離丟例外時不接受並記 anomalies；off 與 jar 原版照收（負對照）..."
 # on＝出貨組態；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版 parse）。測試自驗 argv、開關與封包類別來源。
-java -Xverify:all -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest on
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.LightSettingsGuardTest on
 Assert-Ok "LightSettingsGuardTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.lightSettingsCheck=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest off
+java -Xverify:all "-Dmdc.lightSettingsCheck=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.LightSettingsGuardTest off
 Assert-Ok "LightSettingsGuardTest（off，kill switch）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.network.packets.LightSettingsGuardTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.LightSettingsGuardTest vanilla
 Assert-Ok "LightSettingsGuardTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zx/10] 伺服器端玩家 LOS 過濾迭代器（W83）：同一批世界先跑 jar 原版 updateLOS 寫 trace，再跑 dist 手術後的 observe／on／off 逐行比對（例外、TestZombieSpotPlayer／spotted 序列、spottedList／lastSpotted、viewer／stats／每個物件的全部基本型別欄位）；視窗邊界 ±1 格與 z 邊界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物、survivor、睡著、PlayerData 重複（互斥視窗、第一筆不是 BusyInMain）／缺少、status 不是 BusyInMain、迴圈中改清單（含最後一個元素）、null 與非 IsoMovingObject 元素、非主執行緒；私有亂數各 1/64 抽比對與原版計時（固定種子下的精確次數、原版計時不呼叫 isCouldSee、observe 其餘呼叫回原版迭代器本身）；violation：迴圈中位置漂移由比對抓到後本次啟動停用；phase50／phase64：固定順序輪流時非 0 位置的玩家漂移也會被抓到..."
@@ -752,23 +763,23 @@ Write-Host "[9zx/10] 伺服器端玩家 LOS 過濾迭代器（W83）：同一批
 $plfTrace = "$R\work\player-los-vanilla.txt"
 $plfHash = @("-XX:+UnlockExperimentalVMOptions", "-XX:hashCode=2", "-XX:-OmitStackTraceInFastThrow")
 $plfSeed = "-Dmdc.playerLosFilter.seed=83"
-java -Xverify:all @plfHash -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest vanilla $plfTrace
+java -Xverify:all @plfHash -cp "$R\work\out;$TJ" zombie.mdc.PlayerLosFilterTest vanilla $plfTrace
 Assert-Ok "PlayerLosFilterTest（vanilla，jar 原版寫 trace）"
-java -Xverify:all @plfHash $plfSeed -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest observe $plfTrace
+java -Xverify:all @plfHash $plfSeed -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest observe $plfTrace
 Assert-Ok "PlayerLosFilterTest（observe，出貨組態）"
-java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest on $plfTrace
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest on $plfTrace
 Assert-Ok "PlayerLosFilterTest（on，過濾）"
-java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=off" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest off $plfTrace
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest off $plfTrace
 Assert-Ok "PlayerLosFilterTest（off，kill switch）"
-java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=1" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest violation $plfTrace
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest violation $plfTrace
 Assert-Ok "PlayerLosFilterTest（violation，比對發現不一致即停用）"
-java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest phase50 $plfTrace
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest phase50 $plfTrace
 Assert-Ok "PlayerLosFilterTest（phase50，50 人輪流不鎖相）"
-java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PlayerLosFilterTest phase64 $plfTrace
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest phase64 $plfTrace
 Assert-Ok "PlayerLosFilterTest（phase64，64 人輪流不鎖相）"
 
 Write-Host "[9zy/10] 只把動物附近的載具送進 native 尋路（W85）：替身 native（只記 addVehicle／removeVehicle／findPath、沒有 JNI）跑同一串呼叫——啟動迴圈、第一次更新補送、遲滯（進入 8／離開 12 chunk、1 秒限頻）、沒送過與送過的重新加入、移除沒送過的車、CheckSwap 的 remove→add→add、經真探針 findPath 的非動物請求（findPath 前就記下）、背景 add 與背景移除送過的車；observe／off 與原版 18 筆逐筆相同（探針 off 順序相同、背景呼叫改在主執行緒送），observe 的 vehNative 鏡像（含背景）與 M2 beat 欄位等於暴力列舉，off 零計數零 log；on 只送範圍內、回原版補送延後的車各一次；on 的背景呼叫一律排隊由主執行緒決定（背景重新加入延後的車之後回原版不重複 add、背景移除送過的車由主執行緒送、回原版補送途中背景 remove＋add 不重複 add）；排空途中例外不重入、照順序送；helper 例外回原版；參數解析..."
-$pvsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$pvsCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all "-Dmdc.pathfindVehicleScopeR=abc" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest observe
 Assert-Ok "MdcPathfindVehicleScopeTest（observe，出貨組態；半徑亂碼落回 64）"
 java -Xverify:all "-Dmdc.pathfindVehicleScope=off" -cp $pvsCp zombie.pathfind.nativeCode.MdcPathfindVehicleScopeTest off
@@ -787,7 +798,7 @@ java -Xverify:all "-Dmdc.pathfindVehicleScope=on" -cp $pvsCp zombie.pathfind.nat
 Assert-Ok "MdcPathfindVehicleScopeTest（on-reenter，排空途中例外不重入、照順序送）"
 
 Write-Host "[9zz/10] 世界地圖可見性索引（W86）：真 SafeHouse／Faction 邊界資料逐對等於原版（含 null、大小寫、重複、空名單、第二個 word、同名兩派系第一個贏、成員先於後面派系的 owner），經手術後 GameServer 私有方法進 helper；owner／成員 null、非字串成員、factions 被換掉、輪外、其他執行緒回原版（例外類別相同）；round() 包住原版、例外照丟；跨輪 71→63→1→65→71 塊（換塊、words 變動、順序打亂）每輪逐對等於原版；原版負對照：輪內改名單，on 抽樣 256 次內抓到並永久停用、observe 第一次抓到，停用後心跳照常帶 disabled=true；off 純委派零計數零 log..."
-$wmviCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$wmviCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest observe
 Assert-Ok "WorldMapVisibilityIndexTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.worldMapVisibilityIndex=on" -cp $wmviCp zombie.mdc.WorldMapVisibilityIndexTest on
@@ -798,9 +809,9 @@ Assert-Ok "WorldMapVisibilityIndexTest（off，kill switch 純委派）"
 Write-Host "[9zza/10] Map= 列了不存在的地圖資料夾（W87）：工作目錄建 Alpha／Bravo／Zulu 三張地圖、跑真 ZomboidFileSystem.init 與真 IsoMetaGrid.CreateStep1（Zulu 沒有 map.info，載入時停在建世界之前），事故清單 Alpha;缺;Bravo;Zulu：on 伺服器與客戶端 priority 都是 0,1,2、Bravo 自己的 cell 不被真 higherPriority300x300CellExists 略過、重疊 cell 照原版讓 Alpha 優先、真 writeGameMap 送出的清單沒有缺的那項、一行警告；off 與 jar 原版兩邊 0,2,3、Bravo 被略過（負對照）；都在不動；只剩一項送出帶分號的清單；全部不存在照原版..."
 # on＝出貨組態；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版）。測試自驗 argv、開關與 IsoMetaGrid 來源。
 # 工作目錄必須是空的 map-folder-test：ZomboidFileSystem.init 從工作目錄的 media/ 建檔案表，測試在那裡建地圖。
-$mfgCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$mfgCp = "$R\work\out;$R\dist\java;$TJ"
 foreach ($mfg in @(@('on', @(), $mfgCp), @('off', @('-Dmdc.mapFolderGuard=off'), $mfgCp),
-        @('vanilla', @(), "$R\work\out;$R\work\projectzomboid.jar"))) {
+        @('vanilla', @(), "$R\work\out;$TJ"))) {
     $mfgDir = "$R\work\map-folder-test"
     Remove-Item -Recurse -Force $mfgDir -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $mfgDir | Out-Null
@@ -815,14 +826,14 @@ foreach ($mfg in @(@('on', @(), $mfgCp), @('off', @('-Dmdc.mapFolderGuard=off'),
 
 Write-Host "[9zzb/10] PVP=false 時玩家死亡不歸給玩家（W88）：手術後與 jar 原版的真 DoDeath 各自搬成 static 方法、外部效果換替身，死者（玩家／動物／殭屍）×攻擊者（玩家／動物／殭屍／null）×PVP 逐格比，on 只在 PVP=false、死者是玩家、攻擊者是 IsoPlayer 時改走 non pvp（user.txt died、聊天 is dead.、不 logKill），其餘與原版逐筆相同；off 全部同原版..."
 # on＝出貨組態；off＝kill switch（原版負對照）。測試自驗 argv 與實際開關相符。
-java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" on
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.PveDeathLogTest "$TJ" "$R\dist\java" on
 Assert-Ok "PveDeathLogTest（on，出貨組態）"
-java -Xverify:all "-Dmdc.pveDeathLog=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.PveDeathLogTest "$R\work\projectzomboid.jar" "$R\dist\java" off
+java -Xverify:all "-Dmdc.pveDeathLog=off" -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.PveDeathLogTest "$TJ" "$R\dist\java" off
 Assert-Ok "PveDeathLogTest（off，原版負對照）"
 
 Write-Host "[9zzc/10] 閒置車降頻（W89）：真 MovingObjectUpdateScheduler.startFrame（dist 手術後與 jar 原版），閒置條件 20 項（含收音機開著）逐項翻轉的真值表；observe 每台車每幀都 add、會跳次數＝每 N 幀 N−1 次、16 個輪次只記 1 個輪次、只改位置算 posDiff、位置與狀態都改算 stateDiff、心跳（vehicles／orphanTow／posTop）；on N=8 與 N=4 每 N 幀閒置車恰好 1 次、活動車每幀，第一次稽核狀態也變了不停用、第二次只改位置就停用、停用後照原版且心跳照印 disabled=true；on-wake N=8 與 N=4：收音機打開最多 N−1 幀內改成每幀、關掉重新暖機，同 id 換車重新暖機，暖機看放行幀累加的物理秒（牆鐘 60 秒、卡頓、不在 scheduler 都不提早降頻，4.99 仍每幀、不閒置一幀歸 0、滿 5 只在輪次），真 VehiclePedestrianContactTracking 差分：只在放行幀推進與每幀推進同一幀清掉接觸、第一次被跳過在那之後；helper 例外照原版 add 並停用；off 原樣轉呼叫；原版負對照每台車每幀都 add..."
 # observe＝出貨組態；on／on N=4／on-wake（收音機與暖機）／on-throw；off＝kill switch；vanilla＝classpath 不含 dist（jar 原版）。測試自驗 argv、模式、N 與 scheduler 來源。
-$ivtCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$ivtCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest observe 8
 Assert-Ok "IdleVehicleThrottleTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.idleVehicleThrottle=on" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest on 8
@@ -837,33 +848,33 @@ java -Xverify:all "-Dmdc.idleVehicleThrottle=on" -cp $ivtCp zombie.mdc.IdleVehic
 Assert-Ok "IdleVehicleThrottleTest（on，helper 例外回原版）"
 java -Xverify:all "-Dmdc.idleVehicleThrottle=off" -cp $ivtCp zombie.mdc.IdleVehicleThrottleTest off 8
 Assert-Ok "IdleVehicleThrottleTest（off，kill switch）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.IdleVehicleThrottleTest vanilla 8
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.IdleVehicleThrottleTest vanilla 8
 Assert-Ok "IdleVehicleThrottleTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zzd/10] 車輛聲音網路相關性預篩（W90）：300 台隨機車（引擎、喇叭、倒車蜂鳴、vehicleId=-1）× 12 條隨機連線 × 600 輪，真 Manager.update 的一輪開始＋真 getVehiclesRelevantToConnection 逐條（內容與順序）等於原版迴圈；六種聲源各自成立與全部關閉的確定性案例逐條等於原版、少一個條件的替身預篩至少一個案例不同（車門警報被引擎條件涵蓋）；on 沒有連線的一輪不建清單；observe 每 16 輪、on 每 256 輪比對；一輪開始後改車的狀態（違反前提）在比對那一輪抓到並停用、停用後等於原版、心跳照印；off 不比對不印；原版負對照（jar 的 Manager）..."
-$vspCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$vspCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest observe
 Assert-Ok "MdcVehicleSoundPrefilterTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.vehicleSoundPrefilter=on" -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest on
 Assert-Ok "MdcVehicleSoundPrefilterTest（on，預篩）"
 java -Xverify:all "-Dmdc.vehicleSoundPrefilter=off" -cp $vspCp zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest off
 Assert-Ok "MdcVehicleSoundPrefilterTest（off，kill switch）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.vehicleNetworkSound.server.MdcVehicleSoundPrefilterTest vanilla
 Assert-Ok "MdcVehicleSoundPrefilterTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zze/10] checkIsNearVehicle 只在潛行時跑（W91）：真 checkIsNearVehicle 八種組合（潛行 × 3.5 格內有車 × 呼叫前 nearWallCrouching）呼叫後的玩家狀態等於原版；潛行照原版、不潛行 on 跳過；原版加了副作用的替身 observe 第一次、on 抽查時抓到並停用，停用後照原版、心跳照印；off 每次呼叫原版；原版負對照（jar：潛行而且車在 3.5 格內才寫）..."
-$nvsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$nvsCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest observe
 Assert-Ok "NearVehicleSneakGateTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.nearVehicleSneakGate=on" -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest on
 Assert-Ok "NearVehicleSneakGateTest（on，不潛行時跳過）"
 java -Xverify:all "-Dmdc.nearVehicleSneakGate=off" -cp $nvsCp zombie.mdc.NearVehicleSneakGateTest off
 Assert-Ok "NearVehicleSneakGateTest（off，kill switch）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.NearVehicleSneakGateTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.NearVehicleSneakGateTest vanilla
 Assert-Ok "NearVehicleSneakGateTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zzf/10] 動物循環音迴圈在伺服器整段跳過（W92）：真 IsoCell.ProcessObjects（dist 手術後與 jar 原版），5 隻動物（1 隻在鉤子上）＋1 台車 × 512 幀：observe／off 每幀對 4 隻各一次、on 0 次並照原版跑 updateZombieVocals，observe 每 64 幀量一次迴圈；第 256、512 幀稽核 anomalies 0；emitter 不是 Dummy、runloop eventInstance 非 0、SoundManager.instance 不是 SoundManager 三種違反前提：observe 記 anomalies、on 第一次就停用並回到原版迴圈，心跳照印；日誌鏈拋例外（首次生效、心跳、停用）時 ProcessObjects 照常跑完、停用那幀就回原版 iterator（on 前提不成立、observe helper 自己拋例外），日誌改拋 OutOfMemoryError 時照常外拋；原版負對照（jar：每幀都跑整段迴圈）..."
-$alsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$alsCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest observe
 Assert-Ok "AnimalLoopSoundGateTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.animalLoopSoundGate=on" -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest on
@@ -874,11 +885,11 @@ java -Xverify:all "-Dmdc.animalLoopSoundGate=on" -cp $alsCp zombie.mdc.AnimalLoo
 Assert-Ok "AnimalLoopSoundGateTest（logthrow on，日誌拋例外＋前提不成立停用）"
 java -Xverify:all -cp $alsCp zombie.mdc.AnimalLoopSoundGateTest logthrow
 Assert-Ok "AnimalLoopSoundGateTest（logthrow observe，日誌拋例外＋helper 例外停用）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.AnimalLoopSoundGateTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.AnimalLoopSoundGateTest vanilla
 Assert-Ok "AnimalLoopSoundGateTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zzg/10] W13 每條連線的常數提到迴圈外（W93）：60 種情境（grid 0／12–20 × 步行／載具／沒有玩家 × coop）各 400 個隨機動物，beginConnection 過的連線與每對重算的判定逐筆相同、rejected／passthrough／suppressed 增量相同；on 每輪都用快取、observe 每 17 次 begin 抽一輪比對（60 輪抽 3 輪、沒抽到的輪不比對，同一條連線抽到的輪後接沒抽到的輪內上車也不比對）、off 不動；換連線時快取跟著 begin；begin 後同一輪內上車：observe 抽到的輪第一對記 mismatch、on 抽查抓到並停用、下一輪 begin 後快取更新..."
-$arhCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$arhCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $arhCp zombie.mdc.AnimalRelevancyHoistTest observe
 Assert-Ok "AnimalRelevancyHoistTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.animalRelevancyHoist=on" -cp $arhCp zombie.mdc.AnimalRelevancyHoistTest on
@@ -887,7 +898,7 @@ java -Xverify:all "-Dmdc.animalRelevancyHoist=off" -cp $arhCp zombie.mdc.AnimalR
 Assert-Ok "AnimalRelevancyHoistTest（off，kill switch：每對重算）"
 
 Write-Host "[9zzh/10] 伺服器跳過 setBodyPartsLastState（W94）：真 BodyDamage.setBodyPartsLastState（3 個部位），observe／off 照原版抄、on 在伺服器不抄、客戶端照抄，玩家／動物分開計數、observe 每 64 次量一次，心跳；日誌鏈拋例外（首次生效、心跳）那次照原版抄寫、拋 OutOfMemoryError 時照常外拋；原版負對照（jar：原版會抄）..."
-$blsCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$blsCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $blsCp zombie.mdc.BodyLastStateGateTest observe
 Assert-Ok "BodyLastStateGateTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.bodyLastStateSkip=on" -cp $blsCp zombie.mdc.BodyLastStateGateTest on
@@ -896,11 +907,11 @@ java -Xverify:all "-Dmdc.bodyLastStateSkip=off" -cp $blsCp zombie.mdc.BodyLastSt
 Assert-Ok "BodyLastStateGateTest（off，kill switch）"
 java -Xverify:all -cp $blsCp zombie.mdc.BodyLastStateGateTest logthrow
 Assert-Ok "BodyLastStateGateTest（logthrow observe，日誌拋例外照原版抄寫）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.BodyLastStateGateTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.BodyLastStateGateTest vanilla
 Assert-Ok "BodyLastStateGateTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zzi/10] 動物與液體容器純觀測（W95）：a0 照原版呼叫 updateVirtualAnimals、loadedCells 掃描（cell／chunk／idle／moving／足跡）；F1 回原版同一個陣列、抽樣數 rainCatcher > 0；sim 只在主執行緒每 16 幀數一幀（沒人收得到而且閒置的比例、懷孕壓力 > 80），sim 例外不計入 animals 並記例外類別訊息；日誌鏈拋例外（首次生效、心跳、anomaly）時 a0／F1 照原版完成、拋 OutOfMemoryError 時照常外拋；off 原樣轉呼叫不計數..."
-$apCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$apCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest observe
 Assert-Ok "MdcAnimalProbesTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.animalProbes=off" -cp $apCp zombie.characters.animals.MdcAnimalProbesTest off
@@ -909,25 +920,25 @@ java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest logthr
 Assert-Ok "MdcAnimalProbesTest（logthrow observe，日誌拋例外照原版完成）"
 
 Write-Host "[9zzj/10] 步行瞬移觀測與踢人（W96）：真 PlayerPacket.resetMovable 與 AntiCheatSpeed.validate（dist 手術後與 jar 原版）＋配置的玩家、連線與真 SpeedChecker，每一包與直接呼叫原版 set 的雙胞胎比位置、是否在車上與速度；登入後基準點、寬限期只豁免第一次達門檻的跳動（含看連線的登入時間）、下車那一次（車輛上限內才豁免）、伺服器傳送後、進出 (0,0) 不重開寬限期也照判、送出的連線有權限只計數、20 格／秒以下不記、別條連線送的封包記 foreign 而且不當被冒用者的起點、沒經過 begin 不判；正式服 7 個帳號的回歸（Player-O 6174.87／591.90 would-kick、149.71 below，Player-P、Player-Q、Player-R 74 s exempt(grace)，Player-R 199／613 s、10-04 來回、Player-S would-kick，Player-U 上線那一秒不記）；判斷順序表（Player-T 被車撞 exempt(hitVehicle)）、寬限期與踢人處置函式；kick 對沒完全連上的連線記 would-kick(notConnected) 不踢；off 不記不建帳..."
-$twCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$twCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $twCp zombie.mdc.TeleportWatchTest observe
 Assert-Ok "TeleportWatchTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.teleportWatch=kick" -cp $twCp zombie.mdc.TeleportWatchTest kick
 Assert-Ok "TeleportWatchTest（kick）"
 java -Xverify:all "-Dmdc.teleportWatch=off" -cp $twCp zombie.mdc.TeleportWatchTest off
 Assert-Ok "TeleportWatchTest（off，kill switch）"
-java -Xverify:all -cp "$R\work\out;$R\work\projectzomboid.jar" zombie.mdc.TeleportWatchTest vanilla
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.TeleportWatchTest vanilla
 Assert-Ok "TeleportWatchTest（vanilla，jar 原版負對照）"
 
 Write-Host "[9zzk/10] Steam 模式也擋 bannedip（W97）：真 SQLite（原版 DDL）判斷表（Steam 模式 × 位址 × 連線型別）、有理由／理由 NULL／沒有這一列、查詢失敗放行；封鎖結果與原版非 Steam 模式 authClient 逐欄相同、原版 Steam 模式不查（負對照）；找連線要 SteamID 與位址都相同..."
-$sibCp = "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar"
+$sibCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $sibCp zombie.network.MdcSteamIpBanTest on
 Assert-Ok "MdcSteamIpBanTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.steamIpBan=off" -cp $sibCp zombie.network.MdcSteamIpBanTest off
 Assert-Ok "MdcSteamIpBanTest（off，kill switch）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
-java -cp "$R\work\out;$R\dist\java;$R\work\projectzomboid.jar" zombie.mdc.FastIdentityArrayRemovalBenchmark
+java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark
 Assert-Ok "FastIdentityArrayRemovalBenchmark"
 
 Copy-Item "$R\deploy\install.sh", "$R\deploy\uninstall.sh" "$R\dist\" -Force
