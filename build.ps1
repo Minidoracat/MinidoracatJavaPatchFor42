@@ -88,7 +88,6 @@ $helperEntries = @(
     'zombie/mdc/AnimalRequestGate.class',
     'zombie/mdc/AnimalRequestGate$Bucket.class',
     'zombie/mdc/MainLoopWatchdog.class',
-    'zombie/mdc/HutchLoadGuard.class',
     'zombie/mdc/AnimalLosGate.class',
     'zombie/mdc/AnimalLosScan.class',
     'zombie/mdc/VehicleRemoveGuard.class',
@@ -134,7 +133,6 @@ $helperEntries = @(
     'zombie/mdc/SyncIsoObjectProbe$Conn.class',
     'zombie/mdc/WorldMapChangeCount.class',
     'zombie/mdc/AnimalLossProbe.class',
-    'zombie/mdc/AnimalLossProbe$Saving.class',
     'zombie/mdc/ZoneSyncGuard.class',
     'zombie/mdc/ZoneDeleteGuard.class',
     'zombie/network/packets/MdcSyncZoneLog.class',
@@ -328,15 +326,8 @@ Assert-Ok "MainLoopWatchdogTest（threshold 上限 clamp）"
 # 退役（2026-09-02）：[9m/10] W16 動物卸載接手守衛測試隨刀移除（8 天全零遺失，
 # 觀測結論已達）。詳見 docs/patches.md 2ad。
 
-Write-Host "[9n/10] hutch 載入回傳守衛（W17）三模式行為驗證（獨立 JVM）..."
-# ZeroRandom 確定性製造「有空槽但 vanilla 101 次全撞同槽」；enforce force-put、
-# observe 只記不救、off 純委派三路徑都必須真跑，並驗滿舍20隻/第21隻CRITICAL。
-java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest enforce
-Assert-Ok "HutchLoadGuardTest（enforce，預設出貨模式）"
-java "-Dmdc.hutchLoadGuard=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest observe
-Assert-Ok "HutchLoadGuardTest（observe，只記不救）"
-java "-Dmdc.hutchLoadGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.HutchLoadGuardTest off
-Assert-Ok "HutchLoadGuardTest（off，純委派 kill switch）"
+# 退役（2026-11-10）：[9n/10] W17 hutch 載入回傳守衛測試隨刀移除（42.22.2 原版 IsoHutch.load
+# 對 addAnimalInside 失敗改走 addAnimalInsideFirstFreePosition）。詳見 docs/patches.md 2ae。
 
 Write-Host "[9n2/10] 雞舍自發同步收件人過濾（W26）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
 # enforce＝預設出貨（真的過濾掉範圍外連線）；observe＝只量測 wouldSkip／wouldSkipBytes、
@@ -443,7 +434,7 @@ java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpAccrualTest on
 Assert-Ok "AnimalCatchUpAccrualTest（on，出貨組態）"
 java "-Dmdc.animalCatchUpAccrual=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpAccrualTest off
 Assert-Ok "AnimalCatchUpAccrualTest（animalCatchUpAccrual=0，原版一次性 age＋午夜 growUp）"
-# W56 補算等畜牧區就緒：nodefer／noown 是原版負對照（chunk 路徑當場補算時看不到槽，zone 路徑被 W42 截成 0h）。
+# W56 補算等畜牧區就緒：nodefer 是負對照（chunk 路徑當場補算時看不到槽，zone 路徑被 W42 截成 0h）；noown 是 42.22.2 原版（chunk 路徑不補、留給 doMeta）。
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest on
 Assert-Ok "AnimalCatchUpDeferTest（on，出貨組態）"
 java "-Dmdc.animalCatchUpDefer=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest nodefer
@@ -481,8 +472,8 @@ Assert-Ok "MdcAnimalSaveTest（animalOwnClock=0，時鐘照原版寫存檔當下
 java "-Dmdc.animalCellSave=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.characters.animals.MdcAnimalSaveTest nocellsave
 Assert-Ok "MdcAnimalSaveTest（animalCellSave=0，W50 隨 W37 停用）"
 
-Write-Host "[9r5/10] 畜牧區補算快照（W38）＋動物死亡帳本（W39）行為驗證＋kill switch（獨立 JVM）..."
-# W38 off 組態以原版迴圈形狀重現重複補算／漏算；on 每隻恰一次。
+Write-Host "[9r5/10] 畜牧區補算每隻一次（W38）＋動物死亡帳本（W39）行為驗證＋kill switch（獨立 JVM）..."
+# W38 走 dist 內手術後的真 DesignationZoneAnimal.doMeta：off 組態重現 42.22.2 原版幼體被補算「動物總數」次；on 每隻恰一次。
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalMetaSnapshotTest on
 Assert-Ok "AnimalMetaSnapshotTest（on，出貨組態）"
 java "-Dmdc.animalMetaSnapshot=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalMetaSnapshotTest off
@@ -637,7 +628,7 @@ Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldMapChangeCountTest off
 Assert-Ok "WorldMapChangeCountTest（off，原版計數）"
 
-Write-Host "[9zi/10] 動物遺失／複製觀測（W60）：放下動物移走別隻、來源仍在世界、長大撞同 ID、chunk 存檔中重載與雙寫，原方法恰一次、原版負對照、off 不記帳..."
+Write-Host "[9zi/10] 動物遺失／複製觀測（W60）：放下動物移走別隻、來源仍在世界、長大撞同 ID，原方法恰一次、原版負對照、off 不記帳..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest on
 Assert-Ok "AnimalLossProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest off

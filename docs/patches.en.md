@@ -1586,7 +1586,7 @@ fuse and stays.
 > After 8 days every loss counter stayed at zero (`s2Missed`, `queueFailures`, `sourceGap`, `cellNullAdd`, `chunkNullAdd`, `duplicateRemoved`, `cellNullSave`; `clearShortfall` 1–4 but with `handedOff == scanSeen`, so not a loss). Conclusion: the vanilla unload hand-off chain is not the culprit. The heartbeat line (one per 256 unloads) was 7.3% of production log volume, so the probe was removed. Kill switch was `-Dmdc.animalPersistGuard` (0=off, 2/unset=observe). To revive: restore files from commit `13650e1` and re-add the matching PatchConfig / SmokeCheck / build.ps1 sections.
 
 <a id="2ae"></a>
-## 2ae. Hutch load return-value guard (W17, server, default enforce)
+## 2ae. Hutch load return-value guard (W17, server; retired: fixed upstream in 42.22.2)
 
 ### Defect (confirmed statically)
 
@@ -1620,6 +1620,10 @@ Kill switch `-Dmdc.hutchLoadGuard`: `1`/unset = enforce (default), `2` = observe
 - After patching: same argument shape, only the call target becomes the static helper; the original call count drops to zero; real instruction count unchanged; class-wide difference of exactly 1.
 - Helper: exactly one original delegation, zero `Rand` in the class, each of the six `forceInto` steps exactly once, back-link is an exact `PUTFIELD`.
 - `HutchLoadGuardTest` in three separate JVMs: a `ZeroRandom` deterministically produces "slot 1 is free but vanilla hits slot 0 on all 101 attempts"; also covers clean-slot preference, dead-body fallback, `key→null`, duplicates, all 20 animals surviving, and `CRITICAL` for the 21st. Mutation removing the map put must fail.
+
+### 2026-11-10 — 42.22.2 re-validation (retired)
+
+In 42.22.2 `IsoHutch.load` calls `addAnimalInsideFirstFreePosition(animal)` when `addAnimalInside(animal, false)` returns false and only warns when both fail (javap: the single `addAnimalInside` is followed by `IFNE` and `INVOKEVIRTUAL addAnimalInsideFirstFreePosition`); `addAnimalInside` itself now checks `isHutchPositionOccupied` and then `pickRandomUnoccupiedHutchPosition`. "A free slot exists but the call returns false and the animal is garbage-collected" is fixed upstream. Removed `HutchLoadGuard`, `HutchLoadGuardTest`, `build.ps1` [9n] and the PatchConfig load redirect (the `IsoHutch` ClassPatch stays for W26). SmokeCheck now pins this vanilla shape and that dist no longer ships the helper; if the shape changes again, re-evaluate. Revive with `git checkout 3f79700 -- patcher/game/zombie/mdc/HutchLoadGuard.java patcher/tests/hutch-load-guard` and restore the matching PatchConfig / SmokeCheck / build.ps1 sections.
 
 ---
 
@@ -2048,6 +2052,10 @@ Local enforce/observe/off (separate JVMs) cover: window bounds and position unio
 
 Production acceptance: correct package loaded, mode=1, the anomaly counters above at zero, `skipped` increasing; then compare hutch `SyncIsoObject` packet traffic and sync behavior when approaching / re-entering, opening doors, collecting eggs and after teleport. The `skipped` ratio must not be quoted as the same ratio of server-wide bandwidth or FPS improvement.
 
+### 2026-11-10 — 42.22.2 re-validation
+
+The two hutch `update` sites keep their context and are rebuilt as is; `IsoHutch.syncIsoObjectReceive` now takes an extra `UdpConnection`, and the SmokeCheck negative control uses the new descriptor. `TeleportPacket.player` changed from `PlayerID` to `OnlinePlayer` (`set` calls `setId(onlineId)` + `setPlayer(player)`; `getPlayer` is inherited from the base `Player`), so the single ID write in `write` is now `OnlinePlayer.write(ByteBufferWriter)` at offset 5. The redirect target `RecipientWindow.writeTeleportPlayer` takes the new first-parameter type; the exemption logic is unchanged. SmokeCheck's identity premise now pins that `OnlinePlayer.set` stores the same character instance through `setPlayer(aload_1)` and that `OnlinePlayer` does not override `getPlayer`; `HutchSyncGateTest` passes in all three JVMs with `OnlinePlayer`.
+
 ---
 
 <a id="2ao"></a>
@@ -2080,6 +2088,8 @@ The patch adds a single receive-call redirect to `AnimalUpdateGuard` inside the 
 **Verification**: the state-protection counterexample fails against the vanilla receive entry; the new build preserves hutch and nest-box membership, covering the normal client writer, buffer boundaries, shared packet state, explicit off, unknown config, rate limiting and a real logger failure. SmokeCheck pins the single receive entry, the exact shape-preserving redirect, an upstream protocol fingerprint, and an unchanged client entry. Full local build and two isolated install/uninstall round-trips passed; this does not prove deployment, does not establish the cause of historical animal losses, and does not repair existing saves.
 
 **42.21 re-validation (2026-09-28)**: the validation gap is still present in 42.21.0 and the upstream wire format and client writer are instruction-identical, so the helper is unchanged. The details will be reported to TIS privately rather than here. The only semantic change in the class is on the client branch; the old whole-class SHA flagged it together with line-number shifts, so the SmokeCheck fingerprint is now a whole-class text hash that ignores debug info (line numbers, local variables, SourceFile) while still covering `@PacketSetting`, fields and all methods; value updated for 42.21.
+
+**42.22.2 re-validation (2026-11-10, pending decision)**: in 42.22.2 `AnimalUpdatePacket.parse` only applies the removal list when `GameClient.client` is set or the connection's role has `Capability.AnimalCheats` (javap: `GETSTATIC Capability.AnimalCheats` → `Role.hasCapability` before the single `IsoAnimal.remove()`), so removals sent by ordinary player connections are already ignored upstream. The upstream wire format and client writer are unchanged and the helper is unchanged. What this patch still does is reject malformed headers as a whole packet and block removals of hutch / nest-box members by `AnimalCheats` roles; whether to keep it is pending a decision. The SmokeCheck whole-class fingerprint is updated for 42.22.2 and a premise for this permission check is added; `AnimalUpdateGuardTest`'s off control now expects vanilla to ignore an ordinary connection's removal, plus a new `AnimalCheats` connection section (vanilla off removes, enforce still rejects).
 
 <a id="2ar"></a>
 ## 2ar. Bulk item registration for large containers (W30, server; retired: 2026-09-27, superseded by W45)
@@ -2131,6 +2141,10 @@ Verification: full build and structural checks; observe / off / unarmed / real-l
 - `-Dmdc.animalAwayProbe=0` disables (pure pass-through); restart required.
 
 **Interpretation**: steadily growing `mismatch` with hoursAway ≫ animalHoursAway confirms the hypothesis → a separate enforce patch (use the animal's own time or cap it). If they are close, the catch-up really is that long and `hourGrow` itself must be investigated. SmokeCheck pins the three-site census, the shape-preserving redirects in both methods, and the fact that vanilla reads `DesignationZone.hourLastSeen` (fails if TIS switches to the animal's own time → re-evaluate). `AnimalAwayProbeTest` covers observe/off, stale zone, missing timestamp, the zone path and exception propagation.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+In 42.22.2 `AnimalManagerMain.fromWorker` no longer calls `updateStatsAway`; instead, when not `IngameState.loading` and the animal's zone is a `DesignationZoneAnimal`, it sets `fromMeta=true` and leaves the catch-up to the zone's `doMeta` (javap offsets 417–439), so vanilla no longer catches up on the chunk path. The two `doMeta` redirects (offsets 47 and 106) are unchanged. The chunk path is now two shape-preserving redirects: the single `getAdvancedAnimator()` in `fromWorker` (offset 468) → `AnimalAwayProbe.fromWorkerAnimator`, which records the animal, and the following `OnAnimDataChanged(false)` (offset 472) → `fromWorkerAnimDataChanged`, which calls vanilla first and then `chunkCatchUp`, at the same point as the 42.21 `updateStatsAway` (after `setGroup`, before the `objectList` / AIM registration). `chunkCatchUp` only catches up animals with their own clock that are not wild, and only when W49 is on; everything else is left to `doMeta` as in 42.22 vanilla. Vanilla has no catch-up here, so a catch-up exception only counts `chunkFailures` (new heartbeat field) and logs a line instead of propagating. The `hourLastSeen` premise is now pinned on `DesignationZone.checkStreamed`. SmokeCheck pins exactly 2 `updateStatsAway` in `doMeta` and none in `fromWorker`, the vanilla fromMeta → getAdvancedAnimator → OnAnimDataChanged order and both redirects' shape; `AnimalAwayProbeTest` calls `chunkCatchUp` and also checks that the hooks return the original animator, let vanilla exceptions propagate and skip the catch-up.
 
 <a id="2av"></a>
 ## 2av. Birth breed guard (W33, server, default on)
@@ -2289,6 +2303,8 @@ New Patcher form `FieldGetRedirect`: replaces `GETFIELD owner.name:desc` with `I
 
 Live E2E (`animal-water-drop-mp`, rewritten to pick up and drop the vanilla way): on the vanilla map the water squares on that bank are all deep water (`solidtrans`, not walkable), so the scenario lays the neighbouring land's floor over one water square, giving a square where `isWaterSquare()` holds, the player can stand and `canDropOnFloor` holds. A hen spawns on the land to the north; the player stands on the water square, picks it up with `ISPickupAnimal` and drops it with `ISInventoryPaneContextMenu.dropItem`. With the fix: `drop moved from=<water square> pos=<land to the north>`, both the server and the client see the hen on that land square, no animal is on the water square, the square unloads normally after the player leaves, and there are zero `textureSkinned` NPEs (RESULT PASS, 4 checks). With the pre-fix package (same as production): `drop discarded` and neither the server nor the client can find the hen (RESULT FAIL, 2 of 4 checks), which is what the player saw.
 
+**42.22.2 re-validation (2026-11-10)**: the two `IsoMovingObject.removeFromWorld` redirects in `IsoChunk.removeFromWorld` are at offsets 332 and 510 (506 in 42.21); `GETFIELD x`/`y` (105, 109) and `copyFrom` (144) in `AddWorldInventoryItem` are unchanged, the only difference being the `getObjects` return type `PZArrayList` → `List`. `AnimalCell.save` bumps the apop version 249 → 251; `MdcAnimalCellSave` only calls `cell.save(out)` and is unaffected (`MdcAnimalCellSaveTest`'s version assertion follows). `AnimalSpawnGuardTest` uses `ArrayList`; everything else is rebuilt as is.
+
 <a id="2ba"></a>
 ## 2ba. Snapshot of the livestock-zone list during offline catch-up (W38, server, default on)
 
@@ -2301,6 +2317,10 @@ Live E2E (`animal-water-drop-mp`, rewritten to pick up and drop the vanilla way)
 SmokeCheck pins the reasons it exists (`updateStatsAway` calls `checkZone`; `setDZone` removes before adding), head/tail/8 swap positions with +12 real instructions, and W32's two redirects. `AnimalMetaSnapshotTest` reproduces the vanilla loop shape: off shows duplicates and misses, on processes each animal exactly once.
 
 Production acceptance: duplicate (frame, animal, position) tuples in W32 detail lines should drop to zero; `died` as a share of `calls` should fall.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+In 42.22.2 `DesignationZoneAnimal.animals` is a `HashSet` and `doMeta` walks a copy from `getAnimalsInZone()` (offset 5), so the 42.21 reordering and skipping is fixed upstream and the 8 `GETFIELD animals` hooks have nothing to attach to. But the baby loop is now "outer loop runs once per animal in the zone, inner loop walks the whole copy, `updateStatsAway` if it is a baby": one `doMeta` catches up each baby N times (N = animals in the zone), the same kind of repeat as in 42.21. The patch is rewritten: `AnimalMetaSnapshot.begin` at the head clears this run's done set, `end` before the single RETURN, and `AnimalAwayProbe.updateStatsAwayZone` first asks `AnimalMetaSnapshot.first(animal)` and skips animals already caught up in this `doMeta`. The FieldGetSwap is gone; `doMeta` hits are 2 + 1 + 1 with +4 real instructions, the heartbeat is now `metas animals repeats`, and the kill switch is unchanged. SmokeCheck pins the 42.22 loop shape (`getAnimalsInZone` copy, two `updateStatsAway`), the begin/end positions and that the helper asks `first`; `AnimalMetaSnapshotTest` now runs the real `doMeta` from dist (2 adults + 3 babies): off catches up each baby 5 times, on exactly once.
 
 <a id="2bb"></a>
 ## 2bb. Animal death ledger (W39, server, observe only)
@@ -2387,6 +2407,8 @@ zone hours exceed own hours by ≥24 h or the animal dies after catch-up. W39's 
 SmokeCheck: vanilla `AnimalData` never writes the animal clock and `update` has exactly one `hourGrow`; redirect shape-preserving. `AnimalAwayProbeTest`
 (three configs): stale zone → 2 h instead of 200 h, future clock → 0, no record → 500 h kept, clock refreshed while alive; `nocap` → all vanilla. Production
 acceptance: `capped` / `cappedHours` grow, `applied` ≈ `animalHoursAway` in `mismatch` details, fewer deaths within 60 s of catch-up.
+
+**42.22.2 re-validation (2026-11-10)**: the `hourGrow` in `AnimalData.update` and the writers of the animal clock keep their context and are rebuilt as is; for the new chunk-path entry see the 42.22.2 note in 2au.
 
 <a id="2bf"></a>
 ## 2bf. 2026-09-27 log trimming, probe retirement and measurement additions (server)
@@ -2804,6 +2826,8 @@ one primitive, `HeadIntFilter` (an int-parameter filter at the head of an instan
 observation off, W42 off, own clock off, carcass guard off; it also checks the adjacent-run accumulation and the delegate failure count),
 `AnimalCatchUpAccrualTest` calls the patched `updateStatsAway` directly (accrual on and off, including a trailer-style direct call of 200 hours capped at
 168), and `MdcAnimalSaveTest` covers every clock decision.
+
+**42.22.2 re-validation (2026-11-10)**: `IsoAnimal.updateStatsAway` only gains a `DebugType.Animal.println`; the head `entryHours` insertion and the four redirects keep their context. The first premise now reflects 42.22.2: `fromWorker` no longer catches up, and the own-clock catch-up on the chunk path is restored by `fromWorkerAnimDataChanged` (see 2au); with own clock off, `AnimalAwayProbeTest` expects 42.22 vanilla (no chunk-path catch-up).
 
 <a id="2bn"></a>
 ## 2bn. Hooked carcasses keep their hook state in saves, and W37 retries no longer duplicate animals (W50, server, default on)
@@ -3281,6 +3305,8 @@ boundary. Livestock that died within 2 s of a catch-up with hunger or thirst ≥
 2/62 (3%); outside zones (not handled by W56) unchanged at 47% and 44%. The longest catch-up run within one frame was 240–702 ms, the same range as
 before (11–790 ms); every watchdog freeze was at shutdown.
 
+**42.22.2 re-validation (2026-11-10)**: the deferral logic is unchanged; its entry moved from `fromWorker`'s `updateStatsAway` to `chunkCatchUp` (2au). 42.22.2 vanilla also sets `fromMeta=true` on newly loaded animals inside a zone and waits for `doMeta`, but when the zone is already streamed `doMeta` may not run again and the animals may stay frozen (inferred, not tested; to verify, keep one corner of the zone within a player's range, unload and reload the chunk at the other corner, and check whether the animals' `fromMeta` stays true); animals with their own clock are still handled by W56's deferral and timeout. SmokeCheck's `fromWorker` premise now pins `INSTANCEOF DesignationZoneAnimal` → `fromMeta` before `getAdvancedAnimator`; `AnimalCatchUpDeferTest` calls `chunkCatchUp` and adds an own-clock-off 42.22 vanilla control (no chunk-path catch-up; the zone catches up 30 hours with the trough visible).
+
 <a id="2bu"></a>
 ## 2bu. Player-built room chunk-load disconnect (W57, client, default on; client package 0.2.6)
 
@@ -3499,31 +3525,26 @@ tell which one ran.
   only handles jobs still in the save queue (`ServerChunkLoader.java:490-511`); a job the save thread has already taken and is writing is not in the
   queue, so the load can read the old file or a half-written one. Hen house animals are saved with the chunk; animals outside are kept in the animal
   population manager's memory. Reading an old hen house puts the same animal both inside and outside (a copy) or in neither place (lost).
+  Fixed upstream in 42.22.2; this probe is retired, see the re-validation note at the end of this section.
 - **Growing up**: `AnimalData.grow` gives the new animal the old animalId, then calls `checkForChickenpocalypse`: if another animal with that ID is
   within ±4 tiles, it deletes the animal that is growing up, and `grow` deletes the new one (`AnimalData.java:1406-1444`, `IsoAnimal.java:275-296`),
   printing only `DebugType.Animal.println`. When a copy grows up, both disappear.
 
-**Patch**: six calls, each redirected 1:1 to `zombie/mdc/AnimalLossProbe` with the same stack shape (the receiver becomes the first argument). The
+**Patch**: four calls, each redirected 1:1 to `zombie/mdc/AnimalLossProbe` with the same stack shape (the receiver becomes the first argument). The
 helper calls the original exactly once outside its try, so results and exceptions match vanilla; javap context is in
 `docs/specs/zombie_animal_loss_probe.json`.
 - `IsoGridSquare.AddWorldInventoryItem(InventoryItem, float, float, float, boolean, boolean)`: offset 144 `IsoAnimal.copyFrom` → `dropCopy`, 168
   `AnimalInstanceManager.get` → `dropLookup`, 210 `AnimalInstanceManager.add` → `dropRegister`, `expectedHits = 3` (new ClassPatch). The three calls
   run in this order and the helper pairs them that way: `copyFrom` records the held animal, `get` records the previous holder's position and state
   before vanilla removes it, and `add` decides.
-- `ServerChunkLoader$LoaderThread.run()`: offset 226 `IsoChunk.LoadChunk` → `loadChunk`, `expectedHits = 1` (new ClassPatch). Checks before and after
-  the load; logs a line when another thread is writing the unload save of the same chunk.
-- `ServerChunkLoader$SaveUnloadedTask.save()`: offset 5 `IsoChunk.Save(Z)V` → `saveUnloaded`, `expectedHits = 1` (new ClassPatch). Registers the
-  thread and start time before the save and removes them in `finally`; logs a line when another thread is saving the same chunk.
 - `AnimalData.grow(String)`: offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`, `expectedHits = 1` (on the existing AnimalData
   ClassPatch). When it returns true, also logs the other animal with the same ID in the same range.
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> evicted=<type>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
 [MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> source=<type>#<animalId> pos=… inWorld=1 … prev=<none|type#animalId>
-[MinidoracatJavaPatch][AnimalLossProbe] reload-race#<n> chunk=<wx>,<wy> phase=<before|during> savingThread=<thread name> saveElapsedMs=<n>
-[MinidoracatJavaPatch][AnimalLossProbe] double-write#<n> chunk=<wx>,<wy> threads=<first>,<second> otherElapsedMs=<n>
 [MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<type>#<animalId> pos=… newType=<grown type> twin=<type>#<animalId> pos=…
-[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> loads=<n> unloadedSaves=<n> reloadRaces=<n> doubleWrites=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
 ```
 
 `drop-evict` is the other animal removed from the world when one was put down (`evicted` is its state before removal; `?` if it could not be
@@ -3540,25 +3561,26 @@ restart.
 restart. After it goes live, check that the banner shows the new fingerprint and `[mdc-javagate] OK: 136`, then look for the first-effect line.
 
 **Reading it**: when a player reports animals multiplying or vanishing again, look for detail lines near that time and place. The `evicted` animal of
-a `drop-evict` is the one that vanished; when the chunk of a `reload-race` (×8 for tile coordinates) is a hen house or pen, compare the saves before
-and after with `hutch-animal-scan.py`. If none of the three shows up, there is another path and it needs more probes.
+a `drop-evict` is the one that vanished; a `grow-dup` names the two copies that vanished together when one grew up. If neither shows up, there is
+another path and it needs more probes.
 
-**Not done**: nothing is blocked or fixed; the fix waits until we know which path it is (only remove the same animal when putting one down, wait for
-a save in progress before loading, and so on).
+**Not done**: nothing is blocked or fixed; the fix waits until we know which path it is (for example, only remove the same animal when putting one
+down).
 
 **Guards and verification**:
-- SmokeCheck: vanilla has exactly one observed call in each of the four methods; putting an animal down calls `copyFrom` → `get` → `add` in this
-  order; LoaderThread calls `saveNow` before `LoadChunk`. After the patch the four method texts (with frames) differ only in these six calls; each helper
-  calls its original exactly once.
+- SmokeCheck: vanilla has exactly one of each observed call; putting an animal down calls `copyFrom` → `get` → `add` in this order. After the patch
+  the two method texts (with frames) differ only in these four calls; each helper calls its original exactly once.
 - `AnimalLossProbeTest` (on and off, separate JVMs): putting an animal down calls the three helpers in the patched order with the real
   `AnimalInstanceManager`. The vanilla negative control (calling the originals directly) counts and logs nothing. Nothing is logged when the previous
   holder is the held animal; when it is another animal holding onlineID 1, one `drop-evict` line with the drop position and that animal's type, ID and
   position; when the held animal is still in the world after the drop, one `drop-dup` line; an exception while describing the previous holder only
   counts `anomalies` and the originals still run; an exception from `copyFrom` propagates unchanged. Growing up: when `checkForChickenpocalypse`
   returns true, one `grow-dup` line with the other same-ID animal found by the real `IsoGridSquare.getAnimals` within ±4 tiles (a `ServerMap` stand-in
-  returns the squares); nothing when it returns false. Chunks: loading a chunk while another thread holds its save registration logs `reload-race`; a
-  different chunk, or the same thread saving then loading (`saveNow`), logs nothing; two threads saving the same chunk log `double-write`; the redirected
-  `saveUnloaded` runs the real `IsoChunk.Save` (noSave) and leaves no registration. Off: the originals run, nothing is counted and the JVM logs nothing.
+  returns the squares); nothing when it returns false. Off: the originals run, nothing is counted and the JVM logs nothing.
+
+### 2026-11-10 — 42.22.2 re-validation (chunk reload probe retired)
+
+In 42.22.2 `ServerChunkLoader$LoaderThread` calls `LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))`: the load takes the unload save data straight from the save queue or from the job the save thread is processing, and `saveNow` is gone; `SaveUnloadedTask.save` now runs `serialize()` (synchronized) and then `writeChunk` under a `WriteLock`. Reading an old or half-written file right after unloading is fixed upstream, so the LoaderThread and SaveUnloadedTask ClassPatches, the `loadChunk`/`saveUnloaded` helpers, `AnimalLossProbe$Saving`, the `reload-race`/`double-write` detail lines and the beat's `loads unloadedSaves reloadRaces doubleWrites` are removed. SmokeCheck now pins that `LoadChunk`'s data comes from `getPendingChunkData`, that there is no `saveNow`, and that dist no longer ships the two classes. The drop and grow-up paths keep their context (only the `getObjects` type changed, `PZArrayList` → `List`) and are rebuilt as is. Revive with `git checkout 3f79700 -- patcher/game/zombie/mdc/AnimalLossProbe.java patcher/tests/animal-loss-probe` and restore the matching PatchConfig / SmokeCheck / build.ps1 sections.
 
 <a id="2by"></a>
 ## 2by. Vehicle teleported by a clamp into a stale chunk (W61, client, default on; client package 0.2.7)
@@ -5583,6 +5605,8 @@ console (one line on first use, a beat every 5 minutes that keeps printing after
 
 **Retirement**: remove the patch when TIS stops running this loop on the server or changes the server behavior of looping sounds; if the SmokeCheck context, census or vanilla method SHA locks turn red, recheck the equivalence first instead of changing the assertion or SHA to make it green.
 
+**42.22.2 re-validation (2026-11-10)**: the loop and animal looping-sound method SHAs are all unchanged; the body of `IsoGameCharacter.<init>(IsoCell,FFF)` changed (new `climbData`, `primaryHandMask`/`secondaryHandMask` initializers, `hitInfoList` is now an `ArrayList`), and the emitter is still one of two putfields (Dummy or real emitter). The SHA lock is updated to the 42.22.2 value.
+
 <a id="2db"></a>
 ## 2db. Hoist per-connection constants out of the animal relevance loop (W93, server, default observe)
 
@@ -5637,6 +5661,8 @@ console (one line on first use, a beat every 5 minutes):
 **Deployment**: the manifest adds `zombie/mdc/BodyLastStateGate.class` and replaces `IsoPlayer.class`.
 
 **Retirement**: remove the patch when TIS stops calling it on the server or a reader appears on the server; if the SmokeCheck census or SHA locks turn red, recheck first instead of changing the assertion or SHA to make it green.
+
+**42.22.2 re-validation (2026-11-10)**: `postupdateInternal` only loses the `Core.lastStand` hoursSurvived branch; the tail `getBodyDamage` → `setBodyPartsLastState` → `return` is unchanged (call site at offset 97, 121 in 42.21). `Bandages.update` still starts with the server early return; after it, only the client's `removeBandageModel` now returns a boolean and calls `syncClothing` on removal. The reader/writer census is unchanged. These two SHA locks are updated to the 42.22.2 values.
 
 <a id="2dd"></a>
 ## 2dd. Observe-only probes for animals and fluid containers (W95, server, default observe)

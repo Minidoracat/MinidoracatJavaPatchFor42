@@ -27,7 +27,6 @@ import zombie.network.GameServer;
 import zombie.network.PacketTypes;
 import zombie.network.ServerMap;
 import zombie.popman.animal.AnimalInstanceManager;
-import zombie.util.list.PZArrayList;
 
 /**
  * W37 AnimalSpawnGuard 行為驗證（無參數＝啟用、{@code off}＝kill switch）。
@@ -311,7 +310,7 @@ public final class AnimalSpawnGuardTest {
         IsoGridSquare sq = (IsoGridSquare) raw(IsoGridSquare.class);
         set(sq, "movingObjects", new ArrayList<IsoMovingObject>());
         set(sq, "staticMovingObjects", new ArrayList<IsoMovingObject>());
-        set(sq, "objects", new PZArrayList<>(IsoObject.class, 2));
+        set(sq, "objects", new ArrayList<>(2));
         set(sq, "specialObjects", new ArrayList<IsoObject>());
         return sq;
     }

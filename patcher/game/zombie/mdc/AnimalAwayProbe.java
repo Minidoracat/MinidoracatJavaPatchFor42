@@ -12,6 +12,7 @@ import java.util.function.Predicate;
 import zombie.GameTime;
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
+import zombie.core.skinnedmodel.advancedanimation.AdvancedAnimator;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoWorld;
@@ -32,8 +33,11 @@ import zombie.iso.objects.IsoFeedingTrough;
  * 大圍場部分 chunk 重載、或 zone 在關機時仍串流中，都會拿到陳舊值、重補數天。
  * 9/26 20:06 session：174/650 筆補算比動物自身離線時間多 ≥24h，38 隻死亡中 25 隻在補算後 60 秒內。
  *
- * <p><b>W32 手術</b>：全 jar 三個 {@code updateStatsAway(I)V} 呼叫點 1:1 改道——{@code fromWorker} ×1
- * （source=chunk）與 {@code DesignationZoneAnimal.doMeta} ×2（source=zone）；委派 vanilla、計時、比對兩種時數。
+ * <p><b>W32 手術</b>：{@code DesignationZoneAnimal.doMeta} 兩個 {@code updateStatsAway(I)V}（source=zone）1:1 改道；委派 vanilla、
+ * 計時、比對兩種時數。chunk 路徑（source=chunk）：42.21 原版在 {@code fromWorker} 的 {@code OnAnimDataChanged} 之後呼叫
+ * {@code updateStatsAway}；42.22 原版拿掉這次補算，改成「不在載入中且站在畜牧區」就設 {@code fromMeta=true} 凍結、等畜牧區
+ * doMeta，所以改道 {@code fromWorker} 唯一的 {@code getAdvancedAnimator()} 與 {@code OnAnimDataChanged(Z)}
+ * （{@link #fromWorkerAnimator}／{@link #fromWorkerAnimDataChanged}），在同一個位置接回 W49 自身時鐘補算。
  * kill switch {@code -Dmdc.animalAwayProbe=0}（不計數、不記錄）。
  *
  * <p><b>W42</b>：補算時數取 {@code min(zone 時數, 動物自身離線時數)}；動物自身時鐘
@@ -44,9 +48,9 @@ import zombie.iso.objects.IsoFeedingTrough;
  *
  * <p><b>W49</b>（原版少補，懷孕與成長只有五到六成）：
  * <ul>
- *   <li>自身時鐘補算（A1）：chunk 路徑改以動物自身離線時數補算，不看 zone。原版在 {@code connectedDZone}
- *       尚未填入（本次開機首次進世界、放養動物）時補 0，zone 只部分串流時也只補到 {@code hourLastSeen}。
- *       自身時鐘在卸載時寫入、載入中與雞舍內每小時刷新、補算時逐小時推進，不會重複計算同一段時間。
+ *   <li>自身時鐘補算（A1）：chunk 路徑以動物自身離線時數補算，不看 zone。42.21 原版在 {@code connectedDZone}
+ *       尚未填入（本次開機首次進世界、放養動物）時補 0；42.22 原版這條路徑不補，畜牧區外的動物（放養）從此沒有補算，
+ *       畜牧區內的等 doMeta 以 {@code hourLastSeen} 補。沒有自身時鐘或野生的動物照 42.22 原版留給 doMeta。
  *       zone 路徑維持 W42。存檔寫出自身時鐘（A3）由 {@code MdcAnimalSave} 負責，兩者共用
  *       {@code -Dmdc.animalOwnClock=0} 開關，且依賴 W42。</li>
  *   <li>長離線上限：一次離線最多補 {@code -Dmdc.animalCatchUpLimit}（預設 168）遊戲小時；超過時先把時鐘設為
@@ -120,7 +124,7 @@ public final class AnimalAwayProbe {
     private static long calls, big, mismatch, died, anomalies, suppressed, capped, cappedHours, clockRefresh;
     private static long maxHours, maxAnimalHours, sumHours, totalNs, maxNs;
     private static long ownCatchUps, ownGainHours, limited, limitedHours, carcassSkips, accrualGrowths, hutchRefresh;
-    private static long directCalls, directHours, directLimited, directLimitedHours, delegateFailures;
+    private static long directCalls, directHours, directLimited, directLimitedHours, delegateFailures, chunkFailures;
     private static long runNs, runLastEndNs, runCalls, maxRunNs, maxRunCalls;
     private static long deferred, deferDrained, deferTimeouts, deferUnloaded, deferDead, deferZoneSkips, deferDirect;
     private static long deferFailures, deferLeaving, deferTransferred, zoneRefreshes, maxDeferNs;
@@ -134,13 +138,54 @@ public final class AnimalAwayProbe {
     private static IsoAnimal probeTicket;
     private static long windowStart, windowLines, lastBeat;
 
-    /** {@code AnimalManagerMain.fromWorker}：chunk 載入時單隻動物補算。 */
-    public static void updateStatsAway(IsoAnimal animal, int hours) {
-        observe(animal, hours, true);
+    /** fromWorker 正在加入世界的那隻（主執行緒；getAdvancedAnimator 記下、OnAnimDataChanged 取用）。 */
+    private static IsoAnimal fromWorkerAnimal;
+
+    /** {@code AnimalManagerMain.fromWorker} 唯一的 {@code animal.getAdvancedAnimator()}：照原版取 animator，記下這隻動物。 */
+    public static AdvancedAnimator fromWorkerAnimator(IsoAnimal animal) {
+        fromWorkerAnimal = animal;
+        return animal.getAdvancedAnimator();
     }
 
-    /** {@code DesignationZoneAnimal.doMeta}：zone 重新完整串流時整區補算（兩處 callsite）。 */
+    /** {@code AnimalManagerMain.fromWorker} 唯一的 {@code OnAnimDataChanged(false)}：照原版呼叫，再走 chunk 路徑補算。 */
+    public static void fromWorkerAnimDataChanged(AdvancedAnimator animator, boolean b) {
+        IsoAnimal animal = fromWorkerAnimal;
+        fromWorkerAnimal = null;
+        animator.OnAnimDataChanged(b);
+        if (animal != null) {
+            chunkCatchUp(animal);
+        }
+    }
+
+    /**
+     * chunk 路徑補算（W49 自身時鐘，畜牧區內的交給 W56 延後）。42.22 原版這裡不補算，所以只處理有自身時鐘、不是野生的動物，
+     * 其餘照原版留給 doMeta；原版時數記成 0（42.21 原版這條路徑同樣幾乎都是 0）。補算例外只計數記錄、不外拋：原版這裡
+     * 沒有補算，外拋會中斷 fromWorker 迴圈，同批後面的動物不進世界。
+     */
+    static void chunkCatchUp(IsoAnimal animal) {
+        if (!OWN) {
+            return;
+        }
+        long clock = animal.timeSinceLastUpdate;
+        try {
+            if (animal.isWild() || animalHoursAway(animal) == NO_RECORD) {
+                return;
+            }
+            observe(animal, 0, true);
+        } catch (RuntimeException e) {
+            chunkFailures++;
+            failureLog(animal, "chunk catch-up failed", -1, clock, e);
+        }
+    }
+
+    /**
+     * {@code DesignationZoneAnimal.doMeta}：zone 重新完整串流時整區補算（兩處 callsite）。W38：同一次 doMeta 內第二次遇到
+     * 同一隻就略過（42.22 原版幼體迴圈外層多一圈，每隻幼體被補算「動物總數」次）。
+     */
     public static void updateStatsAwayZone(IsoAnimal animal, int hours) {
+        if (!AnimalMetaSnapshot.first(animal)) {
+            return;
+        }
         observe(animal, hours, false);
     }
 
@@ -303,7 +348,7 @@ public final class AnimalAwayProbe {
             anomalies++;
             return false;
         }
-        animal.fromMeta = true;   // 原版 fromWorker 已設（IngameState.loading 時除外）：凍結到補算為止，期間也不刷新時鐘
+        animal.fromMeta = true;   // 42.22 原版 fromWorker 已對畜牧區內的設（IngameState.loading 時除外）：凍結到補算為止，期間也不刷新時鐘
         Deferred d = new Deferred(animal, hours, applied, animalHours, animal.timeSinceLastUpdate, System.nanoTime());
         PENDING.put(animal, d);
         ORDER.add(d);
@@ -409,6 +454,11 @@ public final class AnimalAwayProbe {
     }
 
     private static void failureLog(IsoAnimal animal, Deferred d, RuntimeException e) {
+        failureLog(animal, "deferred catch-up failed", d.applied, d.clock, e);
+    }
+
+    /** 補算失敗明細（與 detail 共用每 60 秒行數窗）；applied &lt; 0＝補算時數不明（chunk 路徑在 plan 之前或之中失敗），不印 applied／lost。 */
+    private static void failureLog(IsoAnimal animal, String what, int applied, long clockStart, RuntimeException e) {
         try {
             long now = System.currentTimeMillis();
             if (now - windowStart >= WINDOW_MS) {
@@ -419,11 +469,12 @@ public final class AnimalAwayProbe {
                 suppressed++;
                 return;
             }
-            long doneHours = Math.floorDiv(animal.timeSinceLastUpdate - d.clock, HOUR_MS);
-            DebugLog.log(TAG + "deferred catch-up failed animal=" + animal.getAnimalType() + "#" + animal.getAnimalID()
+            long doneHours = Math.floorDiv(animal.timeSinceLastUpdate - clockStart, HOUR_MS);
+            DebugLog.log(TAG + what + " animal=" + animal.getAnimalType() + "#" + animal.getAnimalID()
                     + " pos=" + (int) animal.getX() + "," + (int) animal.getY() + "," + (int) animal.getZ()
-                    + " applied=" + d.applied + " done=" + doneHours + " lost=" + Math.max(0L, d.applied - doneHours)
-                    + " clockStart=" + d.clock + " clockNow=" + animal.timeSinceLastUpdate + " error=" + e);
+                    + (applied < 0 ? " done=" + doneHours
+                            : " applied=" + applied + " done=" + doneHours + " lost=" + Math.max(0L, applied - doneHours))
+                    + " clockStart=" + clockStart + " clockNow=" + animal.timeSinceLastUpdate + " error=" + e);
         } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }
@@ -684,7 +735,7 @@ public final class AnimalAwayProbe {
                         + " directCalls=" + directCalls + " directHours=" + directHours
                         + " directLimited=" + directLimited + " directLimitedHours=" + directLimitedHours
                         + " carcassSkips=" + carcassSkips + " accrualGrowths=" + accrualGrowths
-                        + " delegateFailures=" + delegateFailures
+                        + " delegateFailures=" + delegateFailures + " chunkFailures=" + chunkFailures
                         + " died=" + died + " maxHours=" + maxHours + " maxAnimalHours=" + maxAnimalHours
                         + " sumAppliedHours=" + sumHours + " totalMs=" + totalNs / 1_000_000L
                         + " maxMs=" + maxNs / 1_000_000L + " maxRunMs=" + maxRunNs / 1_000_000L
@@ -747,6 +798,7 @@ public final class AnimalAwayProbe {
     static long directCallsForTest() { return directCalls; }
     static long directLimitedForTest() { return directLimited; }
     static long delegateFailuresForTest() { return delegateFailures; }
+    static long chunkFailuresForTest() { return chunkFailures; }
     static long maxRunNsForTest() { return maxRunNs; }
     static boolean deferForTest() { return DEFER; }
     static boolean troughRegisterForTest() { return TROUGH_REGISTER; }

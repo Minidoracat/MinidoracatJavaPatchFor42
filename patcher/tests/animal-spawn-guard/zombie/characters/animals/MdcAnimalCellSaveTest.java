@@ -67,7 +67,7 @@ public final class MdcAnimalCellSaveTest {
             AnimalCell healthy = cell(3, 4);
             MdcAnimalCellSave.save(healthy);
             expect("on：健康 cell 正常覆寫（版本 int＋1024 個空 chunk）", Files.size(file) > old.length
-                    && java.nio.ByteBuffer.wrap(Files.readAllBytes(file)).getInt() == 249);
+                    && java.nio.ByteBuffer.wrap(Files.readAllBytes(file)).getInt() == 251);
 
             // IOException（W50 保不住掛鉤狀態時拋出）：同樣保留舊檔、標回重試。
             byte[] good = Files.readAllBytes(file);

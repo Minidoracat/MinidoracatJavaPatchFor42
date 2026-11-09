@@ -1960,7 +1960,7 @@ chunkNullAdd/duplicateRemoved/cellNullSave/lastSaveReal/scanAvgUs/scanMaxUs/anom
 明確不做：鹿瞬移（`fromWorker` 對 id=0 setForceX/Y）、PathfindNativeThread native crash、阻止 chunk unload、任何序列化格式改動。W15 掛點與 property 零重疊。
 
 <a id="2ae"></a>
-## 2ae. hutch 載入回傳守衛（W17，server，預設 enforce）
+## 2ae. hutch 載入回傳守衛（W17，server，已退役：42.22.2 原版修掉）
 
 ### 缺陷（靜態已定罪）
 
@@ -2002,6 +2002,10 @@ skip 動物 blob，迴圈不執行；且 loose class 只部署 server，無 serv
 - 手術後同一實參形狀只換 static helper、原 call 歸零、真指令不變、class-wide 差1。
 - helper 原委派恰1、全 class 零 Rand、forceInto 六步各恰1且 backlink 是精確 PUTFIELD。
 - `HutchLoadGuardTest` 三獨立 JVM，以 ZeroRandom 確定製造「有空 slot1 但 vanilla 101 次全撞 slot0」；另驗 clean-slot 優先、dead-body fallback、key→null、duplicate、20 隻全存活與第21隻 CRITICAL。變異拿掉 map put 必紅。
+
+### 2026-11-10 42.22.2 對版（退役）
+
+42.22.2 的 `IsoHutch.load` 改成 `addAnimalInside(animal, false)` 回 false 時再呼 `addAnimalInsideFirstFreePosition(animal)`，兩個都失敗才印警告（javap：唯一的 `addAnimalInside` 後面 `IFNE` 接 `INVOKEVIRTUAL addAnimalInsideFirstFreePosition`），`addAnimalInside` 也先 `isHutchPositionOccupied` 再 `pickRandomUnoccupiedHutchPosition`，「有空槽卻回 false、動物隨 GC 消失」已由原版修掉；刪除 `HutchLoadGuard`、`HutchLoadGuardTest`、`build.ps1` [9n] 與 PatchConfig 的 load 改道（`IsoHutch` ClassPatch 留給 W26），SmokeCheck 改釘這個原版形狀與 dist 不再出貨 helper，形狀再變就重新評估。復活：`git checkout 3f79700 -- patcher/game/zombie/mdc/HutchLoadGuard.java patcher/tests/hutch-load-guard`，再回填 PatchConfig／SmokeCheck／build.ps1 對應段。
 
 
 ---
@@ -2695,6 +2699,11 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 
 線上驗收需另外確認：正確包已載入、mode=1、上述異常指標為零、`skipped` 確實增加；再對照雞舍 `SyncIsoObject` 的封包流量，以及靠近／重入地圖、開關門、取蛋與傳送後的同步。不能由 `skipped` 比例直接宣稱相同比例的全服頻寬或 FPS 改善。
 
+### 2026-11-10 42.22.2 對版
+
+雞舍 `update` 兩個掛點語境不變，照原樣重建；`IsoHutch.syncIsoObjectReceive` 多帶一個 `UdpConnection` 參數，SmokeCheck 負對照跟著改描述子。`TeleportPacket.player` 從 `PlayerID` 改成 `OnlinePlayer`（`set` 改呼 `setId(onlineId)`＋`setPlayer(player)`，`getPlayer` 繼承自基底 `Player`），`write` 的唯一 ID 寫入改成 offset 5 的 `OnlinePlayer.write(ByteBufferWriter)`；改道目標 `RecipientWindow.writeTeleportPlayer` 的第一參數跟著改型別，豁免判定不變。SmokeCheck 的身分前提改釘 `OnlinePlayer.set` 經 `setPlayer(aload_1)` 存入同一角色實例、`OnlinePlayer` 不覆寫 `getPlayer`；`HutchSyncGateTest` 三個 JVM 改用 `OnlinePlayer` 後全過。
+
+
 ---
 
 <a id="2ao"></a>
@@ -2747,6 +2756,8 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 **驗證**：原版真接收入口的狀態保護反例失敗；新包保留雞舍及巢箱成員資格，涵蓋正常 client writer、buffer 邊界、共用封包狀態、明示回退、未知設定、限頻及真 logger 故障。SmokeCheck 鎖唯一接收入口、精確同形改道、上游協定指紋與 client 入口不變。本機完整建置與兩輪隔離安裝／移除通過；不代表已部署或已證明歷史動物遺失的原因，也不會自動復原既有存檔。
 
 **2026-09-28 42.21 對版**：驗證缺口在 42.21.0 仍在，上行 wire 與 client writer 逐指令未變，helper 不改（缺口細節另以私下管道回報 TIS，不在公開文件描述）。42.21 對這個類別唯一的語意差是 client 分支的 `removeFromSquare()` 後多 `setSquare(null)`；原本的整類 SHA 因此與行號位移一起誤報。SmokeCheck 指紋改為略過 debug 資訊（行號、區域變數、SourceFile）的整類文字雜湊，仍涵蓋 `@PacketSetting`、欄位與全部方法，值更新為 42.21。
+
+**2026-11-10 42.22.2 對版（待裁定）**：42.22.2 的 `AnimalUpdatePacket.parse` 只在 `GameClient.client` 或連線角色有 `Capability.AnimalCheats` 時執行刪除清單（javap：`GETSTATIC Capability.AnimalCheats`→`Role.hasCapability` 在唯一的 `IsoAnimal.remove()` 之前），一般玩家連線送來的刪除原版已經忽略；上行 wire 與 client writer 不變，helper 不改。本刀剩下的作用是畸形表頭整包拒絕，以及擋下 `AnimalCheats` 角色對雞舍／巢箱成員的刪除，是否保留待裁定。SmokeCheck 整類指紋更新為 42.22.2，另加這個權限前提；`AnimalUpdateGuardTest` 的 off 對照改成原版忽略一般連線的刪除，另加 AnimalCheats 連線一段（off 原版照刪、enforce 仍拒絕）。
 
 <a id="2ar"></a>
 ## 2ar. 容器大批物品登記（W30，server，預設 on）
@@ -2815,6 +2826,10 @@ IsoAnimal.updateStatsAway → AnimalData.hourGrow`，全是原版路徑。
 - `-Dmdc.animalAwayProbe=0` 停用（純直通），需重啟。
 
 **判讀**：`mismatch` 持續成長、明細中 hoursAway 遠大於 animalHoursAway＝假說成立，再另案出 enforce（改用動物自身時間或設上限）。兩者相近＝離線補算本來就這麼長，需改查 hourGrow 本身。SmokeCheck 釘三個呼叫點 census、兩個方法同形改道，以及原版讀 `DesignationZone.hourLastSeen` 的事實（TIS 改用動物自身時間時該條會紅＝重估本刀）。`AnimalAwayProbeTest` 覆蓋 observe／off、陳舊 zone、無時間戳、zone 路徑與例外穿透。
+
+### 2026-11-10 42.22.2 對版
+
+42.22.2 的 `AnimalManagerMain.fromWorker` 拿掉 `updateStatsAway`，改成「不在 `IngameState.loading` 且所在畜牧區是 `DesignationZoneAnimal`」就設 `fromMeta=true`、等畜牧區 `doMeta` 補（javap offset 417–439），chunk 路徑原版不再補算。`doMeta` 兩個改道（offset 47、106）照舊；chunk 路徑改成兩刀同形改道：`fromWorker` 唯一的 `getAdvancedAnimator()`（offset 468）→ `AnimalAwayProbe.fromWorkerAnimator` 記下動物，緊接的 `OnAnimDataChanged(false)`（offset 472）→ `fromWorkerAnimDataChanged` 先照原版呼叫再 `chunkCatchUp`，位置與 42.21 的 `updateStatsAway` 相同（`setGroup` 之後、`objectList`／AIM 登記之前）。`chunkCatchUp` 只在 W49 開啟時對有自身時鐘、不是野生的動物補，其餘照 42.22 原版留給 doMeta；原版這裡沒有補算，所以補算例外只計 `chunkFailures`（心跳新欄位）並記一行，不外拋。`hourLastSeen` 的存在理由改釘在 `DesignationZone.checkStreamed`。SmokeCheck 改釘 `doMeta` 恰 2 個、`fromWorker` 零個 `updateStatsAway`、原版 fromMeta→getAdvancedAnimator→OnAnimDataChanged 的順序與兩刀同形；`AnimalAwayProbeTest` 改呼 `chunkCatchUp`，另驗掛點回傳原 animator、原版例外照拋且不補算。
 
 <a id="2av"></a>
 ## 2av. 分娩品種守衛（W33，server，預設 on）
@@ -3030,6 +3045,8 @@ Patcher 新形態 `FieldGetRedirect`：把 `GETFIELD owner.name:desc` 換成 `IN
 
 實機 E2E（`animal-water-drop-mp` 改成照原版抓起再扔掉）：原版地圖河岸的水格都是深水（`solidtrans`，人走不上去），情境在一格水格上疊一層旁邊陸地的地板，做出 `isWaterSquare()` 成立、人站得上去、`canDropOnFloor` 成立的格子；在北邊陸地生一隻母雞，玩家站上水格用 `ISPickupAnimal` 抓起，再用 `ISInventoryPaneContextMenu.dropItem` 扔掉。修補後：`drop moved from=<水格> pos=<北邊陸地>`，伺服器與客戶端都看到母雞在那格陸地，水格上沒有動物，玩家離開後那一格照常卸載，零 `textureSkinned` NPE（RESULT PASS，4 項檢查）。修補前的包（與正式服相同）：`drop discarded`，伺服器與客戶端都找不到母雞（RESULT FAIL，4 項檢查錯 2 項），就是玩家遇到的情形。
 
+**2026-11-10 42.22.2 對版**：`IsoChunk.removeFromWorld` 兩個 `IsoMovingObject.removeFromWorld` 改道在 offset 332、510（42.21 是 506），`AddWorldInventoryItem` 的 `GETFIELD x`／`y`（105、109）與 `copyFrom`（144）不變，差異只有 `getObjects` 回傳型別 `PZArrayList`→`List`；`AnimalCell.save` 的 apop 版號 249→251，`MdcAnimalCellSave` 只呼叫 `cell.save(out)`，不受影響（`MdcAnimalCellSaveTest` 的版號斷言跟著改）。`AnimalSpawnGuardTest` 改用 `ArrayList`，其餘照原樣重建。
+
 <a id="2ba"></a>
 ## 2ba. 畜牧區離線補算快照（W38，server，預設 on）
 
@@ -3047,6 +3064,10 @@ SmokeCheck 釘存在理由（`updateStatsAway` 呼叫 `checkZone`、`setDZone` �
 swap 位置與真指令 +12、W32 兩個改道。`AnimalMetaSnapshotTest` 以原版迴圈形狀重現：off 重複與漏算，on 每隻恰一次。
 
 線上驗收：W32 明細中同一（幀、動物、座標）重複的組數應歸零；`died` 佔 `calls` 的比例應下降。
+
+### 2026-11-10 42.22.2 對版
+
+42.22.2 的 `DesignationZoneAnimal.animals` 改成 `HashSet`，`doMeta` 先取 `getAnimalsInZone()` 複本再走訪（offset 5），42.21 的重排與漏算原版已修，8 個 `GETFIELD animals` 也已無處可掛。但幼體迴圈變成「外層跑畜牧區動物數次、內層走訪整個複本、是幼體就 `updateStatsAway`」：一次 doMeta 每隻幼體被補 N 次（N＝畜牧區動物總數），與 42.21 的重複補算同類。本刀改寫為：頭部 `AnimalMetaSnapshot.begin` 清空本次已補集合、單一 RETURN 前 `end`，`AnimalAwayProbe.updateStatsAwayZone` 先問 `AnimalMetaSnapshot.first(animal)`，同一次 doMeta 已補過的直接跳過；拿掉 FieldGetSwap，`doMeta` 命中數 2＋1＋1、真指令 +4，心跳改為 `metas animals repeats`，kill switch 不變。SmokeCheck 改釘 42.22 迴圈形狀（`getAnimalsInZone` 複本、兩個 `updateStatsAway`）、begin／end 位置與 helper 先問 `first`；`AnimalMetaSnapshotTest` 改跑 dist 內真 `doMeta`（2 隻成年＋3 隻幼體）：off 每隻幼體補 5 次，on 每隻恰 1 次。
 
 <a id="2bb"></a>
 ## 2bb. 動物死亡帳本（W39，server，純觀測）
@@ -3114,6 +3135,8 @@ frames 不變、`AddItemBlind` 不動、`ProcessItems` 頭 beginPass＋尾 endPa
 
 SmokeCheck：原版 `AnimalData` 全 class 零寫入動物時鐘、`update` 內 `hourGrow` 恰 1（存在理由），改道同形。`AnimalAwayProbeTest` 三組態：出貨組態驗陳舊 zone 補 2h 而非 200h、時鐘在未來補 0、無紀錄沿用 500h、活著時刷新時鐘；`nocap` 驗全部回原版時數且不刷新。線上驗收：`capped` 與 `cappedHours` 成長、`mismatch` 明細的 `applied` 接近
 `animalHoursAway`、補算後 60 秒內的死亡明顯減少。
+
+**2026-11-10 42.22.2 對版**：`AnimalData.update` 的 `hourGrow` 與動物時鐘寫入者語境不變，照原樣重建；chunk 路徑的入口改變見 2au 的 42.22.2 對版。
 
 <a id="2bf"></a>
 ## 2bf. 2026-09-27 log 精簡、探針退役與量測補強（server）
@@ -3420,6 +3443,8 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 
 **守門**：SmokeCheck 釘存在理由四條（`fromWorker` 在 `getZone()` 為 null 時補 0、`IsoAnimal.save` 時鐘欄位寫存檔當下、`updateStatsAway` 一次性 `setHoursSurvived(age×24)` 且 `growUp` 在午夜分支、雞舍內不刷新時鐘），加上 `AnimalData.update` 載入中的成長公式（helper 照抄這段）；`updateStatsAway` 頭部的 `entryHours` 插入全序鎖定、真指令恰 +4，其餘與四組改道以「原版文字置換後與 dist 逐字相同」鎖同形。Patcher 新增詞彙 `HeadIntFilter`（instance 方法頭部的 int 參數過濾）。`AnimalAwayProbeTest` 五組態（出貨、觀測關、W42 關、自身時鐘關、屠體守衛關；另驗相鄰補算累計與委派例外計數）、`AnimalCatchUpAccrualTest` 直接呼叫手術後的 `updateStatsAway`（累積語意開與關；含拖車式直接呼叫 200 小時被截成 168）、`MdcAnimalSaveTest` 驗時鐘寫出的各種判定。
 
+**2026-11-10 42.22.2 對版**：`IsoAnimal.updateStatsAway` 只多一行 `DebugType.Animal.println`，頭部 `entryHours` 插入與四組改道語境不變。存在理由第一條改成 42.22.2 的形狀：`fromWorker` 不再補算，chunk 路徑的自身時鐘補算改由 2au 的 `fromWorkerAnimDataChanged` 接回；`AnimalAwayProbeTest` 自身時鐘關閉的組態照 42.22 原版 chunk 路徑不補。
+
 <a id="2bn"></a>
 ## 2bn. 掛鉤屠體存檔保住掛鉤狀態＋W37 重試不重複寫出（W50，server，預設 on）
 
@@ -3685,6 +3710,8 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **上線驗收（2026-10-08 17:58）**：10-08 03:45 MOD 更新重啟時套用（job 狀態 `APPLIED`、03:46 起的 session 橫幅即為新版，舊的 123 個 class 封存在 job 的 `state/`；之後每次開服 `[mdc-javagate] OK: 127`）。之後六個 session（重啟都是 MOD 更新或定時重啟，沒有當機）橫幅都是 `server patch ffed4ff`，127 個 loose class 逐檔 SHA 與 manifest 相符，零 linkage 錯誤，各刀心跳 `anomalies` 都是 0；`deferFailures`、`delegateFailures` 都是 0。各 session 最後一筆心跳合計延後 20,342 筆、補完 20,259 筆（逾時才補 1,308 筆）、延後中卸載 71 筆。`maxDeferMs` 57–181 秒都出在開機後第一位玩家進場（見上段），逾時集中在跨 server cell 邊界的牧場。補算後 2 秒內死亡、飢或渴 ≥0.8 的家畜：畜牧區內從 227／644（35%，10-04 起 41 個 session）降到 2／62（3%）；畜牧區外（W56 不處理）47% 與 44% 不變。同一幀連續補算的最長耗時 240–702 ms，與之前 11–790 ms 同範圍；看門狗記到的凍結都在關服。
 
+**2026-11-10 42.22.2 對版**：延後邏輯不變，入口從 `fromWorker` 的 `updateStatsAway` 改成 2au 的 `chunkCatchUp`。42.22.2 原版也把畜牧區內新載入的動物設 `fromMeta=true` 等 doMeta，但畜牧區已在串流中時 doMeta 可能不會再跑，動物可能一直凍結（推測，未實測；驗證：讓畜牧區一角留在玩家範圍內，卸載再載入另一角的 chunk，看動物 `fromMeta` 是否一直是 true）；有自身時鐘的動物由 W56 的延後與逾時補算照舊處理。SmokeCheck 的 fromWorker 前提改釘 `INSTANCEOF DesignationZoneAnimal`→`fromMeta` 在 `getAdvancedAnimator` 之前；`AnimalCatchUpDeferTest` 改呼 `chunkCatchUp`，新增自身時鐘關閉的 42.22 原版對照（chunk 不補、畜牧區補 30 小時時看得到槽）。
+
 <a id="2bu"></a>
 ## 2bu. 自建房 chunk 載入斷線（W57，client，預設 on；client 包 0.2.6）
 
@@ -3775,21 +3802,18 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 **原版機制**（42.21.0 反編譯＋javap）：
 - **放下動物**：`IsoGridSquare.AddWorldInventoryItem` 遇到 `AnimalInventoryItem` 時新建 `IsoAnimal`、`copyFrom` 手上的動物，再以手上動物的 onlineID 查 `AnimalInstanceManager`；查到的「前持有者」只要不是新動物，就 `removeFromWorld`、`removeFromSquare`、從管理器移除（`IsoGridSquare.java:6082-6097`）。伺服器上從雞舍 chunk 載入的動物用 `IsoAnimal(IsoCell)` 建構（不走 `init`，不配 onlineID），`IsoAnimal.load` 只在客戶端設定 onlineID（`IsoAnimal.java:1495-1500`），所以 onlineID 停在 `IsoPlayer` 的欄位預設值 1（`IsoPlayer.java:334`）。從雞舍抓起再放下時，查到的是當下持有這個 ID 的別隻動物，牠被移出世界、之後不再存檔。這是推論，還沒有實際抓到。
 - **chunk 卸載後立刻重載**：`ServerChunkLoader$LoaderThread` 對每個 chunk 先 `saveNow(wx, wy)` 再 `LoadChunk`。`saveNow` 只處理還在存檔佇列裡的工作（`ServerChunkLoader.java:490-511`），存檔執行緒已經取走、正在寫的那份不在佇列裡，載入可能讀到舊檔或寫到一半的檔。雞舍內的動物跟著 chunk 存，舍外的在 APM 記憶體：讀到舊雞舍時，同一隻會同時出現在雞舍和舍外（複製），或兩邊都沒有（消失）。
+  42.22.2 已由原版修掉，這條的觀測已退役，見本節最後的對版紀錄。
 - **長大**：`AnimalData.grow` 先讓新動物沿用舊 animalId，再 `checkForChickenpocalypse`：±4 格內有別隻同 ID 的動物就刪掉長大前的動物，grow 接著刪掉新動物（`AnimalData.java:1406-1444`、`IsoAnimal.java:275-296`），只印 `DebugType.Animal.println`。複製體長大時兩隻一起消失。
 
-**手術**：六個呼叫各自 1:1 同形改道 `zombie/mdc/AnimalLossProbe`（receiver 變第一參數），helper 在 try 外照原樣呼叫原方法恰一次，回傳與例外都與原版相同；javap 語境見 `docs/specs/zombie_animal_loss_probe.json`。
+**手術**：四個呼叫各自 1:1 同形改道 `zombie/mdc/AnimalLossProbe`（receiver 變第一參數），helper 在 try 外照原樣呼叫原方法恰一次，回傳與例外都與原版相同；javap 語境見 `docs/specs/zombie_animal_loss_probe.json`。
 - `IsoGridSquare.AddWorldInventoryItem(InventoryItem, float, float, float, boolean, boolean)`：offset 144 `IsoAnimal.copyFrom` → `dropCopy`、168 `AnimalInstanceManager.get` → `dropLookup`、210 `AnimalInstanceManager.add` → `dropRegister`，`expectedHits = 3`（新的 ClassPatch）。三個呼叫依序發生，helper 照這個順序配對：`copyFrom` 記手上的動物，`get` 在原版移走前記下前持有者的位置與狀態，`add` 判定。
-- `ServerChunkLoader$LoaderThread.run()`：offset 226 `IsoChunk.LoadChunk` → `loadChunk`，`expectedHits = 1`（新的 ClassPatch）。載入前後各查一次：另一條執行緒正在存同一個 chunk 的卸載存檔就記一行。
-- `ServerChunkLoader$SaveUnloadedTask.save()`：offset 5 `IsoChunk.Save(Z)V` → `saveUnloaded`，`expectedHits = 1`（新的 ClassPatch）。存檔前登記執行緒與開始時間，finally 移除；另一條執行緒也在存同一個 chunk 時記一行。
 - `AnimalData.grow(String)`：offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`，`expectedHits = 1`（掛在既有的 AnimalData ClassPatch）。回 true 時在同範圍找出同 ID 的另一隻一起記。
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> evicted=<種類>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
 [MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> source=<種類>#<animalId> pos=… inWorld=1 … prev=<none|種類#animalId>
-[MinidoracatJavaPatch][AnimalLossProbe] reload-race#<n> chunk=<wx>,<wy> phase=<before|during> savingThread=<執行緒名> saveElapsedMs=<n>
-[MinidoracatJavaPatch][AnimalLossProbe] double-write#<n> chunk=<wx>,<wy> threads=<先>,<後> otherElapsedMs=<n>
 [MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<種類>#<animalId> pos=… newType=<長大後種類> twin=<種類>#<animalId> pos=…
-[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> loads=<n> unloadedSaves=<n> reloadRaces=<n> doubleWrites=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
 ```
 
 `drop-evict` 是放下動物時被移出世界的別隻（`evicted` 是牠被移走前的狀態；描述失敗時寫 `?`）。`drop-dup` 是手上的動物放下後仍在世界上，等於多了一隻。明細每 60 秒最多 30 行，其餘計 `suppressed`；第一次事件（通常是開機後第一次載入 chunk）印首次生效行，之後每 5 分鐘一行 beat。簿記例外只計 `anomalies`。
@@ -3798,13 +3822,17 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **部署**：manifest 新增 `zombie/mdc/AnimalLossProbe.class`、`AnimalLossProbe$Saving.class` 與三個新 patched class（`IsoGridSquare`、`ServerChunkLoader$LoaderThread`、`ServerChunkLoader$SaveUnloadedTask`），`AnimalData.class` 換成多一個命中點的版本（131 → 136 個 class）。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm，下一次排程重啟時切換。上線後確認橫幅指紋是新版、`[mdc-javagate] OK: 136`，再看 console 出現首次生效行。
 
-**判讀**：玩家再回報動物變多或消失時，先找同一時段、座標附近的明細。`drop-evict` 的 `evicted` 就是消失的那隻；`reload-race` 的 chunk 座標（×8＝格座標）對到雞舍或圍欄時，用 `hutch-animal-scan.py` 比對前後存檔看多了或少了哪隻。三種都沒有出現，就是還有別的路徑，再加觀測。
+**判讀**：玩家再回報動物變多或消失時，先找同一時段、座標附近的明細。`drop-evict` 的 `evicted` 就是消失的那隻；`grow-dup` 是複製體長大時一起消失的兩隻。都沒有出現，就是還有別的路徑，再加觀測。
 
-**未做**：不擋、不修；等抓到是哪條路徑再決定怎麼修（放下時只移走同一隻、載入前等正在寫的存檔寫完等）。
+**未做**：不擋、不修；等抓到是哪條路徑再決定怎麼修（例如放下時只移走同一隻）。
 
 **守門與驗證**：
-- SmokeCheck：原版四個方法各恰 1 個被觀測的呼叫；放下動物依序 `copyFrom` → `get` → `add`；LoaderThread 先 `saveNow` 再 `LoadChunk`。手術後四個方法文字（含 frames）只差這六個呼叫；helper 內每個原方法恰呼叫一次。
-- `AnimalLossProbeTest`（on、off 兩個 JVM）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。chunk：另一條執行緒持有存檔登記時載入同一個 chunk 記 `reload-race`；不同 chunk、同一條執行緒先存後載（`saveNow`）都不記；兩條執行緒同時存同一個 chunk 記 `double-write`；改道後的 `saveUnloaded` 跑真 `IsoChunk.Save`（noSave）不留登記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
+- SmokeCheck：原版被觀測的呼叫各恰 1 個；放下動物依序 `copyFrom` → `get` → `add`。手術後兩個方法文字（含 frames）只差這四個呼叫；helper 內每個原方法恰呼叫一次。
+- `AnimalLossProbeTest`（on、off 兩個 JVM）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
+
+### 2026-11-10 42.22.2 對版（chunk 重載觀測退役）
+
+42.22.2 的 `ServerChunkLoader$LoaderThread` 改成 `LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))`：載入時直接取存檔佇列裡或存檔執行緒正在處理的那份卸載資料，`saveNow` 已刪除；`SaveUnloadedTask.save` 改成先 `serialize()`（synchronized）再在 `WriteLock` 下 `writeChunk`。卸載後立刻重載讀到舊檔或半寫檔的路徑原版已修，刪除 LoaderThread、SaveUnloadedTask 兩個 ClassPatch、`loadChunk`／`saveUnloaded` helper、`AnimalLossProbe$Saving`、`reload-race`／`double-write` 兩種明細與 beat 的 `loads unloadedSaves reloadRaces doubleWrites`；SmokeCheck 改釘 `LoadChunk` 的資料來自 `getPendingChunkData`、零 `saveNow`、dist 不再出貨兩個 class。放下與長大兩路語境不變，只差 `getObjects` 型別 `PZArrayList`→`List`，照原樣重建。復活：`git checkout 3f79700 -- patcher/game/zombie/mdc/AnimalLossProbe.java patcher/tests/animal-loss-probe`，再回填 PatchConfig／SmokeCheck／build.ps1 對應段。
 
 <a id="2by"></a>
 ## 2by. 開車被夾回過期 chunk 的瞬移（W61，client，預設 on；client 包 0.2.7）
@@ -5017,6 +5045,8 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 
 **退場**：官方讓伺服器不跑這段或改了循環音的伺服器行為時撤刀；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
 
+**2026-11-10 42.22.2 對版**：迴圈與動物循環音方法的 SHA 全部未變；`IsoGameCharacter.<init>(IsoCell,FFF)` 本體變了（多 `climbData`、`primaryHandMask`／`secondaryHandMask` 初值，`hitInfoList` 改成 `ArrayList`），emitter 仍是兩個 putfield 二選一（Dummy／真 emitter），SHA 鎖更新為 42.22.2 的值。
+
 <a id="2db"></a>
 ## 2db. 動物同步範圍判定的每連線常數提到迴圈外（W93，server，預設 observe）
 
@@ -5071,6 +5101,8 @@ console（首次生效一行、每 5 分鐘一行 beat）：
 **部署**：manifest 新增 `zombie/mdc/BodyLastStateGate.class`，`IsoPlayer.class` 換新。
 
 **退場**：官方在伺服器上不再呼叫它，或伺服器上出現新的讀者時撤刀；SmokeCheck 的普查或 SHA 鎖變紅時先重新核對，不改斷言或 SHA 讓它變綠。
+
+**2026-11-10 42.22.2 對版**：`postupdateInternal` 只拿掉 `Core.lastStand` 的 hoursSurvived 分支，結尾 `getBodyDamage`→`setBodyPartsLastState`→`return` 不變（呼叫點 offset 97，42.21 是 121）；`Bandages.update` 開頭仍是伺服器早退，之後只有客戶端的 `removeBandageModel` 改回傳 boolean、移除時 `syncClothing`；讀者／寫入者清冊不變。這兩個 SHA 鎖更新為 42.22.2 的值。
 
 <a id="2dd"></a>
 ## 2dd. 動物與液體容器純觀測（W95，server，預設 observe）

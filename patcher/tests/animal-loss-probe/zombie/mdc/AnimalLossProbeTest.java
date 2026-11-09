@@ -5,15 +5,12 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 
 import zombie.characters.animals.IsoAnimal;
-import zombie.core.Core;
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.debug.LogSeverity;
 import zombie.iso.IsoCell;
-import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.IsoWorld;
@@ -30,9 +27,7 @@ import zombie.popman.animal.AnimalInstanceManager;
  * 不記；前持有者是別隻（雞舍載入的動物沒有登記 onlineID，查到持有同一個 ID 的動物）記 drop-evict，帶被移走那隻
  * 的種類、ID、位置；手上的動物放下後仍在世界上記 drop-dup；描述時例外只計 anomalies；原方法例外原樣上拋。
  *
- * <p>chunk：另一條執行緒正在存某個 chunk 時，本執行緒載入同一個 chunk 記 reload-race；不同 chunk、同一條執行緒先存後載
- * （LoaderThread 的 saveNow）都不記；兩條執行緒同時存同一個 chunk 記 double-write。真 {@code IsoChunk.Save}
- * 在 noSave 下跑完後不留登記。
+ * <p>（chunk 卸載存檔中重載的觀測 2026-11-10 隨 42.22.2 退役，測試一併移除。）
  *
  * <p>長大：checkForChickenpocalypse 回 true 時記 grow-dup，帶 ±4 格內同 ID 的另一隻（真 IsoCell／IsoGridSquare，
  * ServerMap 替身回傳格子）；回 false 不記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
@@ -138,20 +133,11 @@ public final class AnimalLossProbeTest {
         boolean kept = AnimalLossProbe.growDuplicate(calf, animal("cow", 77, 50f, 50f));
         expect("長大沒撞到：回傳原值 false", !kept && calf.chickenCalls == 1);
 
-        // ---- chunk 卸載存檔與重載：改道後的 saveUnloaded 跑真 IsoChunk.Save（noSave 下直接返回） ----
-        Core.getInstance().setNoSave(true);
-        IsoChunk chunk = alloc(IsoChunk.class);
-        chunk.wx = 7;
-        chunk.wy = 8;
-        AnimalLossProbe.saveUnloaded(chunk, false);
-        expect("真 IsoChunk.Save（noSave）經改道跑完：不留登記", AnimalLossProbe.savingForTest(7, 8) == null);
-
         if (on) {
-            runChunkSeams();
             runOnAsserts();
         } else {
             expect("off：不記帳", AnimalLossProbe.drops.get() == 0L && AnimalLossProbe.growDups.get() == 0L
-                    && AnimalLossProbe.unloadedSaves.get() == 0L && AnimalLossProbe.anomalies.get() == 0L);
+                    && AnimalLossProbe.anomalies.get() == 0L);
             expect("off：整個 JVM 零 log 行", rows().isEmpty());
         }
 
@@ -163,38 +149,6 @@ public final class AnimalLossProbeTest {
             System.exit(1);
         }
         System.out.println("animal-loss-probe OK mode=" + mode);
-    }
-
-    /** 記帳本身（wrapper 只在 on 時呼叫）：另一條執行緒持有存檔登記時載入同一個 chunk。 */
-    private static void runChunkSeams() throws Exception {
-        CountDownLatch saving = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        Thread saver = new Thread(() -> {
-            AnimalLossProbe.Saving s = AnimalLossProbe.beginSave(100, 200);
-            saving.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            AnimalLossProbe.endSave(s);
-        }, "SaveChunk");
-        saver.start();
-        saving.await();
-        boolean recheckRace = AnimalLossProbe.beforeLoad(100, 200);
-        boolean recheckOther = AnimalLossProbe.beforeLoad(100, 201);
-        AnimalLossProbe.Saving own = AnimalLossProbe.beginSave(300, 400);
-        boolean recheckOwn = AnimalLossProbe.beforeLoad(300, 400);
-        AnimalLossProbe.endSave(own);
-        AnimalLossProbe.Saving dup = AnimalLossProbe.beginSave(100, 200);
-        AnimalLossProbe.endSave(dup);
-        release.countDown();
-        saver.join();
-        boolean recheckAfter = AnimalLossProbe.beforeLoad(100, 200);
-        expect("載入時另一條執行緒正在存同一個 chunk：不必再查（已記 race）；不同 chunk、自己先存後載、存完之後都要再查",
-                !recheckRace && recheckOther && recheckOwn && recheckAfter);
-        expect("存完之後不留登記", AnimalLossProbe.savingForTest(100, 200) == null
-                && AnimalLossProbe.savingForTest(300, 400) == null);
     }
 
     private static void runOnAsserts() {
@@ -212,17 +166,10 @@ public final class AnimalLossProbeTest {
         expect("on：grow-dup 恰一行，帶長大前的動物、新種類與同 ID 的另一隻",
                 grows.size() == 1 && grows.get(0).contains("animal=chick#9753 pos=100,100,0")
                         && grows.get(0).contains("newType=hen") && grows.get(0).contains("twin=chick#9753 pos=102,97,0"));
-        List<String> races = rowsContaining("reload-race#");
-        expect("on：reload-race 恰一行，帶 chunk、phase=before 與存檔執行緒名",
-                races.size() == 1 && races.get(0).contains("chunk=100,200 phase=before savingThread=SaveChunk"));
-        List<String> doubles = rowsContaining("double-write#");
-        expect("on：double-write 恰一行，帶兩條執行緒名",
-                doubles.size() == 1 && doubles.get(0).contains("chunk=100,200 threads=SaveChunk,main"));
-        expect("on：計數 drops=5 evicted=2 dropDups=1 growDups=1 reloadRaces=1 doubleWrites=1 unloadedSaves=4 anomalies=1",
+        expect("on：計數 drops=5 evicted=2 dropDups=1 growDups=1 anomalies=1",
                 AnimalLossProbe.drops.get() == 5L && AnimalLossProbe.evicted.get() == 2L
                         && AnimalLossProbe.dropDups.get() == 1L && AnimalLossProbe.growDups.get() == 1L
-                        && AnimalLossProbe.reloadRaces.get() == 1L && AnimalLossProbe.doubleWrites.get() == 1L
-                        && AnimalLossProbe.unloadedSaves.get() == 4L && AnimalLossProbe.anomalies.get() == 1L);
+                        && AnimalLossProbe.anomalies.get() == 1L);
     }
 
     /** 照手術後 AddWorldInventoryItem 的順序：copyFrom → get →（原版移走前持有者）→ add。 */
