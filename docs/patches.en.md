@@ -50,14 +50,19 @@ other helpers live in our own packages (e.g. `zombie.mdc`) and load from the age
   this for every class when it builds the jar. A class that loads after arming with bytes that are not the build
   base (for example because another agent changed it first) is left alone and `[mdc-agent] NOT APPLIED` is
   printed: the patch set is then incomplete, so fix the cause and restart.
-- **Running next to other Java agents**: this agent's transformer is retransformation capable (the restore needs
-  that). The JVM runs every incapable transformer before the capable ones, whatever the order of `-javaagent`
-  options, so a class another agent changed reaches this agent with bytes that are not the build base and is left
-  alone (`NOT APPLIED`). When another agent later retransforms a class this agent replaced, it gets the same patched
-  bytes again; when another agent or a debugger redefines it with other bytes, this agent does not overwrite them
-  and prints `NOT APPLIED`. Listing this agent first only makes its premain run first, so no other agent can load a
-  class to patch before the check. The production server has no other agents; this mainly matters for the client
-  package.
+- **Running next to other Java agents**: changing the same class as another agent is not supported; this only
+  describes what is visible in each case. This agent's transformer is retransformation capable (the restore needs
+  that) and is registered in premain. For every class the JVM first runs all incapable transformers: a class they
+  changed reaches this agent with bytes that are not the build base and is left alone (`NOT APPLIED`). Capable
+  Java transformers run in registration order, which is the order of the `-javaagent` options: one listed before
+  this agent that changes the bytes also gives `NOT APPLIED`; one listed after it, and every capable native
+  agent, changes the patched version, which this agent cannot see and does not report. So the absence of
+  `NOT APPLIED` does not prove that no other agent touched these classes. When another agent later retransforms a
+  class this agent replaced and the bytes handed to this agent are still the original ones, it gets the same
+  patched bytes again; when they are not (a transformer listed earlier changed them, or someone redefined the
+  class with other content), this agent does not overwrite them and prints `NOT APPLIED`. Listed first, this
+  agent's premain also runs first, so no other agent can load a class to patch before the check. The production
+  server has no other agents; this mainly matters for the client package.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.
@@ -455,15 +460,26 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
 (currently `MinidoracatClientPatches-42.22.2-0.3.0.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
-of this document): the package holds a single `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`,
-one set of patched classes and helpers per module). The installer puts it at `.mdc-patches/MinidoracatClientPatches.jar`
-and appends one `-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<modules>` entry to the top-level
-`vmArgs` of `ProjectZomboid64.json`; the official jar and the classpath stay untouched. The relative path works because
-the vanilla json's own `-Djava.library.path=win64/;.` already relies on the game folder being the working directory.
+of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
+set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
+into `.mdc-patches/` and adds one
+`-agentpath:.mdc-patches/mdc-agent-loader.dll=.mdc-patches/MinidoracatClientPatches.jar=modules=<modules>` entry at
+the front of the top-level `vmArgs` of `ProjectZomboid64.json`; the official jar and the classpath stay untouched.
+The relative paths work because the vanilla json's own `-Djava.library.path=win64/;.` already relies on the game
+folder being the working directory. A plain `-javaagent` does not work: the game launcher `ProjectZomboid64.exe`
+loads `jvm.dll` itself, and when the JVM then loads `jre64\bin\instrument.dll` for `-javaagent` it cannot find
+`java.dll` and `jli.dll` in the same folder, so the game does not start (`Could not find agent library instrument on
+the library path, with error: Can't find dependent libraries`; seen in a real game run and reproduced locally).
+Starting through `java.exe` does not have this problem, which is why `AgentLoadCheck` cannot see it. The loader
+(`patcher/agent-loader/mdc-agent-loader.c`, linked against `kernel32` only) loads those two DLLs by full path and
+passes `Agent_OnLoad` on to `instrument.dll` unchanged. `build-client.ps1` runs `launcher-probe`, which creates a
+JVM the way the launcher does (no `java.exe`, `PATH` reduced to the Windows folders), and asserts that `-javaagent`
+fails (the vanilla premise) and that the loader gives `ARMED`. Linux is not affected (`libinstrument.so` has RPATH
+`$ORIGIN`; creating a JVM the same way on the production server loads it), so the server keeps `-javaagent`.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
-`client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after jar/agent SHA checks;
-`Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the entry and the
-agent jar. Only our entry changes: the installer replaces just the text span of the top-level `vmArgs` array and
+`client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after SHA checks of the jar, the agent jar and
+the loader; `Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the
+entry and both files. Only our entry changes: the installer replaces just the text span of the top-level `vmArgs` array and
 re-parses the result, every other byte (BOM and line endings included) is kept, and uninstalling restores the file
 byte for byte. Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
 transaction writes before it deletes and can be rolled back from the state backup, so the json never points at a

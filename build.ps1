@@ -232,13 +232,16 @@ Assert-Ok "AgentLoadCheck（helper 定義失敗：已換上的 class 還原、�
 $preloadDir = "$R\work\agentcheck\preload"
 New-Item -ItemType Directory -Force $preloadDir | Out-Null
 Copy-Item "$R\work\out\PreloadAgent.class" $preloadDir -Force
-[System.IO.File]::WriteAllText("$preloadDir\manifest.mf", "Premain-Class: PreloadAgent`n", $utf8NoBom)
+[System.IO.File]::WriteAllText("$preloadDir\manifest.mf", "Premain-Class: PreloadAgent`nCan-Retransform-Classes: true`n", $utf8NoBom)
 jar --create --file "$preloadDir\preload-agent.jar" --manifest "$preloadDir\manifest.mf" -C $preloadDir PreloadAgent.class
 Assert-Ok "jar（PreloadAgent）"
 $firstPatched = ((Get-Content "$R\dist\manifest.txt" | Where-Object { ($_ -split "`t")[1] -ne '-' } | Select-Object -First 1) -split "`t")[0]
 $preloadClass = $firstPatched.Substring(0, $firstPatched.Length - '.class'.Length).Replace('/', '.')
 java -Xverify:all "-javaagent:$preloadDir\preload-agent.jar=$preloadClass" $agentJar -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" disarmed
 Assert-Ok "AgentLoadCheck（別的 agent 先載入 $preloadClass：不啟用、原版）"
+# 排在後面的另一個 agent 對全部已換上的 class 做一次真的 retransform：每一個都要再拿到同一份修補
+java -Xverify:all $agentJar "-javaagent:$preloadDir\preload-agent.jar" "-Dmdc.check.retransform=1" -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" armed
+Assert-Ok "AgentLoadCheck（別的 agent retransform 全部已換上的 class：修補仍在）"
 # classpath 的資料夾裡有會蓋掉修補的 loose class（舊版 loose-class 安裝的殘留）：不啟用。
 # 資料夾排在 jar 後面：檢查只看檔案在不在，簽章 package 的 loose 檔真的被載入會 SecurityException
 $looseOwn = "$R\work\agentcheck\loose-own"

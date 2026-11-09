@@ -272,7 +272,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
 3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），再輸入 `Y` 確認。
 
-安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與 agent jar 的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-javaagent:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後重新執行 `Install-Patches.bat` 即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而 jar 不在時，遊戲起不來；要移除請執行 `Uninstall-Patches.bat`（選 `A`），所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接執行新版 `Install-Patches.bat`，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
+安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與包內檔案的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 和一個小小的載入器 `mdc-agent-loader.dll`（遊戲的啟動器要靠它才載入得了 Java agent，原始碼在 `patcher/agent-loader/`）放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-agentpath:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後重新執行 `Install-Patches.bat` 即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而檔案不在時，遊戲起不來；要移除請執行 `Uninstall-Patches.bat`（選 `A`），所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接執行新版 `Install-Patches.bat`，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
 
 | 模組 | 用途 |
 |---|---|
@@ -284,7 +284,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）會把 `.class` 檔放進遊戲資料夾。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新（推測：沒有實測 PZ_Optimization 本身）。
 
-也可以用 `build-client.ps1` 自行建置。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
+也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
 ## 建議的伺服器設定
 

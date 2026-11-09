@@ -41,9 +41,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 最後才移除 transformer（手術不改 class 的形狀，建置期 {@code AgentJarBuilder} 逐 class 檢查），回到原版遊戲；
  * 還原不完整才結束 JVM（exit 78），不帶著半套修補開服。
  *
- * <p>和別的 agent 並存：transformer 是 retransformation capable（還原要用），JVM 先跑所有 incapable 的 transformer
- * 才輪到 capable 的，和 {@code -javaagent} 的先後無關；別的 agent 先改過的 class，本 agent 拿到的 bytes 不是建置基準，
- * 那一個不換（{@code NOT APPLIED}）。排在最前面的好處只有 premain 先跑：別的 agent 來不及在本 agent 檢查之前載入要換的 class。
+ * <p>和別的 agent 並存（同改一個 class 的組合不支援，下面只說明各種情況下看得到什麼）：本 agent 的 transformer 是
+ * retransformation capable（還原要用），在 premain 裡註冊。JVM 對每個 class 先跑所有 incapable 的 transformer，
+ * 它們改過的 class 到本 agent 手上已不是建置基準，那一個不換（{@code NOT APPLIED}）。capable 的 Java transformer 照
+ * 註冊順序跑，也就是 {@code -javaagent} 的順序：排在本 agent 之前的若改了 bytes，同樣 {@code NOT APPLIED}；排在之後的，
+ * 以及所有 capable 的 native agent，是在修補版上再改，本 agent 看不到、不會印任何訊息。所以沒有 {@code NOT APPLIED}
+ * 不代表沒有別的 agent 動過這些 class。本 agent 排在最前面時 premain 也最先跑，別的 agent 來不及在檢查之前載入要換的 class。
  *
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
  *
@@ -518,36 +521,41 @@ public final class MdcAgent {
             } catch (Throwable t) {
                 base = false;
             }
-            synchronized (this) {   // 與 beginRestore 同一把鎖
+            byte[] result = null;
+            String note = null;
+            synchronized (this) {   // 與 beginRestore 同一把鎖；鎖內只判定與登記，訊息出了鎖再印
                 if (restoring) {
                     if (redefined != null && base) {
                         restoredNames.add(className);   // 沒記到＝還原數不符，由 arm() 判失敗
                     }
-                    return null;
-                }
-                if (redefined != null) {
+                } else if (redefined != null) {
+                    // retransform／redefine。載入時沒換上的 class 不在事後補換
                     if (appliedNames.contains(className)) {
                         if (base) {
-                            return p.bytes();   // 別的 agent retransform 已換上的 class（JVM 交來原始 bytes）：照樣給同一份
+                            result = p.bytes();   // 交來的是原始 bytes（別的 agent retransform）：照樣給同一份
+                        } else {
+                            // 排在前面的 transformer、redefineClasses 或除錯器給了別的 bytes：不蓋掉對方，但修補從此少一個
+                            MISMATCHED.incrementAndGet();
+                            note = "retransformed or redefined with bytes that are not the build base"
+                                    + " (another agent or a debugger changed it)";
                         }
-                        // redefineClasses（別的 agent 或除錯器）給了別的 bytes：不蓋掉對方的定義，但修補從此少一個
-                        MISMATCHED.incrementAndGet();
-                        say("NOT APPLIED " + className + ": redefined with other bytes by another agent or a debugger");
                     }
-                    return null;   // 載入時沒換上的 class 不在事後補換
-                }
-                if (!base) {
-                    // 整個 jar 的 SHA 已經對過，走到這裡代表這個 class 不是從遊戲 jar 來（例如 java/ 底下的殘留 loose 檔）
+                } else if (!base) {
+                    // 整個 jar 的 SHA 已經對過：這個 class 不是從遊戲 jar 來（例如殘留的 loose 檔），或排在前面的 transformer 改過
                     MISMATCHED.incrementAndGet();
-                    say("NOT APPLIED " + className + ": loaded bytes differ from the build base (not from "
-                            + GAME_JAR + "?)");
-                    return null;
+                    note = "loaded bytes differ from the build base (not from " + GAME_JAR
+                            + ", or another agent changed it first)";
+                } else {
+                    if (appliedNames.add(className)) {
+                        APPLIED.incrementAndGet();
+                    }
+                    result = p.bytes();
                 }
-                if (appliedNames.add(className)) {
-                    APPLIED.incrementAndGet();
-                }
-                return p.bytes();
             }
+            if (note != null) {
+                say("NOT APPLIED " + className + ": " + note);
+            }
+            return result;
         }
     }
 }

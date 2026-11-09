@@ -5,8 +5,10 @@
     設計要點（契約：deploy-client 安裝包契約）
       * 讀 manifest.json（build-client.ps1 產生，schemaVersion=2）：一個 agent jar（所有模組）＋模組清單。
       * 42.22 起 projectzomboid.jar 簽章，手術後的 class 不能再以 loose 檔放在遊戲資料夾（SecurityException）。
-        安裝＝把 agent jar 放到 <遊戲根>\.mdc-patches\，並在 ProjectZomboid64.json 頂層 vmArgs 放一條
-        -javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<選的模組>；卸載＝拿掉那一條與檔案。
+        安裝＝把 agent jar 與 agent 載入器（mdc-agent-loader.dll）放到 <遊戲根>\.mdc-patches\，並在 ProjectZomboid64.json 頂層 vmArgs 放一條
+        -agentpath:.mdc-patches/mdc-agent-loader.dll=.mdc-patches/MinidoracatClientPatches.jar=modules=<選的模組>；卸載＝拿掉那一條與檔案。
+        不直接用 -javaagent：遊戲啟動器自己載入 jvm.dll，JVM 為 -javaagent 載入 jre64\bin\instrument.dll 時找不到同資料夾的
+        java.dll／jli.dll，遊戲會起不來；載入器先以完整路徑載入那兩個 DLL，再把呼叫原樣轉給 instrument.dll。
         只動自己那一條：其他 vmArgs、windows 區段與使用者的修改照原文保留；寫入前重新 parse 驗證。
       * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json（schemaVersion=2），runtime 與 installer 的同一份真相。
         0.2.x 的 schemaVersion=1（loose class 清單）讀得懂：升級或移除時在同一筆交易刪掉那些 loose class。
@@ -70,8 +72,11 @@ $STATE_DIRNAME = '.mdc-patches'
 $STATE_REL = '.mdc-patches/state.json'
 $JOURNAL_REL = '.mdc-patches/journal.json'
 $BACKUP_REL = '.mdc-patches/backup'
-# 與 MdcPatchRuntime.AGENT_REL 相同；-javaagent 的路徑相對遊戲資料夾（遊戲以它為工作目錄，-Djava.library.path=win64/;. 也靠這點）
+# 與 MdcPatchRuntime.AGENT_REL 相同；啟動參數裡的路徑相對遊戲資料夾（遊戲以它為工作目錄，-Djava.library.path=win64/;. 也靠這點）
 $AGENT_REL = '.mdc-patches/MinidoracatClientPatches.jar'
+$LOADER_REL = '.mdc-patches/mdc-agent-loader.dll'
+# 本包放進遊戲資料夾的檔案：manifest.json／state.json 裡的欄位名 → 位置
+$PACKAGE_FILES = [ordered]@{ agent = $AGENT_REL; loader = $LOADER_REL }
 $LAUNCHER_REL = 'ProjectZomboid64.json'
 
 # ---------------------------------------------------------------- 輸出
@@ -213,9 +218,9 @@ function Assert-SafeRelPath([string]$rel, [string]$origin) {
     }
 }
 
-# 交易能碰的目標：舊版 loose class，或固定的 state／agent jar／啟動設定三個檔
+# 交易能碰的目標：舊版 loose class，或固定的 state／agent jar／agent 載入器／啟動設定
 function Assert-TransactionPath([string]$rel, [string]$origin) {
-    if ($rel -ceq $STATE_REL -or $rel -ceq $AGENT_REL -or $rel -ceq $LAUNCHER_REL) { return }
+    if ($rel -ceq $STATE_REL -or $rel -ceq $LAUNCHER_REL -or @($PACKAGE_FILES.Values) -ccontains $rel) { return }
     Assert-SafeRelPath $rel $origin
 }
 
@@ -392,16 +397,17 @@ function Exit-GameRootLock($lock) {
 # ---------------------------------------------------------------- 啟動設定（ProjectZomboid64.json）
 # 讀：ConvertFrom-Json 驗證格式。寫：只替換頂層 "vmArgs" 陣列那一段文字（其餘位元組照原檔），再 parse 一次確認
 # 除了自己那一條以外全部相同。遊戲啟動器讀這個檔組 JVM 參數（Steam 更新會把它換回原版）。
+# 本包那一條：-agentpath:<agent 載入器>=<agent jar>=modules=<模組>
 function Test-OurAgentArg([string]$arg) {
-    if (-not $arg.StartsWith('-javaagent:', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    $path = $arg.Substring('-javaagent:'.Length)
+    if (-not $arg.StartsWith('-agentpath:', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $path = $arg.Substring('-agentpath:'.Length)
     $eq = $path.IndexOf('=')
     if ($eq -ge 0) { $path = $path.Substring(0, $eq) }
     $path = $path.Trim('"').Replace('\', '/')
-    return ($path -ieq $AGENT_REL -or $path.EndsWith('/' + $AGENT_REL, [System.StringComparison]::OrdinalIgnoreCase))
+    return ($path -ieq $LOADER_REL -or $path.EndsWith('/' + $LOADER_REL, [System.StringComparison]::OrdinalIgnoreCase))
 }
 
-function Get-AgentArg([string[]]$moduleIds) { return "-javaagent:$AGENT_REL=modules=$(@($moduleIds) -join ',')" }
+function Get-AgentArg([string[]]$moduleIds) { return "-agentpath:$LOADER_REL=$AGENT_REL=modules=$(@($moduleIds) -join ',')" }
 
 # 頂層物件裡 "<key>": [ ... ] 的 [ 與 ] 位置；找不到或不是陣列回 $null
 function Find-TopLevelArray([string]$text, [string]$key) {
@@ -521,9 +527,10 @@ function Read-Launcher([string]$gameRoot) {
     return $r
 }
 
-# 頂層 vmArgs 換成「拿掉自己的 -javaagent、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
-# 排最前面：JVM 照順序跑各 agent 的 premain，本包的先跑，別的 agent 就來不及在本包檢查之前載入要換的 class
-# （那樣本包會整包不啟用，DISARMED）。transform 的先後不由這個順序決定：別的 agent 改過的 class 本包不換（NOT APPLIED）。
+# 頂層 vmArgs 換成「拿掉自己那一條、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
+# 排最前面：JVM 照命令列順序跑各 agent 的 premain，本包的先跑，別的 agent 就來不及在本包檢查之前載入要換的 class
+# （那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：在本包之前就被改過的 class 本包不換
+# （NOT APPLIED）；在本包之後才改的（排在後面的 retransformation capable agent、native agent）本包看不到。
 function New-LauncherBytes($launcher, [string]$newArg) {
     $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
     $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })
@@ -627,19 +634,21 @@ function Read-Manifest([string]$packageDir) {
         Fail $EXIT_PACKAGE (L "manifest.json 的 schemaVersion 不是 2（實際：$(Get-Prop $m 'schemaVersion' '(缺)')）——請換用對應版本的安裝器。" "manifest.json schemaVersion is not 2 (found: $(Get-Prop $m 'schemaVersion' '(missing)')). Use the matching installer version.")
     }
     if (-not (Get-Prop $m 'jarSha256')) { Fail $EXIT_PACKAGE (L 'manifest.json 缺 jarSha256。' 'manifest.json is missing jarSha256.') }
-    $agent = Get-Prop $m 'agent'
-    $agentSource = [string](Get-Prop $agent 'source')
-    if (-not $agentSource -or [string](Get-Prop $agent 'sha256') -notmatch '^[0-9a-fA-F]{64}$') {
-        Fail $EXIT_PACKAGE (L 'manifest.json 的 agent 缺 source 或 sha256。' 'manifest.json agent is missing source or sha256.')
+    foreach ($key in $PACKAGE_FILES.Keys) {
+        $file = Get-Prop $m $key
+        $source = [string](Get-Prop $file 'source')
+        if (-not $source -or [string](Get-Prop $file 'sha256') -notmatch '^[0-9a-fA-F]{64}$') {
+            Fail $EXIT_PACKAGE (L "manifest.json 的 $key 缺 source 或 sha256。" "manifest.json $key is missing source or sha256.")
+        }
+        # source 是複製的來源路徑，不准跳出安裝包資料夾
+        Assert-SafeRelBase $source (L "manifest.json 的 $key source" "manifest.json $key source")
     }
-    # source 是複製的來源路徑，不准跳出安裝包資料夾
-    Assert-SafeRelBase $agentSource (L 'manifest.json 的 agent source' 'manifest.json agent source')
     $mods = ConvertTo-Array (Get-Prop $m 'modules')
     if ($mods.Count -eq 0) { Fail $EXIT_PACKAGE (L 'manifest.json 沒有任何 module。' 'manifest.json has no modules.') }
     $seenId = @{}
     foreach ($mod in $mods) {
         $id = [string](Get-Prop $mod 'id')
-        # id 會寫進啟動參數（-javaagent:…=modules=<id>,…），只准小寫英數與連字號
+        # id 會寫進啟動參數（-agentpath:…=modules=<id>,…），只准小寫英數與連字號
         if ($id -cnotmatch '^[a-z0-9-]+$') { Fail $EXIT_PACKAGE (L "manifest.json 有 module 的 id 缺漏或含不允許的字元：$id" "manifest.json has a module with a missing or invalid id: $id") }
         if ($seenId.ContainsKey($id)) { Fail $EXIT_PACKAGE (L "manifest.json 有重複的 module id：$id" "manifest.json has a duplicate module id: $id") }
         $seenId[$id] = $true
@@ -695,17 +704,18 @@ function Get-ModuleLabel($manifest, [string]$id) {
 }
 
 function Assert-PayloadIntact($manifest, [string]$packageDir) {
-    $agent = Get-Prop $manifest 'agent'
-    $sourceRel = Get-Prop $agent 'source'
-    Assert-NoReparsePoint $packageDir $sourceRel
-    $src = Get-FullTargetPath $packageDir $sourceRel
-    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
-        Fail $EXIT_PACKAGE (L "安裝包缺檔：$sourceRel——請重新完整解壓縮 zip。" "Package file missing: $sourceRel. Extract the whole zip again.")
+    foreach ($key in $PACKAGE_FILES.Keys) {
+        $file = Get-Prop $manifest $key
+        $sourceRel = Get-Prop $file 'source'
+        Assert-NoReparsePoint $packageDir $sourceRel
+        $src = Get-FullTargetPath $packageDir $sourceRel
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+            Fail $EXIT_PACKAGE (L "安裝包缺檔：$sourceRel——請重新完整解壓縮 zip。" "Package file missing: $sourceRel. Extract the whole zip again.")
+        }
+        if ((Get-Sha256 $src) -ne (Get-Prop $file 'sha256').ToLowerInvariant()) {
+            Fail $EXIT_PACKAGE (L "安裝包檔案損毀：$sourceRel——請重新完整解壓縮 zip。" "Package file is damaged: $sourceRel. Extract the whole zip again.")
+        }
     }
-    if ((Get-Sha256 $src) -ne (Get-Prop $agent 'sha256').ToLowerInvariant()) {
-        Fail $EXIT_PACKAGE (L "安裝包檔案損毀：$sourceRel——請重新完整解壓縮 zip。" "Package file is damaged: $sourceRel. Extract the whole zip again.")
-    }
-    return $src
 }
 
 # ---------------------------------------------------------------- 安裝狀態
@@ -721,8 +731,12 @@ function Read-State([string]$gameRoot) {
     if ($schema -ne 1 -and $schema -ne 2) {
         Fail $EXIT_INTERNAL (L "$STATE_REL 的 schemaVersion 是 $schema，這個安裝器不認得，請用對應版本處理。" "$STATE_REL schemaVersion is $schema, which this installer does not understand. Use the matching installer version.")
     }
-    if ($schema -eq 2 -and [string](Get-Prop (Get-Prop $s 'agent') 'path') -cne $AGENT_REL) {
-        Fail $EXIT_CONFLICT (L "$STATE_REL 記錄的 agent 路徑不是 $AGENT_REL，拒絕依它動檔案。" "$STATE_REL records an agent path other than $AGENT_REL; no files will be changed based on it.")
+    if ($schema -eq 2) {
+        foreach ($key in $PACKAGE_FILES.Keys) {
+            if ([string](Get-Prop (Get-Prop $s $key) 'path') -cne $PACKAGE_FILES[$key]) {
+                Fail $EXIT_CONFLICT (L "$STATE_REL 記錄的 $key 路徑不是 $($PACKAGE_FILES[$key])，拒絕依它動檔案。" "$STATE_REL records a path for $key other than $($PACKAGE_FILES[$key]); no files will be changed based on it.")
+            }
+        }
     }
     return $s
 }
@@ -746,14 +760,14 @@ function Get-StateLooseFiles($state) {
     return $map
 }
 
-function New-StateObject([string]$jarSha, [string]$packageVersion, [string]$agentSha, $moduleEntries) {
-    return [ordered]@{
-        schemaVersion  = 2
-        jarSha256      = $jarSha
-        packageVersion = $packageVersion
-        agent          = [ordered]@{ path = $AGENT_REL; sha256 = $agentSha }
-        modules        = @($moduleEntries)
+# $shaSource：manifest.json（安裝）或現有的 state.json（部分卸載）；兩者的 agent／loader 都有 sha256
+function New-StateObject([string]$jarSha, [string]$packageVersion, $shaSource, $moduleEntries) {
+    $s = [ordered]@{ schemaVersion = 2; jarSha256 = $jarSha; packageVersion = $packageVersion }
+    foreach ($key in $PACKAGE_FILES.Keys) {
+        $s[$key] = [ordered]@{ path = $PACKAGE_FILES[$key]; sha256 = ([string](Get-Prop (Get-Prop $shaSource $key) 'sha256')).ToLowerInvariant() }
     }
+    $s['modules'] = @($moduleEntries)
+    return $s
 }
 
 # 舊版 loose class 的刪除清單：內容等於紀錄的才刪，不等的列為變造（不刪）
@@ -1242,21 +1256,24 @@ function Get-PatchedClassSet($manifest, [string[]]$targetIds) {
 function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$targetIds, $state, $legacy, $launcher, $jarPackages) {
     $writes = @(); $conflicts = @(); $repairs = @(); $warnings = @()
 
-    # agent jar（.mdc-patches 是本包專用資料夾，內容不對就換掉；與紀錄不符時提示是修復）
-    $agent = Get-Prop $manifest 'agent'
-    $agentSha = (Get-Prop $agent 'sha256').ToLowerInvariant()
-    Assert-NoReparsePoint $gameRoot $AGENT_REL
-    $agentFull = Get-FullTargetPath $gameRoot $AGENT_REL
-    if (Test-Path -LiteralPath $agentFull -PathType Container) {
-        $conflicts += @{ Path = $AGENT_REL; Text = (L "$AGENT_REL 位置上是一個資料夾，無法安裝。" "$AGENT_REL is a folder, so it cannot be installed.") }
-    } else {
+    # agent jar 與 agent 載入器（.mdc-patches 是本包專用資料夾，內容不對就換掉；與紀錄不符時提示是修復）
+    foreach ($key in $PACKAGE_FILES.Keys) {
+        $rel = $PACKAGE_FILES[$key]
+        $file = Get-Prop $manifest $key
+        $sha = (Get-Prop $file 'sha256').ToLowerInvariant()
+        Assert-NoReparsePoint $gameRoot $rel
+        $full = Get-FullTargetPath $gameRoot $rel
+        if (Test-Path -LiteralPath $full -PathType Container) {
+            $conflicts += @{ Path = $rel; Text = (L "$rel 位置上是一個資料夾，無法安裝。" "$rel is a folder, so it cannot be installed.") }
+            continue
+        }
         $cur = $null
-        if (Test-Path -LiteralPath $agentFull -PathType Leaf) { $cur = Get-Sha256 $agentFull }
-        if ($cur -ne $agentSha) {
+        if (Test-Path -LiteralPath $full -PathType Leaf) { $cur = Get-Sha256 $full }
+        if ($cur -ne $sha) {
             $recorded = ''
-            if ($state -and -not (Test-LegacyState $state)) { $recorded = ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant() }
-            if ($cur -and $recorded -and $cur -ne $recorded) { $repairs += $AGENT_REL }
-            $writes += @{ Path = $AGENT_REL; Source = (Get-FullTargetPath $packageDir (Get-Prop $agent 'source')); Sha = $agentSha }
+            if ($state -and -not (Test-LegacyState $state)) { $recorded = ([string](Get-Prop (Get-Prop $state $key) 'sha256')).ToLowerInvariant() }
+            if ($cur -and $recorded -and $cur -ne $recorded) { $repairs += $rel }
+            $writes += @{ Path = $rel; Source = (Get-FullTargetPath $packageDir (Get-Prop $file 'source')); Sha = $sha }
         }
     }
 
@@ -1326,7 +1343,7 @@ function Write-ForeignLooseWarning([string[]]$paths) {
 function Write-OtherAgentsNote([string[]]$agents) {
     if (@($agents).Count -eq 0) { return }
     Write-Info ((L '  啟動設定裡另有其他 Java agent（本包不動它們）：' '  The launch settings also load other Java agents (this package leaves them alone): ') + (@($agents) -join ' '))
-    Write-Info (L '  本包的啟動參數排在最前面，先啟動。別的 agent 若改了本包要修補的 class，那個 class 不換（console 印 [mdc-agent] NOT APPLIED，遊戲內狀態顯示 CHECK FAILED）；本包啟動時發現要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。' '  This package''s launch option goes first, so it starts first. If another agent changes a class this package patches, that class is skipped (the console prints [mdc-agent] NOT APPLIED and the in-game status shows CHECK FAILED). If a class to patch is already loaded when this package starts, the whole package stays off (it prints [mdc-agent] DISARMED).')
+    Write-Info (L '  本包的啟動參數排在最前面，先啟動。本包不支援和別的 agent 修改同一個 class：某個 class 在本包之前就被改過時，那個 class 不換（console 印 [mdc-agent] NOT APPLIED，遊戲內狀態顯示 CHECK FAILED）；別的 agent 在本包之後才改的，本包偵測不到。本包啟動時發現要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。' '  This package''s launch option goes first, so it starts first. Changing the same class as another agent is not supported: a class that was changed before this package sees it is skipped (the console prints [mdc-agent] NOT APPLIED and the in-game status shows CHECK FAILED); changes another agent makes after this package cannot be detected. If a class to patch is already loaded when this package starts, the whole package stays off (it prints [mdc-agent] DISARMED).')
 }
 
 function New-StateModuleEntries($manifest, [string[]]$targetIds) {
@@ -1469,7 +1486,7 @@ function Invoke-Install {
         if (Test-LegacyState $state) {
             Write-Info (L "  移除舊版 $(Get-Prop $state 'packageVersion' '0.2.x') 放在遊戲資料夾的 loose class（42.22 起會讓遊戲丟 SecurityException）" "  Removing the loose class files of old version $(Get-Prop $state 'packageVersion' '0.2.x') from the game folder (since 42.22 they make the game throw a SecurityException)")
         }
-        Write-Info (L "  修補檔：$AGENT_REL；啟動參數：$(Get-AgentArg $targetIds)" "  Patch file: $AGENT_REL; launch option: $(Get-AgentArg $targetIds)")
+        Write-Info (L "  修補檔：$AGENT_REL、$LOADER_REL；啟動參數：$(Get-AgentArg $targetIds)" "  Patch files: $AGENT_REL, $LOADER_REL; launch option: $(Get-AgentArg $targetIds)")
         Write-Info (L "  寫入 $($plan.Writes.Count) 個檔案、移除 $($plan.Deletes.Count) 個檔案" "  Writing $($plan.Writes.Count) file(s), removing $($plan.Deletes.Count) file(s)")
         foreach ($r in $plan.Repairs) { Write-Warn2 (L "自家檔案 $r 內容與紀錄不符，將重新寫入修復。" "Installed file $r does not match the record; it will be rewritten to repair it.") }
         Write-ForeignLooseWarning $plan.Warnings
@@ -1493,8 +1510,7 @@ function Invoke-Install {
         # 「不需要變更」必須連 state.json 都已經是最終內容才算數。只比對 class 檔的話，
         # 接管內容剛好相同的舊版包、或紀錄裡的指紋／版本過期，都會被當成完工收工，
         # 留下沒有安裝紀錄的遊戲目錄——之後卸載會把它當成無主舊版 patch 而拒絕處理。
-        $agentSha = (Get-Prop (Get-Prop $Manifest 'agent') 'sha256').ToLowerInvariant()
-        $newState = New-StateObject $jarSha (Get-Prop $Manifest 'packageVersion' '') $agentSha (New-StateModuleEntries $Manifest $targetIds)
+        $newState = New-StateObject $jarSha (Get-Prop $Manifest 'packageVersion' '') $Manifest (New-StateModuleEntries $Manifest $targetIds)
         $statePath = Get-FullTargetPath $GameRoot $STATE_REL
         $curStateJson = ''
         if (Test-Path -LiteralPath $statePath -PathType Leaf) { $curStateJson = [System.IO.File]::ReadAllText($statePath) }
@@ -1568,7 +1584,7 @@ function Invoke-Uninstall {
                     $bytes = New-LauncherBytes $launcher $null
                     if ($bytes) { $orphanWrites += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
                 }
-            } elseif (-not $launcher.Missing -and ($null -eq $launcher.Text -or $launcher.Text.IndexOf('MinidoracatClientPatches', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            } elseif (-not $launcher.Missing -and ($null -eq $launcher.Text -or $launcher.Text.IndexOf([System.IO.Path]::GetFileNameWithoutExtension($AGENT_REL), [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
                 # 讀不出來，或讀得出文字、裡面提到本包的 jar 卻解析不了：不能確定啟動參數清掉了沒，不回報「沒有東西需要卸載」
                 Fail $EXIT_CONFLICT $launcher.Problem
             }
@@ -1577,13 +1593,13 @@ function Invoke-Uninstall {
                     Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
                     return
                 }
-                Write-Head (L '卸載計畫' 'Removal plan')
-                Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
-                Write-Info (L '  沒有安裝紀錄，但 ProjectZomboid64.json 還留著本包的啟動參數：拿掉它' '  There is no install record, but ProjectZomboid64.json still has this package''s launch option: removing it')
-                # 沒有模組可挑，只能整條拿掉：比照舊版包，非互動要明示 -All
+                # 沒有模組可挑，只能整條拿掉：比照舊版包，非互動要明示 -All（先檢查再印計畫）
                 if (-not $RemoveAll -and -not $Interactive) {
                     Fail $EXIT_USAGE (L '沒有安裝紀錄，但啟動設定還留著本包的啟動參數；只能整個拿掉：請用 -All。' 'There is no install record, but the launch settings still have this package''s launch option. It can only be removed as a whole. Use -All.')
                 }
+                Write-Head (L '卸載計畫' 'Removal plan')
+                Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
+                Write-Info (L '  沒有安裝紀錄，但 ProjectZomboid64.json 還留著本包的啟動參數：拿掉它' '  There is no install record, but ProjectZomboid64.json still has this package''s launch option: removing it')
                 if ($Interactive) {
                     $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
                     if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
@@ -1686,11 +1702,14 @@ function Invoke-Uninstall {
                 Fail $EXIT_CONFLICT $launcher.Problem
             }
             if ($keep.Count -eq 0) {
-                Assert-NoReparsePoint $GameRoot $AGENT_REL
-                $agentFull = Get-FullTargetPath $GameRoot $AGENT_REL
-                if (Test-Path -LiteralPath $agentFull -PathType Leaf) {
-                    if ((Get-Sha256 $agentFull) -ne ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant()) { $tampered += $AGENT_REL }
-                    else { $deletes += $AGENT_REL }
+                foreach ($key in $PACKAGE_FILES.Keys) {
+                    $rel = $PACKAGE_FILES[$key]
+                    Assert-NoReparsePoint $GameRoot $rel
+                    $full = Get-FullTargetPath $GameRoot $rel
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        if ((Get-Sha256 $full) -ne ([string](Get-Prop (Get-Prop $state $key) 'sha256')).ToLowerInvariant()) { $tampered += $rel }
+                        else { $deletes += $rel }
+                    }
                 }
             }
         }
@@ -1720,7 +1739,7 @@ function Invoke-Uninstall {
             foreach ($id in $installed) {
                 if ($keep.Contains($id)) { $entries += $stateModules[$id] }
             }
-            $newState = New-StateObject (Get-Prop $state 'jarSha256' '') (Get-Prop $state 'packageVersion' '') ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')) $entries
+            $newState = New-StateObject (Get-Prop $state 'jarSha256' '') (Get-Prop $state 'packageVersion' '') $state $entries
         }
         Invoke-PatchTransaction -GameRoot $GameRoot -Writes $writes -Deletes $deletes -NewState $newState
         if ($keep.Count -gt 0) {
@@ -1765,18 +1784,21 @@ function Invoke-Status {
         Write-Warn2 (L '這是 0.2.x 的舊版安裝（class 檔直接放在遊戲資料夾）。42.22 起遊戲 jar 有簽章，這些檔案會讓遊戲丟 SecurityException 而無法遊玩：請用新版安裝包重新安裝（會自動移除舊檔），或全部移除。' 'This is an old 0.2.x install (class files placed directly in the game folder). Since 42.22 the game jar is signed and these files make the game throw a SecurityException, so it cannot be played: install again with a new package (the old files are removed automatically), or remove everything.')
     } else {
         Write-Info (L "  安裝包版本：$(Get-Prop $state 'packageVersion' '(未標示)')" "  Package version: $(Get-Prop $state 'packageVersion' '(not specified)')")
-        $agentFull = Get-FullTargetPath $GameRoot $AGENT_REL
-        $agentOk = (Test-Path -LiteralPath $agentFull -PathType Leaf) -and
-            (Get-Sha256 $agentFull) -eq ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant()
+        $filesOk = $true
+        foreach ($key in $PACKAGE_FILES.Keys) {
+            $full = Get-FullTargetPath $GameRoot $PACKAGE_FILES[$key]
+            if (-not (Test-Path -LiteralPath $full -PathType Leaf) -or
+                (Get-Sha256 $full) -ne ([string](Get-Prop (Get-Prop $state $key) 'sha256')).ToLowerInvariant()) { $filesOk = $false }
+        }
         $jarOk = -not $jarSha -or ([string](Get-Prop $state 'jarSha256')).ToLowerInvariant() -eq $jarSha
         $expected = Get-AgentArg $ids
         $argOk = @($launcher.Ours).Count -eq 1 -and @($launcher.Ours)[0] -ceq $expected
-        $mark = if ($agentOk -and $jarOk -and $argOk) { L '正常' 'OK' } elseif (-not $agentOk) { L '異常（修補檔缺少或被改過）' 'PROBLEM (patch file missing or modified)' } else { L '沒有啟用' 'not active' }
+        $mark = if ($filesOk -and $jarOk -and $argOk) { L '正常' 'OK' } elseif (-not $filesOk) { L '異常（修補檔缺少或被改過）' 'PROBLEM (patch file missing or modified)' } else { L '沒有啟用' 'not active' }
         foreach ($m in (ConvertTo-Array (Get-Prop $state 'modules'))) {
             Write-Info (L "    [已安裝] $(Get-Prop $m 'name' (Get-Prop $m 'id')) ($(Get-Prop $m 'id')) $(Get-Prop $m 'version' '') — $mark" "    [Installed] $(Get-ModuleName $m (Get-Prop $m 'id') $Manifest) ($(Get-Prop $m 'id')) $(Get-Prop $m 'version' '') - $mark")
         }
-        if (-not $agentOk) {
-            Write-Warn2 (L "$AGENT_REL 缺少或內容與安裝紀錄不符。啟動設定還指著它時遊戲會起不來；請重新安裝，或全部移除。" "$AGENT_REL is missing or does not match the install record. While the launch settings still point to it the game will not start; install again, or remove everything.")
+        if (-not $filesOk) {
+            Write-Warn2 (L "$AGENT_REL 或 $LOADER_REL 缺少或內容與安裝紀錄不符。啟動設定還指著它時遊戲會起不來；請重新安裝，或全部移除。" "$AGENT_REL or $LOADER_REL is missing or does not match the install record. While the launch settings still point to it the game will not start; install again, or remove everything.")
         }
         if (-not $jarOk) {
             Write-Warn2 (L '遊戲已經更新（projectzomboid.jar 與安裝時不同）：修補比對到不同的 jar 就不啟用、照原版跑。遊戲更新後要重新安裝對應新版的修補包。' 'The game has been updated (projectzomboid.jar differs from install time): the patches do not switch on for a different jar, so the game runs unpatched. After a game update, install the package for the new version.')
@@ -1785,7 +1807,7 @@ function Invoke-Status {
             Write-Warn2 (L '已安裝但沒有啟用：ProjectZomboid64.json 裡沒有本包的啟動參數（通常是遊戲更新把它換回原版）。遊戲更新後要重新安裝對應新版的修補包；版本沒變的話，重新安裝一次就會補回去。' 'Installed but not active: ProjectZomboid64.json does not have this package''s launch option (usually because a game update put the original file back). After a game update, install the package for the new version; if the version did not change, installing again puts the option back.')
         } elseif (-not $argOk -and $launcher.Editable) {
             Write-Warn2 ((L '啟動參數與安裝紀錄不符，請重新安裝一次。目前：' 'The launch option does not match the install record; install again. Now: ') + (@($launcher.Ours) -join ' '))
-        } elseif ($argOk -and $agentOk -and $jarOk) {
+        } elseif ($argOk -and $filesOk -and $jarOk) {
             Write-Info (L "  啟用狀態：已啟用（$expected）" "  Active: yes ($expected)")
         }
     }

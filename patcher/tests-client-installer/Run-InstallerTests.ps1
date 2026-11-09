@@ -36,8 +36,10 @@ if (-not ([System.IO.Path]::GetFullPath($GameDir)).StartsWith($TempBase, [System
 }
 
 $AGENT_REL = '.mdc-patches/MinidoracatClientPatches.jar'
+$LOADER_REL = '.mdc-patches/mdc-agent-loader.dll'
 $LAUNCHER_REL = 'ProjectZomboid64.json'
-$ARG_PREFIX = "-javaagent:$AGENT_REL=modules="
+$ARG_PREFIX = "-agentpath:$LOADER_REL=$AGENT_REL=modules="
+$C_LOADER = 'agent-loader-dll'
 
 # ---------------------------------------------------------------- 測試框架
 $script:Passed = 0
@@ -132,7 +134,7 @@ function Test-ModuleSet([string[]]$expected) {
     return (((@($actual) | Sort-Object) -join ',') -eq ((@($expected) | Sort-Object) -join ','))
 }
 function Get-TopVmArgs { return @(([System.IO.File]::ReadAllText((GameFile $LAUNCHER_REL)) | ConvertFrom-Json).vmArgs) }
-function Get-OurArgs { return @(Get-TopVmArgs | Where-Object { $_ -like '-javaagent:*MinidoracatClientPatches.jar*' }) }
+function Get-OurArgs { return @(Get-TopVmArgs | Where-Object { $_ -like '-agentpath:*mdc-agent-loader.dll*' }) }
 # 啟動設定裡恰好一條自己的參數，模組清單（依 manifest 順序）正好是 $mods，而且排在頂層 vmArgs 最後
 function Test-ArgModules([string]$mods) {
     $ours = @(Get-OurArgs)
@@ -179,7 +181,9 @@ function New-TestPackage {
     if (Test-Path -LiteralPath $Dir) { Remove-Item -LiteralPath $Dir -Recurse -Force }
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
     $agentSrc = 'agent/MinidoracatClientPatches.jar'
+    $loaderSrc = 'agent/mdc-agent-loader.dll'
     Write-TextFile (Join-Path $Dir ($agentSrc -replace '/', '\')) $AgentText
+    Write-TextFile (Join-Path $Dir ($loaderSrc -replace '/', '\')) $C_LOADER
     $mods = @()
     foreach ($m in $ModuleSpecs) {
         $entry = [ordered]@{ id = $m.id; name = $m.name; version = $m.version; requires = @($m.requires); patchedClasses = @($m.classes) }
@@ -192,6 +196,7 @@ function New-TestPackage {
         packageVersion = $PackageVersion
         jarSha256      = $JarSha
         agent          = [ordered]@{ source = $agentSrc; sha256 = (Get-TextSha $AgentText) }
+        loader         = [ordered]@{ source = $loaderSrc; sha256 = (Get-TextSha $C_LOADER) }
         modules        = @($mods)
     }
     if ($LegacySpecs) {
@@ -322,13 +327,15 @@ try {
     $r = Invoke-Install @('profiler') $PkgV1
     Check ($r.Code -eq 0) '結束代碼 0'
     Check (Test-GameFileIs $AGENT_REL $C_AGENT_V1) 'agent jar 放進 .mdc-patches'
-    Check (Test-ArgModules 'core,profiler') '啟動設定加上一條 -javaagent（core,profiler），排在頂層 vmArgs 最前面'
+    Check (Test-GameFileIs $LOADER_REL $C_LOADER) 'agent 載入器放進 .mdc-patches'
+    Check (Test-ArgModules 'core,profiler') '啟動設定加上一條 -agentpath（載入器＝agent jar＝core,profiler），排在頂層 vmArgs 最前面'
     $j = [System.IO.File]::ReadAllText((GameFile $LAUNCHER_REL)) | ConvertFrom-Json
     Check (@($j.windows.'10.0.17134'.vmArgs) -join ',' -ceq '-XX:+UseZGC') 'windows 區段沒動'
     Check ((@(Get-TopVmArgs) | Select-Object -Skip 1) -join ',' -ceq '-Djava.awt.headless=true,--enable-native-access=ALL-UNNAMED,-Xmx3072m,-Djava.library.path=win64/;.') '其他 vmArgs 原樣、原順序'
     Check (Test-ModuleSet @('core', 'profiler')) 'state.json 記錄 core + profiler'
     Check ((Get-InstalledState).schemaVersion -eq 2 -and (Get-InstalledState).agent.path -ceq $AGENT_REL) 'state.json 是 schemaVersion 2，記錄 agent 路徑'
     Check ((Get-InstalledState).agent.sha256 -eq (Get-TextSha $C_AGENT_V1)) 'state.json 記錄 agent SHA'
+    Check ((Get-InstalledState).loader.path -ceq $LOADER_REL -and (Get-InstalledState).loader.sha256 -eq (Get-TextSha $C_LOADER)) 'state.json 記錄 agent 載入器的路徑與 SHA'
     Check ((Get-InstalledState).packageVersion -eq 'v4.0') 'state.json 記錄 packageVersion'
     Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches/journal.json'))) '沒有殘留 journal'
     Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches/backup'))) '沒有殘留備份'
@@ -1152,7 +1159,7 @@ try {
 
     Start-Case '63. 自己的參數重複或寫成絕對路徑：安裝後只剩一條'
     Reset-GameDir
-    $dupJson = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"$($ARG_PREFIX)core`",`n`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"-javaagent:C:\\Games\\PZ\\.mdc-patches\\MinidoracatClientPatches.jar=modules=core`"`n")
+    $dupJson = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"$($ARG_PREFIX)core`",`n`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"-agentpath:C:\\Games\\PZ\\.mdc-patches\\mdc-agent-loader.dll=C:\\Games\\PZ\\.mdc-patches\\MinidoracatClientPatches.jar=modules=core`"`n")
     Write-TextFile (GameFile $LAUNCHER_REL) $dupJson
     $r = Invoke-Install @('profiler') $PkgV1
     Check ($r.Code -eq 0 -and (Test-ArgModules 'core,profiler')) '只剩一條正確的參數'
@@ -1227,6 +1234,10 @@ try {
     Write-TextFile (GameFile $LAUNCHER_REL) '{ not json at all'
     $r = Invoke-UninstallAll
     Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '啟動設定解析不了但沒提到本包：照舊回報沒東西要卸載'
+    [System.IO.File]::WriteAllBytes((GameFile $LAUNCHER_REL), [byte[]](0x7B, 0xFF, 0xFE, 0x7D))
+    $badSha = Get-GameBytesSha $LAUNCHER_REL
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 7 -and $r.Out -notmatch '沒有東西需要卸載' -and (Get-GameBytesSha $LAUNCHER_REL) -eq $badSha) '啟動設定不是合法 UTF-8（讀不出文字）：結束代碼 7，檔案沒被動'
     Reset-GameDir
     $r = Invoke-Install @('profiler') $PkgV1
     Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force

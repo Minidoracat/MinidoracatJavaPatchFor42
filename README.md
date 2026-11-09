@@ -324,16 +324,18 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
 
 The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
 or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for and checks
-the SHA-256 of `projectzomboid.jar` and of the agent jar. Since 0.3.0 the patches load as a Java agent (from 42.22 on
-the official jar is signed, and the old way of putting `.class` files into the game folder keeps the game from
-starting): the installer puts `MinidoracatClientPatches.jar` into the game folder's `.mdc-patches` and adds one
-`-javaagent:` launch option to `ProjectZomboid64.json`; the game's own files stay untouched. Uninstalling removes
-only that option and keeps your other settings (a custom `-Xmx`, for example), and an interrupted install rolls
+the SHA-256 of `projectzomboid.jar` and of the package files. Since 0.3.0 the patches load as a Java agent (from
+42.22 on the official jar is signed, and the old way of putting `.class` files into the game folder keeps the game
+from starting): the installer puts `MinidoracatClientPatches.jar` and a small loader, `mdc-agent-loader.dll` (the
+game's launcher needs it to load a Java agent; its source is in `patcher/agent-loader/`), into the game folder's
+`.mdc-patches` and adds one `-agentpath:` launch option to `ProjectZomboid64.json`; the game's own files stay
+untouched. Uninstalling removes only that option and keeps your other settings (a custom `-Xmx`, for example), and
+an interrupted install rolls
 back. **No need to uninstall before a game update**: when the jar changes, the patches switch themselves off and the
 game runs vanilla. Steam updates often restore the original `ProjectZomboid64.json`; the patches are then inactive
 (the installer's status shows "installed but not active"), and running `Install-Patches.bat` from the package for the
 new version turns them back on. Do not delete the `.mdc-patches` folder by hand: with the launch option still there and
-the jar gone, the game does not start. Remove the patches with `Uninstall-Patches.bat` (choose `A`), so keep the
+the files gone, the game does not start. Remove the patches with `Uninstall-Patches.bat` (choose `A`), so keep the
 extracted folder (or download the same zip again when you need it). Starting the game through `ProjectZomboid64.bat`
 or `ShowConsole.bat` skips `ProjectZomboid64.json`, so the patches do not load. Upgrading from 0.2.x: close the game
 and run the new `Install-Patches.bat`; the `.class` files the old version put into the game folder are removed in
@@ -360,7 +362,7 @@ it). Also, from 42.22 on, a `.class` file in the same package as an official cla
 `SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
 their authors (inference: PZ_Optimization itself was not tested).
 
-Build the package yourself with `build-client.ps1`; installer tests:
+Build the package yourself with `build-client.ps1` (it also needs MinGW-w64 gcc, for the small agent loader DLL); installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
 (do not run them while a Project Zomboid JVM is running).
 

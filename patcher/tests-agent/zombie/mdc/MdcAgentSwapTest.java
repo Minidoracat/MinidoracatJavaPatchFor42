@@ -43,6 +43,7 @@ public final class MdcAgentSwapTest {
         for (int round = 0; round < rounds; round++) {
             MdcAgent.Swap swap = new MdcAgent.Swap(app, table);
             Set<String> gotPatched = ConcurrentHashMap.newKeySet();
+            Set<Throwable> failures = ConcurrentHashMap.newKeySet();
             CountDownLatch start = new CountDownLatch(1);
             Thread[] workers = new Thread[threads];
             for (int t = 0; t < threads; t++) {
@@ -53,22 +54,30 @@ public final class MdcAgentSwapTest {
                     } catch (InterruptedException e) {
                         return;
                     }
-                    for (int i = 0; i < perThread; i++) {
-                        String name = "t/C" + id + "_" + i;
-                        if (swap.transform(null, app, name, null, null, vanilla) != null) {
-                            gotPatched.add(name);
+                    try {
+                        for (int i = 0; i < perThread; i++) {
+                            String name = "t/C" + id + "_" + i;
+                            if (swap.transform(null, app, name, null, null, vanilla) != null) {
+                                gotPatched.add(name);
+                            }
                         }
+                    } catch (Throwable e) {
+                        failures.add(e);
                     }
                 });
                 workers[t].start();
             }
             start.countDown();
-            for (int target = round % 400; gotPatched.size() < target; ) {
-                Thread.onSpinWait();   // 每輪在不同的進度切換（0–399／512 個已換上）
+            // 每輪在不同的進度切換（0–399／512 個已換上）；worker 都結束了（例如 transform 丟例外）就不再等
+            for (int target = round % 400; gotPatched.size() < target && java.util.Arrays.stream(workers).anyMatch(Thread::isAlive); ) {
+                Thread.onSpinWait();
             }
             Set<String> snapshot = swap.beginRestore();
             for (Thread w : workers) {
                 w.join();
+            }
+            if (!failures.isEmpty()) {
+                throw new AssertionError("transform 丟例外：" + failures.iterator().next(), failures.iterator().next());
             }
             swappedBefore += snapshot.size();
             for (String name : gotPatched) {

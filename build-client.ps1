@@ -18,6 +18,9 @@ $GEN = Join-Path $R 'work/gen-client-modular'
 $AGENT_CLASSES = Join-Path $R 'work/agent-classes-client'
 $AGENT_CHECK = Join-Path $R 'work/agentcheck-client'
 $AGENT_JAR_NAME = 'MinidoracatClientPatches.jar'
+$LOADER_NAME = 'mdc-agent-loader.dll'
+$GCC = "$env:USERPROFILE\scoop\apps\mingw\current\bin\gcc.exe"
+if (-not (Test-Path -LiteralPath $GCC)) { throw '找不到 MinGW-w64 gcc（agent 載入器是 C 寫的 DLL）' }
 $ASM_CP = "$R\lib\asm-9.8.jar;$R\lib\asm-tree-9.8.jar;$R\lib\asm-analysis-9.8.jar;$R\lib\asm-util-9.8.jar"
 $UTF8 = [System.Text.UTF8Encoding]::new($false)
 
@@ -293,10 +296,49 @@ Invoke-AgentLoadCheck 'core,client-fixes-standard' @('core', 'client-fixes-stand
 Invoke-AgentLoadCheck 'client-fixes-standard' @('core', 'client-fixes-standard') 'disarmed'
 Invoke-AgentLoadCheck 'core,client-fixes-standard,client-fixes-lowmem' @('core', 'client-fixes-standard') 'disarmed'
 
+# agent 載入器。遊戲啟動器（ProjectZomboid64.exe）自己載入 jvm.dll，不經 java.exe：JVM 為 -javaagent 載入 instrument.dll 時
+# 找不到同資料夾的 java.dll／jli.dll，JVM 起不來。上面的 AgentLoadCheck 都經 java.exe，測不到這件事；這裡用 launcher-probe
+# 照啟動器的方式建 JVM（PATH 只留 Windows 自己的資料夾、工作目錄＝遊戲資料夾、參數用安裝器寫的相對路徑）。
+# 載入器不連 C runtime：它自己不能再有「找不到相依 DLL」的問題。
+$loaderDll = Join-Path $DIST $LOADER_NAME
+& $GCC -shared -O2 -s -Wall -Wextra -Werror -nostdlib '-Wl,-e,DllMainCRTStartup' '-Wl,--no-insert-timestamp' -o $loaderDll "$R\patcher\agent-loader\mdc-agent-loader.c" -lkernel32
+Assert-Ok 'gcc mdc-agent-loader.dll'
+$probe = Join-Path $OUT 'launcher-probe.exe'
+& $GCC -O2 -s -Wall -Werror -o $probe "$R\patcher\tests-agent\launcher-probe.c"
+Assert-Ok 'gcc launcher-probe.exe'
+$probeGame = Join-Path $R 'work/launcher-probe-game'
+if (Test-Path -LiteralPath $probeGame) { Remove-Item -LiteralPath $probeGame -Recurse -Force }
+New-Item -ItemType Directory -Path "$probeGame\.mdc-patches" -Force | Out-Null
+Copy-Item -LiteralPath $agentJar, $loaderDll -Destination "$probeGame\.mdc-patches"
+function Invoke-LauncherProbe([string]$AgentOption) {
+    $savedPath = $env:PATH
+    $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+    Push-Location -LiteralPath $probeGame
+    try { $text = (& $probe $JDK "-Djava.class.path=$AGENT_CHECK;$JAR" $AgentOption 2>&1 | Out-String) }
+    finally { Pop-Location; $env:PATH = $savedPath }
+    return [PSCustomObject]@{ Code = $LASTEXITCODE; Text = $text }
+}
+$probeModules = 'modules=core,client-fixes-standard'
+# 原版前提：-javaagent 在啟動器的環境下 JVM 起不來。這條變紅＝JRE 或啟動器改了，先重估還需不需要載入器
+$probed = Invoke-LauncherProbe "-javaagent:.mdc-patches/$AGENT_JAR_NAME=$probeModules"
+if ($probed.Code -eq 0 -or $probed.Text -notmatch 'Could not find agent library instrument') {
+    throw "原版前提不成立：啟動器方式下 -javaagent 沒有照預期失敗（exit=$($probed.Code)）：$($probed.Text)"
+}
+$probed = Invoke-LauncherProbe "-agentpath:.mdc-patches/$LOADER_NAME=.mdc-patches/$AGENT_JAR_NAME=$probeModules"
+if ($probed.Code -ne 0 -or $probed.Text -notmatch '\[mdc-agent\] ARMED') {
+    throw "agent 載入器在啟動器方式下沒有把修補帶起來（exit=$($probed.Code)）：$($probed.Text)"
+}
+Write-Host "launcher-probe OK：啟動器方式下 -javaagent 起不來（原版前提），經 $LOADER_NAME 則 ARMED"
+# 找不到 agent jar：instrument.dll 自己回報錯誤、JVM 不啟動（和 -javaagent 指到不存在的 jar 相同），載入器不吞
+$probed = Invoke-LauncherProbe "-agentpath:.mdc-patches/$LOADER_NAME=.mdc-patches/no-such.jar=$probeModules"
+if ($probed.Code -eq 0 -or $probed.Text -notmatch 'JAR manifest missing') {
+    throw "agent jar 不存在時應由 instrument.dll 報錯（exit=$($probed.Code)）：$($probed.Text)"
+}
+
 Write-Host '[7/8] 產生管理器套件與 manifest'
 $pkg = Join-Path $DIST 'pkg'
 New-Item -ItemType Directory -Path $pkg -Force | Out-Null
-Copy-Item -LiteralPath $agentJar -Destination $pkg
+Copy-Item -LiteralPath $agentJar, $loaderDll -Destination $pkg
 foreach ($name in @('Manage-Patches.ps1', 'Install-Patches.bat', 'Uninstall-Patches.bat')) {
     Copy-Item -LiteralPath "$R\deploy-client\$name" -Destination $pkg
 }
@@ -304,6 +346,7 @@ $manifest = [ordered]@{
     schemaVersion=2; gameVersion=$GAME_VERSION; packageVersion=$PACKAGE_VERSION
     jarSha256=$jarSha; built=$built; sourceRef=$sourceRef
     agent=[ordered]@{ source=$AGENT_JAR_NAME; sha256=(Get-FileHash -LiteralPath $agentJar -Algorithm SHA256).Hash.ToLowerInvariant() }
+    loader=[ordered]@{ source=$LOADER_NAME; sha256=(Get-FileHash -LiteralPath $loaderDll -Algorithm SHA256).Hash.ToLowerInvariant() }
     modules=$modules
     legacyPackages=@(Get-Content -LiteralPath "$R\deploy-client\legacy-packages.json" -Raw | ConvertFrom-Json)
 }
@@ -317,8 +360,9 @@ Minidoracat Client Patches $PACKAGE_VERSION / Project Zomboid $GAME_VERSION
 WHAT THIS IS
 Unofficial client-side fixes that only change the game on your own PC. Since 42.22 the
 game jar is signed, so the fixes are applied by a small Java agent while the game loads:
-the installer copies $AGENT_JAR_NAME into the .mdc-patches folder inside the game
-folder and adds one launch option (-javaagent:...) to ProjectZomboid64.json.
+the installer copies $AGENT_JAR_NAME and a small loader ($LOADER_NAME) into the
+.mdc-patches folder inside the game folder and adds one launch option (-agentpath:...)
+to ProjectZomboid64.json.
 projectzomboid.jar itself is not modified.
 - Players, zombies and vehicles turn invisible (only the shadow and name tag remain).
 - Walking or driving into an area with player-built houses: an error in the
@@ -452,12 +496,17 @@ Modules
 Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
   never removes other authors' tools.
-- Changes ProjectZomboid64.json only by adding or removing its own -javaagent option (it
+- $LOADER_NAME is a small helper (a few KB) that the game needs to load a Java agent:
+  the game's launcher cannot use -javaagent directly, because the Java runtime then fails
+  to load its own agent support. Its source code is in the repository
+  (patcher/agent-loader/mdc-agent-loader.c).
+- Changes ProjectZomboid64.json only by adding or removing its own -agentpath option (it
   goes first in vmArgs, so this package starts before other agents). It does not change
-  the game jar. Other Java agents (-javaagent, -agentlib, -agentpath) stay. If one of them
-  changes a class this package patches, that class is skipped ([mdc-agent] NOT APPLIED in
-  the console); if a class to patch is already loaded when this package starts, the whole
-  package stays off ([mdc-agent] DISARMED).
+  the game jar. Other Java agents (-javaagent, -agentlib, -agentpath) stay, but changing
+  the same class as another agent is not supported: a class that was changed before this
+  package sees it is skipped ([mdc-agent] NOT APPLIED in the console), and changes another
+  agent makes after this package cannot be detected. If a class to patch is already loaded
+  when this package starts, the whole package stays off ([mdc-agent] DISARMED).
 - The console shows [mdc-agent] ARMED when the patches are active and [mdc-agent]
   DISARMED (with the reason) when they switched themselves off.
 - Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
@@ -473,8 +522,8 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 
 【這是什麼】
 只改你自己電腦上的遊戲，修三個問題、減輕兩個效能問題。42.22 起遊戲 jar 有簽章，修補改由一個小小的
-Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進遊戲資料夾裡的 .mdc-patches 資料夾，
-並在 ProjectZomboid64.json 加一條啟動參數（-javaagent:...）。projectzomboid.jar 本身不會被改。
+Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小小的載入器（$LOADER_NAME）放進遊戲資料夾裡的
+.mdc-patches 資料夾，並在 ProjectZomboid64.json 加一條啟動參數（-agentpath:...）。projectzomboid.jar 本身不會被改。
 - 隊友、殭屍、車輛看不到，只剩影子和名牌。
 - 走進或開車進入有自建房的區域時，右下角跳錯、畫面一黑，被斷線送回主選單
   （42.21.0 起的官方 bug，42.22.2 仍在：那一帶地圖載入途中剛好有人在附近蓋或拆東西時發生）。
@@ -569,9 +618,12 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進遊戲�
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
-- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -javaagent（排在 vmArgs 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
-  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留；它們若改了本包要修補的 class，那個 class 不換
-  （console 印 [mdc-agent] NOT APPLIED）；本包啟動時要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。
+- $LOADER_NAME 是讓遊戲載入 Java agent 用的小工具（幾 KB）：遊戲的啟動器不能直接用 -javaagent
+  （Java 執行環境會載入不了自己的 agent 支援）。原始碼在 repo 的 patcher/agent-loader/mdc-agent-loader.c。
+- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -agentpath（排在 vmArgs 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
+  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留，但不支援和它們修改同一個 class：在本包之前就被改過的 class
+  不換（console 印 [mdc-agent] NOT APPLIED）；別的 agent 在本包之後才改的，本包偵測不到。本包啟動時要修補的 class 已經被載入，
+  就整包不啟用（印 [mdc-agent] DISARMED）。
 - console 印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
 - 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - JVM 執行中不得移除修補。交易中斷時，先重跑管理器復原，再開遊戲。
