@@ -38,15 +38,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * （jar 已逐位元比對過建置基準、建置期 {@code AgentLoadCheck} 以同一個 jar 跑過同一段，實際上不會發生）。
  *
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
+ *
+ * <p>client 包的 agent jar 有多個模組（index 有 {@code module} 行；同一個 class 在三個 client-fixes 變體各有一份），
+ * 由 {@code -javaagent:<jar>=modules=<id>,<id>} 選：沒選、選了不存在的、同一組選兩個、缺依賴，一律不啟用。多模組的
+ * helper 全部以 Lookup 定義（我方 package {@code zombie.mdc} 以本 class 為錨），jar 裡沒有一般 entry 的 helper，
+ * 沒選的模組就一個 class 都不會出現。伺服器的 jar 沒有 {@code module} 行，參數不用給。
  */
 public final class MdcAgent {
 
     static final String INDEX = "/mdc/agent-index.tsv";
-    static final String PATCHED_PREFIX = "/mdc/patched/";
-    static final String DEFINE_PREFIX = "/mdc/define/";
     static final String GAME_JAR = "projectzomboid.jar";
 
     private static volatile String state = "not loaded";
+    private static volatile String selectedModules = "-";
     private static volatile int armedClasses;
     private static final AtomicInteger APPLIED = new AtomicInteger();
     private static final AtomicInteger MISMATCHED = new AtomicInteger();
@@ -63,9 +67,10 @@ public final class MdcAgent {
         }
     }
 
-    /** 給驗證與診斷用：armed／off／disarmed 的狀態與換上的 class 數。 */
+    /** 給驗證與診斷用：armed／off／disarmed 的狀態、換上的 class 數與選的模組。 */
     public static String status() {
-        return state + " patched=" + armedClasses + " applied=" + APPLIED.get() + " mismatched=" + MISMATCHED.get();
+        return state + " patched=" + armedClasses + " applied=" + APPLIED.get() + " mismatched=" + MISMATCHED.get()
+                + " modules=" + selectedModules;
     }
 
     static void arm(String args, Instrumentation inst) throws IOException, ReflectiveOperationException {
@@ -76,6 +81,12 @@ public final class MdcAgent {
             return;
         }
         Index index = Index.read();
+        String problem = index.select(args);
+        if (problem != null) {
+            disarm(problem);
+            return;
+        }
+        selectedModules = String.join(",", index.selected);
         Path jar = gameJar();
         if (jar == null) {
             disarm(GAME_JAR + " not found on java.class.path");
@@ -89,24 +100,35 @@ public final class MdcAgent {
         }
         Map<String, Payload> patched = new HashMap<>();
         for (Entry e : index.patched) {
-            byte[] bytes = resource(PATCHED_PREFIX + e.name + ".class");
-            if (bytes == null || !sha256(bytes).equals(e.sha)) {
-                disarm("payload missing or SHA mismatch: " + e.name);
+            if (!index.selected.contains(e.module())) {
+                continue;
+            }
+            byte[] bytes = resource(e.path("patched"));
+            if (bytes == null || !sha256(bytes).equals(e.sha())) {
+                disarm("payload missing or SHA mismatch: " + e.name());
                 return;
             }
-            patched.put(e.name, new Payload(e.origSha, bytes));
+            if (patched.put(e.name(), new Payload(e.origSha(), bytes)) != null) {
+                disarm("two selected modules patch " + e.name());
+                return;
+            }
         }
+        List<Entry> defineEntries = new ArrayList<>();
         List<byte[]> defines = new ArrayList<>();
         for (Entry e : index.defines) {
-            byte[] bytes = resource(DEFINE_PREFIX + e.name + ".class");
-            if (bytes == null || !sha256(bytes).equals(e.sha)) {
-                disarm("payload missing or SHA mismatch: " + e.name);
+            if (!index.selected.contains(e.module())) {
+                continue;
+            }
+            byte[] bytes = resource(e.path("define"));
+            if (bytes == null || !sha256(bytes).equals(e.sha())) {
+                disarm("payload missing or SHA mismatch: " + e.name());
                 return;
             }
-            if (!index.anchors.containsKey(packageOf(e.name))) {
-                disarm("no anchor class for package " + packageOf(e.name));
+            if (!index.anchors.containsKey(packageOf(e.name()))) {
+                disarm("no anchor class for package " + packageOf(e.name()));
                 return;
             }
+            defineEntries.add(e);
             defines.add(bytes);
         }
 
@@ -117,8 +139,8 @@ public final class MdcAgent {
         inst.addTransformer(swap, false);
         Map<String, MethodHandles.Lookup> lookups = new HashMap<>();
         try {
-            for (int i = 0; i < defines.size(); i++) {   // 建置期排好的順序：父型別在前
-                String pkg = packageOf(index.defines.get(i).name);
+            for (int i = 0; i < defines.size(); i++) {   // 建置期排好的順序：依賴的模組在前、父型別在前
+                String pkg = packageOf(defineEntries.get(i).name());
                 MethodHandles.Lookup lookup = lookups.get(pkg);
                 if (lookup == null) {
                     Class<?> anchor = Class.forName(index.anchors.get(pkg).replace('/', '.'), false, app);
@@ -136,8 +158,9 @@ public final class MdcAgent {
             return;
         }
         state = "armed";
-        say("ARMED: " + patched.size() + " patched classes, " + defines.size() + " helpers defined into game packages; agent "
-                + index.version + " built " + index.built + "; jar sha256 " + live.substring(0, 8));
+        say("ARMED: " + patched.size() + " patched classes, " + defines.size() + " helpers defined; "
+                + (index.modules.isEmpty() ? "" : "modules " + selectedModules + "; ")
+                + "agent " + index.version + " built " + index.built + "; jar sha256 " + live.substring(0, 8));
     }
 
     private static void disarm(String reason) {
@@ -205,7 +228,15 @@ public final class MdcAgent {
     record Payload(String origSha, byte[] bytes) {
     }
 
-    record Entry(String name, String origSha, String sha) {
+    /** {@code module} 空字串＝伺服器的單一模組 jar。 */
+    record Entry(String name, String origSha, String sha, String module) {
+        /** jar 內的路徑：單一模組 {@code /mdc/<kind>/…}，多模組 {@code /mdc/m/<module>/<kind>/…}。 */
+        String path(String kind) {
+            return (module.isEmpty() ? "/mdc/" : "/mdc/m/" + module + "/") + kind + "/" + name + ".class";
+        }
+    }
+
+    record ModuleSpec(String group, List<String> requires) {
     }
 
     /** {@code mdc/agent-index.tsv}：由 AgentJarBuilder 寫出，tab 分隔、LF。 */
@@ -213,9 +244,11 @@ public final class MdcAgent {
         String version = "?";
         String built = "?";
         String jarSha;
+        final Map<String, ModuleSpec> modules = new java.util.LinkedHashMap<>();
         final List<Entry> patched = new ArrayList<>();
         final List<Entry> defines = new ArrayList<>();
         final Map<String, String> anchors = new HashMap<>();
+        final java.util.Set<String> selected = new java.util.LinkedHashSet<>();
 
         static Index read() throws IOException {
             byte[] raw = resource(INDEX);
@@ -232,8 +265,10 @@ public final class MdcAgent {
                     case "version" -> index.version = f[1];
                     case "built" -> index.built = f[1];
                     case "jar" -> index.jarSha = f[1];
-                    case "patched" -> index.patched.add(new Entry(f[1], f[2], f[3]));
-                    case "define" -> index.defines.add(new Entry(f[1], f[2], f[3]));
+                    case "module" -> index.modules.put(f[1], new ModuleSpec(f[2].equals("-") ? "" : f[2],
+                            f[3].equals("-") ? List.of() : List.of(f[3].split(","))));
+                    case "patched" -> index.patched.add(new Entry(f[1], f[2], f[3], f.length > 4 ? f[4] : ""));
+                    case "define" -> index.defines.add(new Entry(f[1], f[2], f[3], f.length > 4 ? f[4] : ""));
                     case "anchor" -> index.anchors.put(f[1], f[2]);
                     default -> {
                         // 未知欄位：較新的建置工具才會寫，忽略
@@ -244,6 +279,50 @@ public final class MdcAgent {
                 throw new IOException("agent index has no build base jar sha256");
             }
             return index;
+        }
+
+        /**
+         * 依 agent 參數選模組，填進 {@link #selected}；不成立時回傳原因（呼叫端不啟用）。單一模組 jar 不看參數。
+         * 參數格式 {@code modules=<id>,<id>}。
+         */
+        String select(String args) {
+            if (modules.isEmpty()) {
+                selected.add("");
+                return null;
+            }
+            String list = null;
+            for (String part : (args == null ? "" : args).split(";")) {
+                if (part.trim().startsWith("modules=")) {
+                    list = part.trim().substring("modules=".length());
+                }
+            }
+            if (list == null || list.isBlank()) {
+                return "no modules selected (-javaagent:<jar>=modules=<id>,...; available: "
+                        + String.join(",", modules.keySet()) + ")";
+            }
+            Map<String, String> groups = new HashMap<>();
+            for (String id : list.split(",")) {
+                id = id.trim();
+                ModuleSpec m = modules.get(id);
+                if (m == null) {
+                    return "unknown module " + id + " (available: " + String.join(",", modules.keySet()) + ")";
+                }
+                if (!m.group().isEmpty()) {
+                    String other = groups.put(m.group(), id);
+                    if (other != null && !other.equals(id)) {
+                        return "modules " + other + " and " + id + " are alternatives (group " + m.group() + ")";
+                    }
+                }
+                selected.add(id);
+            }
+            for (String id : selected) {
+                for (String req : modules.get(id).requires()) {
+                    if (!selected.contains(req)) {
+                        return "module " + id + " requires " + req;
+                    }
+                }
+            }
+            return null;
         }
     }
 

@@ -8,8 +8,8 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 建置期：在帶 {@code -javaagent:dist\mdc-javapatch-agent.jar} 的 JVM 裡、以<b>官方簽章 jar</b> 為 classpath，
- * 驗證正式服的載入路徑。
+ * 建置期：在帶 {@code -javaagent:<agent jar>}（client 包另帶 {@code =modules=<id>,...}）的 JVM 裡、以<b>官方簽章 jar</b>
+ * 為 classpath，驗證實際的載入路徑。manifest 給這次選到的模組（client 包是那幾個模組的 manifest 合併）。
  *
  * <ul>
  *   <li>{@code armed}：agent 狀態 armed；manifest 每個 class（手術後的與 helper）都載得起來、連結（強制驗證）不出錯；
@@ -19,7 +19,7 @@ import java.util.Set;
  *   <li>{@code off}：{@code -Dmdc.agent=off} → 同上。</li>
  * </ul>
  *
- * <p>用法：{@code java -Xverify:all -javaagent:<agent jar> -cp <本工具>;<jar> AgentLoadCheck <manifest> armed|disarmed|off}
+ * <p>用法：{@code java -Xverify:all -javaagent:<agent jar>[=modules=...] -cp <本工具>;<jar> AgentLoadCheck <manifest> armed|disarmed|off}
  */
 public final class AgentLoadCheck {
 
@@ -34,15 +34,20 @@ public final class AgentLoadCheck {
             throw new AssertionError("agent 狀態應為 " + expect + "，實得：" + before);
         }
 
-        // 原版 package 的 helper（agent 以 Lookup.defineClass 定義的）從 agent index 讀
+        // agent 以 Lookup.defineClass 定義的 helper 從 agent index 讀；錨點是原版 class 的才有官方簽章者
+        // （client 包連我方 package 的 helper 也用 Lookup 定義，錨點是 MdcAgent，ProtectionDomain 是 agent jar）
         Set<String> defines = new HashSet<>();
+        Set<String> signedPackages = new HashSet<>();
         try (var in = app.getResourceAsStream("mdc/agent-index.tsv")) {
             if (in == null) {
                 throw new AssertionError("agent jar 沒有 mdc/agent-index.tsv");
             }
             for (String l : new String(in.readAllBytes(), StandardCharsets.UTF_8).split("\n")) {
-                if (l.startsWith("define\t")) {
-                    defines.add(l.split("\t")[1].replace('/', '.'));
+                String[] f = l.split("\t");
+                if (f[0].equals("define")) {
+                    defines.add(f[1].replace('/', '.'));
+                } else if (f[0].equals("anchor") && !f[2].equals("zombie/mdc/MdcAgent")) {
+                    signedPackages.add(f[1].replace('/', '.'));
                 }
             }
         }
@@ -65,7 +70,7 @@ public final class AgentLoadCheck {
             Class<?> c = Class.forName(name, false, app);
             c.getDeclaredMethods();   // 強制連結（-Xverify:all 下就是驗證）
             loaded++;
-            if (expect.equals("armed") && (patched || defines.contains(name))) {
+            if (expect.equals("armed") && (patched || defines.contains(name) && signedPackages.contains(c.getPackageName()))) {
                 var cs = c.getProtectionDomain().getCodeSource();
                 if (cs == null || cs.getCodeSigners() == null || cs.getCodeSigners().length == 0) {
                     throw new AssertionError(name + " 沒有官方簽章者（不是以官方 jar 的 ProtectionDomain 定義）");
