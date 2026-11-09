@@ -1236,6 +1236,12 @@ A TIS follow-up report draft exists (items R1/R3), **not yet submitted**.
 - **Verification**: `NetTimedActionGuardTest` in three configurations (shipping / B off / D off). A Request with a missing component completes `parse` under D without calling the constructor, then the real `processServer` from the dist runs (only the RakNet send side replaced); exactly one packet is captured and its bytes are a Reject with the same action/player id. SmokeCheck now pins "both `write` and `setState` receivers in `processServer` are `act`" (red if TIS reverts to `this.write` → re-evaluate A) and "`processServer` does not go through `NetTimedActionGuard`".
 - Revive A: `git checkout 8d2bee8 -- <files>` (PatchConfig / NetTimedActionGuard / SmokeCheck / tests / build.ps1).
 
+### 2026-11-10 — 42.22.2 re-validation
+
+- **B / D1 kept, hooks unchanged**: the whole `NetTimedAction` class is method-identical to 42.21 (`parse` hits 3/3: `beginParse` + `protectedCall` + `actionArgs.load`), and the `loadInventoryItem`/`loadComponent` and Lua-fuse preconditions hold. What changed is the player field on `Action`: `PlayerID playerId` became `ConnectionPlayer player`, a single short on the wire. The client sends its local player index (0–3); the server resolves it with `connection.getPlayerAt(index)` and rewrites the id to that player's onlineID. The Reject reply carries the onlineID (one index byte fewer than 42.21).
+- **Shared decoder**: `PZNetKahluaTableImpl.load(…B)` became `load(…BI)` with a nesting depth (throws `lua table nesting exceeded` at 256); the old method is gone and W51's anchor moved with it ([2bo](#2bo)). D's redirect target `load(ByteBufferReader,IConnection)V` keeps its signature; the new depth exception is also a `RuntimeException`, so `loadArgs` catches it and vanilla sends the Reject.
+- **Verification**: `NetTimedActionGuardTest`, four configurations (shipping / B off / D off / W51 off). The test packet now sends index 0 and is parsed with a capture connection that owns the player; vanilla `processServer` sends exactly one Reject: 3 header bytes plus action id, state and onlineID (4 bytes).
+
 <a id="2y"></a>
 ## 2y. Animal sound sort livelock catcher (W11, server, default on)
 
@@ -1816,6 +1822,8 @@ The patch redirected that single call (1:1, shape-preserving) to `FaceObjectGuar
 
 > **42.21 re-validation (2026-09-28):** C (`NetTimedAction.start` tail call) and R (three redirects in `ActionManager.update`) are retired. W10-E (`ActionManager.stop` head call + `remove(BZ)` redirect) is retired because TIS fixed it upstream. The dispatch bridge is reduced to an action-packet owner check. Only B remains active. See "42.21 re-validation" at the end of this section.
 
+> **42.22.2 re-validation (2026-11-10):** the action-packet owner check (`-Dmdc.actionOwnerCheck`) and the W78 performer check (`-Dmdc.actionExecutorCheck`, [2cm](#2cm)) are retired because TIS fixed them upstream; the dispatch bridge only keeps the W10-C Request context and the WorldSound probe. The B redirect follows vanilla and now takes an `IsoPlayer`. See "42.22.2 re-validation" at the end of this section.
+
 ### Incident (reported 2026-08-28, shipped 2026-09-02)
 
 W10 ([§2x](#2x)) fixed actions that throw during server construction and so never get Accept or Reject. Players still reported stuck timed actions at peak hours: the progress bar finishes but the action never completes (crafting, butter-making, dismantling). It is intermittent: one action in a long queue sticks and blocks everything behind it. Two victims' client logs were **completely silent** while stuck (no errors, no Reject, no `[NetTimedAction]`), and the server W10 heartbeat showed `caught=0 rejected=0`, so W10's scenario was not involved. One log showed the DismantleAllAtOnce mod (Workshop ID 3761218629) queuing 15 handcraft actions at once. Decompiling 42.20.4 turned up **three server paths that W10 does not cover and that leave no server log trace**. This patch does not guess which one is the cause; it measures all three.
@@ -1885,6 +1893,16 @@ The patch redirected the final `INetworkPacket.processServer` call in `PacketTyp
 **Verification.** `MdcTimedActionProbeTest` runs four configurations (observe / enforce / off / `actionOwnerCheck=0`). For all four packet types, a real `write → parse` produces a Reject carrying another player's onlineID (GeneralAction through `setReject(id, player)` with a local slot, the others through index -1). With the check on, both players' same-id actions are untouched. In the owner-off negative control, vanilla really cancels the other player's action. A legitimate cancel goes to vanilla and removes only the sender's own same-id action, and Fishing Reject + bobber-flag event data belongs to the sender. A forged Request (index 0 / -1) is rejected before `getAction/copyFrom`; with owner-off, vanilla flips the other player's action to Reject. Also covered: split-screen index 1, a stale owner object, an owner on this connection whose wire onlineID belongs to the other local player, and an empty or missing connection. SmokeCheck pins the W10-E retirement evidence (`remove` keyed by `(id, PlayerID.getID)`, `setReject` writes the sender), the reason for the owner check (`PlayerID.isConsistent` reads neither the onlineID nor the connection), the vanilla cancel entry of all four packets, that the bridge never calls `ActionManager.stop/remove`, and that `ActionManager` is not shipped.
 
 **Hit counts.** `NetTimedActionPacket.processServer` 3 → 1; `NetTimedAction` 4 → 3 (`start` removed); `ActionManager` 5 → 0 (no longer patched); `PacketTypes$PacketType.onServerPacket` stays at 1. To deploy, fully uninstall with the old manifest first, so no stale `ActionManager.class` is left calling deleted helper methods.
+
+### 42.22.2 re-validation (2026-11-10)
+
+**B kept**: the Request branch of `processServer` still calls `stopPlayerActions` before starting the new action. Vanilla now takes an `IsoPlayer` (`ActionManager.stopPlayerActions(IsoPlayer)` compares both onlineIDs per action through `isActionOf`), so the redirect descriptor is now `(Lzombie/characters/IsoPlayer;)V`, still 1 hit; the helper's "Accepted old action of the same player" uses the same onlineID comparison as `isActionOf`. Server-side `ActionManager.remove(IsoPlayer,B)` still only removes and calls `stop()`, and the whole method has zero `startPacket` (in 42.22 the client branch does not send either), so the reason for the enforce-mode Reject is unchanged.
+
+**Owner check retired (fixed upstream in 42.22.2)**: vanilla replaced the player field of action packets with `ConnectionPlayer`. On the server, `parse` first clears the player via `Player.parse`, returns if the index is outside 0–3 (`isInvalidIndex`), otherwise calls `connection.getPlayerAt(index)` and rewrites the id to that player's onlineID; it no longer looks up the server-wide `IDToPlayerMap` (javap `ConnectionPlayer.parse` offsets 45–114). `Action.isConsistent` delegates to `Player.isConsistent` (false when the player is null), none of the four action packets overrides it, and `onServerPacket` only logs an inconsistent packet, calls `sync` and does not dispatch it. An action packet that reaches dispatch can therefore only stand for the sending connection's own player, and the bridge's owner check has nothing left to block. Removed `ownedByConnection`, `refuseUntrusted`, `unknownRefused`, the `untrustedAction#` line and `-Dmdc.actionOwnerCheck` (setting it has no effect). The heartbeat is now `interruptCalls interruptedAccepted sameIdResend rejectsSent rejectsSkippedNoConn anomalies mode`.
+
+**Verification**: `MdcTimedActionProbeTest`, three configurations (observe / enforce / off). Besides B and the context binding, a real write → parse checks the vanilla behaviour of all four action packets: index 0 resolves to this connection's player and, handed to vanilla, cancels only that player's same-id action (Fishing event data belongs to that player); index -1, another player's onlineID and an empty slot of this connection all fail to resolve, `isConsistent` is false, and neither player's action changes. SmokeCheck now pins the owner-check retirement basis (`ConnectionPlayer.parse` uses only `getPlayerAt` and rewrites the id, never reads `GameServer.IDToPlayerMap`; `Player.parse` clears to null first; `Action.parse/isConsistent` go through `ConnectionPlayer`; the four packets do not override `isConsistent`; red when TIS reverts = revive) and the new shape of the W10-E retirement basis (`stop → remove(IsoPlayer,B)`, both `remove` lambdas keyed by `(id, isActionOf)`, `GeneralActionPacket.setData` writes the sender).
+
+**Deployment**: helper and patched-class counts unchanged (`MdcTimedActionProbe.class` replaced). To revive the owner check and W78: `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java patcher/tests/timed-action-probe`, and restore the matching SmokeCheck and build.ps1 sections.
 
 ---
 
@@ -2116,6 +2134,8 @@ Only the outermost dispatch on the main-loop thread is timed (nested time is inc
 Verification: full build and structural checks; observe / off / unarmed / real-logger-failure configurations; identity of original RuntimeException/Error; nested and foreign threads; rate limiting; batch settlement without follow-up packets. Accumulation thresholds are tested with injected completion samples (no sleep-bound assumptions), plus an integration smoke with a real vanilla zero-radius packet. This is not production acceptance of real slow packets; after deploy, check the banner and correlate slowCall/slowBatch with stacks from the same period.
 
 **42.21 re-validation (2026-09-28)**: after the dispatch bridge was slimmed (end of [2aj](#2aj)), `WorldSoundPacket` is still handed to this probe by the same `MdcTimedActionProbe.processServer`; call site and behavior unchanged (SmokeCheck "called exactly once from the existing dispatcher" still holds).
+
+**42.22.2 re-validation (2026-11-10)**: with the owner/W78 checks retired from the bridge, `WorldSoundPacket` is still handed to this probe by the same `MdcTimedActionProbe.processServer`; in `onServerPacket` only the parameter type of `sync` changed from `UdpConnection` to `IConnection`, and the dispatch site context is unchanged.
 
 <a id="2au"></a>
 ## 2au. Offline animal catch-up probe (W32, server, default observe)
@@ -2460,6 +2480,8 @@ a chunk the client read from disk aren't notified. Both leave ghosts, expected t
 = retire W44), and shape-preserving redirects. `WorldItemExpirySyncTest` proves term-by-term equivalence with vanilla (incl. both quirks) and knob parsing. No
 local dedicated-server end-to-end run exists; production acceptance = `can't find world item` lines drop sharply, `WorldItemExpiry removed` grows with
 `anomalies=0`, `TransactionReject sent` accounts for remaining pickup failures.
+
+**42.22.2 re-validation (2026-11-10, W44)**: in `TransactionManager.update()` only `Transaction.playerId` (`PlayerID`) became `player` (`ConnectionPlayer`). The three `setState` calls and the Done branch's reply sequence (`getConnectionFromPlayer` → `isFullyConnected` → `startPacket` → `doPacket` → `ItemTransactionPacket.write` → `send`) are instruction-identical, 3/3 hits, kept; the helper now reads `packet.player.getPlayer()`. The vanilla Reject branch still sends nothing (SmokeCheck's W44 reason to exist stays green). The new `removeItemTransaction(B,UdpConnection)` and `cancelAllRelevantToUser(S)` in 42.22 are separate methods and do not touch this hook.
 
 <a id="2bh"></a>
 ## 2bh. Identity index for the item-processing list (W45, server, default on; W30 retired in the same batch)
@@ -2905,6 +2927,8 @@ it completes.
 `NetTimedAction.parse`: a known animal decodes to the same instance and logs nothing; a missing one reaches the constructor as nil exactly as in
 vanilla and logs exactly one line with the action type/name; a stale parse context does not label another caller as a timed action; 30 consecutive
 misses are all counted while per-line logging is throttled; the kill switch logs and counts nothing.
+
+**42.22.2 re-validation (2026-11-10, re-anchored)**: vanilla removed `load(ByteBufferReader,IConnection,B)` and replaced it with `load(ByteBufferReader,IConnection,B,I)` carrying a nesting depth (+1 for each nested table, `lua table nesting exceeded` at 256), called per entry from `load(…,I)V`. The type-17 branch is instruction-identical (`new AnimalID` → `parse` → `getAnimal` → `areturn`); the PatchConfig and SmokeCheck anchors now point at `load(…BI)`, still 1 hit, and the guard that every other `PZNetKahluaTableImpl` method is instruction-identical still holds (it covers the new methods too). `NetTimedActionGuardTest` is green in all four configurations.
 
 <a id="2bp"></a>
 ## 2bp. Name guard for split-screen joins and respawns (W52, server, default enforce)
@@ -4819,10 +4843,14 @@ Console (one first-use line on the first build request; rejections at most 20 li
 
 **Retirement**: remove the patch when TIS validates build classes and positions on the server.
 
+**42.22.2 re-validation (2026-11-10)**: in `BuildAction.parse` only two `playerId` → `player` (`ConnectionPlayer`) field reads changed type; the single `protectedCall` is still at javap offset 221, followed by `item=null` when `getFirst()==null`, and `isValid` still has no callers in the jar, so it is kept (2/2 hits). The server only resolves the player from the sending connection, so the owner position W77 compares against is always the sender's own. `BuildActionPacket` gained `shouldInstantiate()=true` (a new object per packet); the `beginParse` binding is unchanged. `MdcBuildActionGuardTest` now sends index 0 on the wire and parses with a connection that owns the player; both / type-off / range-off are green.
+
 ---
 
 <a id="2cm"></a>
 ## 2cm. Timed action performer check (W78, server, default on)
+
+> **Retired (2026-11-10, fixed upstream in 42.22.2):** after `isConsistent` and `action != null`, the Request branch of vanilla `NetTimedActionPacket.processServer` now also compares `action.rawget("character") == player.getPlayer()`; when they differ (nil included) it jumps to the same Reject branch as `action == null`, before `stopPlayerActions` (javap: `ldc "character"` → `KahluaTable.rawget` → `ConnectionPlayer.getPlayer` → `if_acmpne` to the Reject label), and `player` can only be the sending connection's own player (end of [2aj](#2aj)). `checkExecutor`, `executorRefused`, the `executorMismatch#` line and `-Dmdc.actionExecutorCheck` (setting it has no effect) are removed. One difference from this patch: vanilla also rejects a nil `character` (this patch let nil through). SmokeCheck now pins this vanilla comparison (red when TIS removes it = revive), and `MdcTimedActionProbeTest` checks that vanilla sends exactly one Reject and does not interrupt old actions when `character` is another player, not a player, or nil. To revive: `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java patcher/tests/timed-action-probe` (restore the matching SmokeCheck and build.ps1 sections too). The rest of this section is the record from before retirement.
 
 Hardens server-side validation of timed actions: in an action rebuilt from a NetTimedAction request, the performer (the action table's `character`, set by `ISBaseTimedAction.new(self, character)`) must be the player who sent the packet; otherwise the server sends a Reject. The details of the gap are not described in public documents.
 
@@ -4880,6 +4908,8 @@ Console (rejections at most 20 lines per 10 seconds):
 - `SpriteUpdateGuardTest` (`build.ps1` [9zt/10], two JVMs: on, off, each checking argv): runs the real patched `receiveUpdateItemSprite` from dist on a real wire; the server branch of a real `IsoCell` goes to a `ServerMap` subclass that records calls. Fetches the square as vanilla: next to the player, exactly 20 tiles per axis, one floor apart, any split-screen player in range. Does not fetch it and logs: 21 tiles, far away, two floors apart, no split-screen player in range, no player on the connection. Off behaves as vanilla.
 
 **Retirement**: remove the patch when TIS validates the `UpdateItemSprite` distance on the server or makes it server-authoritative.
+
+**42.22.2 re-validation (2026-11-10)**: in `receiveUpdateItemSprite` only the return type of `IsoGridSquare.getObjects()` changed from `PZArrayList` to `List` (now `invokeinterface size/get`); the single `getGridSquare(III)` is still at javap offset 47, followed by `astore 9` / `aload 9` / `ifnull` to the return, 2/2 hits, kept. `SpriteUpdateGuardTest` on/off is green.
 
 ---
 
@@ -5196,6 +5226,8 @@ Console (one line per refused packet, at most 20 lines per 10 seconds; fields eq
 - `LightSettingsGuardTest` (`build.ps1` [9zw/10], three JVMs: on, off, vanilla, each checking argv, the switch and where the packet class was loaded from; the vanilla classpath has no dist, so it runs the jar's original `parse`): the client light produces the wire with the real `write`, the server light goes through the real `parse`, and the forwarded content is decoded from the same packet's real `write`; only the `NetObject` that finds the light is a stand-in. All three modes behave as vanilla for a shot light (bulb becomes null, everything else unchanged) and for turning the light off; when the client's power lags by 0.005, on keeps the server's value and logs nothing; for a bystander's late shot packet (the server's light is already off with no bulb, the packet still says on) on does not turn the light back on and logs nothing; after a packet that is cut off mid-parse, a following legitimate shot packet does not log the previous packet's fields. Changing every field, swapping the bulb for another kind, and turning the light on only: on leaves the server state unchanged, forwards the server's values, passes the server's value to `switchLight` and logs one line per packet; off and vanilla take the client's values (negative control). Distance: connections 51 tiles away in either direction on x and on y shooting the light or turning it off leave the server state unchanged under on and log one `outOfRange=true` line each (with player positions), while off and vanilla take the client's values; a distant bystander's late shot packet changes nothing and logs nothing under on; exactly 50 on each axis (diagonal, 3 floors apart) and a connection with one far and one near player are accepted in all three modes; when the light has no square and the distance check throws, on refuses and counts an anomaly.
 
 **Retirement**: remove the patch when TIS validates the client fields of this packet on the server, or makes the server the only sender.
+
+**42.22.2 re-validation (2026-11-10)**: `SyncCustomLightSettingsPacket` is method-identical to 42.21; the surgery and hit count (12) are unchanged, kept. The legitimate source changed: the third parameter of `CombatManager.shootPlacedItems` is now `isLocalShooter` (set by `IsoBulletTracerEffects` from the shooter's `isLocal()`), so only the shooter's own client sets the bulb to null and sends this packet, and bystanders replaying the tracer no longer send it. The bystander cases above (the late bulb-shot packet, the far bystander being refused) no longer occur in 42.22; the related log rules simply stop firing and the code is unchanged. SmokeCheck's legitimate-source census uses the new signature `shootPlacedItems(IsoGridSquare,Vector3,Z)Z`. `LightSettingsGuardTest` on/off/vanilla is green.
 
 ---
 
@@ -5723,6 +5755,8 @@ Fields: `login` is seconds since login (`setFullyConnected`), `spawn` since this
 
 **Retirement**: re-evaluate when TIS stops counting per packet or excludes the correction after login; the SmokeCheck locks on the checker and `validate` turn red when TIS changes them, and the judging has to be rechecked first.
 
+**42.22.2 re-validation (2026-11-10)**: the three hooks are instruction-identical (`AntiCheatSpeed.validate`, `PlayerPacket.resetMovable`, `GameServer.sendTeleport`; SHA locks green), kept. The player field of `PlayerPacket` changed from `PlayerID id` to `ConnectionPlayer player`: the server only resolves it from the sending connection's slot, and when that fails `isConsistent` is false and the packet is dropped before any anti-cheat runs (both walking packets now only have Power, Speed and NoClip), so the `foreign` branch is unreachable in 42.22; the code stays as a safeguard (it still logs if TIS goes back to the server-wide table). `NetworkPlayerAI.speedChecker` is a public final field inherited from `NetworkCharacterAI`, so the missing-field report from the helper reference check was a false positive (javac and the tests pass). `TeleportWatchTest` now sets the packet player with `packet.player.setPlayer`; observe / kick / off / vanilla are green.
+
 <a id="2df"></a>
 ## 2df. IP bans also apply in Steam mode (W97, server, default on)
 
@@ -5750,6 +5784,8 @@ Console:
 **Deployment**: the manifest adds `zombie/network/MdcSteamIpBan.class` and replaces `MdcAccountGate.class`. Before deploying, review `bannedip` once (`SELECT ip, username, reason FROM bannedip`): rows written in Steam mode never took effect before and all start blocking once this is live, possibly including dynamic IPs now used by someone else. W96–W97 together take the manifest from 185 to 190 classes (85 patched classes, 265 patch sites, 105 helpers).
 
 **Retirement**: when TIS checks `bannedip` in Steam mode too (the SmokeCheck reason to exist turns red).
+
+**42.22.2 re-validation (2026-11-10)**: no surgery; `GoogleAuthKeyPacket` is method-identical and `LoginPacket` differs only in debug info, so the four SHA locks and the reason to exist stay green (42.22 still only checks `bannedip` outside Steam mode). `MdcSteamIpBanTest` on/off is green.
 
 ---
 

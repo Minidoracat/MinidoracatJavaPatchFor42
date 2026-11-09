@@ -184,8 +184,7 @@ public final class MdcBuildActionGuardTest {
         ByteBuffer bb = ByteBuffer.allocate(1024);
         bb.put((byte) 7);                                               // Action.id
         bb.put((byte) Transaction.TransactionState.Request.ordinal());  // Action.state
-        bb.putShort(who);                                               // PlayerID.id
-        bb.put((byte) -1);                                              // PlayerID.playerIndex
+        bb.putShort((short) 0);                                         // ConnectionPlayer：本連線的玩家 index（42.22）
         bb.putFloat(x);
         bb.putFloat(y);
         bb.putFloat(z);
@@ -200,8 +199,20 @@ public final class MdcBuildActionGuardTest {
         item.save(bb);
         bb.flip();
         BuildActionPacket p = new BuildActionPacket();
-        p.parse(new ByteBufferReader(bb), null);
+        p.parse(new ByteBufferReader(bb), connectionOf(who));
         return p;
+    }
+
+    /** 送封包的連線：slot 0 是 {@code who}（42.22 伺服器只從送出的連線解析玩家）。 */
+    private static UdpConnection connectionOf(short who) {
+        try {
+            UdpConnection c = alloc(UdpConnection.class);
+            c.players = new IsoPlayer[4];
+            c.players[0] = GameServer.IDToPlayerMap.get(who);
+            return c;
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** 原版 {@code ISBaseObject:derive} 的形狀：類別表的 metatable 是父類別，{@code Type} 與全域名相同；每個類別有計次的 new。 */

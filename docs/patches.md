@@ -1507,6 +1507,12 @@ TIS 草稿：`docs/report/2026-09-07-tis-timed-action-followups.md` R1／R3，**
   皆為 act」（TIS 退回 `this.write` 時紅＝重估 A 刀）與「processServer 不經 `NetTimedActionGuard`」。
 - 復活 A 刀：`git checkout 8d2bee8 -- <檔案>`（PatchConfig／NetTimedActionGuard／SmokeCheck／測試／build.ps1）。
 
+### 2026-11-10 42.22.2 對版
+
+- **B／D1 保留，掛點不動**：`NetTimedAction` 整個 class 與 42.21 逐方法相同（`parse` 命中 3/3：`beginParse`＋`protectedCall`＋`actionArgs.load`），`loadInventoryItem`／`loadComponent` 與 Lua 保險絲的前提照舊。變的是 `Action` 的玩家欄位：`PlayerID playerId` 改成 `ConnectionPlayer player`，wire 上只剩一個 short——客戶端送本機玩家 index（0–3），伺服器以 `connection.getPlayerAt(index)` 解析，再把 id 改成那位玩家的 onlineID；Reject 回送時寫 onlineID（比 42.21 少一個 index byte）。
+- **共用 decoder**：`PZNetKahluaTableImpl.load(…B)` 改成帶巢狀深度的 `load(…BI)`（深度達 256 拋 `lua table nesting exceeded`），舊方法刪除；W51 的錨點跟著改（[2bo](#2bo)）。D 刀改道的 `load(ByteBufferReader,IConnection)V` 簽名不變，新的深度例外同樣是 `RuntimeException`，照樣由 `loadArgs` 攔下、走原版 Reject。
+- **驗證**：`NetTimedActionGuardTest` 四組態（出貨／B off／D off／W51 off）。測試封包的玩家欄位改送 index 0、parse 時帶擁有該玩家的擷取連線；原版 `processServer` 恰送 1 包 Reject，bytes＝封包頭 3＋action id、state、onlineID 共 4。
+
 <a id="2y"></a>
 ## 2y. 動物聲音排序活鎖捕手（W11，server）
 
@@ -2336,6 +2342,8 @@ vanilla、class-wide 改道恰 1）。掛在既存 W7 的 IsoGameCharacter Class
 
 > **2026-09-28 42.21 對版**：C（`NetTimedAction.start` tailCall）與 R（`ActionManager.update` 三改道）退役；W10-E（`ActionManager.stop` headCall＋`remove(BZ)` 改道）因官方已修退役；派送 bridge 精簡為動作封包 owner 檢查。詳見本節末「2026-09-28 42.21 對版」。
 
+> **2026-11-10 42.22.2 對版**：動作封包 owner 檢查（`-Dmdc.actionOwnerCheck`）與 W78 執行者檢查（`-Dmdc.actionExecutorCheck`，[2cm](#2cm)）因官方已修退役，派送 bridge 只剩 W10-C 的 Request 上下文與 WorldSound 觀測；B 刀改道跟著原版改收 `IsoPlayer`。詳見本節末「2026-11-10 42.22.2 對版」。
+
 ### 立案（2026-08-28 回報、2026-09-02 落地）
 
 W10（§2x，8/23 上線）根治「server 建構動作就炸 → 既不 Accept 也不 Reject」後，玩家 8/28 晚峰仍回報「讀條走滿不完成」（製作／做奶油／拆除；間歇、排隊多條卡一條、後續動作一起堵死）。兩份受害者 client log 在卡住當下**完全安靜**——零 error、零 Reject、零 `[NetTimedAction]`；server 端 W10 heartbeat `caught=0 rejected=0`＝W10 的目標情境根本沒發生。其中一份 log 顯示
@@ -2481,6 +2489,16 @@ Reject＋bobber flag 的事件資料屬於本人。偽造 Request（index 0／-1
 **命中數**：`NetTimedActionPacket.processServer` 3→1、`NetTimedAction` 4→3（start 移除）、`ActionManager` 5→0（不再是
 patched class）、`PacketTypes$PacketType.onServerPacket` 1 不變。部署時用舊 manifest 完整卸載，避免殘留舊的
 `ActionManager.class`（它呼叫已刪除的 helper 方法）。
+
+### 2026-11-10 42.22.2 對版
+
+**B 保留**：`processServer` 的 Request 分支仍先 `stopPlayerActions` 再 `start` 新動作。原版改收 `IsoPlayer`（`ActionManager.stopPlayerActions(IsoPlayer)` 逐筆以 `isActionOf` 比兩邊 onlineID），改道描述子跟著改成 `(Lzombie/characters/IsoPlayer;)V`，命中仍 1；helper 判斷「同一位玩家的 Accept 舊動作」改用與 `isActionOf` 相同的 onlineID 比較。伺服器端 `ActionManager.remove(IsoPlayer,B)` 仍只移出＋`stop()`，整個方法零 `startPacket`（42.22 連 client 分支也不送），enforce 補送 Reject 的理由不變。
+
+**owner 檢查退役（42.22.2 官方已修）**：原版把動作封包的玩家欄位換成 `ConnectionPlayer`。伺服器 `parse` 先由 `Player.parse` 把玩家清成 null，index 不在 0–3（`isInvalidIndex`）就 return，否則 `connection.getPlayerAt(index)`、再把 id 改成那位玩家的 onlineID，不再查全服 `IDToPlayerMap`（javap `ConnectionPlayer.parse` offset 45–114）；`Action.isConsistent` 委派 `Player.isConsistent`（玩家 null 回 false），四種動作封包都不覆寫，`onServerPacket` 遇到不一致只記 inconsistent、`sync` 後不派送。送進派送點的動作封包只可能代表送出連線自己的玩家，bridge 的 owner 檢查已沒有能擋的情況。刪除 `ownedByConnection`、`refuseUntrusted`、`unknownRefused`、`untrustedAction#` 行與 `-Dmdc.actionOwnerCheck`（設了也無效）。heartbeat 改成 `interruptCalls interruptedAccepted sameIdResend rejectsSent rejectsSkippedNoConn anomalies mode`。
+
+**驗證**：`MdcTimedActionProbeTest` 三組態（observe／enforce／off）。B 與上下文綁定之外，改以真 write→parse 驗四種動作封包的原版行為：index 0 解析成本連線的玩家，交回原版只取消自己的同 id 動作（Fishing 事件資料屬於本人）；index -1、他人 onlineID、本連線的空 slot 都解析不到玩家、`isConsistent` 為 false，雙方動作不動。SmokeCheck 改釘 owner 檢查退役依據（`ConnectionPlayer.parse` 只用 `getPlayerAt` 並改寫 id、不讀 `GameServer.IDToPlayerMap`；`Player.parse` 先清 null；`Action.parse／isConsistent` 走 `ConnectionPlayer`；四種封包不另寫 `isConsistent`；TIS 退回時紅＝復活）與 W10-E 退役依據的新形（`stop→remove(IsoPlayer,B)`、`remove` 的兩個 lambda 以 `(id, isActionOf)` 分鍵、`GeneralActionPacket.setData` 寫入發送者）。
+
+**部署**：helper 與 patched class 數不變（`MdcTimedActionProbe.class` 換新）。復活 owner 檢查與 W78：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java patcher/tests/timed-action-probe`，SmokeCheck 與 build.ps1 對應段一併取回。
 
 <a id="2ak"></a>
 ## 2ak. 每 Steam ID 帳號上限的登入期執法（W23，server，預設 on）
@@ -2794,6 +2812,8 @@ methodText 雜湊，42.20.4 與 42.21 算出同值。
 
 **2026-09-28 42.21 對版**：派送 bridge 精簡（§2aj 末）後，`WorldSoundPacket` 仍由同一個 `MdcTimedActionProbe.processServer`
 交給本觀測器，呼叫點與行為不變（SmokeCheck「只由既有派送器呼叫一次」照舊）。
+
+**2026-11-10 42.22.2 對版**：bridge 退役 owner／W78 檢查後，`WorldSoundPacket` 仍由同一個 `MdcTimedActionProbe.processServer` 交給本觀測器；`onServerPacket` 只有 `sync` 的參數型別從 `UdpConnection` 改成 `IConnection`，派送點語境不變。
 
 <a id="2au"></a>
 ## 2au. 動物離線補算觀測（W32，server，預設 observe）
@@ -3169,6 +3189,8 @@ chunk 由 client 讀檔、伺服器稍後自行載入時多清的部分不通知
 `PacketType.send` 恰 1（TIS 補 Reject 回送即紅＝撤 W44）、改道同形。`WorldItemExpirySyncTest` 驗丟棄條件與原版逐項等價（含兩個原版怪處）與旋鈕解析。沒有本機可執行的 dedicated server 端到端情境；線上驗收＝`can't find world item`
 每 session 行數大幅下降、`WorldItemExpiry removed` 成長且 `anomalies=0`、`TransactionReject sent` 對應剩餘的撿物失敗。
 
+**2026-11-10 42.22.2 對版（W44）**：`TransactionManager.update()` 只有 `Transaction.playerId`（`PlayerID`）改成 `player`（`ConnectionPlayer`）；三個 `setState` 與 Done 分支的回送序列（`getConnectionFromPlayer`→`isFullyConnected`→`startPacket`→`doPacket`→`ItemTransactionPacket.write`→`send`）逐指令相同，命中 3/3，保留，helper 改讀 `packet.player.getPlayer()`。原版 Reject 分支仍不送封包（SmokeCheck 的 W44 存在理由照綠）。42.22 新增的 `removeItemTransaction(B,UdpConnection)`、`cancelAllRelevantToUser(S)` 是別的方法，不影響本刀掛點。
+
 <a id="2bh"></a>
 ## 2bh. 物品處理清單身分索引（W45，server，預設 on；W30 同批退役）
 
@@ -3475,6 +3497,8 @@ room fade skipped`（每次啟動至多一行）。標準版與省記憶體版�
 **未做**：伺服器端的 ID 登記與移除紀錄（用來分辨從沒登記與已移除）等累積樣本再決定。
 
 **驗證**：`NetTimedActionGuardTest` 四組態（出貨與三個 kill switch），用真 table decoder 與真 `NetTimedAction.parse`：查得到的動物原樣解析、不記；查不到時建構子照原版拿到 nil，並記恰 1 行、帶動作 type／name；殘留的 parse 上下文不會讓其他呼叫端被標成讀條動作；連續 30 筆查不到全部計數，逐筆 log 受節流；kill switch 不記也不計。
+
+**2026-11-10 42.22.2 對版（重新錨定）**：原版刪除 `load(ByteBufferReader,IConnection,B)`，改成帶巢狀深度的 `load(ByteBufferReader,IConnection,B,I)`（table 型別遞迴時深度 +1，達 256 拋 `lua table nesting exceeded`），由 `load(…,I)V` 逐筆呼叫。type 17 分支逐指令相同（`new AnimalID`→`parse`→`getAnimal`→`areturn`），PatchConfig 與 SmokeCheck 的錨點改成 `load(…BI)`，命中仍 1；`PZNetKahluaTableImpl` 其餘方法逐指令不變的守門照舊（新方法也在內）。`NetTimedActionGuardTest` 四組態綠。
 
 <a id="2bp"></a>
 ## 2bp. 分割畫面與重生的名稱冒用守衛（W52，server，預設 enforce）
@@ -4416,10 +4440,14 @@ console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20
 
 **退場**：官方在伺服器端驗證建造類別與位置時撤刀。
 
+**2026-11-10 42.22.2 對版**：`BuildAction.parse` 只有兩處 `playerId`→`player`（`ConnectionPlayer`）的欄位讀取改型別，唯一 `protectedCall` 仍在 javap offset 221、之後 `getFirst()==null` 時 `item=null`，`isValid` 全 jar 仍沒有呼叫者，保留（命中 2/2）。伺服器只從送出的連線解析玩家，W77 比的 owner 位置一定是送封包的人自己。`BuildActionPacket` 新增 `shouldInstantiate()=true`（每包新建物件），`beginParse` 綁定照舊。`MdcBuildActionGuardTest` 的 wire 改送 index 0、parse 時帶擁有該玩家的連線；both／type-off／range-off 綠。
+
 ---
 
 <a id="2cm"></a>
 ## 2cm. timed action 的執行者驗證（W78，server，預設 on）
+
+> **退役（2026-11-10，42.22.2 官方已修）**：原版 `NetTimedActionPacket.processServer` 的 Request 分支在 `isConsistent` 與 `action != null` 之後多比一次 `action.rawget("character") == player.getPlayer()`，不同（含 nil）就跳到與 `action == null` 同一個 Reject 分支，而且在 `stopPlayerActions` 之前（javap：`ldc "character"`→`KahluaTable.rawget`→`ConnectionPlayer.getPlayer`→`if_acmpne` 到 Reject 標籤）；`player` 也只會是送出連線自己的玩家（[2aj](#2aj) 末）。`checkExecutor`、`executorRefused`、`executorMismatch#` 行與 `-Dmdc.actionExecutorCheck`（設了也無效）一併刪除。與本刀的差別：原版連 `character` 是 nil 也拒絕（本刀放行 nil）。SmokeCheck 改釘這段原版比較（TIS 拿掉時紅＝復活），`MdcTimedActionProbeTest` 驗 `character` 是別的玩家、不是玩家、nil 時原版恰送 1 包 Reject、不打斷舊動作。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java patcher/tests/timed-action-probe`（SmokeCheck、build.ps1 對應段一併取回）。以下是退役前的紀錄。
 
 強化伺服器端的 timed action 驗證：NetTimedAction 請求重建出的動作，執行者（動作表的 `character`，`ISBaseTimedAction.new(self, character)` 設的）必須是送封包的玩家本人，否則回 Reject。缺口細節不在公開文件描述。
 
@@ -4477,6 +4505,8 @@ console（拒絕時每 10 秒最多 20 行）：
 - `SpriteUpdateGuardTest`（`build.ps1` [9zt/10]，on、off 兩個 JVM，自驗 argv）：走 dist 內手術後的真 `receiveUpdateItemSprite`＋真 wire，真 `IsoCell` 的伺服器分支轉給記錄呼叫的 `ServerMap` 子類。照原版取格子：玩家身旁、每軸恰 20 格、樓層差 1、同機多人任一位在範圍內；不取格子並記 log：21 格、遠處、樓層差 2、同機多人都不在範圍內、連線上沒有玩家；off 照原版。
 
 **退場**：官方在伺服器端驗證 `UpdateItemSprite` 的距離，或改成伺服器權威時撤刀。
+
+**2026-11-10 42.22.2 對版**：`receiveUpdateItemSprite` 只有 `IsoGridSquare.getObjects()` 的回傳型別從 `PZArrayList` 改成 `List`（改成 `invokeinterface size／get`）；唯一 `getGridSquare(III)` 仍在 javap offset 47、之後 `astore 9`／`aload 9`／`ifnull` 跳到 return，命中 2/2，保留。`SpriteUpdateGuardTest` on／off 綠。
 
 ---
 
@@ -4632,6 +4662,8 @@ console（每個被擋的封包一行，每 10 秒最多 20 行；值與伺服�
 - `LightSettingsGuardTest`（`build.ps1` [9zw/10]，on、off、vanilla 三個 JVM，自驗 argv、開關與封包類別來源；vanilla 的 classpath 不含 dist，跑 jar 原版 `parse`）：客戶端那盞燈用真 `write` 產生 wire，伺服器那盞燈走真 `parse`，轉發內容用同一封包的真 `write` 解回來比對，只有找燈的 `NetObject` 換成替身。三種模式都照原版：打掉燈泡（燈泡變 null、其餘不變）、關燈；客戶端電量落後 0.005 時 on 留伺服器值且不記 log；旁觀者晚到的打燈封包（伺服器燈已關、沒燈泡，封包仍是開的）on 不重新開燈、不記 log；上一包讀到一半截斷後，下一包合法打燈不記上一包的欄位。每個欄位都改、燈泡換成另一種、只有開燈：on 伺服器狀態不變、轉發伺服器值、`switchLight` 參數是伺服器的，每包記一行 log；off 與 vanilla 照收（負對照）。距離：x、y 各正負方向差 51 的連線打燈或關燈，on 伺服器狀態不變、各記一行 `outOfRange=true`（含玩家位置），off 與 vanilla 照收；遠方旁觀者晚到的打燈封包 on 不改、不記 log；每軸剛好 50（含對角、差 3 層）、同連線一遠一近，三種模式都照收；燈沒有格子、判距離丟例外時 on 不接受並記 `anomalies`。
 
 **退場**：官方在伺服器端驗證這個封包的客戶端欄位，或改成只由伺服器送出時撤刀。
+
+**2026-11-10 42.22.2 對版**：`SyncCustomLightSettingsPacket` 逐方法與 42.21 相同，手術與命中（12）不變，保留。合法來源變了：`CombatManager.shootPlacedItems` 第三個參數改成 `isLocalShooter`（`IsoBulletTracerEffects` 以射擊者的 `isLocal()` 設定），只有開槍的人本機才把燈泡設成 null 並送這個封包，旁觀者重播曳光不再送；上面「看到這發子彈的其他客戶端」那幾種情況（晚到的打燈封包、遠方旁觀者被擋）在 42.22 不會再出現，相關的 log 規則只是不再觸發，程式不改。SmokeCheck 的合法來源清冊改成新簽名 `shootPlacedItems(IsoGridSquare,Vector3,Z)Z`。`LightSettingsGuardTest` on／off／vanilla 綠。
 
 ---
 
@@ -5157,6 +5189,8 @@ console（首次生效一行；每次超過 20 的取樣一行；每 10 分鐘�
 
 **退場**：官方讓 `AntiCheatSpeed` 不再逐包累計、或自己排除登入後的位置修正時重估；SmokeCheck 鎖了取樣器與 `validate` 的本體，官方改它們時會變紅，先重新核對判斷。
 
+**2026-11-10 42.22.2 對版**：三個掛點逐指令相同（`AntiCheatSpeed.validate`、`PlayerPacket.resetMovable`、`GameServer.sendTeleport`；SHA 鎖照綠），保留。`PlayerPacket` 的玩家欄位從 `PlayerID id` 改成 `ConnectionPlayer player`：伺服器只以送出連線的 slot 解析，解析不到時 `isConsistent` 為 false、封包在反作弊之前就被丟掉（兩種步行封包的 `anticheats` 只剩 Power、Speed、NoClip），所以 `foreign` 分支在 42.22 走不到；程式保留當防線（TIS 退回查全服表時照樣記）。`NetworkPlayerAI.speedChecker` 是從 `NetworkCharacterAI` 繼承的 public final 欄位，helper 參照檢查報的缺欄位是誤報（javac 與測試都過）。`TeleportWatchTest` 的封包玩家改用 `packet.player.setPlayer`；observe／kick／off／vanilla 四組態綠。
+
 <a id="2df"></a>
 ## 2df. Steam 模式也擋 IP 封鎖（W97，server，預設 on）
 
@@ -5184,6 +5218,8 @@ console：
 **部署**：manifest 新增 `zombie/network/MdcSteamIpBan.class`，`MdcAccountGate.class` 換新。部署前先看一次 `bannedip`（`SELECT ip, username, reason FROM bannedip`）：Steam 模式以前寫進去的列從沒生效過，上線後全部開始擋，其中可能有已經換人用的浮動 IP。W96–W97 合計 185 → 190 個 class（85 個 patched class、265 個命中點、105 個 helper）。
 
 **退場**：官方讓 Steam 模式也查 `bannedip` 時撤刀（SmokeCheck 的存在理由會紅）。
+
+**2026-11-10 42.22.2 對版**：沒有手術；`GoogleAuthKeyPacket` 逐方法相同、`LoginPacket` 只差 debug 資訊，4 個 SHA 鎖與存在理由照綠（42.22 仍只在非 Steam 模式查 `bannedip`）。`MdcSteamIpBanTest` on／off 綠。
 
 ---
 

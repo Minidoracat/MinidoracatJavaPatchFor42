@@ -85,7 +85,6 @@ public final class NetTimedActionGuardTest {
         LuaManager.env = table();
         LuaManager.caller = CALLER;
         zombie.characters.IsoPlayer player = testPlayer();
-        GameServer.IDToPlayerMap.put((short) 3, player);
 
         testVanillaDecoderUntouched();
         testReferenceDiagnostics();
@@ -209,9 +208,13 @@ public final class NetTimedActionGuardTest {
                     && NetTimedActionGuard.argsRejectedForTest() == rejected0);
             return p;
         }
-        p.parse(packetWire(true), null);
+        CaptureConnection connection = captureConnection();
+        connection.players = new zombie.characters.IsoPlayer[4];
+        connection.players[0] = player;   // 42.22：ConnectionPlayer 在伺服器以送出連線的 slot 解析玩家
+        p.parse(packetWire(true), connection);
         expect("D：缺 component 的封包 parse 走完，保留合法玩家 header，action=null 進拒絕分支",
-                p.isConsistent(null) && p.action == null && ACTION_TYPE.equals(p.type) && "test".equals(p.name));
+                p.isConsistent(connection) && p.action == null
+                && ACTION_TYPE.equals(p.type) && "test".equals(p.name));
         expect("D：partial args 清空後不呼叫 Lua 建構子，argsFailed／argsRejected 各 +1，B 刀計數不動",
                 CALLER.calls == 0
                 && NetTimedActionGuard.argsFailedForTest() == failed0 + 1
@@ -220,18 +223,16 @@ public final class NetTimedActionGuardTest {
         expect("D：失敗原因與 parse 上下文已在 protectedCall 取用即清",
                 !NetTimedActionGuard.argsFailedPendingForTest() && !NetTimedActionGuard.parseBoundForTest());
 
-        CaptureConnection connection = captureConnection();
         p.processServer(PacketTypes.PacketType.NetTimedAction, connection);
         byte[] wire = connection.packets.size() == 1 ? connection.packets.get(0) : new byte[0];
         ByteBufferReader received = new ByteBufferReader(ByteBuffer.wrap(wire));
-        boolean ok = wire.length == 3 + 5
+        boolean ok = wire.length == 3 + 4
                 && received.getByte() == (byte) 134
                 && received.getShort() == PacketTypes.PacketType.NetTimedAction.getId()
                 && received.getByte() == 7
                 && received.getEnum(Transaction.TransactionState.class) == Transaction.TransactionState.Reject
-                && received.getShort() == player.getOnlineID()
-                && received.getByte() == (player.isLocal() ? (byte) player.getIndex() : (byte) -1);
-        expect("D→原版 processServer：恰送出 1 包，bytes 保留動作／玩家編號且 state=Reject（42.21 以 act.write 序列化）", ok);
+                && received.getShort() == player.getOnlineID();
+        expect("D→原版 processServer：恰送出 1 包，bytes 保留動作 id 與玩家 onlineID 且 state=Reject（以 act.write 序列化）", ok);
         return p;
     }
 
@@ -414,8 +415,7 @@ public final class NetTimedActionGuardTest {
         ByteBuffer bb = ByteBuffer.allocate(512);
         bb.put((byte) 7);                                                   // Action.id
         bb.put((byte) Transaction.TransactionState.Request.ordinal());      // Action.state
-        bb.putShort((short) 3);                                             // PlayerID.id
-        bb.put((byte) -1);                                                  // PlayerID.playerIndex
+        bb.putShort((short) 0);                                             // ConnectionPlayer：本連線的玩家 index（42.22）
         putUTF(bb, ACTION_TYPE);
         putUTF(bb, "test");
         args.accept(bb);
@@ -472,7 +472,7 @@ public final class NetTimedActionGuardTest {
         zombie.characters.IsoPlayer player = alloc(zombie.characters.IsoPlayer.class);
         player.setOnlineID((short) 3);
         player.remote = true;
-        // 原版 reject 分支的 copyFrom → PlayerID.set → isLocal() 會查 ECS 元件表。
+        // 原版 reject 分支的 copyFrom → ConnectionPlayer.set 會讀 onlineID；ECS 元件表照樣補上。
         Field ecs = findField(player.getClass(), "ecsComponentMap");
         ecs.setAccessible(true);
         ecs.set(player, new HashMap<>());

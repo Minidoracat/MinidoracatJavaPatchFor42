@@ -23,7 +23,6 @@ import zombie.debug.LogSeverity;
 import zombie.characters.ecs.ECSComponent;
 import zombie.iso.Vector2;
 import zombie.network.anticheats.AntiCheatSpeed;
-import zombie.network.fields.character.PlayerID;
 import zombie.network.packets.character.PlayerPacket;
 import zombie.network.packets.character.PlayerPacketReliable;
 
@@ -495,7 +494,7 @@ public final class TeleportWatchTest {
                 throw new IllegalStateException("配置的玩家不成立");
             }
             packet = new PlayerPacketReliable();
-            field(PlayerID.class, "player").set(packet.id, player);
+            packet.player.setPlayer(player);   // 42.22：PlayerPacket 的玩家欄位是 ConnectionPlayer
             if (packet.getPlayer() != player || packet.hitVehicleId.getVehicle() != null) {
                 throw new IllegalStateException("配置的封包不成立");
             }

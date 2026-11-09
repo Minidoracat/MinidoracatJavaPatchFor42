@@ -1443,8 +1443,9 @@ public final class SmokeCheck {
         // W51（docs/patches.md 2bo）：共用 table decoder 只為觀測重新出貨。存在理由：原版 type 17 查不到 online ID
         // 就把 null 交給呼叫端、不留紀錄（TIS 補上紀錄或拒絕時紅＝重估）。手術：唯一 AnimalID.parse 同形改道，
         // 原呼叫在 helper 的 try 之外；其餘方法逐指令不變——W10-D2 的猜測改道不得回來。
+        // 42.22：typed decoder 從 load(…B) 改成帶巢狀深度的 load(…BI)（舊方法刪除），type 17 語境不變。
         String animalIdCls = "zombie/network/fields/character/AnimalID";
-        String typedLoadDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;";
+        String typedLoadDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;BI)Ljava/lang/Object;";
         String parseAnimalIdDesc = "(L" + animalIdCls + ";" + argsLoadDesc.substring(1);
         MethodNode vTypedLoad = methodFromJar(jar, netTableCls, "load", typedLoadDesc);
         AbstractInsnNode vAnimalParse = null;
@@ -1452,13 +1453,13 @@ public final class SmokeCheck {
             if (isCall(in, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc)) vAnimalParse = in;
         }
         AbstractInsnNode vAfterParse = vAnimalParse == null ? null : nextReal(nextReal(vAnimalParse));
-        failed += check("W51 vanilla：AnimalID.parse 只以 AnimalInstanceManager.get 查 online ID；load(…B) 恰 1 處 parse，之後直接回 getAnimal()",
+        failed += check("W51 vanilla：AnimalID.parse 只以 AnimalInstanceManager.get 查 online ID；load(…BI) 恰 1 處 parse，之後直接回 getAnimal()",
                 methodText(methodFromJar(jar, animalIdCls, "parse", argsLoadDesc)).contains(
                         "INVOKEVIRTUAL zombie/popman/animal/AnimalInstanceManager.get (S)Lzombie/characters/animals/IsoAnimal;")
                 && countExactCalls(vTypedLoad, Opcodes.INVOKEVIRTUAL, animalIdCls, "parse", argsLoadDesc) == 1
                 && isCall(vAfterParse, Opcodes.INVOKEVIRTUAL, animalIdCls, "getAnimal", "()Lzombie/characters/animals/IsoAnimal;")
                 && nextReal(vAfterParse).getOpcode() == Opcodes.ARETURN);
-        failed += check("W51 load(…B) 唯一 AnimalID.parse 同形改道 NetTimedActionGuard.parseAnimalId，其餘指令與 frames 保留",
+        failed += check("W51 load(…BI) 唯一 AnimalID.parse 同形改道 NetTimedActionGuard.parseAnimalId，其餘指令與 frames 保留",
                 methodText(vTypedLoad).replace("INVOKEVIRTUAL " + animalIdCls + ".parse " + argsLoadDesc,
                         "INVOKESTATIC " + ntaGuardCls + ".parseAnimalId " + parseAnimalIdDesc)
                         .equals(methodText(method(distJava, netTableCls, "load", typedLoadDesc))));
@@ -1500,8 +1501,8 @@ public final class SmokeCheck {
                 countNew(vNtaParse, netTableCls) == 1
                 && methodFromJar(jar, netTableCls, "load", argsLoadDesc).tryCatchBlocks.isEmpty()
                 && methodFromJar(jar, netTableCls, "load",
-                        "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;")
-                        .tryCatchBlocks.isEmpty());
+                        "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;I)V").tryCatchBlocks.isEmpty()
+                && methodFromJar(jar, netTableCls, "load", typedLoadDesc).tryCatchBlocks.isEmpty());
 
         // ---- W11 動物聲音排序活鎖捕手 ----
         String basCls = "zombie/characters/BaseAnimalSoundManager";
@@ -2542,16 +2543,17 @@ public final class SmokeCheck {
         // ---- W10-C 靜默打斷觀測（processServer 的 stopPlayerActions）；C／R 兩點於 42.21 對版退役 ----
         String taProbeCls = "zombie/core/MdcTimedActionProbe";
         String amCls = "zombie/core/ActionManager";
-        String pidCls2 = "zombie/network/fields/character/PlayerID";
-        String stopDesc = "(L" + pidCls2 + ";)V";
-        String amRemoveDesc = "(L" + pidCls2 + ";BZ)V";
-        // vanilla 前提 (B)：processServer 內 stopPlayerActions 恰 1；ActionManager.remove 內
-        // startPacket 恰 1（＝client 分支的 GeneralAction Reject；server 分支零封包＝「不通知
-        // client」的結構事實）。TIS 在 server 分支補通知時此條紅＝enforce 補送 Reject 撤刀訊號。
+        String isoPlayerCls = "zombie/characters/IsoPlayer";
+        String connPlayerCls = "zombie/network/fields/character/ConnectionPlayer";
+        String stopDesc = "(L" + isoPlayerCls + ";)V";
+        String amRemoveDesc = "(L" + isoPlayerCls + ";B)V";
+        // vanilla 前提 (B)：processServer 內 stopPlayerActions 恰 1；ActionManager.remove 的 server 分支零封包
+        // （42.22 起 client 分支也不送，整個 remove 零 startPacket）＝「打斷時不通知 client」的結構事實。
+        // TIS 在 remove 補通知時此條紅＝enforce 補送 Reject 撤刀訊號。
         MethodNode vAmRemove = methodFromJar(jar, amCls, "remove", amRemoveDesc);
-        failed += check("W10-C vanilla (B)：processServer stopPlayerActions=1；ActionManager.remove startPacket 恰 1（server 分支零封包）",
+        failed += check("W10-C vanilla (B)：processServer stopPlayerActions=1；ActionManager.remove 零 startPacket（server 分支不通知 client）",
                 countExactCalls(vNtaProcess, Opcodes.INVOKESTATIC, amCls, "stopPlayerActions", stopDesc) == 1
-                && countCalls(vAmRemove, "zombie/core/raknet/UdpConnection", "startPacket") == 1
+                && countCalls(vAmRemove, "zombie/core/raknet/UdpConnection", "startPacket") == 0
                 && countExactFields(vAmRemove, Opcodes.GETSTATIC, "zombie/network/GameServer", "server", "Z") == 1);
         failed += check("W10-C 手術後：stopPlayerActions 改道 x1、原呼叫歸零",
                 countExactCalls(pNtaProcess, Opcodes.INVOKESTATIC, taProbeCls, "stopPlayerActions", stopDesc) == 1
@@ -2575,10 +2577,11 @@ public final class SmokeCheck {
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "doPacket") == 1
                 && countCalls(gSendReject, "zombie/network/PacketTypes$PacketType", "send") == 1);
 
-        // W10-E 退役依據（42.21 官方修正）：stop 以 (PlayerID,id) 呼叫 remove；remove 的兩個 lambda 同時比 id 與
-        // PlayerID.getID；GeneralActionPacket.setReject 帶 IsoPlayer 並寫入 playerId。退回只比 id 時本條紅＝重估 W10-E。
+        // W10-E 退役依據（42.21 官方修正，42.22 改以 IsoPlayer 分鍵）：stop 以 (action.player 的玩家, id) 呼叫 remove；
+        // remove 的兩個 lambda 同時比 id 與 isActionOf（onlineID）；GeneralActionPacket.setData 寫入發送者。退回只比 id 時本條紅＝重估 W10-E。
         String actionCls = "zombie/core/Action";
         String amStopDesc = "(L" + actionCls + ";)V";
+        String isActionOfDesc = "(L" + actionCls + ";L" + isoPlayerCls + ";)Z";
         MethodNode vAmStop = methodFromJar(jar, amCls, "stop", amStopDesc);
         ClassNode vAmNode = classNodeFromJar(jar, amCls);
         int removeLambdas = 0;
@@ -2589,29 +2592,62 @@ public final class SmokeCheck {
             }
             removeLambdas++;
             removeLambdaOwnerKeyed &= countExactFields(m, Opcodes.GETFIELD, actionCls, "id", "B") == 1
-                    && countExactFields(m, Opcodes.GETFIELD, actionCls, "playerId", "L" + pidCls2 + ";") == 1
-                    && countExactCalls(m, Opcodes.INVOKEVIRTUAL, pidCls2, "getID", "()S") == 2;
+                    && countExactCalls(m, Opcodes.INVOKESTATIC, amCls, "isActionOf", isActionOfDesc) == 1;
         }
         String generalPacketCls = "zombie/network/packets/GeneralActionPacket";
-        MethodNode vSetReject = methodFromJar(jar, generalPacketCls, "setReject", "(BLzombie/characters/IsoPlayer;)V");
-        failed += check("W10-E 退役依據：stop→remove(PlayerID,B,Z) 恰 1、remove lambda 以 (id, PlayerID.getID) 分鍵、setReject 寫入發送者",
+        MethodNode vSetData = methodFromJar(jar, generalPacketCls, "setData", "([Ljava/lang/Object;)V");
+        failed += check("W10-E 退役依據：stop→remove(IsoPlayer,B) 恰 1、remove lambda 以 (id, isActionOf) 分鍵、isActionOf 比兩邊 onlineID、"
+                        + "GeneralActionPacket.setData 寫入發送者",
                 countExactCalls(vAmStop, Opcodes.INVOKESTATIC, amCls, "remove", amRemoveDesc) == 1
+                && countExactFields(vAmStop, Opcodes.GETFIELD, actionCls, "player", "L" + connPlayerCls + ";") == 1
                 && removeLambdas == 2 && removeLambdaOwnerKeyed
-                && countExactCalls(vSetReject, Opcodes.INVOKEVIRTUAL, pidCls2, "set", "(Lzombie/characters/IsoPlayer;)V") == 1);
+                && countExactCalls(methodFromJar(jar, amCls, "isActionOf", isActionOfDesc),
+                        Opcodes.INVOKEVIRTUAL, isoPlayerCls, "getOnlineID", "()S") == 2
+                && countExactCalls(vSetData, Opcodes.INVOKEVIRTUAL, connPlayerCls, "set", "(L" + isoPlayerCls + ";)V") == 1);
 
-        // 動作封包身分檢查的存在理由：原版以 wire PlayerID.getID 當查詢／取消鍵，但 PlayerID.isConsistent
-        // 只驗 id != -1 與解析得到 player，不比對該 player 的 onlineID 或所屬連線。TIS 補上比對時本條紅＝重估 bridge 的 owner 檢查。
-        MethodNode vPidConsistent = methodFromJar(jar, pidCls2, "isConsistent", "(Lzombie/network/IConnection;)Z");
-        failed += check("動作封包身分 vanilla 前提：PlayerID.isConsistent 不讀 player 的 onlineID、不查連線",
-                countCalls(vPidConsistent, "zombie/characters/IsoPlayer", "getOnlineID") == 0
-                && countExactFields(vPidConsistent, Opcodes.GETFIELD, "zombie/characters/IsoPlayer", "onlineId", "S") == 0
-                && countCalls(vPidConsistent, "zombie/network/GameServer", "getPlayerFromConnection") == 0);
+        // 動作封包 owner 檢查退役依據（2026-11-10，42.22.2 官方已修）：伺服器只從送出的連線解析動作封包的玩家。
+        // Action.parse → ConnectionPlayer.parse：先由 Player.parse 清成 null，伺服器分支 isInvalidIndex 就 return，否則
+        // connection.getPlayerAt(index)、id 改成該玩家的 onlineID，不查全服 IDToPlayerMap；Action.isConsistent 委派 Player.isConsistent
+        // （玩家 null 就 false），四種動作封包都不另寫 isConsistent。TIS 退回查全服表或放寬一致性時本條紅＝復活 owner 檢查。
+        String playerFieldCls = "zombie/network/fields/character/Player";
+        String fieldParseDesc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String consistentDesc = "(Lzombie/network/IConnection;)Z";
+        MethodNode vConnParse = methodFromJar(jar, connPlayerCls, "parse", fieldParseDesc);
+        MethodNode vFieldParse = methodFromJar(jar, playerFieldCls, "parse", fieldParseDesc);
+        MethodNode vFieldConsistent = methodFromJar(jar, playerFieldCls, "isConsistent", consistentDesc);
+        boolean actionFamilyDelegates = true;
+        for (String c : new String[]{"zombie/core/GeneralAction", generalPacketCls, ntaCls, ntaPktCls,
+                "zombie/core/BuildAction", "zombie/network/packets/BuildActionPacket",
+                "zombie/core/FishingAction", "zombie/network/packets/FishingActionPacket"}) {
+            MethodNode own = declaredMethod(classNodeFromJar(jar, c), "isConsistent", consistentDesc);
+            actionFamilyDelegates &= own == null || (realInsnCount(own) == 4
+                    && countExactCalls(own, Opcodes.INVOKESPECIAL, actionCls, "isConsistent", consistentDesc) == 1);
+        }
+        failed += check("owner 檢查退役依據：ConnectionPlayer.parse 伺服器只以 getPlayerAt 解析並改寫 id、不讀 GameServer.IDToPlayerMap；"
+                        + "Player.parse 先清 null；Action.parse／isConsistent 走 ConnectionPlayer；四種動作封包不另寫 isConsistent",
+                countExactCalls(vConnParse, Opcodes.INVOKESPECIAL, playerFieldCls, "parse", fieldParseDesc) == 1
+                && firstCallIndex(vConnParse, Opcodes.INVOKESPECIAL, playerFieldCls, "parse", fieldParseDesc)
+                        < firstCallIndex(vConnParse, Opcodes.INVOKEINTERFACE, "zombie/network/IConnection", "getPlayerAt",
+                                "(I)L" + isoPlayerCls + ";")
+                && countExactCalls(vConnParse, Opcodes.INVOKESTATIC, connPlayerCls, "isInvalidIndex", "(S)Z") == 1
+                && countExactCalls(vConnParse, Opcodes.INVOKEINTERFACE, "zombie/network/IConnection", "getPlayerAt",
+                        "(I)L" + isoPlayerCls + ";") == 1
+                && countExactCalls(vConnParse, Opcodes.INVOKEVIRTUAL, isoPlayerCls, "getOnlineID", "()S") == 1
+                && countExactCalls(vConnParse, Opcodes.INVOKEVIRTUAL, connPlayerCls, "setId", "(S)V") == 1
+                && countExactFields(vConnParse, Opcodes.GETSTATIC, "zombie/network/GameServer", "IDToPlayerMap", "Ljava/util/HashMap;") == 0
+                && methodText(vFieldParse).contains("ACONST_NULL\n    INVOKEVIRTUAL " + playerFieldCls + ".setPlayer")
+                && countCalls(vFieldConsistent, playerFieldCls, "getPlayer") == 1
+                && countExactCalls(methodFromJar(jar, actionCls, "parse", fieldParseDesc),
+                        Opcodes.INVOKEVIRTUAL, connPlayerCls, "parse", fieldParseDesc) == 1
+                && countExactCalls(methodFromJar(jar, actionCls, "isConsistent", consistentDesc),
+                        Opcodes.INVOKEVIRTUAL, connPlayerCls, "isConsistent", consistentDesc) == 1
+                && actionFamilyDelegates);
         MethodNode vGapProcess = methodFromJar(jar, generalPacketCls, "processServer", psDesc);
-        failed += check("動作封包身分：GeneralActionPacket 取消恰一個 ActionManager.stop（原版取消入口）",
+        failed += check("動作封包取消入口：GeneralActionPacket 取消恰一個 ActionManager.stop",
                 countExactCalls(vGapProcess, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
         for (String cancelPacket : new String[]{"BuildActionPacket", "FishingActionPacket", "NetTimedActionPacket"}) {
             MethodNode cancel = methodFromJar(jar, "zombie/network/packets/" + cancelPacket, "processServer", psDesc);
-            failed += check("動作封包身分：" + cancelPacket + " 取消恰一個 ActionManager.stop（原版取消入口）",
+            failed += check("動作封包取消入口：" + cancelPacket + " 取消恰一個 ActionManager.stop",
                     countExactCalls(cancel, Opcodes.INVOKESTATIC, amCls, "stop", amStopDesc) == 1);
         }
 
@@ -7197,8 +7233,8 @@ public final class SmokeCheck {
     }
 
     /**
-     * W76–W79 伺服器端請求驗證（docs/patches.md 2cl–2cn）：掛點語境與上游指紋（任一項變了＝重驗或重評撤刀）、
-     * 同形手術、helper 契約。
+     * W76、W77、W79 伺服器端請求驗證（docs/patches.md 2cl、2cn）：掛點語境與上游指紋（任一項變了＝重驗或重評撤刀）、
+     * 同形手術、helper 契約；W78（2cm）42.22.2 官方已修而退役，這裡釘退役依據。
      */
     static int checkActionValidation(Path jar, Path distJava) throws Exception {
         int failed = 0;
@@ -7243,24 +7279,43 @@ public final class SmokeCheck {
                 countExactCalls(gCall, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 2
                 && gCall.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
 
-        // W78：派送 bridge 在 NetTimedAction 封包交回原版前檢查 character；原版 processServer 在 action==null 時走 Reject。
+        // W78 退役依據（2026-11-10，42.22.2 官方已修）：原版 processServer 的 Request 分支在 action 不是 null 之後，
+        // 比 action.rawget("character") 與 player.getPlayer()，不同（含 nil）就跳到與 action==null 同一個 Reject 分支，
+        // 而且在 stopPlayerActions 之前。TIS 拿掉這個比較時本條紅＝復活 W78。bridge 不再碰 action。
         String probe = "zombie/core/MdcTimedActionProbe";
         String psDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
-        MethodNode vNtaProcess = methodFromJar(jar, "zombie/network/packets/NetTimedActionPacket", "processServer", psDesc);
-        failed += check("W78 vanilla 前提：NetTimedActionPacket.processServer 讀 action、null 時跳 Reject 分支",
-                methodText(vNtaProcess).contains(".action : Lse/krka/kahlua/vm/KahluaTable;\n    IFNULL"));
+        String ntaPkt = "zombie/network/packets/NetTimedActionPacket";
+        String connPlayer = "zombie/network/fields/character/ConnectionPlayer";
+        MethodNode vNtaProcess = methodFromJar(jar, ntaPkt, "processServer", psDesc);
+        JumpInsnNode nullJump = null;
+        JumpInsnNode characterJump = null;
+        for (AbstractInsnNode in : vNtaProcess.instructions) {
+            if (nullJump == null && in.getOpcode() == Opcodes.IFNULL
+                    && isField(prevReal(in), Opcodes.GETFIELD, ntaPkt, "action", "Lse/krka/kahlua/vm/KahluaTable;")) {
+                nullJump = (JumpInsnNode) in;
+            }
+            AbstractInsnNode getPlayer = prevReal(in);
+            if (characterJump == null && in.getOpcode() == Opcodes.IF_ACMPNE
+                    && isCall(getPlayer, Opcodes.INVOKEVIRTUAL, connPlayer, "getPlayer", "()Lzombie/characters/IsoPlayer;")
+                    && isField(prevReal(getPlayer), Opcodes.GETFIELD, ntaPkt, "player", "L" + connPlayer + ";")
+                    && isCall(prevReal(prevReal(prevReal(getPlayer))), Opcodes.INVOKEINTERFACE, "se/krka/kahlua/vm/KahluaTable",
+                            "rawget", "(Ljava/lang/Object;)Ljava/lang/Object;")
+                    && prevReal(prevReal(prevReal(prevReal(getPlayer)))) instanceof LdcInsnNode ldc && "character".equals(ldc.cst)) {
+                characterJump = (JumpInsnNode) in;
+            }
+        }
+        AbstractInsnNode stopCall = firstCall(vNtaProcess, Opcodes.INVOKESTATIC, "zombie/core/ActionManager", "stopPlayerActions",
+                "(Lzombie/characters/IsoPlayer;)V");
+        failed += check("W78 退役依據：processServer 先判 action==null，再比 action.character == player.getPlayer()，"
+                        + "不同就跳同一個 Reject 分支，都在 stopPlayerActions 之前",
+                nullJump != null && characterJump != null && stopCall != null && nullJump.label == characterJump.label
+                && vNtaProcess.instructions.indexOf(nullJump) < vNtaProcess.instructions.indexOf(characterJump)
+                && vNtaProcess.instructions.indexOf(characterJump) < vNtaProcess.instructions.indexOf(stopCall));
         MethodNode bridge = method(distJava, probe, "processServer",
                 "(Lzombie/network/packets/INetworkPacket;" + psDesc.substring(1));
-        String execDesc = "(Lzombie/network/packets/NetTimedActionPacket;Lzombie/core/raknet/UdpConnection;)V";
-        MethodNode exec = method(distJava, probe, "checkExecutor", execDesc);
-        failed += check("W78 helper 契約：bridge 在第一次交回原版 processServer 之前呼叫 checkExecutor；checkExecutor 讀 character、"
-                        + "不符時寫 action=null，不自行派送",
-                countExactCalls(bridge, Opcodes.INVOKESTATIC, probe, "checkExecutor", execDesc) == 1
-                && firstCallIndex(bridge, Opcodes.INVOKESTATIC, probe, "checkExecutor", execDesc)
-                        < firstCallIndex(bridge, Opcodes.INVOKEINTERFACE, "zombie/network/packets/INetworkPacket", "processServer", psDesc)
-                && methodText(exec).contains("LDC \"character\"")
-                && methodText(exec).contains("ACONST_NULL\n    PUTFIELD zombie/network/packets/NetTimedActionPacket.action : Lse/krka/kahlua/vm/KahluaTable;")
-                && countCalls(exec, "zombie/network/packets/INetworkPacket", "processServer") == 0);
+        failed += check("W78 退役：bridge 不寫 NetTimedActionPacket.action、probe 不再有 checkExecutor",
+                countExactFields(bridge, Opcodes.PUTFIELD, ntaPkt, "action", "Lse/krka/kahlua/vm/KahluaTable;") == 0
+                && classNode(distJava, probe).methods.stream().noneMatch(m -> m.name.equals("checkExecutor")));
 
         // W79：receiveUpdateItemSprite 唯一 getGridSquare(III) 之後 null 就 return；頭部綁連線、改道 SpriteUpdateGuard。
         String gs = "zombie/network/GameServer";
@@ -7433,10 +7488,12 @@ public final class SmokeCheck {
                 && methodText(methodFromJar(jar, pkt, "processServer",
                         "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V"))
                         .matches("(?s).*INVOKEVIRTUAL " + pkt + "\\.sendToClients .*INVOKEVIRTUAL " + pkt + "\\.processClient .*"));
+        // 42.22：shootPlacedItems 第三個參數改成 isLocalShooter（IsoBulletTracerEffects 以 isoGameCharacter.isLocal() 設定），
+        // 只有開槍者本機才 setBulbItemRaw(null)＋syncCustomizedSettings；旁觀者重播曳光不再送打燈封包。
         failed += check("W82 合法來源清冊：全 jar 呼叫 IsoLightSwitch.syncCustomizedSettings 的只有 CombatManager.shootPlacedItems（客戶端打掉燈泡）"
                         + "與 IsoLightSwitch 自己 6 處（伺服器分支）；多了新呼叫點＝重驗它是不是客戶端送出、會不會被擋",
                 jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, ls, "syncCustomizedSettings", "(Lzombie/core/raknet/UdpConnection;)V").equals(java.util.List.of(
-                        "zombie/CombatManager.shootPlacedItems(Lzombie/iso/IsoGridSquare;Lzombie/iso/Vector3;Lzombie/iso/objects/IsoBulletTracerEffects$Effect;)Z",
+                        "zombie/CombatManager.shootPlacedItems(Lzombie/iso/IsoGridSquare;Lzombie/iso/Vector3;Z)Z",
                         ls + ".addBattery(Lzombie/characters/IsoGameCharacter;Lzombie/inventory/InventoryItem;)V",
                         ls + ".addLightBulb(Lzombie/characters/IsoGameCharacter;Lzombie/inventory/InventoryItem;)V",
                         ls + ".removeBattery(Lzombie/characters/IsoGameCharacter;)Lzombie/inventory/types/DrainableComboItem;",
