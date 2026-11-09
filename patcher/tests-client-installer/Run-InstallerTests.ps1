@@ -1216,6 +1216,27 @@ try {
     Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有留下狀態目錄'
     $r = Invoke-UninstallAll
     Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '再跑一次：沒東西要卸載'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force
+    $brokenJson = (Get-GameText $LAUNCHER_REL) + '}{ not json'
+    Write-TextFile (GameFile $LAUNCHER_REL) $brokenJson
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 7 -and $r.Out -notmatch '沒有東西需要卸載') '啟動設定解析不了、裡面還有本包的參數：結束代碼 7，不回報沒東西要卸載'
+    Check ((Get-GameText $LAUNCHER_REL) -ceq $brokenJson) '啟動設定沒被動'
+    Write-TextFile (GameFile $LAUNCHER_REL) '{ not json at all'
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '啟動設定解析不了但沒提到本包：照舊回報沒東西要卸載'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force
+    $r = Invoke-Uninstall @('profiler')
+    Check ($r.Code -eq 2 -and -not (Test-JsonIsOriginal)) '非互動又沒有 -All：只能整條拿掉，要求 -All（代碼 2），什麼都不動'
+    Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
+    Write-TextFile (GameFile $P_FIX_TIDAM) $C_LEGACY_TIDAM_STD
+    $r = Invoke-UninstallAll $PkgV1
+    Check ($r.Code -eq 0 -and (Test-JsonIsOriginal)) '同時有整組吻合的舊版包：同一筆交易拿掉啟動參數'
+    Check (-not (Test-GameFile $P_LEGACY_GUARD) -and -not (Test-GameFile $P_FIX_TIDAM) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '舊版包的檔案也移除，沒有留下狀態目錄'
 
     Start-Case '69. zombie/mdc 底下沒有紀錄的 class（舊版殘留）：拒裝，不讓它蓋掉 agent jar 的同名 class'
     Reset-GameDir

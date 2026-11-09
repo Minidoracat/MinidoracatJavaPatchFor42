@@ -99,8 +99,15 @@ public final class MdcPatchRuntime {
         return Set.of(modules.split(","));
     }
 
+    private static java.lang.reflect.Method agentMismatched;
+
+    /** canProfile() 每次都會問，Method 只查一次。 */
     private static int agentMismatched() throws ReflectiveOperationException {
-        return (Integer) Class.forName("zombie.mdc.MdcAgent").getMethod("mismatched").invoke(null);
+        java.lang.reflect.Method m = agentMismatched;
+        if (m == null) {
+            agentMismatched = m = Class.forName("zombie.mdc.MdcAgent").getMethod("mismatched");
+        }
+        return (Integer) m.invoke(null);
     }
 
     /** 啟動檢查通過，而且到現在都沒有換不上的 class（啟動後才載入的 class 也算）。 */

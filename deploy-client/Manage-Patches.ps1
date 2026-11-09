@@ -522,8 +522,8 @@ function Read-Launcher([string]$gameRoot) {
 }
 
 # 頂層 vmArgs 換成「拿掉自己的 -javaagent、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
-# 排最前面：JVM 照順序跑各 agent 的 premain，本包先註冊就先拿到原版 bytes；排在後面時，前面的 agent 若先載入或
-# 改了本包要換的 class，本包就整包不啟用（DISARMED）或那個 class 不換（NOT APPLIED）。
+# 排最前面：JVM 照順序跑各 agent 的 premain，本包的先跑，別的 agent 就來不及在本包檢查之前載入要換的 class
+# （那樣本包會整包不啟用，DISARMED）。transform 的先後不由這個順序決定：別的 agent 改過的 class 本包不換（NOT APPLIED）。
 function New-LauncherBytes($launcher, [string]$newArg) {
     $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
     $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })
@@ -1326,7 +1326,7 @@ function Write-ForeignLooseWarning([string[]]$paths) {
 function Write-OtherAgentsNote([string[]]$agents) {
     if (@($agents).Count -eq 0) { return }
     Write-Info ((L '  啟動設定裡另有其他 Java agent（本包不動它們）：' '  The launch settings also load other Java agents (this package leaves them alone): ') + (@($agents) -join ' '))
-    Write-Info (L '  本包的啟動參數排在最前面，先換上修補。若仍有 class 在本包之前就被載入或改過，本包整包不啟用（console 印 [mdc-agent] DISARMED）或那個 class 不換（印 [mdc-agent] NOT APPLIED）。' '  This package''s launch option goes first, so its patches are applied first. If a class was still loaded or changed before this package, the whole package stays off (the console prints [mdc-agent] DISARMED) or that class is skipped (it prints [mdc-agent] NOT APPLIED).')
+    Write-Info (L '  本包的啟動參數排在最前面，先啟動。別的 agent 若改了本包要修補的 class，那個 class 不換（console 印 [mdc-agent] NOT APPLIED，遊戲內狀態顯示 CHECK FAILED）；本包啟動時發現要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。' '  This package''s launch option goes first, so it starts first. If another agent changes a class this package patches, that class is skipped (the console prints [mdc-agent] NOT APPLIED and the in-game status shows CHECK FAILED). If a class to patch is already loaded when this package starts, the whole package stays off (it prints [mdc-agent] DISARMED).')
 }
 
 function New-StateModuleEntries($manifest, [string[]]$targetIds) {
@@ -1563,9 +1563,14 @@ function Invoke-Uninstall {
             # 安裝紀錄不見了（例如 .mdc-patches 被手動刪掉）但啟動設定還留著本包那一條：agent jar 不在時 JVM 起不來，要拿掉
             $orphanWrites = @()
             $launcher = Read-Launcher $GameRoot
-            if ($launcher.Editable -and $launcher.Ours.Count -gt 0) {
-                $bytes = New-LauncherBytes $launcher $null
-                if ($bytes) { $orphanWrites += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
+            if ($launcher.Editable) {
+                if ($launcher.Ours.Count -gt 0) {
+                    $bytes = New-LauncherBytes $launcher $null
+                    if ($bytes) { $orphanWrites += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
+                }
+            } elseif (-not $launcher.Missing -and ($null -eq $launcher.Text -or $launcher.Text.IndexOf('MinidoracatClientPatches', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+                # 讀不出來，或讀得出文字、裡面提到本包的 jar 卻解析不了：不能確定啟動參數清掉了沒，不回報「沒有東西需要卸載」
+                Fail $EXIT_CONFLICT $launcher.Problem
             }
             if ($legacy.Packages.Count -eq 0) {
                 if ($orphanWrites.Count -eq 0) {
@@ -1575,6 +1580,10 @@ function Invoke-Uninstall {
                 Write-Head (L '卸載計畫' 'Removal plan')
                 Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
                 Write-Info (L '  沒有安裝紀錄，但 ProjectZomboid64.json 還留著本包的啟動參數：拿掉它' '  There is no install record, but ProjectZomboid64.json still has this package''s launch option: removing it')
+                # 沒有模組可挑，只能整條拿掉：比照舊版包，非互動要明示 -All
+                if (-not $RemoveAll -and -not $Interactive) {
+                    Fail $EXIT_USAGE (L '沒有安裝紀錄，但啟動設定還留著本包的啟動參數；只能整個拿掉：請用 -All。' 'There is no install record, but the launch settings still have this package''s launch option. It can only be removed as a whole. Use -All.')
+                }
                 if ($Interactive) {
                     $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
                     if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }

@@ -453,11 +453,11 @@ Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
   never removes other authors' tools.
 - Changes ProjectZomboid64.json only by adding or removing its own -javaagent option (it
-  goes first in vmArgs, so this package gets the original classes before other agents).
-  It does not change the game jar. Other Java agents (-javaagent, -agentlib, -agentpath)
-  stay. If a class this package patches was still loaded or changed before it, the whole
-  package stays off ([mdc-agent] DISARMED) or that class is skipped ([mdc-agent] NOT
-  APPLIED in the console).
+  goes first in vmArgs, so this package starts before other agents). It does not change
+  the game jar. Other Java agents (-javaagent, -agentlib, -agentpath) stay. If one of them
+  changes a class this package patches, that class is skipped ([mdc-agent] NOT APPLIED in
+  the console); if a class to patch is already loaded when this package starts, the whole
+  package stays off ([mdc-agent] DISARMED).
 - The console shows [mdc-agent] ARMED when the patches are active and [mdc-agent]
   DISARMED (with the reason) when they switched themselves off.
 - Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
@@ -569,9 +569,9 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進遊戲�
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
-- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -javaagent（排在 vmArgs 最前面，比其他 agent 先拿到原版 class）；不改遊戲 JAR。
-  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留；仍有 class 在本包之前就被載入或改過時，本包整包不啟用
-  （console 印 [mdc-agent] DISARMED）或那個 class 不換（印 [mdc-agent] NOT APPLIED）。
+- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -javaagent（排在 vmArgs 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
+  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留；它們若改了本包要修補的 class，那個 class 不換
+  （console 印 [mdc-agent] NOT APPLIED）；本包啟動時要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。
 - console 印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
 - 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - JVM 執行中不得移除修補。交易中斷時，先重跑管理器復原，再開遊戲。

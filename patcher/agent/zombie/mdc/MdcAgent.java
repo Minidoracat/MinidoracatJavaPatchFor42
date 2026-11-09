@@ -36,9 +36,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p><b>全有或全無</b>：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對、要換的 class 一個都還沒被載入，
  * 才註冊 transformer；任何一步不符就一個 class 都不換（原版遊戲），且不讓開服失敗——premain 丟例外會讓 JVM 直接結束。
  * 遊戲更新換了 jar 就不會啟用，沒有「新 jar＋舊修補」混跑。transformer 註冊後才定義原版 package 的 helper：錨點與
- * helper 的父型別（例如封包都實作被修補的 {@code INetworkPacket}）會在定義時載入，必須已經換得到。定義失敗時移除
- * transformer，再以 {@code retransformClasses} 把已換上的 class 還原成原版（手術不改 class 的欄位、方法與繼承，
- * 建置期 {@code AgentJarBuilder} 逐 class 檢查），回到原版遊戲；連還原都失敗才結束 JVM（exit 78），不帶著半套修補開服。
+ * helper 的父型別（例如封包都實作被修補的 {@code INetworkPacket}）會在定義時載入，必須已經換得到。定義失敗時把
+ * transformer 切到還原模式，以 {@code retransformClasses} 把已換上的 class 還原成原版並逐個核對原始 bytes 的 SHA，
+ * 最後才移除 transformer（手術不改 class 的形狀，建置期 {@code AgentJarBuilder} 逐 class 檢查），回到原版遊戲；
+ * 還原不完整才結束 JVM（exit 78），不帶著半套修補開服。
+ *
+ * <p>和別的 agent 並存：transformer 是 retransformation capable（還原要用），JVM 先跑所有 incapable 的 transformer
+ * 才輪到 capable 的，和 {@code -javaagent} 的先後無關；別的 agent 先改過的 class，本 agent 拿到的 bytes 不是建置基準，
+ * 那一個不換（{@code NOT APPLIED}）。排在最前面的好處只有 premain 先跑：別的 agent 來不及在本 agent 檢查之前載入要換的 class。
  *
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
  *
@@ -223,10 +228,11 @@ public final class MdcAgent {
         } catch (Throwable t) {
             // 還原：transformer 切到還原模式後 retransform，JVM 把原始 bytes 再交給它一次；它核對 SHA 是建置基準、回 null
             // （不換），已換上的 class 就回到原版。定義成功的 helper 沒有人引用。核對數不等於換上的數＝還原不完整。
+            // beginRestore 與 transform 的判定同一把鎖：切到還原模式那一刻之後不會再有 class 被換上，之前換上的都在清單裡
+            // （別的執行緒還在定義中的 class，下面的 Class.forName 會等它定義完）。
             Set<String> swapped = Set.of();
             try {
-                swap.restoring = true;
-                swapped = swap.applied();
+                swapped = swap.beginRestore();
                 List<Class<?>> classes = new ArrayList<>();
                 for (String n : swapped) {
                     classes.add(Class.forName(n.replace('/', '.'), false, app));
@@ -478,16 +484,17 @@ public final class MdcAgent {
 
         private final java.util.Set<String> appliedNames = java.util.concurrent.ConcurrentHashMap.newKeySet();
         private final java.util.Set<String> restoredNames = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        /** 還原模式：一個都不換；retransform 交來的原始 bytes 對過 SHA 就記為已還原。 */
-        volatile boolean restoring;
+        /** 還原模式：一個都不換；retransform 交來的原始 bytes 對過 SHA 就記為已還原。只在鎖內讀寫。 */
+        private boolean restoring;
 
         Swap(ClassLoader app, Map<String, Payload> table) {
             this.app = app;
             this.table = table;
         }
 
-        /** 換上過的 class（內部名稱，排序）。 */
-        Set<String> applied() {
+        /** 切到還原模式，回傳到這一刻為止換上過的 class（內部名稱，排序）；回傳之後 transform 不會再換任何 class。 */
+        synchronized Set<String> beginRestore() {
+            restoring = true;
             return new java.util.TreeSet<>(appliedNames);
         }
 
@@ -505,35 +512,42 @@ public final class MdcAgent {
             if (p == null) {
                 return null;
             }
-            if (restoring) {
-                try {
-                    if (redefined != null && sha256(original).equals(p.origSha())) {
-                        restoredNames.add(className);
-                    }
-                } catch (Throwable ignored) {
-                    // 沒記到＝還原數不符，由 arm() 判失敗
-                }
-                return null;
-            }
-            if (redefined != null && appliedNames.contains(className)) {
-                return p.bytes();   // 別的 agent retransform 已換上的 class：照樣給同一份，整套修補不因此少一個
-            }
+            boolean base;
             try {
-                if (!sha256(original).equals(p.origSha())) {
+                base = sha256(original).equals(p.origSha());
+            } catch (Throwable t) {
+                base = false;
+            }
+            synchronized (this) {   // 與 beginRestore 同一把鎖
+                if (restoring) {
+                    if (redefined != null && base) {
+                        restoredNames.add(className);   // 沒記到＝還原數不符，由 arm() 判失敗
+                    }
+                    return null;
+                }
+                if (redefined != null) {
+                    if (appliedNames.contains(className)) {
+                        if (base) {
+                            return p.bytes();   // 別的 agent retransform 已換上的 class（JVM 交來原始 bytes）：照樣給同一份
+                        }
+                        // redefineClasses（別的 agent 或除錯器）給了別的 bytes：不蓋掉對方的定義，但修補從此少一個
+                        MISMATCHED.incrementAndGet();
+                        say("NOT APPLIED " + className + ": redefined with other bytes by another agent or a debugger");
+                    }
+                    return null;   // 載入時沒換上的 class 不在事後補換
+                }
+                if (!base) {
                     // 整個 jar 的 SHA 已經對過，走到這裡代表這個 class 不是從遊戲 jar 來（例如 java/ 底下的殘留 loose 檔）
                     MISMATCHED.incrementAndGet();
                     say("NOT APPLIED " + className + ": loaded bytes differ from the build base (not from "
                             + GAME_JAR + "?)");
                     return null;
                 }
-            } catch (Throwable t) {
-                MISMATCHED.incrementAndGet();
-                return null;
+                if (appliedNames.add(className)) {
+                    APPLIED.incrementAndGet();
+                }
+                return p.bytes();
             }
-            if (appliedNames.add(className)) {
-                APPLIED.incrementAndGet();
-            }
-            return p.bytes();
         }
     }
 }

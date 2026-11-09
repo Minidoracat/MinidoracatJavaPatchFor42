@@ -59,6 +59,12 @@ Assert-Ok "javac runtime helpers"
 # 正式服載入器（Java agent）：只用 JDK，不對遊戲 jar 編譯；打包時才和 dist\java 合成 agent jar
 javac -encoding UTF-8 -d "$R\work\agent-classes" (Get-ChildItem "$R\patcher\agent" -Recurse -Filter *.java).FullName
 Assert-Ok "javac agent"
+# agent 的還原不變式（多執行緒載入中途切到還原模式）；測試 class 另放，不進 agent jar
+New-Item -ItemType Directory -Force "$R\work\agent-tests" | Out-Null
+javac -encoding UTF-8 -cp "$R\work\agent-classes" -d "$R\work\agent-tests" (Get-ChildItem "$R\patcher\tests-agent" -Recurse -Filter *.java).FullName
+Assert-Ok "javac agent tests"
+java -cp "$R\work\agent-classes;$R\work\agent-tests" zombie.mdc.MdcAgentSwapTest
+Assert-Ok "MdcAgentSwapTest"
 
 Write-Host "[3/10] 編譯全部行為測試與 benchmark..."
 javac -encoding UTF-8 -cp "$R\work\out;$ASM_CP;$R\dist\java;$R\work\projectzomboid.jar" -d "$R\work\out" `

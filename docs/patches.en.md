@@ -50,6 +50,14 @@ other helpers live in our own packages (e.g. `zombie.mdc`) and load from the age
   this for every class when it builds the jar. A class that loads after arming with bytes that are not the build
   base (for example because another agent changed it first) is left alone and `[mdc-agent] NOT APPLIED` is
   printed: the patch set is then incomplete, so fix the cause and restart.
+- **Running next to other Java agents**: this agent's transformer is retransformation capable (the restore needs
+  that). The JVM runs every incapable transformer before the capable ones, whatever the order of `-javaagent`
+  options, so a class another agent changed reaches this agent with bytes that are not the build base and is left
+  alone (`NOT APPLIED`). When another agent later retransforms a class this agent replaced, it gets the same patched
+  bytes again; when another agent or a debugger redefines it with other bytes, this agent does not overwrite them
+  and prints `NOT APPLIED`. Listing this agent first only makes its premain run first, so no other agent can load a
+  class to patch before the check. The production server has no other agents; this mainly matters for the client
+  package.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.

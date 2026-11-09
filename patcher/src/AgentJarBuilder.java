@@ -328,22 +328,46 @@ public final class AgentJarBuilder {
 
     static String shape(byte[] bytes) {
         ClassReader cr = new ClassReader(bytes);
-        Set<String> members = new TreeSet<>();
+        List<String> fields = new ArrayList<>();   // JVM 依宣告順序比對欄位
+        Set<String> methods = new TreeSet<>();
+        List<String> attrs = new ArrayList<>();    // NestHost、NestMembers、Record、PermittedSubclasses 也不能變
         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
             @Override
             public org.objectweb.asm.FieldVisitor visitField(int access, String name, String desc, String sig, Object value) {
-                members.add("F " + access + " " + name + " " + desc);
+                fields.add(access + " " + name + " " + desc);
                 return null;
             }
 
             @Override
             public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc, String sig,
                                                                String[] exceptions) {
-                members.add("M " + access + " " + name + desc);
+                methods.add(access + " " + name + desc);
+                return null;
+            }
+
+            @Override
+            public void visitNestHost(String nestHost) {
+                attrs.add("nestHost " + nestHost);
+            }
+
+            @Override
+            public void visitNestMember(String nestMember) {
+                attrs.add("nestMember " + nestMember);
+            }
+
+            @Override
+            public void visitPermittedSubclass(String permittedSubclass) {
+                attrs.add("permitted " + permittedSubclass);
+            }
+
+            @Override
+            public org.objectweb.asm.RecordComponentVisitor visitRecordComponent(String name, String desc, String sig) {
+                attrs.add("record " + name + " " + desc);
                 return null;
             }
         }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-        return cr.getAccess() + " " + cr.getSuperName() + " " + List.of(cr.getInterfaces()) + " " + members;
+        return cr.getAccess() + " " + cr.getSuperName() + " " + List.of(cr.getInterfaces()) + " fields" + fields
+                + " methods" + methods + " " + attrs;
     }
 
     /** 錨點：同 package 的原版 class，先挑沒被修補的頂層 class。 */
