@@ -2,10 +2,10 @@
 
 [English](README.md) | **繁體中文**
 
-**Project Zomboid Build 42**（目前對應 **42.21.0**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
+**Project Zomboid Build 42**（目前對應 **42.22.2**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 的 loose `.class` 覆蓋，處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.21.0 共 85 個 patched class、265 個命中點、105 個 helper class。
+- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 80 個 patched class、244 個命中點、99 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -15,7 +15,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 > **給 The Indie Stone 開發團隊**
 >
 > 以下每一項都是在正式服上用 thread dump、JFR、心跳計數器與封包擷取定位出來的，每個修正都逐指令對照過官方
-> `projectzomboid.jar`。其中幾項已在 42.20.2–42.21.0 由官方修掉（見[官方已修](#官方已修)），謝謝。表格的
+> `projectzomboid.jar`。其中幾項已在 42.20.2–42.22.2 由官方修掉（見[官方已修](#官方已修)），謝謝。表格的
 > **TIS** 欄標出哪些已在論壇回報、哪些還沒回報。任何一項都可以提供 log、封包統計或測試版本：請在這裡開
 > issue，或在論壇聯絡 **Minidoracat**。
 
@@ -54,13 +54,12 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ## 修補目錄
 
-狀態欄以 42.21.0 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。
+狀態欄以 42.22.2 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。42.22.2 由官方修掉而退役的修補移到[官方已修](#官方已修)。
 
 ### 穩定性：凍結、活鎖與崩潰
 
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
-| W5 容器環守衛（[2q](docs/patches.md#2q)） | 多人搬移可以把容器放進自己的子孫容器裡，`ItemContainer.getCharacter()` 因此無限遞迴，`StackOverflowError` 讓主迴圈死掉（無聲凍結 13 分鐘）。 | 在找擁有者的路徑上偵測環（identity 路徑＋深度保險絲），切斷並記錄環的位置。2026-08-13 以來未再發生。 | [#100891](https://theindiestone.com/forums/topic/100891/) |
 | W6 地圖格載入捕手（[2r](docs/patches.md#2r)） | `IsoChunk.doLoadGridsquare` 裡的 `IsoObject.addToWorld` 丟出 "Entity is already registered"，該格一直留在待載入佇列，每 0.1 秒重撞一次：活鎖 114 分鐘。 | 在兩處 `addToWorld` 攔截，記下座標與 sprite 後跳過該物件。殘留的重複登記每天仍有幾次，但不會再讓伺服器凍結。 | [#100893](https://theindiestone.com/forums/topic/100893/) |
 | W11 動物聲音排序（[2y](docs/patches.md#2y)） | `BaseAnimalSoundManager` 排序用的比較器會即時重算距離，遇到 NaN 就違反比較契約；TimSort 丟例外、`clear()` 被跳過，陳舊清單每幀都失敗：全服卡讀條、時間停止。 | 攔下例外，該幀跳過排序讓 `clear()` 照常執行，並記錄 NaN 來源。 | [#100897](https://theindiestone.com/forums/topic/100897/) |
 | W37 動物半建構物件（[2az](docs/patches.md#2az)） | `IsoAnimal` 建構子的檢查失敗時，物件已經放進 cell，`adef`／`data` 為 null，之後每個 tick 都丟例外（遊戲時間凍結約 65 分鐘）。存檔先開 `apop_*.bin` 才序列化，一失敗就留下 0 bytes 檔、動物全失。把動物放到水格時，原版又把建構失敗的物件放回格子；那個 cell 卸載時每個 tick 都丟例外，之後的 cell 全部卸不掉，約 1 小時 heap 用盡。有些岸邊格看起來是草地、人也站得上去，地板卻是水，玩家在那裡放下動物不會發覺。 | 建構子返回前撤出失敗的物件；先序列化，成功才寫檔。放到水格的動物改在旁邊第一格能走、沒有被牆或圍欄隔開的陸地建好，也告訴客戶端那一格；找不到才把建構失敗的動物移出世界、不送給客戶端；chunk 卸載只吞這種動物的例外。 | 草稿 |
@@ -75,12 +74,9 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
-| W7 朝向暫存執行緒隔離（[2s](docs/patches.md#2s)） | `IsoGameCharacter.setForwardDirectionFromIsoDirection` 用共用的 static `tempVector2_2` 當暫存；chunk 載入執行緒與主迴圈同時使用時讀到零向量，chunk 載入中止，原版把整個 chunk 抹除重生（一位玩家的雞舍連 32 隻家禽整組消失）。 | 兩處讀取改成執行緒私有向量（堆疊形狀不變，不動 frame）。 | [#100895](https://theindiestone.com/forums/topic/100895/) |
 | W8 chunk 寫入閘（[2t](docs/patches.md#2t)） | 43 個玩家建造的 chunk 在 `SANITY CHECK FAIL` 後被抹除；鑑識證明檔案寫入時就已帶錯誤或為 0 的 CRC。 | 在 `SafeWrite` 截斷舊檔之前先驗長度與 CRC，損毀就擋下、保留舊檔並記錄 stack。上線第一晚擋下 8 筆損毀寫入，零損失。 | [#100901](https://theindiestone.com/forums/topic/100901/) |
 | W9 存檔管線隔離（[2u](docs/patches.md#2u)） | 存檔執行緒共用 `CRC32` 實例而產生競態（W8 損毀 header 的根因），存檔管線還和發送執行緒共用全域 chunk 池。 | CRC 部分已在 42.21.0 由官方修掉並退役；存檔管線的私有 chunk 池保留。修正後 290 萬次寫入零攔截。 | [#100901](https://theindiestone.com/forums/topic/100901/)（部分已修） |
-| W12 車輛 chunk 索引（[2z](docs/patches.md#2z)） | `VehiclesDB2$VehicleBuffer.set` 從陳舊或回收池裡的 `vehicle.chunk` 取 `wx`／`wy`，`x`／`y` 卻來自物理位置；資料列存進錯的 chunk，車子再也載不回來。 | 改由車輛位置推算 `wx`／`wy`（本服每週約修正 180 次）。 | [#100913](https://theindiestone.com/forums/topic/100913/) |
-| W17 雞舍載入（[2ae](docs/patches.md#2ae)） | `IsoHutch.load` 丟掉 `addAnimalInside` 的回傳值；雞舍快滿時，動物在載入時被靜默銷毀。 | 改找空位放入；只有真的滿舍才記一行 critical。 | [#100907](https://theindiestone.com/forums/topic/100907/) |
-| W38 畜牧區補算快照（[2ba](docs/patches.md#2ba)） | 離線補算迴圈用索引走 `zone.animals`，補算過程又把動物移到清單尾端，有的補算兩次、有的被跳過；加倍的飢渴與年齡是多數異常死亡的主因。 | 本次補算改走一份快照。 | 草稿 |
+| W38 畜牧區補算一次（[2ba](docs/patches.md#2ba)） | 42.21：離線補算迴圈用索引走 `zone.animals`，補算過程又把動物移到清單尾端，有的補算兩次、有的被跳過；加倍的飢渴與年齡是多數異常死亡的主因。42.22.2 原版改走複本，但幼體迴圈對每隻幼體補算 N 次（N＝畜牧區動物數）。 | 同一次補算中每隻動物只補一次。 | 草稿 |
 | W42 補算時數上限（[2be](docs/patches.md#2be)） | 離線時數取自圈區上次離開串流的時間；大圍場只有部分重載時這個時間是陳舊的，動物被多補算好幾天（某 session 38 隻死亡中有 25 隻發生在補算後 60 秒內）。 | 補算不超過動物自身的離線時間，動物活著時每小時更新自身時鐘。 | 草稿 |
 | W49 動物離線補算根治（[2bm](docs/patches.md#2bm)） | 同一群動物的懷孕與成長只有遊戲時間的五到六成：存檔的時鐘欄位寫存檔當下，重啟前的離線時間永遠補不回來；開機後首次載入的動物補 0 小時；每次補算丟掉最多 23 小時的累積；補算按午夜、載入中按 24 小時兩種成長語意混用。 | 以動物自身時鐘補算（已卸載的動物把時鐘存進存檔，載入中與雞舍內每小時刷新），成長與載入中一樣每累積 24 小時一次；一次離線最多補 168 遊戲小時（可調）；掛鉤屠體不補算。 | 未回報 |
 | W50 掛鉤屠體存檔（[2bn](docs/patches.md#2bn)） | 從磁碟載入的屠體要到第一次更新才找回鉤子；這之前存檔就寫成 onHook=0，屠體下次載入變成活動物。 | 依屠體載入時還原的座標寫出掛鉤狀態（與原版掛鉤格式相同），絕不寫出已知錯誤的紀錄；apop 存檔失敗重試時不再把世界中的動物寫兩次。 | 未回報 |
@@ -135,8 +131,8 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
 | W10 卡讀條（[2x](docs/patches.md#2x)） | 封包參數反序列化成 null 時，Lua 動作建構子在 `processServer` 之前就丟例外；client 既收不到 Accept 也收不到 Reject，整條動作佇列卡死。 | 在建構子與參數解析外加保險絲，client 會收到正確的 Reject。（從錯的物件寫出 Reject 的 W10-A 已在 42.21.0 由官方修掉。） | [#100905](https://theindiestone.com/forums/topic/100905/) |
-| W10-C 被打斷的動作（[2aj](docs/patches.md#2aj)） | 新的請求會在伺服器上靜默停掉玩家已被接受的動作，卻不通知 client。 | 對被打斷的動作補送 Reject（enforce 模式），並且只派送玩家屬於發送連線的動作封包。 | 草稿 |
-| W20 衣物同步（[2ah](docs/patches.md#2ah)） | 一件 visual 為 null 的穿戴物會讓 `ItemDescription` 丟例外，該玩家的衣物廣播全部停擺；數量不符時整個 `SyncVisuals` 封包被丟棄。 | 守住 tint 讀取；另外兩個叢集加觀測。 | [#100911](https://theindiestone.com/forums/topic/100911/) |
+| W10-C 被打斷的動作（[2aj](docs/patches.md#2aj)） | 新的請求會在伺服器上靜默停掉玩家已被接受的動作，卻不通知 client。 | 對被打斷的動作補送 Reject（enforce 模式）。（只派送玩家屬於發送連線的動作封包那一段已在 42.22.2 由官方做到並退役。） | 草稿 |
+| W20 衣物同步（[2ah](docs/patches.md#2ah)） | 數量不符時整個 `SyncVisuals` 封包被丟棄；visual 為 null 的穿戴物曾讓 `ItemDescription` 丟例外、整位玩家的衣物廣播停擺。 | 數量不符的觀測保留；tint 守衛 42.22.2 原版已補，退役。 | [#100911](https://theindiestone.com/forums/topic/100911/) |
 | W59 地圖上看不到隊友（[2bw](docs/patches.md#2bw)） | 客戶端只在遠端玩家的變更計數和伺服器不同時索取完整的地圖資料，拿到資料才畫這位玩家。兩邊的條目一開始都是 1（客戶端第一幀把新條目從 0 推到 1），索取和回覆又是不可靠封包，只要掉一包，兩邊計數就一直相等：這位隊友永遠不會出現在玩家的小地圖和世界地圖上。 | 伺服器改送「基準＋2×計數」（基準是每次開機隨機、至少 1024 的偶數），沒拿到資料的客戶端對不上，會每秒持續索取直到拿到；其餘流量與原版相同，只改伺服器。 | 未回報 |
 | W64 車卡在地板下（[2ca](docs/patches.md#2ca)） | 車的物理在駕駛的客戶端算，`VehiclePhysicsPacket.processServer` 照單全收客戶端回報的高度。客戶端物理把車推到地板下時（2026-10-14：低速倒車碰到停著的半掛卡車；2026-10-15：開車瞬移後翻覆掉到地板下 32 m），之後每個客戶端都拿到這個高度，重登也一樣。原版只有 `BaseVehicle.load` 把高度夾回地板，而且不會扶正翻覆的車。 | 車交回伺服器時（下車、換座、斷線、碰撞歸還），原點比有地板的那一格低 0.25 m 以上，就抬回生成時的停放高度，並對每個客戶端送完整更新。翻覆的車要低於地板一層以上才處理：先扶正（保留車頭方向）再抬回；只陷一點的照原版，留給玩家自己翻正。 | 未回報 |
 | W66 畜牧區消失或重複（[2cb](docs/patches.md#2cb)） | 任何玩家都能刪任何一塊畜牧區，連同相連的一起刪，伺服器不留紀錄。每條連線共用一個 `SyncZonePacket` 快取實例；動物吃草時的草地再生通知（`IsoGridSquare.removeGrass`）沒清掉畜牧區欄位，送出的是這位玩家上次的畜牧區新增、改名或刪除：別人刪掉的畜牧區會在他畫面上一直出現，其他客戶端則重播上一次收到的刪除。開服時暫時隨機 id 撞到已載入畜牧區的那一塊不進存檔清單，下次重啟就消失（664 塊時每次重啟約 2.2%）。 | 記錄每次畜牧區新增、改名、刪除，帶帳號、位置與刪除時連帶刪掉的整組；草地通知改送原版已用來更新區域時間戳的 `RegisterZone`；撞號漏掉的畜牧區補回存檔清單。不改誰能刪畜牧區。 | 未回報 |
@@ -154,7 +150,6 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W67 安全屋內的畜牧區（[2cc](docs/patches.md#2cc)） | 任何玩家都能刪任何一塊畜牧區，連同相連的一起刪，別人安全屋裡的也一樣。 | 要刪的整組壓到安全屋時，只接受那間的屋主、成員或管理員（`CanSetupSafehouses`）；其他人刪的話，伺服器保留這些畜牧區、補回刪除者的畫面並告訴他原因。伺服器政策。 | 未回報 |
 | W76 建造請求的類別驗證（[2cl](docs/patches.md#2cl)） | 建造請求的伺服器端驗證有缺口；細節不在此公開。 | 請求指名的建造類別必須是 `ISBuildingObject` 的子類（沿 metatable 鏈找，不寫死名單，原版與 MOD 的建造類別都能過），否則回 Reject 並記錄。 | 未回報 |
 | W77 建造距離驗證（[2cl](docs/patches.md#2cl)） | 同上。 | 建造位置與玩家每軸差超過 8 格或樓層差超過 1 時回 Reject 並記錄；有作弊建造權限的管理員不限。 | 未回報 |
-| W78 timed action 執行者驗證（[2cm](docs/patches.md#2cm)） | timed action 的伺服器端驗證有缺口；細節不在此公開。 | 動作的執行者（`character`）必須是送封包的玩家，否則回 Reject 並記錄；其他玩家參數（例如替別人包紮的病人）照原版。 | 未回報 |
 | W79 物件外觀更新距離驗證（[2cn](docs/patches.md#2cn)） | 物件外觀更新的伺服器端驗證有缺口；細節不在此公開。 | 送封包的連線上必須有玩家在該物件 20 格內，否則不改、不轉發並記錄；拆解、修理、開車撞圍籬照常。 | 未回報 |
 | W82 燈具設定同步驗證（[2cq](docs/patches.md#2cq)） | 燈具設定同步的伺服器端驗證有缺口；細節不在此公開。 | 伺服器不採用客戶端不該改的燈具設定欄位：從客戶端只接受打掉燈泡與關燈，而且送封包的連線上要有玩家在燈的 50 格內；轉發給其他客戶端的是伺服器的值，被擋的封包會記錄。 | 未回報 |
 | W96 步行瞬移觀測與踢人（[2de](docs/patches.md#2de)） | 反作弊 `AntiCheatSpeed` 每秒取樣一次步行位置算速度，超過只依選項處理：設成只記 log（本服的設定）時，伺服器一秒後就接受瞬移後的位置；改成踢人時，它對瞬移後一秒內的每一包都累計，登入後的位置修正或網路延遲後的追趕也會被踢。 | 沿用原版同一次取樣，每次取樣最多一行 log（帳號、SteamID、速度、起訖座標、距登入／基準點／伺服器傳送／下車的秒數、封包間隔；跳到遠處又跳回原處時標出對應的那一行）。權限、踢人與 log 的帳號都看送出封包的連線；排除有傳送權限的角色、車上與下車那一次（原版車輛上限內）、被車撞，登入／重生／伺服器傳送後的寬限期（預設 60 秒）只豁免第一次跳動。預設 observe 只記 log；`-Dmdc.teleportWatch=kick` 對門檻（預設 150 格／秒）以上的取樣用原版反作弊的踢人流程。 | 未回報 |
@@ -170,7 +165,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ### 觀測
 
-不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）、動物 ID 解析失敗紀錄（[2bo](docs/patches.md#2bo)）、聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）、SyncIsoObject 洪流觀測（[2bv](docs/patches.md#2bv)；原版 `Packets limit has exceeded` 警告不記連線，這支記下洪流背後的玩家與物件）與動物遺失觀測（[2bx](docs/patches.md#2bx)；放下動物時移走了別隻、chunk 的卸載存檔還在寫就被重新載入、長大的動物因附近有同 ID 的複製體被刪，都會記一行）與動物、液體容器探針（[2dd](docs/patches.md#2dd)；虛擬動物的規模與每幀耗時、液體容器更新的實體數與會集雨的比例、沒人收得到而且閒置的動物比例，給兩個要服主裁定的降頻選項用）。它們在 console
+不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）、動物 ID 解析失敗紀錄（[2bo](docs/patches.md#2bo)）、聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）、SyncIsoObject 洪流觀測（[2bv](docs/patches.md#2bv)；原版 `Packets limit has exceeded` 警告不記連線，這支記下洪流背後的玩家與物件）與動物遺失觀測（[2bx](docs/patches.md#2bx)；放下動物時移走了別隻、長大的動物因附近有同 ID 的複製體被刪，都會記一行；chunk 卸載存檔還在寫就被重新載入那一路 42.22.2 原版已修、退役）與動物、液體容器探針（[2dd](docs/patches.md#2dd)；虛擬動物的規模與每幀耗時、液體容器更新的實體數與會集雨的比例、沒人收得到而且閒置的動物比例，給兩個要服主裁定的降頻選項用）。它們在 console
 寫限流的心跳行，上面多數問題都是靠它們找到的。
 
 ### 客戶端修補（發布包）
@@ -196,7 +191,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 |---|---|---|---|
 | pfguard（[設計文件](docs/pathfind-aligned-block-guard-design-v1.md)） | `libPZPathFind64.so`：`VehicleRect` 池的槽位被寫壞，在 `PolygonalMap2::createVehicleClusters` SIGSEGV；`VehicleCluster::merge` 從不歸還被合併的 cluster（每秒約洩漏 40 塊）。 | 用 `LD_PRELOAD` 在該配置器家族周圍加 guard page（第一次錯誤寫入就當場 fault），並把被合併的 cluster 還回池。啟動時核對函式庫雜湊，不符即停用。 | 崩潰：[#100921](https://theindiestone.com/forums/topic/100921/)；洩漏：草稿 |
 | steamfix | Valve 的 `steamclient.so` PseudoTCP：部分 ACK 只縮短傳送片段、卻沒推進起始序號，重傳時越界讀取。 | 選用：以 `LD_AUDIT` 在已載入的函式庫中修正那一個區塊（磁碟上的檔案不變），只對確切的 Steam build 生效。 | Valve 函式庫 |
-| 啟動閘（[run-with-pfguard.sh](native-observer/deploy/run-with-pfguard.sh)） | 遊戲自動更新後，殘留的舊 loose class 讓伺服器起不來，或在新 jar 上靜默混跑。 | 每次開服重驗 payload SHA 與 jar 同源；不符就把修補移到一旁、以原版啟動。 | — |
+| 啟動閘（[run-with-pfguard.sh](native-observer/deploy/run-with-pfguard.sh)） | 遊戲自動更新後，舊修補不能套在新 jar 上：42.21 以前殘留的 loose class 讓伺服器起不來或靜默混跑；42.22 起混進簽章 package 的 loose class 直接讓 JVM 丟 `SecurityException`。 | 每次開服：殘留的 loose class 不同源就移到一旁；再驗 agent jar 與遊戲 jar 的 SHA，都對才以 `-javaagent` 帶進遊戲，不符就以原版啟動。 | — |
 
 ## 官方未修的已知問題
 
@@ -226,6 +221,14 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | `RequestData` ACK 迴圈邊界（W27，[2ao](docs/patches.md#2ao)） | 42.21.0 | — |
 | PopMan 缺格生成與背景存檔互斥（W28，[2ap](docs/patches.md#2ap)） | 42.21.0 | — |
 | `AnimationSet`／`ActionStateContainer` log 噪音（[1](docs/patches.md#1)） | 42.20／42.21.0 | — |
+| 容器互裝成環的無限遞迴（W5，[2q](docs/patches.md#2q)） | 42.22.2（有上限的迴圈、`AddItem` 拒絕成環） | [#100891](https://theindiestone.com/forums/topic/100891/) |
+| 共用 `tempVector2_2` 讓 chunk 載入失敗被抹除（W7，[2s](docs/patches.md#2s)） | 42.22.2（每次 `new Vector2()`） | [#100895](https://theindiestone.com/forums/topic/100895/) |
+| 車輛 DB 從陳舊 `vehicle.chunk` 取 chunk 索引（W12，[2z](docs/patches.md#2z)） | 42.22.2（由座標計算，開檔時修正既有資料） | [#100913](https://theindiestone.com/forums/topic/100913/) |
+| 雞舍載入時丟掉動物（W17，[2ae](docs/patches.md#2ae)） | 42.22.2（位置被佔時改找空位） | [#100907](https://theindiestone.com/forums/topic/100907/) |
+| 衣物 tint 讀到 null visual（W20 tint 守衛，[2ah](docs/patches.md#2ah)） | 42.22.2 | [#100911](https://theindiestone.com/forums/topic/100911/) |
+| timed action 執行者驗證（W78，[2cm](docs/patches.md#2cm)）與動作封包的玩家歸屬（[2aj](docs/patches.md#2aj)） | 42.22.2 | — |
+| chunk 卸載存檔還在寫就被重新載入（W60 之二，[2bx](docs/patches.md#2bx)） | 42.22.2 | — |
+| `PacketsCache` log 噪音（[1](docs/patches.md#1)） | 42.22.2（只在開發模式印） | — |
 
 ## 修補原理
 

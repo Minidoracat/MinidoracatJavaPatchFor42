@@ -361,8 +361,9 @@ public final class PatchConfig {
         // 退役（2026-11-10，42.22.2 官方已修）：W12 車輛 DB chunk 索引守衛（VehicleBuffer.set）。
         // 42.22.2 的 set 不再讀 vehicle.chunk：x/y 存入後 `wx = PZMath.fastfloor(x / 8.0F)`、`wy` 同理
         // （就是 W12 的推導式），開檔時 SQLStore.init → repairStoredVehicleChunks 依 x/y 修正既有列，
-        // 讀車時跳過非 finite 座標。復活：git checkout 3f79700 -- patcher/src/PatchConfig.java
-        // patcher/game/zombie/mdc/VehicleChunkIndexGuard.java patcher/tests/vehicle-chunk-index patcher/src/SmokeCheck.java build.ps1
+        // 讀車時跳過非 finite 座標。復活：git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/src/Patcher.java
+        // （VehicleChunkIndexRepair 手術形態只有 W12 用，一起刪了）patcher/game/zombie/mdc/VehicleChunkIndexGuard.java
+        // patcher/tests/vehicle-chunk-index patcher/src/SmokeCheck.java build.ps1
 
         // ---- W4-1 v2 chunk 供給併包（2026-09-07 復活，預設 observe；docs/patches.md 2p）----
         // vanilla 供給＝主迴圈每幀、每連線只交付一個 ccr（update() 的 ready 閘內 remove(0) 一次），

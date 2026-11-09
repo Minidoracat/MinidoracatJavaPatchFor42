@@ -39,7 +39,7 @@ import zombie.popman.animal.AnimalSynchronizationManager;
 
 /**
  * W29 行為回歸；enforce／off／unknown 各跑獨立 JVM，argv 自驗實際 property。
- * 未套用守衛時：42.22.2 原版只在連線角色有 AnimalCheats 時執行刪除清單，一般連線的刪除被原版忽略、AnimalCheats 連線的照刪（危險行為對照）。
+ * 未套用守衛時對照 42.22.2 原版的結果（原版多了一項權限前提；細節同 docs/patches.md 2aq，不在公開檔描述）。
  *
  * <p>核心案例走真接收入口、pooled packet、parse／processServer 與同步請求表。
  * 另直接呼叫 helper，避免原版外層 catch 掩蓋拒絕例外；紀錄測試使用真 DebugLog
@@ -189,7 +189,7 @@ public final class AnimalUpdateGuardTest {
         int pooledBefore = delegations(RELIABLE);
         Throwable pooledThrown = feed(RELIABLE, wire(new short[] {104}, NONE, 0));
         if (expectVanilla) {
-            expect("pooled ②（off）：42.22.2 原版忽略無 AnimalCheats 連線的刪除 ⇒ 雞舍格位保留",
+            expect("pooled ②（off）：42.22.2 原版結果 ⇒ 雞舍格位保留",
                     hutch.animalInside.get(4) == pooledVictim);
             expect("pooled ②（off）：原版入口被執行", delegations(RELIABLE) == pooledBefore + 1);
         } else {
@@ -250,7 +250,7 @@ public final class AnimalUpdateGuardTest {
         int mixedBefore = delegations(RELIABLE);
         feed(RELIABLE, wire(new short[] {105}, new short[] {51, 52}, 0));
         if (expectVanilla) {
-            expect("混合包（off）：42.22.2 原版忽略無 AnimalCheats 連線的刪除 ⇒ 雞舍格位保留",
+            expect("混合包（off）：42.22.2 原版結果 ⇒ 雞舍格位保留",
                     hutch.animalInside.get(5) == mixedVictim);
         } else {
             expect("混合包：雞舍格位保留", hutch.animalInside.get(5) == mixedVictim);
@@ -265,7 +265,7 @@ public final class AnimalUpdateGuardTest {
         int directBefore = delegations(RELIABLE);
         Throwable directThrown = invokeDirect(entry, RELIABLE, wire(new short[] {107}, NONE, 0));
         if (expectVanilla) {
-            expect("直呼 helper（off）：42.22.2 原版忽略無 AnimalCheats 連線的刪除", hutch.animalInside.get(7) == directVictim);
+            expect("直呼 helper（off）：42.22.2 原版結果 ⇒ 雞舍格位保留", hutch.animalInside.get(7) == directVictim);
             expect("直呼 helper（off）：委派原版恰一次", delegations(RELIABLE) == directBefore + 1);
         } else {
             expect("直呼 helper：拒絕不向外層拋例外", directThrown == null);
@@ -299,16 +299,16 @@ public final class AnimalUpdateGuardTest {
             conn.delegationFailure = null;
         }
 
-        // ── G 有 AnimalCheats 的連線：42.22.2 原版照刪（canDelete＝client 或 AnimalCheats），W29 enforce 仍整包拒絕 ──
+        // ── G 有權限的連線：42.22.2 原版照常處理，W29 enforce 仍整包拒絕 ──
         IsoAnimal cheatVictim = hutchAnimal(mgr, (short) 108, hutch, 8);
         conn.getRole().addCapability(Capability.AnimalCheats);
         int cheatBefore = delegations(RELIABLE);
         feed(RELIABLE, wire(new short[] {108}, NONE, 0));
         if (expectVanilla) {
-            expect("AnimalCheats 連線（off）：原版收下並執行移除，雞舍格位被清空（危險行為對照）",
+            expect("有權限的連線（off）：原版處理後雞舍格位被清空（危險行為對照）",
                     hutch.animalInside.get(8) == null && delegations(RELIABLE) == cheatBefore + 1);
         } else {
-            expect("AnimalCheats 連線：刪除照樣整包拒絕（正常 client 不寫刪除清單），雞舍格位保留",
+            expect("有權限的連線：整包拒絕，雞舍格位保留",
                     hutch.animalInside.get(8) == cheatVictim && delegations(RELIABLE) == cheatBefore);
         }
 
@@ -320,7 +320,7 @@ public final class AnimalUpdateGuardTest {
                 + "：真接線（GameServer.mainLoopDealWithNetData）／原版 writer 合法 wire／"
                 + "offset+direct+read-only buffer／非目標型別原委派／畸形整包拒絕（短表頭・負數・"
                 + "溢位・截斷・尾巴）／pooled 不重播／"
-                + (expectVanilla ? "kill switch off 對照（42.22.2 原版忽略一般連線的刪除、AnimalCheats 連線照刪）"
+                + (expectVanilla ? "kill switch off 對照（42.22.2 原版結果；有權限的連線雞舍格位真的被清空）"
                         : "雞舍格位與巢箱皆未被未授權移除")
                 + " 全數通過");
     }
@@ -369,8 +369,8 @@ public final class AnimalUpdateGuardTest {
         int before = delegations(type);
         Throwable thrown = feed(type, payload);
         if (expectVanilla) {
-            // 42.22.2 原版 parse：刪除清單只在 client 或連線角色有 AnimalCheats 時執行；這條連線沒有，原版讀過就忽略。
-            expect(what + "（off）：42.22.2 原版忽略無 AnimalCheats 連線的刪除，容器格位保留", intact.ok());
+            // 42.22.2 原版的權限前提下，這條連線的請求不生效（細節同 docs/patches.md 2aq）。
+            expect(what + "（off）：42.22.2 原版結果，容器格位保留", intact.ok());
             expect(what + "（off）：原版入口被執行", delegations(type) == before + 1);
         } else {
             expect(what + "：動物仍在原處（未授權移除被整包拒絕）", intact.ok());

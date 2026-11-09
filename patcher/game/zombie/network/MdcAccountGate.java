@@ -80,7 +80,7 @@ public final class MdcAccountGate {
             DebugLog.log("[MinidoracatJavaPatch][AccountGate] deny user=\"" + user + "\" key=" + keyStr
                     + " rank=" + rank + " accounts=" + rows.size() + " max=" + max
                     + " (denied=" + n + " passed=" + passed.get() + ")");
-        } catch (Throwable t) {
+        } catch (Exception | LinkageError t) {   // OOM／SOE 等 VirtualMachineError 照常往外拋
             failedOpen.incrementAndGet();
             DebugLog.log("[MinidoracatJavaPatch][AccountGate] fail-open user=\"" + user + "\": " + t);
         }

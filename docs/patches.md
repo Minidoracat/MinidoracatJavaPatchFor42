@@ -2591,12 +2591,12 @@ MdcAccountGate.authClient(ServerWorldDatabase,…)`（1:1 同形，receiver 前�
 的 `authorized=false`／`dcReason="MaxAccountsReached"`，後續 log 與 `AccessDenied` 封包全走 vanilla
 既有分支（offset 218-223）。**不刪任何資料**，uninstall 即回 vanilla。
 
-helper 放 `zombie.network`（非 `zombie.mdc`）：`ServerWorldDatabase.conn` 是 package-private，loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未 sealed，manifest 實查）。
+helper 放 `zombie.network`（非 `zombie.mdc`）：`ServerWorldDatabase.conn` 是 package-private。42.21 以前 loose class 與 jar 同 classloader、同 runtime package 可直接用（jar 未 sealed，manifest 實查）；42.22 起 jar 簽章，helper 改由 agent 以 `zombie.network` 的原版 class 為錨用 `Lookup.defineClass` 定義（同一個 ProtectionDomain 與簽章者），存取不變。
 
 身分 key **預設連線 `getSteamId()`**（與 vanilla 同語意，家庭共享子帳號各算各的——使用者
 2026-09-06 決定，實查有真的兩個人共用一套家庭庫同時在線）。`-Dmdc.accountGate.key=owner`
 改為 `getOwnerId()`＋whitelist `ownerid` 優先，整個家庭合計 max 個。kill switch
-`-Dmdc.accountGate=0`。例外一律 fail-open（回 vanilla 結果並記 `[AccountGate] fail-open`）。
+`-Dmdc.accountGate=0`。`Exception`（含 SQL 例外）／`LinkageError` 一律 fail-open（回 vanilla 結果並記 `[AccountGate] fail-open`）；OOM、StackOverflow 這類 `VirtualMachineError` 照常往外拋（2026-11-10 起，與其他刀「Error 保持致命」的規定一致）。
 
 行為結果：每個 Steam ID 只剩「最近登入的那個」帳號名能進；其餘登入即 `MaxAccountsReached`，而拒絕發生在 `updateLastConnectionDate` 之前，名次不會因嘗試而改變（穩定）。`MaxAccountsPerUser` 改回 2 就自動放寬到前 2 名。
 
@@ -2842,7 +2842,7 @@ SmokeCheck 鎖兩個 update 呼叫的語境、全 class 七處原 sync 分布、
 
 **2026-09-28 42.21 對版**：驗證缺口在 42.21.0 仍在，上行 wire 與 client writer 逐指令未變，helper 不改（缺口細節另以私下管道回報 TIS，不在公開文件描述）。42.21 對這個類別唯一的語意差是 client 分支的 `removeFromSquare()` 後多 `setSquare(null)`；原本的整類 SHA 因此與行號位移一起誤報。SmokeCheck 指紋改為略過 debug 資訊（行號、區域變數、SourceFile）的整類文字雜湊，仍涵蓋 `@PacketSetting`、欄位與全部方法，值更新為 42.21。
 
-**2026-11-10 42.22.2 對版（待裁定）**：42.22.2 的 `AnimalUpdatePacket.parse` 只在 `GameClient.client` 或連線角色有 `Capability.AnimalCheats` 時執行刪除清單（javap：`GETSTATIC Capability.AnimalCheats`→`Role.hasCapability` 在唯一的 `IsoAnimal.remove()` 之前），一般玩家連線送來的刪除原版已經忽略；上行 wire 與 client writer 不變，helper 不改。本刀剩下的作用是畸形表頭整包拒絕，以及擋下 `AnimalCheats` 角色對雞舍／巢箱成員的刪除，是否保留待裁定。SmokeCheck 整類指紋更新為 42.22.2，另加這個權限前提；`AnimalUpdateGuardTest` 的 off 對照改成原版忽略一般連線的刪除，另加 AnimalCheats 連線一段（off 原版照刪、enforce 仍拒絕）。
+**2026-11-10 42.22.2 對版（待裁定）**：42.22.2 原版在 `AnimalUpdatePacket.parse` 加了一項權限前提，已確認的缺口有一部分由原版擋下（細節同前，不在公開文件描述）；上行 wire 與 client writer 不變，helper 不改。本刀照舊 enforce，是否保留待裁定。SmokeCheck 整類指紋更新為 42.22.2，另鎖住這項原版前提（變了就重估）；`AnimalUpdateGuardTest` 的 off 對照改成 42.22.2 原版的結果。
 
 <a id="2ar"></a>
 ## 2ar. 容器大批物品登記（W30，server，預設 on）

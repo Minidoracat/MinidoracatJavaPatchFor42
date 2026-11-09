@@ -2669,9 +2669,8 @@ public final class SmokeCheck {
         // 固定共用 wire 實作及兩個側別宣告；TIS 修改時人工判定是否撤刀或更新契約。
         // 指紋取去 debug（行號／區域變數／SourceFile）的整類文字：含 @PacketSetting、欄位與全部方法，
         // 只因上游插碼造成的行號位移不再誤報。42.21 對版：AnimalUpdatePacket 只差 client 分支的
-        // setSquare(null)，上行 wire 與伺服器 parse 逐指令未變（docs/patches.md 2aq）。42.22.2 對版：只差 parse——
-        // 刪除清單照樣讀完，但只在 client 或連線角色有 AnimalCheats 時執行（下一條前提），另 client 分支 Prediction.z 改成 float；
-        // 上行 wire（刪除數＋ID、requested 數＋ID）與伺服器 requested 解析逐指令未變，W29 的形狀檢查照舊成立。
+        // setSquare(null)，上行 wire 與伺服器 parse 逐指令未變（docs/patches.md 2aq）。42.22.2 對版：只差 parse 多一項原版
+        // 權限前提（下一條）與 client 分支 Prediction.z 改成 float；上行 wire 與其餘解析逐指令未變，W29 的形狀檢查照舊成立。
         String[][] animalProtocol = {
             {"zombie/network/packets/character/AnimalUpdatePacket", "54e12176ec4fdb13bb301cc1c553c69da4d395c8028730f5ab82106aa4574a6d"},
             {"zombie/network/packets/character/AnimalUpdateReliablePacket", "1e4a0964828ef29a3cc76129f7d0e9cd3bd38ec2424e3848458b077d3af420af"},
@@ -2683,12 +2682,11 @@ public final class SmokeCheck {
             failed += check("W29 不覆寫動物同步協定類別：" + entry[0],
                     !Files.exists(distJava.resolve(entry[0] + ".class")));
         }
-        // 42.22.2 原版自己補上的刪除授權（W29 存在理由的一半）：parse 讀完刪除數後以 GameClient.client || 連線角色有
-        // AnimalCheats 決定是否執行刪除；一般玩家送來的刪除被原版忽略，W29 剩下的是畸形表頭整包拒絕與 AnimalCheats 角色的刪除。
-        // 紅＝原版又改了刪除授權，重估 W29 要不要撤刀（docs/patches.md 2aq「42.22.2 對版」）。
+        // 42.22.2 原版自己補上的權限前提（W29 存在理由的一部分；細節同 2aq，不在公開檔描述）。
+        // 紅＝原版又改了這段，重估 W29 要不要撤刀（docs/patches.md 2aq「42.22.2 對版」）。
         MethodNode w29Parse = methodFromJar(jar, "zombie/network/packets/character/AnimalUpdatePacket", "parse",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
-        failed += check("W29 原版前提（42.22.2）：AnimalUpdatePacket.parse 只在 client 或 AnimalCheats 角色執行刪除清單",
+        failed += check("W29 原版前提（42.22.2）：AnimalUpdatePacket.parse 的權限前提在移除之前",
                 countExactFields(w29Parse, Opcodes.GETSTATIC, "zombie/characters/Capability", "AnimalCheats",
                         "Lzombie/characters/Capability;") == 1
                 && countExactCalls(w29Parse, Opcodes.INVOKEVIRTUAL, "zombie/characters/Role", "hasCapability",

@@ -106,15 +106,6 @@ public final class Patcher {
     }
 
     /**
-     * VehicleBuffer.set(BaseVehicle) 在原 y 欄位寫入後追加 wx/wy 覆寫：
-     * 以 helper 從物理 x/y 推導 chunk，不再信任可能已 pool reset/reuse 的 vehicle.chunk。
-     *
-     * <p>掛點以 ALOAD 0 → ALOAD 1 → BaseVehicle.getY()F →
-     * PUTFIELD VehicleBuffer.y:F 全序鎖定；任一步漂移即零命中並由 expectedHits fail-closed。
-     */
-    record VehicleChunkIndexRepair(String bufferOwner, String vehicleOwner, String helperOwner) {}
-
-    /**
      * 方法頭部 null 守衛：aload &lt;slot&gt;［; invokevirtual owner.name desc］; ifnonnull L; return; L:[F_SAME]。
      * 插在原第一條指令前（含 super 呼叫之前）；堆疊峰值 1、locals 不變、原 frames 照舊——
      * 新 branch target 只需補一個 F_SAME（與初始 frame 等價，後續壓縮 frame 的 delta 鏈不受影響）。
@@ -183,7 +174,6 @@ public final class Patcher {
         FieldGetSwap fieldGetSwap = null;
         final List<FieldPutWrap> fieldPutWraps = new ArrayList<>();
         final List<FieldGetRedirect> fieldGetRedirects = new ArrayList<>();
-        VehicleChunkIndexRepair vehicleChunkIndexRepair = null;
         int expectedHits = 0;
         int actualHits = 0;
         MethodOps(String name, String desc) { this.name = name; this.desc = desc; }
@@ -226,8 +216,6 @@ public final class Patcher {
         int clampState = 0;
         int clampCountSlot = -1;
         int clampOffsetSlot = -1;
-        /** VehicleChunkIndexRepair：0=待命 1=aload0 2=aload1 3=getY。 */
-        int vehicleChunkState = 0;
         MethodSurgeon(MethodVisitor mv, MethodOps ops) {
             super(Opcodes.ASM9, mv);
             this.ops = ops;
@@ -269,12 +257,9 @@ public final class Patcher {
 
         @Override
         public void visitMaxs(int maxStack, int maxLocals) {
-            // 頭部插入峰值＝載入的 slot 數（單 slot 版=1）；HeadIntFilter 的 this＋int 峰值為 2；
-            // VehicleChunkIndexRepair 的 buffer＋vehicle＋float＋int 峰值為 4
+            // 頭部插入峰值＝載入的 slot 數（單 slot 版=1）；HeadIntFilter 的 this＋int 峰值為 2
             int minimum;
-            if (ops.vehicleChunkIndexRepair != null) {
-                minimum = 4;
-            } else if (ops.headCall != null) {
+            if (ops.headCall != null) {
                 minimum = Math.max(ops.headCall.slots().length,
                         ops.headGuard != null || ops.tailCall != null ? 1 : 0);
             } else {
@@ -287,7 +272,6 @@ public final class Patcher {
             for (Site s : ops.redirects) {
                 if (s.opcode() == opcode && s.owner().equals(owner) && s.name().equals(name) && s.desc().equals(desc)) {
                     clampState = 0;
-                    vehicleChunkState = 0;
                     super.visitMethodInsn(Opcodes.INVOKESTATIC, s.redirectOwner(), s.redirectName(),
                             redirectDesc(opcode, owner, desc), false);
                     ops.actualHits++;
@@ -298,24 +282,11 @@ public final class Patcher {
             CountClamp c = ops.countClamp;
             clampState = c != null && opcode == Opcodes.INVOKESTATIC && c.siteOwner().equals(owner)
                     && c.siteName().equals(name) && c.siteDesc().equals(desc) ? 1 : 0;
-            VehicleChunkIndexRepair r = ops.vehicleChunkIndexRepair;
-            vehicleChunkState = r != null && vehicleChunkState == 2
-                    && opcode == Opcodes.INVOKEVIRTUAL
-                    && r.vehicleOwner().equals(owner) && name.equals("getY") && desc.equals("()F")
-                    ? 3 : 0;
         }
 
         @Override
         public void visitVarInsn(int opcode, int var) {
             super.visitVarInsn(opcode, var);
-            VehicleChunkIndexRepair r = ops.vehicleChunkIndexRepair;
-            if (r != null) {
-                if (vehicleChunkState == 1 && opcode == Opcodes.ALOAD && var == 1) {
-                    vehicleChunkState = 2;
-                } else {
-                    vehicleChunkState = opcode == Opcodes.ALOAD && var == 0 ? 1 : 0;
-                }
-            }
             CountClamp c = ops.countClamp;
             if (c == null) {
                 return;
@@ -356,14 +327,12 @@ public final class Patcher {
             }
             super.visitInsn(opcode);
             clampState = clampState == 4 && opcode == Opcodes.IADD ? 5 : 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitJumpInsn(int opcode, org.objectweb.asm.Label label) {
             super.visitJumpInsn(opcode, label);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
@@ -374,7 +343,6 @@ public final class Patcher {
                         super.visitMethodInsn(Opcodes.INVOKESTATIC, fr.helperOwner(), fr.helperName(), fr.helperDesc(), false);
                         ops.actualHits++;
                         clampState = 0;
-                        vehicleChunkState = 0;
                         return;
                     }
                 }
@@ -392,75 +360,43 @@ public final class Patcher {
                 super.visitMethodInsn(Opcodes.INVOKESTATIC, sw.helperOwner(), sw.helperName(), sw.helperDesc(), false);
                 ops.actualHits++;
             }
-            VehicleChunkIndexRepair r = ops.vehicleChunkIndexRepair;
-            if (r != null && vehicleChunkState == 3 && opcode == Opcodes.PUTFIELD
-                    && r.bufferOwner().equals(owner) && name.equals("y") && desc.equals("F")) {
-                String vehicleDesc = "L" + r.vehicleOwner() + ";";
-                String helperDesc = "(" + vehicleDesc + "FI)I";
-                // wx = helper(vehicle, captured buffer.x, captured vanilla wx)
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitVarInsn(Opcodes.ALOAD, 1);
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitFieldInsn(Opcodes.GETFIELD, r.bufferOwner(), "x", "F");
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitFieldInsn(Opcodes.GETFIELD, r.bufferOwner(), "wx", "I");
-                super.visitMethodInsn(Opcodes.INVOKESTATIC, r.helperOwner(), "wx", helperDesc, false);
-                super.visitFieldInsn(Opcodes.PUTFIELD, r.bufferOwner(), "wx", "I");
-                // wy = helper(vehicle, captured buffer.y, captured vanilla wy)
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitVarInsn(Opcodes.ALOAD, 1);
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitFieldInsn(Opcodes.GETFIELD, r.bufferOwner(), "y", "F");
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitFieldInsn(Opcodes.GETFIELD, r.bufferOwner(), "wy", "I");
-                super.visitMethodInsn(Opcodes.INVOKESTATIC, r.helperOwner(), "wy", helperDesc, false);
-                super.visitFieldInsn(Opcodes.PUTFIELD, r.bufferOwner(), "wy", "I");
-                ops.actualHits++;
-            }
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitTypeInsn(int opcode, String type) {
             super.visitTypeInsn(opcode, type);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitIincInsn(int varIndex, int increment) {
             super.visitIincInsn(varIndex, increment);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitInvokeDynamicInsn(String name, String desc, org.objectweb.asm.Handle handle, Object... args) {
             super.visitInvokeDynamicInsn(name, desc, handle, args);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitTableSwitchInsn(int min, int max, org.objectweb.asm.Label dflt, org.objectweb.asm.Label... labels) {
             super.visitTableSwitchInsn(min, max, dflt, labels);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitLookupSwitchInsn(org.objectweb.asm.Label dflt, int[] keys, org.objectweb.asm.Label[] labels) {
             super.visitLookupSwitchInsn(dflt, keys, labels);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
         public void visitMultiANewArrayInsn(String descriptor, int numDimensions) {
             super.visitMultiANewArrayInsn(descriptor, numDimensions);
             clampState = 0;
-            vehicleChunkState = 0;
         }
 
         @Override
@@ -468,12 +404,10 @@ public final class Patcher {
             super.visitFrame(type, numLocal, local, numStack, stack);
             // StackMapFrame＝控制流合流點；pattern 跨越合流點即語意不明，放棄（codex 對抗審查發現）
             clampState = 0;
-            vehicleChunkState = 0;
         }
         @Override
         public void visitLdcInsn(Object value) {
             clampState = 0;
-            vehicleChunkState = 0;
             for (ConstChange c : ops.consts) {
                 if (c.from().equals(value)) {
                     super.visitLdcInsn(c.to());
@@ -486,7 +420,6 @@ public final class Patcher {
         @Override
         public void visitIntInsn(int opcode, int operand) {
             clampState = 0;
-            vehicleChunkState = 0;
             if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) {
                 for (ConstChange c : ops.consts) {
                     if (c.from() instanceof Integer i && i == operand && c.to() instanceof Integer t) {
