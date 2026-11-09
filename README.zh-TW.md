@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.22.2**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 80 個 patched class、244 個命中點、99 個 helper class。
+- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 81 個 patched class、245 個命中點、99 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -74,7 +74,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
-| W8 chunk 寫入閘（[2t](docs/patches.md#2t)） | 43 個玩家建造的 chunk 在 `SANITY CHECK FAIL` 後被抹除；鑑識證明檔案寫入時就已帶錯誤或為 0 的 CRC。 | 在 `SafeWrite` 截斷舊檔之前先驗長度與 CRC，損毀就擋下、保留舊檔並記錄 stack。上線第一晚擋下 8 筆損毀寫入，零損失。 | [#100901](https://theindiestone.com/forums/topic/100901/) |
+| W8 chunk 寫入閘（[2t](docs/patches.md#2t)） | 43 個玩家建造的 chunk 在 `SANITY CHECK FAIL` 後被抹除；鑑識證明檔案寫入時就已帶錯誤或為 0 的 CRC。 | 在 `SafeWrite` 截斷舊檔之前先驗長度與 CRC，損毀就擋下、保留舊檔並記錄 stack。42.22.2 起載入也會直接拿存檔佇列裡的資料：佇列裡那份損毀時不拿它載入，改讀磁碟上一版，不抹除重生。上線第一晚擋下 8 筆損毀寫入，零損失。 | [#100901](https://theindiestone.com/forums/topic/100901/) |
 | W9 存檔管線隔離（[2u](docs/patches.md#2u)） | 存檔執行緒共用 `CRC32` 實例而產生競態（W8 損毀 header 的根因），存檔管線還和發送執行緒共用全域 chunk 池。 | CRC 部分已在 42.21.0 由官方修掉並退役；存檔管線的私有 chunk 池保留。修正後 290 萬次寫入零攔截。 | [#100901](https://theindiestone.com/forums/topic/100901/)（部分已修） |
 | W38 畜牧區補算一次（[2ba](docs/patches.md#2ba)） | 42.21：離線補算迴圈用索引走 `zone.animals`，補算過程又把動物移到清單尾端，有的補算兩次、有的被跳過；加倍的飢渴與年齡是多數異常死亡的主因。42.22.2 原版改走複本，但幼體迴圈對每隻幼體補算 N 次（N＝畜牧區動物數）。 | 同一次補算中每隻動物只補一次。 | 草稿 |
 | W42 補算時數上限（[2be](docs/patches.md#2be)） | 離線時數取自圈區上次離開串流的時間；大圍場只有部分重載時這個時間是陳舊的，動物被多補算好幾天（某 session 38 隻死亡中有 25 隻發生在補算後 60 秒內）。 | 補算不超過動物自身的離線時間，動物活著時每小時更新自身時鐘。 | 草稿 |

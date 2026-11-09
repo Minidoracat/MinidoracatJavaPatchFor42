@@ -1043,6 +1043,88 @@ public final class SmokeCheck {
         failed += check("W8 負對照：IsoChunk 除 Save(Z)V 外零改道（含其他 Save 多載；SafeWrite 本體無遞迴）",
                 safeWriteClean);
 
+        // ---- W8 載入側（42.22.2：LoaderThread.run 的 LoadChunk 直接吃 getPendingChunkData，不經寫入閘）----
+        String ltCls = "zombie/network/ServerChunkLoader$LoaderThread";
+        String sctW8 = "zombie/network/ServerChunkLoader$SaveChunkThread";
+        String lcDesc = "(IILjava/nio/ByteBuffer;)Z";
+        String cwgLoadDesc = "(Lzombie/iso/IsoChunk;IILjava/nio/ByteBuffer;)Z";
+        MethodNode vLtRun = methodFromJar(jar, ltCls, "run", "()V");
+        MethodInsnNode vLcCall = findExactCall(vLtRun, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadChunk", lcDesc);
+        failed += check("W8 載入側 vanilla 前提：LoaderThread.run 的 LoadChunk 恰 1、第三參數緊接 getPendingChunkData 的結果",
+                countExactCalls(vLtRun, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadChunk", lcDesc) == 1
+                && vLcCall != null && isCall(prevReal(vLcCall), Opcodes.INVOKEVIRTUAL, sctW8,
+                        "getPendingChunkData", "(II)Ljava/nio/ByteBuffer;"));
+        // pending buffer 的來源與版面：getPendingChunkData → ChunkSaveTask.copyChunkData；兩個實作都走 copyData，
+        // copyData＝ByteBuffer.wrap(Arrays.copyOf(bb.array(), bb.position()))＝position 0、limit＝長度的私有副本
+        // （helper 以 verify(array, limit) 驗證的依據）。
+        MethodNode vCopy = methodFromJar(jar, sclCls, "copyData", "(Lzombie/network/ClientChunkRequest$Chunk;)Ljava/nio/ByteBuffer;");
+        failed += check("W8 載入側 vanilla 前提：getPendingChunkData→copyChunkData x1，兩個存檔 task 的 copyChunkData 各 copyData x1，"
+                        + "copyData＝wrap(Arrays.copyOf(array, position))",
+                countExactCalls(methodFromJar(jar, sctW8, "getPendingChunkData", "(II)Ljava/nio/ByteBuffer;"),
+                        Opcodes.INVOKEINTERFACE, "zombie/network/ServerChunkLoader$ChunkSaveTask", "copyChunkData", "()Ljava/nio/ByteBuffer;") == 1
+                && countExactCalls(methodFromJar(jar, sltCls, "copyChunkData", "()Ljava/nio/ByteBuffer;"), Opcodes.INVOKESTATIC,
+                        sclCls, "copyData", "(Lzombie/network/ClientChunkRequest$Chunk;)Ljava/nio/ByteBuffer;") == 1
+                && countExactCalls(methodFromJar(jar, "zombie/network/ServerChunkLoader$SaveUnloadedTask", "copyChunkData", "()Ljava/nio/ByteBuffer;"),
+                        Opcodes.INVOKESTATIC, sclCls, "copyData", "(Lzombie/network/ClientChunkRequest$Chunk;)Ljava/nio/ByteBuffer;") == 1
+                && countExactCalls(vCopy, Opcodes.INVOKESTATIC, "java/util/Arrays", "copyOf", "([BI)[B") == 1
+                && countExactCalls(vCopy, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "position", "()I") == 1
+                && countExactCalls(vCopy, Opcodes.INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;") == 1);
+        // 原版載入失敗的毀滅路徑：LoadOrCreate 失敗 → setChecksum(0) → Blam → LoadBrandNew（這一刀要擋的就是它）；
+        // LoadOrCreate 的 buffer 為 null 時讀磁碟（helper 以 null 呼叫的語意依據）。
+        MethodNode vLoadChunk = methodFromJar(jar, w8IcCls, "LoadChunk", lcDesc);
+        MethodNode vLoc = methodFromJar(jar, w8IcCls, "LoadOrCreate", lcDesc);
+        MethodInsnNode vLcCk = findExactCall(vLoadChunk, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V");
+        failed += check("W8 載入側 vanilla 前提：LoadChunk 內 LoadOrCreate→setChecksum(0)→Blam→LoadBrandNew 各 1 且依序；"
+                        + "LoadOrCreate 有 LoadFromBuffer x1、LoadFromDisk x1",
+                countExactCalls(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadOrCreate", lcDesc) == 1
+                && countExactCalls(vLoadChunk, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V") == 1
+                && countExactCalls(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "Blam", "(II)V") == 1
+                && countExactCalls(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadBrandNew", "(II)Z") == 1
+                && vLcCk != null && prevReal(vLcCk).getOpcode() == Opcodes.LCONST_0
+                && firstCallIndex(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadOrCreate", lcDesc)
+                        < firstCallIndex(vLoadChunk, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V")
+                && firstCallIndex(vLoadChunk, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V")
+                        < firstCallIndex(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "Blam", "(II)V")
+                && firstCallIndex(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "Blam", "(II)V")
+                        < firstCallIndex(vLoadChunk, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadBrandNew", "(II)Z")
+                && countExactCalls(vLoc, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadFromBuffer", lcDesc) == 1
+                && countExactCalls(vLoc, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadFromDisk", "()V") == 1);
+        // 原版載入側的判斷與 verify 相同：LoadFromDiskOrBufferInternal 以 limit 對 len 欄位（checkLength）、
+        // 從 array 的 17 到 limit 算 CRC 對 crc 欄位（checkCRC），兩者不符都經 SanityCheck.log 拋 RuntimeException。
+        String scCls = "zombie/iso/IsoChunk$SanityCheck";
+        MethodNode vLoadInt = methodFromJar(jar, w8IcCls, "LoadFromDiskOrBufferInternal", "(Ljava/nio/ByteBuffer;)V");
+        MethodNode vScLog = methodFromJar(jar, scCls, "log", "(Ljava/lang/String;)V");
+        boolean scLogThrows = false;
+        for (AbstractInsnNode in : vScLog.instructions) {
+            scLogThrows |= in.getOpcode() == Opcodes.ATHROW;
+        }
+        failed += check("W8 載入側 vanilla 前提：載入 header 判斷＝checkLength(len 欄位, limit)＋checkCRC(crc 欄位, CRC[17,limit))，不符即拋",
+                countExactCalls(vLoadInt, Opcodes.INVOKEVIRTUAL, scCls, "checkLength", "(JJ)V") == 1
+                && countExactCalls(vLoadInt, Opcodes.INVOKEVIRTUAL, scCls, "checkCRC", "(JJ)V") == 1
+                && countExactCalls(vLoadInt, Opcodes.INVOKEVIRTUAL, "java/nio/ByteBuffer", "limit", "()I") == 2
+                && existsConstThenCall(vLoadInt, 17, "java/util/zip/CRC32", "update", 6)
+                && countExactCalls(methodFromJar(jar, scCls, "checkLength", "(JJ)V"), Opcodes.INVOKEVIRTUAL, scCls, "log", "(Ljava/lang/String;)V") == 1
+                && countExactCalls(methodFromJar(jar, scCls, "checkCRC", "(JJ)V"), Opcodes.INVOKEVIRTUAL, scCls, "log", "(Ljava/lang/String;)V") == 1
+                && scLogThrows);
+        // 手術後：同形改道、其餘指令不變；helper 只呼叫原版 LoadChunk 一次，資料來源由 loadSource 決定
+        MethodNode pLtRun = method(distJava, ltCls, "run", "()V");
+        failed += check("W8 載入側手術後：LoaderThread.run 的 LoadChunk 改道 ChunkWriteGuard.loadChunk x1、原呼叫歸零、其餘指令不變",
+                countExactCalls(pLtRun, Opcodes.INVOKESTATIC, cwgCls, "loadChunk", cwgLoadDesc) == 1
+                && countExactCalls(pLtRun, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadChunk", lcDesc) == 0
+                && methodText(vLtRun).replace("INVOKEVIRTUAL " + w8IcCls + ".LoadChunk " + lcDesc,
+                        "INVOKESTATIC " + cwgCls + ".loadChunk " + cwgLoadDesc).equals(methodText(pLtRun)));
+        failed += check("W8 載入側負對照：LoaderThread 除 run 外零 ChunkWriteGuard 呼叫",
+                classNode(distJava, ltCls).methods.stream()
+                        .filter(m -> !(m.name.equals("run") && m.desc.equals("()V")))
+                        .allMatch(m -> countCallsToOwner(m, cwgCls) == 0));
+        MethodNode gLoad = method(distJava, cwgCls, "loadChunk", cwgLoadDesc);
+        MethodNode gSrc = method(distJava, cwgCls, "loadSource", "(IILjava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;");
+        failed += check("W8 載入側 helper 結構：loadChunk 恰 1 個原版 LoadChunk 與 1 個 loadSource；loadSource 不碰 LoadChunk／SafeWrite",
+                countExactCalls(gLoad, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadChunk", lcDesc) == 1
+                && countExactCalls(gLoad, Opcodes.INVOKESTATIC, cwgCls, "loadSource", "(IILjava/nio/ByteBuffer;)Ljava/nio/ByteBuffer;") == 1
+                && countExactCalls(gSrc, Opcodes.INVOKEVIRTUAL, w8IcCls, "LoadChunk", lcDesc) == 0
+                && countExactCalls(gSrc, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
+
         // ---- W9 存檔管線隔離（42.21 起只剩私有池：addLoadedJob 租借＋SaveLoadedTask.release 歸還）----
         String sctCls = "zombie/network/ServerChunkLoader$SaveChunkThread";
         String csiCls = "zombie/mdc/ChunkSaveIsolation";
@@ -3507,13 +3589,16 @@ public final class SmokeCheck {
         // 紅＝TIS 改回讀檔，從 3f79700 取回 W60 之二。
         MethodNode w60Run = methodFromJar(jar, "zombie/network/ServerChunkLoader$LoaderThread", "run", "()V");
         MethodInsnNode w60LoadCall = findExactCall(w60Run, Opcodes.INVOKEVIRTUAL, w60Chunk, "LoadChunk", "(IILjava/nio/ByteBuffer;)Z");
+        // LoaderThread 自 42.22.2 起由 W8 載入側出貨（LoadChunk 改道 ChunkWriteGuard.loadChunk），故這裡改釘「不帶 W60 的
+        // AnimalLossProbe 呼叫」；SaveUnloadedTask 仍不出貨。
         failed += check("W60 之二退役前提：LoaderThread.run 唯一 LoadChunk 的資料來源是 getPendingChunkData、零 saveNow；"
-                        + "LoaderThread、SaveUnloadedTask 不再出貨",
+                        + "出貨的 LoaderThread 零 AnimalLossProbe 呼叫、SaveUnloadedTask 不再出貨",
                 countExactCalls(w60Run, Opcodes.INVOKEVIRTUAL, w60Chunk, "LoadChunk", "(IILjava/nio/ByteBuffer;)Z") == 1
                 && w60LoadCall != null && isCall(prevReal(w60LoadCall), Opcodes.INVOKEVIRTUAL,
                         "zombie/network/ServerChunkLoader$SaveChunkThread", "getPendingChunkData", "(II)Ljava/nio/ByteBuffer;")
                 && countExactCalls(w60Run, Opcodes.INVOKEVIRTUAL, "zombie/network/ServerChunkLoader$SaveChunkThread", "saveNow", "(II)V") == 0
-                && !Files.exists(distJava.resolve("zombie/network/ServerChunkLoader$LoaderThread.class"))
+                && classNode(distJava, "zombie/network/ServerChunkLoader$LoaderThread").methods.stream()
+                        .allMatch(m -> countCallsToOwner(m, w60Probe) == 0)
                 && !Files.exists(distJava.resolve("zombie/network/ServerChunkLoader$SaveUnloadedTask.class")));
         // W37 (3)(4)：同一個 AddWorldInventoryItem 另有兩個改道（dropPlace、dropSend）與兩個欄位改道（dropX、dropY），
         // 一起算進手術後的預期文字。存在理由（TIS 改掉時紅＝重估）：動物分支先在放下的格子 new IsoAnimal（座標參數是

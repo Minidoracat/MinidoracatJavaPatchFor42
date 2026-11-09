@@ -560,6 +560,19 @@ public final class PatchConfig {
         sclWriteM.expectedHits = 1;
         patches.add(sclWrite);
 
+        // 42.22.2 載入側：LoaderThread.run 改成 chunk.LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))，
+        // 佇列中或正在寫的存檔 buffer（copyData 的私有副本）直接拿來載入、不經上面的寫入閘。它若損毀，原版
+        // LoadChunk 失敗就 setChecksum(0)＋Blam＋LoadBrandNew，重生的 chunk 下輪存檔會通過寫入閘蓋掉磁碟好檔。
+        // 同形改道到 ChunkWriteGuard.loadChunk：同一個 verify（＝原版載入側 checkLength／checkCRC），
+        // enforce 不通過就以 null 呼叫原版 LoadChunk（改讀磁碟上一版）。javap：run 內 LoadChunk 恰 1。
+        Patcher.ClassPatch sclLoader = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$LoaderThread");
+        Patcher.MethodOps sclLoaderRun = sclLoader.method("run", "()V");
+        sclLoaderRun.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/iso/IsoChunk", "LoadChunk", "(IILjava/nio/ByteBuffer;)Z",
+                "zombie/mdc/ChunkWriteGuard", "loadChunk"));
+        sclLoaderRun.expectedHits = 1;
+        patches.add(sclLoader);
+
         // 退役（2026-09-28，42.21.0 官方已修）：W9 之二 crcSave ×4 → dedupCrc（官方刪除共用
         // ServerChunkLoader.crcSave，save() 改用區域 new CRC32）；復活：git checkout 8d2bee8 -- <檔案>
         Patcher.ClassPatch sclSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveLoadedTask");

@@ -229,6 +229,12 @@ Write-Host "[7/10] 守衛語意驗證（smoke＋負對照＋結構斷言）..."
 # 在測試 JVM 能完整初始化，未導向會把垃圾寫進本機 Saves/）
 java "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$ASM_CP" SmokeCheck "$R\dist\java" "$TJ"
 Assert-Ok "SmokeCheck"
+# W8 載入側（LoaderThread 的 LoadChunk 改道）三模式：MODE 是 static final，各開一個 JVM；測試自驗模式與 argv 相符。
+# 原版負對照用原版自己的 SanityCheck／validateByteBufferHeader（真 LoadChunk 失敗路徑會寫存檔目錄的 blam/，不在測試裡跑）。
+foreach ($w8m in @(@('enforce', '1'), @('observe', '2'), @('off', '0'))) {
+    java "-Dmdc.chunkWriteGuard=$($w8m[1])" "-Dmdc.chunkWriteGuard.dumpDir=$R\work\smoke-dumps" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ChunkWriteGuardLoadTest $w8m[0]
+    Assert-Ok "ChunkWriteGuardLoadTest（$($w8m[0])）"
+}
 
 # 退役（2026-09-02）：[8/10] 登入／join 量測 wrapper 的行為與例外 precedence 驗證隨刀
 # 移除（歸因任務已完成，REJOIN_TOTAL 常態 5–13ms）。詳見 docs/patches.md 2i。
