@@ -17,6 +17,7 @@ import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -139,15 +140,40 @@ public final class MdcAgent {
         inst.addTransformer(swap, false);
         Map<String, MethodHandles.Lookup> lookups = new HashMap<>();
         try {
-            for (int i = 0; i < defines.size(); i++) {   // 建置期排好的順序：依賴的模組在前、父型別在前
-                String pkg = packageOf(defineEntries.get(i).name());
-                MethodHandles.Lookup lookup = lookups.get(pkg);
-                if (lookup == null) {
-                    Class<?> anchor = Class.forName(index.anchors.get(pkg).replace('/', '.'), false, app);
-                    lookup = MethodHandles.privateLookupIn(anchor, MethodHandles.lookup());
-                    lookups.put(pkg, lookup);
+            // 建置期排好的順序：依賴的模組在前、父型別在前。Lookup.defineClass 定義後立刻連結，驗證時要載入的 helper
+            // 若還沒定義（定義的 helper 沒有一般 entry，app loader 找不到；例如外層 class 先於它的內部 class）就丟
+            // NoClassDefFoundError：這時 class 已經定義、只差連結，第一次使用時 JVM 重新連結（建置期 AgentLoadCheck 以
+            // -Xverify:all 連結過每一個）。沒定義成的（父型別還沒定義）留到下一輪；一整輪都沒進展才算失敗。
+            List<Integer> pending = new ArrayList<>();
+            for (int i = 0; i < defines.size(); i++) {
+                pending.add(i);
+            }
+            while (!pending.isEmpty()) {
+                int before = pending.size();
+                NoClassDefFoundError last = null;
+                for (Iterator<Integer> it = pending.iterator(); it.hasNext(); ) {
+                    int i = it.next();
+                    String name = defineEntries.get(i).name();
+                    String pkg = packageOf(name);
+                    MethodHandles.Lookup lookup = lookups.get(pkg);
+                    if (lookup == null) {
+                        Class<?> anchor = Class.forName(index.anchors.get(pkg).replace('/', '.'), false, app);
+                        lookup = MethodHandles.privateLookupIn(anchor, MethodHandles.lookup());
+                        lookups.put(pkg, lookup);
+                    }
+                    try {
+                        lookup.defineClass(defines.get(i));
+                        it.remove();
+                    } catch (NoClassDefFoundError e) {
+                        last = e;
+                        if (defined(app, name)) {
+                            it.remove();
+                        }
+                    }
                 }
-                lookup.defineClass(defines.get(i));
+                if (pending.size() == before) {
+                    throw last;
+                }
             }
         } catch (Throwable t) {
             inst.removeTransformer(swap);
@@ -161,6 +187,16 @@ public final class MdcAgent {
         say("ARMED: " + patched.size() + " patched classes, " + defines.size() + " helpers defined; "
                 + (index.modules.isEmpty() ? "" : "modules " + selectedModules + "; ")
                 + "agent " + index.version + " built " + index.built + "; jar sha256 " + live.substring(0, 8));
+    }
+
+    /** class 已經在 app loader 裡（定義成功但連結失敗的也算）。只載入、不初始化。 */
+    private static boolean defined(ClassLoader app, String internalName) {
+        try {
+            Class.forName(internalName.replace('/', '.'), false, app);
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
     }
 
     private static void disarm(String reason) {
