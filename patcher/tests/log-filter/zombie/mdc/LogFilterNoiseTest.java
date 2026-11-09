@@ -61,9 +61,8 @@ public final class LogFilterNoiseTest {
         // 名單防呆：反作弊訊息不經 warnObj；若未來有人誤加進名單，此處必爆
         requireForwarded("The packet Login is not valid");
         requireForwarded("packet.sync recovered zombie 123");
-        // OBJ_PREFIX 既有行為鎖（PacketsCache 動態尾綴）
-        requireSuppressed("No packet handler for type: 999");
-        requireForwarded("No packet handler for typo: 999");
+        // OBJ_PREFIX 已退役（42.22.2 PacketsCache 只在 IS_DEV 才印）：動態尾綴的舊訊息必須放行
+        requireForwarded("No packet handler for type: 999");
         // 抑噪 #10 LOG_PREFIX：車輛卸載正常路徑（動態 id 尾綴）必攔；同方法外的相似字串、null 放行
         require(LogFilter.suppressesLog("IsoChunk.removeFromWorld: vehicle wasn't removed from world id=42"),
                 "vehicle unload 前綴必須被攔");

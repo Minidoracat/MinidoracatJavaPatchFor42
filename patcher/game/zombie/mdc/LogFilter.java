@@ -30,7 +30,7 @@ public final class LogFilter {
         "The packet %s is not consistent: %s",                                           // INetworkPacket.logInconsistentPacket
     };
 
-    /** warn(Object) 呼叫點——訊息已組字串：完整訊息用 equals、動態長串用 startsWith。 */
+    /** warn(Object) 呼叫點——訊息已組字串，完整訊息用 equals。 */
     private static final String[] OBJ_EXACT = {
         "Invalid SpriteConfig object! scripted object = MetalBigWireFence",              // SpriteConfig（選擇性）
         "Invalid SpriteConfig object! scripted object = WoodFloorLvl3",
@@ -76,9 +76,8 @@ public final class LogFilter {
         "Invalid SpriteConfig object! scripted object = WoodenDarkWindowFrameLvl3",      // 116
         "Invalid SpriteConfig object! scripted object = Floor_Concrete",                 // 106
     };
-    private static final String[] OBJ_PREFIX = {
-        "No packet handler for type:",                                                   // PacketsCache <init>
-    };
+    // 退役（2026-11-10，42.22.2）：OBJ_PREFIX `No packet handler for type:`（PacketsCache <init>）——原版改成只在
+    // Core.IS_DEV 才印，專用伺服器不印；復活：git checkout 3f79700 -- patcher/game/zombie/mdc/LogFilter.java
 
     /**
      * 抑噪 #5：{@code NetworkZombieManager.moveZombie} 換擁有者時舊擁有者的清單裡沒有這隻殭屍。原文不印、改計數，
@@ -116,17 +115,12 @@ public final class LogFilter {
     }
 
     /**
-     * OBJ_EXACT／OBJ_PREFIX 的攔截判定——抽成 pure function 供 LogFilterNoiseTest 鎖行為。
+     * OBJ_EXACT 的攔截判定——抽成 pure function 供 LogFilterNoiseTest 鎖行為。
      * 前置條件：{@code s} 非 null（唯一呼叫端 warnObj 以 String.valueOf 保證；新增呼叫端須自行保證）。
      */
     static boolean suppressesObj(String s) {
         for (String p : OBJ_EXACT) {
             if (s.equals(p)) {
-                return true;
-            }
-        }
-        for (String p : OBJ_PREFIX) {
-            if (s.startsWith(p)) {
                 return true;
             }
         }

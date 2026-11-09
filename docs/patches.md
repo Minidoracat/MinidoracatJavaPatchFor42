@@ -34,7 +34,7 @@
 ---
 
 <a id="1"></a>
-## 1. 抑噪類（現役 8 項：表列 #2–#8＋§2bf 的 #10；#1、#9 已於 42.21.0 退役）——為什麼值得做
+## 1. 抑噪類（現役 7 項：表列 #2–#5、#7、#8＋§2bf 的 #10；#1、#9 已於 42.21.0 退役，#6 於 42.22.2 退役）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：(a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與檔案膨脹是實際開銷；(c) DebugLog 寫檔在高頻呼叫路徑上有同步成本。
 
@@ -45,7 +45,7 @@
 | 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` **exact 白名單 37 名**（初版 MetalBigWireFence／WoodFloorLvl3／Wooden_Windows；42.20 加 DoubleWireGate／BrickWallLvl2／MetalSmallWireFence／BrickWindowFrameLvl2／Piano／WoodenWallLvl3；42.20.3 加 SandFloor／WoodenDarkWallLvl3／GravelFloor／Floor_SpringGrass／DoubleDoor／WoodenWindowFrameLvl3／WoodFloorLvl2／Wood_DoubleDoorDark／WoodDoorFrameLvl3／Fences_MetalFarmGate；42.20.4 加 Commercial_FullGlassBlackWall／Commercial_GridGlassBlackWall／Commercial_HalfGlassRedWall／Commercial_FullGlassRedWall／Commercial_HalfGlassBlackWall／Commercial_GridGlassRedWall／MetalFloorLvl1／Wood_Crate_Lvl2／Floor_SummerGrass／WoodFloorLvl1／WoodenDarkDoorFrameLvl3／Composter／BrickFloorLvl1／Floor_SummerGrassCorner／ComposterShoddy／DoubleFenceGate／WoodenDarkWindowFrameLvl3／Floor_Concrete，見 §2bf；完整訊息 equals；入列門檻 ≥4 筆/h 見 AGENTS.md 手術鐵則，名單行為由 LogFilterNoiseTest 鎖） | 特定物件載入必刷（42.20 六名為 5.5h 實測 1183 筆；42.20.3 十名為 26h 實測 23,517 筆＝當時最大殘留噪音源，17 個 ≤86 筆低量名依門檻刻意不收）。37 名的生效定義都來自建築 MOD 的 entity 覆寫（其中 22 名與 vanilla 同名、15 名為 MOD 專屬），名單的退役訊號跟著該 MOD 更新走，不跟 PZ 版本走（42.21.0 審計：觸發程式碼位元不變，無名稱可移除） | **其他名稱（含 null 與低量名）照常警告**；resetObjectInfo 清理照跑 |
 | 4 | ItemPickInfo.GetPickInfo | 前綴 `ItemPickInfo -> cannot get ID for `（container/room/tile/zone 四變體） | MOD 地圖自訂容器/房間未註冊 ItemConfigurator，每次 loot roll 觸發且**不受 debug 閘控** | 4 條 debug 模式診斷訊息前綴不同、照常輸出；loot fallback 行為不變 |
 | 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.`（完整字串 equals；**不印、改計數**，累計在 W80 心跳的 `nzMissing`） | 換擁有者時舊擁有者的清單裡沒有這隻殭屍。至少一部分是回收的殭屍物件帶著上一輪的擁有者（原版缺陷，[W80](#2co) 修掉）；其他來源沒查 | 擁有權轉移邏輯照舊 |
-| 6 | PacketsCache.\<init\> | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | printException（真錯誤）與 `Packets limit has exceeded`（真限流）不動 |
+| 6 | ~~PacketsCache.\<init\>~~（**42.22.2 退役**） | 前綴 `No packet handler for type:` | vanilla 本就有多個 PacketType 走內建 switch 而非 handler class，**每個玩家連線必刷一長串** | 42.22.2 原版改成只在 `Core.IS_DEV` 才印（專用伺服器恆 false），改道點與 `OBJ_PREFIX` 一併刪除 |
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
 | 9 | ~~IsoObject.syncIsoObject~~（**42.21.0 退役**） | `ERROR: IsoThumpable not found on square x,y,z`（`System.out.println`，訊息 invokedynamic 組成 → 前綴 startsWith；2026-09-02） | B42 建造流程在 IsoThumpable 加進 square 前就呼叫 `setHealth` → server 端 `sync()` → `getObjectIndex()==-1` 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 門檻 4/h） | 42.21 官方把 `IsoThumpable.setHealth` 改為 `server && getObjectIndex() != -1` 才 sync，噪音源頭消失；剩下的 not-found 是低頻破損訊號，回歸原版照常印 |
@@ -57,6 +57,8 @@
 > **42.21.0 變更（2026-09-28）**：第 1 項 `AnimationSet.GetState` 被 TIS 降級為 `trace`（javap 42.21 offset 37
 > `invokevirtual DebugType.trace`），第 9 項的噪音源被 `IsoThumpable.setHealth` 的 `getObjectIndex() != -1` 守衛從源頭消除（javap 42.21 setHealth offset 21–25），兩項退役；LogFilter 的 `FMT_EXACT` 第 1 筆與
 > `PRINTLN_PREFIX`／`println`／`suppressesPrintln` 一併刪除。其餘 7 項（＋§2bf 的 #10）審計確認觸發程式碼與頻率前提仍成立。復活：`git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`。
+
+> **42.22.2 變更（2026-11-10）**：第 6 項退役——42.22.2 的 `PacketsCache.<init>` 把 `No packet handler for type:`（與新加的 `No packet validation for type:`）包進 `if (Core.IS_DEV)`，全 jar 沒有任何 `putstatic Core.IS_DEV`，專用伺服器恆為 false＝原版就不印（這個方法多出的第二個 `warn(Object)` 讓命中數 2 != 1）；改道與 `LogFilter.OBJ_PREFIX` 一併刪除，`LogFilterNoiseTest` 改成斷言舊前綴放行。其餘改道點核對：`ItemPickInfo.GetPickInfo` 9 個 `DebugLog.log`、`LootRespawn.respawnInChunk` 的 `getZone`／`getContainerCount`、`IsoChunk.removeFromWorld` 的車輛卸載 log 前後指令不變（三個方法的差異都只有 `IsoGridSquare.getObjects()` 回傳型別從 `PZArrayList` 改成 `List`）；`SkinningBoneHierarchy`、`SpriteConfig.initObjectInfo`、`INetworkPacket.logInconsistentPacket`、`NetworkZombieManager.moveZombie`、`GameServer.sendToxicBuilding` 逐指令相同。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java patcher/tests/log-filter`。
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，先 `uninstall.sh` 還原再觀察。每份 spec 的 `verification` 段都寫了正反向驗證法。
 
@@ -132,6 +134,8 @@ guard 位置正確）＋ASM 結構斷言（guard 在最前、super 恰一次、9
 **將來評估**（更根本的修復點，未做）：`Zombie.isConsistent()` 加 `getZombie()!=null`（現只驗 ID
 存在不驗型別）；`hit/Player` 有對稱風險應一起審。
 
+**2026-11-10 42.22.2 對版**：保留。`hit/Zombie.process` 與 42.21 只差一個旗標常數（`sipush 128`→`bipush 64`），開頭仍是 `super.process()` 後直接 `getZombie().setAttackOutcome`，`getZombie()` 仍是 `Type.tryCastTo`（可回 null）；呼叫端從 `PlayerHitZombiePacket.preProcess／postProcess` 改成 `processTarget`（42.22 把 WeaponHit 併入 `Hit`），SmokeCheck 的原版必拋 NPE 負對照與修補版安靜返回照樣成立。`Fall.process` 逐指令相同。
+
 ---
 
 <a id="2d"></a>
@@ -175,6 +179,8 @@ chunk 的**下一個正常 `HoursForLootRespawn` 週期**恢復。`explored`、`
 
 **已知邊界**：若 square 完全沒有 Zone，就沒有可保存的原版 `hourLastSeen`，fallback 使用 0；正式服目前
 `SeenHoursPreventLootRespawn=0`，不影響現行行為。此 patch 修的是週期刷新，不強制未探索容器立刻生成，也不重寫既有 `lootRespawnHour`。
+
+**2026-11-10 42.22.2 對版**：保留。`respawnInChunk` 的兩個改道點（`IsoGridSquare.getZone`、`IsoObject.getContainerCount`）前後指令不變，方法差異只在走訪格子物件改用 `List.size()／get(i)`；helper 走訪 `getObjects()` 的寫法隨回傳型別改成 `List` 重新編譯即可。
 
 ---
 
@@ -492,6 +498,8 @@ dist/java 所以測不到）。已補雙向守門：dist/java 與 manifest 不�
 ### 2026-11-10 42.22.2 對版
 
 `IsoZombie.isVehicleBetween` 逐指令未變，2k-1 原樣保留。
+
+`BaseVehicle.update` 唯一 `couldSeeIntersectedSquare(I)Z` 的前後語境（`numPlayers` 迴圈、`current` null 檢查、後接 `ifne`／`setTargetAlpha(I,0)`）與 42.21 相同，`couldSeeIntersectedSquare` 本體與 `render` 那一處逐指令相同，保留。
 
 <a id="2l"></a>
 ## 2l. 假死修復：removeGlassAttachments 無限迴圈保險絲
@@ -816,7 +824,7 @@ pending 機制（`PendingChunk`≤4096／`OutOfRangeRequest`≤1024／新封包 
 
 
 <a id="2q"></a>
-## 2q. 容器環防崩潰守衛（W5，server）
+## 2q. 容器環防崩潰守衛（W5，server；42.22.2 官方已修，退役）
 
 **事故**：2026-08-13 21:31:10 正式服主迴圈死於 `java.lang.StackOverflowError`，堆疊 1024 層全部是 `ItemContainer.getCharacter` 自我遞迴。伺服器假死 13 分鐘（frame 凍在 f:54247）、21:40 的 graceful `quit` 收不進去、看門狗 21:44 強制重啟。存檔在 21:30:10 成功、凍結在
 21:31:10，故世界資料只掉約 1 分鐘，但玩家 21:31–21:44 的操作全部沒被 server 收到。
@@ -858,6 +866,10 @@ rollback，不可借道 containsID=true（誤導 error＋`getItemWithID` null）
 **驗證**：SmokeCheck——兩刀各自的 vanilla 前提（恰一個自身遞迴）、改道恰一次且原遞迴歸零、**指令總數未變**（1:1 替換的結構事實）、原體保留（`getParent` 呼叫數與 `containingItem`
 觸碰數不變）、全 class 負對照（其他 27 個呼叫端保持 vanilla）。行為測試 7 案＋kill switch 模式：**vanilla 必爆負對照**（用 vanilla 爬升邏輯走同一個環必拋 SOE，證明環是真的）、守衛切斷回 null、**正向回傳真實擁有者**（堵住「永遠回 null」的假 helper 假綠通道）、正常巢狀零觸發、診斷指出閉合點、深度歸零不污染、門檻邊界（63 不觸發／66 觸發）。測試以 `sun.reflect.ReflectionFactory` 分配未初始化物件造環（`InventoryItem` 建構子會拉起
 ZomboidFileSystem），classpath 中 `dist\java` 排在 jar 前，故測到的是**改道後**的方法。
+
+### 2026-11-10 42.22.2 對版（退役）
+
+**官方已修，退役**。42.22.2 的 `getCharacter()` 與 `isInCharacterInventory(IsoGameCharacter)` 改成有界迴圈：`for (depth = 0; depth < 16; depth++)` 沿 `containingItem.getContainer()` 往上走，走回自己（`== this`）或遇到 null 就停，方法內零自身遞迴（javap：`bipush 16`／`if_icmpge` 迴圈，沒有 `invokevirtual ItemContainer.getCharacter`），環不會再 StackOverflowError，結果與本刀切斷時一樣回 null／false；`AddItem` 兩個多載另先查新的 `chainContainsContainingItem`，拒絕把容器放進自己的子孫（`can't add item … the item contains this container`），`containsRecursive` 等遞迴也改帶深度與 visited set。改道點不存在（漂移 0 != 1），`ContainerCycleGuard`、`ContainerCycleGuardTest`、build [9a/10] 與 SmokeCheck 斷言一併刪除，SmokeCheck 改釘「退役前提」（兩個方法零自身遞迴、各有 16 的上限）。失去的只有環上容器的診斷 log；同一個 `ItemContainer` ClassPatch 上的 W41（`AddItem`）照舊。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ContainerCycleGuard.java patcher/tests/cycle-guard patcher/src/SmokeCheck.java build.ps1`。
 
 <a id="2r"></a>
 ## 2r. 地圖格載入捕手（W6，server）
@@ -1031,8 +1043,12 @@ thread-safe**。並行 `add`／`size` 沒有任何定義保證，HashMap 家族�
 
 **Mutation 實測**（證明新閘不是裝飾，兩者在修正前都會全綠通過）：`catch (RuntimeException)` → `catch (Throwable)` ⇒ `struct FAIL 主 catch 型別鎖定`；刪掉 production log 行 ⇒ `應恰好輸出一行，實得 0`。
 
+### 2026-11-10 42.22.2 對版
+
+**保留，前提部分改變**。`doLoadGridsquare` 三處 `addToWorld` 的前後指令不變（方法差異只有 `getObjects()` 改回傳 `List`、`getBuildingsIntersecting` 多一個 boolean 參數），兩個改道點命中照舊。原版新增一層保護：`ServerMap.preupdate` 把 `ServerCell.Load2()`（42.21 回傳 boolean、42.22 改 void，經 `RecalcAll2` 呼叫 `doLoadGridsquare`）包進 `try/catch (Exception)`，例外時印 `Dropping cell`、`Unload()` 整格並從 `cellMap`／`loadedCells` 拿掉，同一個物件丟例外不會再讓主迴圈每 0.1 秒重撞而凍結。本刀仍有價值：原版是丟掉整格 64 個 chunk（玩家還在附近時下一輪又排進載入、又丟），本刀只跳過那一個物件的 `addToWorld`、整格照常載入。`ChunkLoadGuard` 診斷原本讀 `isAddedToEngine()`，42.22 刪掉了（新增的 `isAddedOrScheduledForEngine()` 會把排程中的也算進去），改成反射讀同名欄位 `GameEntity.addedToEngine`（42.21 的 `isAddedToEngine()` 就是 `getfield addedToEngine; ireturn`），只在診斷 log 路徑讀、失敗計入 `diagFailures`。`ChunkLoadGuardTest` 兩個模式通過。
+
 <a id="2s"></a>
-## 2s. 朝向暫存執行緒隔離（W7，server）
+## 2s. 朝向暫存執行緒隔離（W7，server；42.22.2 官方已修，退役）
 
 **事故**：2026-08-13 19:55:03，玩家 Player-A 的雞舍連同旁邊的水桶整組消失。chunk <chunk-A>（方格 <squares of chunk-A>）在重啟後 4 秒載入失敗，被原版的 `Blam + LoadBrandNew`
 清空重生：**46,142 bytes → 8,549 bytes**，雞舍、32 隻家禽的完整基因組、`Base.Bucket`
@@ -1132,6 +1148,10 @@ payload preflight、以及開機健檢（驗證清單 11a）。
 
 **沒有 kill switch**（刻意，偏離 W4-1／W5／W6 慣例，故在此說明理由）：那三刀都會**改變行為**（併包改變送出批次、守衛吞掉例外、捕手跳過入世界），旋鈕的價值在於「懷疑是它造成的就先關掉，不必整包 uninstall」。W7 不同——它是**語意保持**的：全類別 javap 多重集合比對證明零刪除、僅新增 2 條指令，且同執行緒行為與原版逐字相同。更關鍵的是，本刀的「關掉」等同於**把共享 static 換回去，也就是把毀存檔的競態放回來**；提供這種旋鈕是提供一把傷害自己的刀。真要退場就是 `uninstall.sh`（整包），那才是正確的粒度。唯一無法被旋鈕挽救的情境（helper 載入失敗）也不需要旋鈕——見上方降級分析，那是吵鬧的執行緒死亡而非資料損失。
 
+### 2026-11-10 42.22.2 對版（退役）
+
+**官方已修，退役**。42.22.2 的 `setForwardDirectionFromIsoDirection` 改成 `setForwardDirection(getVectorFromDirection(new Vector2()))`（javap：`new Vector2`／`invokespecial <init>` 後直接傳入，方法內零 `getstatic tempVector2_2`），主執行緒與 `LoaderThread` 不再共用暫存，競態不存在（漂移 0 != 2）。`ForwardVectorGuard`、PatchConfig 的 FieldGetSwap、SmokeCheck 的 W7 前提／手術後斷言、耦合鎖與跨執行緒行為 smoke 一併刪除，SmokeCheck 改釘「退役前提」（零 `tempVector2_2` 讀取、`new Vector2` ×1）；`IsoGameCharacter` ClassPatch 留給 W34、W88。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ForwardVectorGuard.java patcher/src/SmokeCheck.java build.ps1`。
+
 <a id="2t"></a>
 ## 2t. chunk 寫入閘（W8，server）
 
@@ -1196,6 +1216,14 @@ vanilla——測試環境必拋＝到達寫入路徑的證明）；vanilla 前�
 setChecksum 計數＋**setChecksum 先於 SafeWrite 的順序鎖**、census 總數 5＋**逐類分佈**堵新舊呼叫點互抵、hot-save 閘 **getstatic→ifne 方向鎖**、格式 offset **語境鎖**（17→CRC32.update、5→ByteBuffer.position，非僅常數存在））；手術後改道到位＋原呼叫歸零；負對照（排除條件鎖到精確簽名 `Save(Z)V`，其他 Save 多載也受檢；SafeWrite 本體無遞迴）。
 
 **歷史損失的還原路線**（另案執行）：A 組 16 筆改寫 header CRC 後即可還原（Player-B 案優先）；B 組 27 筆 body 可能為撕裂混合體，需逐筆分析不可批次。還原一律在閘門上線後進行——否則還原完可能再被同一缺陷吃掉。（2026-08-14 18:11 已執行：A 組 16/16 全數還原成功，含 Player-B 基地 <chunk-B>。）
+
+### 2026-11-10 42.22.2 對版
+
+**重新錨定**。42.22.2 把伺服器存檔的寫檔集中到新的 `private static ServerChunkLoader.writeChunk(ClientChunkRequest$Chunk)`：`new CRC32` 算整個 buffer → `getChecksumIfExists` 不同才 `IsoChunk.SafeWrite` → `setChecksum`。`SaveLoadedTask.save()` 與 `SaveUnloadedTask.save()`（卸載存檔，42.21 走 `IsoChunk.Save(Z)`）都在 `synchronized (IsoChunk.WriteLock)` 內呼叫它，`SaveLoadedTask.save` 不再有 `SafeWrite`（漂移 0 != 1）。改道點從 `SaveLoadedTask.save` 搬到 `writeChunk`（新開 `ServerChunkLoader` ClassPatch，命中 1，其餘指令不變），全 jar `SafeWrite` 仍恰 5 個（IsoChunk 2／ChunkSaveWorker 1／WorldGenerate 1／ServerChunkLoader 1），`IsoChunk.Save(Z)` 與 42.21 逐指令相同、照舊改道 ×2；卸載存檔改走 `writeChunk` 後也由同一個改道點涵蓋。
+
+**歸零重試的時序改變**：`writeChunk` 先 `SafeWrite` 再 `setChecksum(本次 buffer 的 CRC)`，與 42.21 相反；helper 擋下時歸零的 checksum 會被原版蓋成「沒寫進磁碟的壞 buffer」的 CRC。下一輪乾淨序列化的 bytes 必然不同，dedup 照樣放行重寫；bytes 完全相同代表同一份壞資料，dedup 跳過等於再擋一次，磁碟仍是上一版。SmokeCheck 的順序鎖改成：`Save(Z)` 先 `setChecksum` 後 `SafeWrite`、`writeChunk` 先 `getChecksumIfExists` 再 `SafeWrite` 最後 `setChecksum`，PZ 再改就紅。
+
+**格式前提**：`IsoChunk.Save(ByteBuffer,CRC32,Z)` 的版本常數 249→251，該方法其餘指令逐條相同（header 的 debug byte、版本 int、len int、crc long 版面不變），helper 的 offset 不用改，SmokeCheck 的常數改成 251。
 
 <a id="2u"></a>
 ## 2u. 存檔管線隔離（W9，server）
@@ -1266,6 +1294,10 @@ WorkerThread）。W8 攔得住不自洽的寫入，攔不住「buffer 被完整�
 **SmokeCheck 改釘**：刪除 crc32／crcSave 前提、全 jar 耦合鎖、swap 緊鄰性與 CRC 行為 smoke；新增「退役前提」（`addLoadedJob`／`save()` 各 `new CRC32` ×1，`ServerChunkLoader`／`SaveChunkThread`／`SaveLoadedTask`／`IsoChunk` 零 CRC32 欄位——TIS 退回共用實例即紅，復活兩刀用 `git checkout 8d2bee8`）與「之三存在理由」（`update()` 無鎖且讀 `savedChunks`、`ClientChunkRequest` 兩池仍為 static——TIS 加鎖或改成 per-instance 池即紅，重新評估之三）。`save()` 加負對照：零 `ChunkSaveIsolation` 呼叫。build 步驟 9d 的 off 路徑測試只剩三個池 helper。
 
 **驗證閉環不變**：W8 `flagged` 在 42.21 應恆 0；不為 0 代表還有官方修正與私有池都沒涵蓋的機制，看 BLOCKED stack。
+
+### 2026-11-10 42.22.2 對版
+
+**私有池保留**。`addLoadedJob` 的 `getChunk`／`getByteBuffer`／`releaseChunk` 前後指令不變（差異只有尾端入列改成 `addTask`、例外路徑 `ZLogger.write(Throwable)`）。`SaveLoadedTask.release()` 變成 `synchronized`、歸還前先設 `isReleased = true`（給新的 `copyChunkData` 判斷），但不讀它就歸還；`SaveChunkThread.update()` 仍用無鎖的 `savedChunks` 逐一 `release()`，雙重 release 照樣會把同一顆 buffer 還給全域池兩次，私有池仍需要。我們的 `releaseChunk` 在 `release()` 的鎖內執行，和 `copyChunkData` 互斥。42.22.2 新增的 `SaveUnloadedTask.serialize()` 向全域池租殼（`SaveLoadedChunk` 呼叫者 2→3），但 `serialize`／`release` 同為 `synchronized`、歸還後把 `chunkData` 設 null＝恰好歸還一次，不改道。存檔 dedup 的 `new CRC32` 從 `SaveLoadedTask.save` 移到 `writeChunk`，SmokeCheck 的退役前提跟著改看 `writeChunk`，census 改成 3 並釘住 `SaveUnloadedTask.release` 的 synchronized 與清 `chunkData`。`ChunkSaveIsolationTest`（off）通過。
 
 <a id="2v"></a>
 ## 2v. 抑噪第 8 項—— toxic log 改道
@@ -1576,7 +1608,7 @@ clear；TIS 把 clear 移進 finally 或 sort 前時此條紅，提醒重估本�
 
 
 <a id="2z"></a>
-## 2z. 車輛 DB chunk 索引一致性守衛（W12，server）
+## 2z. 車輛 DB chunk 索引一致性守衛（W12，server；42.22.2 官方已修，退役）
 
 **事故**：2026-08-23～24 正式服連續三輛車在卡車／仍坐車斷線／21:58 crash 後不可見；`vehicles.db` 列與 blob 都仍在，但 header 的 `wx,wy` 與 `x,y` 自相矛盾：
 
@@ -1619,6 +1651,10 @@ clear；TIS 把 clear 移進 finally 或 sort 前時此條紅，提醒重估本�
 **kill switch**：`-Dmdc.vehicleChunkIndexGuard=0`。
 
 **官方回報**：見 `docs/report/2026-08-24-vehicle-chunk-index-corruption-tis.md`。
+
+### 2026-11-10 42.22.2 對版（退役）
+
+**官方已修，退役**。42.22.2 的 `VehicleBuffer.set` 不再讀 `vehicle.chunk`：存入 x／y 後 `wx = PZMath.fastfloor(x / 8.0F)`、`wy` 同理（就是本刀的推導式），座標非 finite 或不是有效格子時印 `vehicle %d has invalid coordinates`；開檔時 `SQLStore.init` 先呼叫新的 `repairStoredVehicleChunks()`，掃整張 `vehicles` 表把 wx／wy 與座標推導值不符的列改正並 commit，讀車的三條查詢也跳過非 finite 座標。官方回報的問題已修，連既有壞列都會修。`Patcher.VehicleChunkIndexRepair` 手術形態只有本刀用；`VehicleChunkIndexGuard`、`VehicleChunkIndexGuardTest`、build [9i/10]、`$helperEntries` 條目與 `-Dmdc.vehicleChunkIndexGuard` 旗標一併刪除，SmokeCheck 改釘「退役前提」（`set` 零 `vehicle.chunk` 讀取、wx／wy 由 FDIV＋fastfloor 推導、`SQLStore.init` 呼叫 `repairStoredVehicleChunks`）。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/VehicleChunkIndexGuard.java patcher/tests/vehicle-chunk-index patcher/src/SmokeCheck.java build.ps1`（`Patcher.java` 的手術形態若已刪，同樣從 3f79700 取回）。
 
 ---
 
@@ -1891,6 +1927,8 @@ kill switch：`-Dmdc.mainLoopWatchdog=0`（tick 早退、執行緒不啟動）�
 **生效後觀測**：開機 banner `[MinidoracatJavaPatch][MainLoopWatchdog] 首次生效
 threshold=5000ms …`；凍結事件時 `主迴圈已凍結 <ms>（快照 n/12）ticks=… state=…
 heapUsedMB=…` ＋逐行 stack；恢復時 `凍結結束 observedMs≈… ticksDuringStall=…`。`anomalies` 必須恆 0。快照的 stack 直接餵回 216s 三假說裁決；若長期零凍結事件，本刀就是零成本保險絲，不撤。
+
+**2026-11-10 42.22.2 對版**：保留。頭部 `tick()` 掛點照舊（42.22.2 的 `preupdate` 開頭多了 `lastTick = System.nanoTime()`，全 jar 沒有讀者，不是官方看門狗），`GameServer.main` 內 `preupdate` 仍恰 1；方法其餘差異是 `ServerCell.Load2()` 改成 void、例外時丟掉整格（見 [2r](#2r)），不影響本刀。`MainLoopWatchdogTest` 三個模式通過。
 
 <a id="2ad"></a>
 ## 2ad. 動物卸載接手守衛（W16，server，observe）
@@ -3346,6 +3384,8 @@ W45 的數字已含攤提的批次移除。正式服 W40 實測 29–37 µs，�
   判定。伺服器已是 `Server` 時的歸還：on 下一輪帶授權、off 不送；送出一次後不再重送；伺服器忽略歸還（`Local(5)`）時 on 把 `Local(5)` 送回；申請包不動快取；連線沒有快取時不新建。
 - 線上驗收：用 `temp/vc_trace.py`（gitignore）重抓入站 30 秒，只送 `collide=0` 的迴圈應消失（每台車最多數十包）；卡頓後的 `VehicleCollide` 警告尖峰應大幅下降；beat `invalidated` 成長、`anomalies=0`。
 
+**2026-11-10 42.22.2 對版**：保留。`processServer` 的玩家欄位從 `PlayerID playerId` 改成 `OnlinePlayer player`（`getId()`），其餘指令相同；頭部掛點（slots 0,2）與 helper 只讀 `vehicleId`、`isCollide` 與連線的 `vehicleStates`，不讀玩家欄位，`ServerVehicleState` 只差 debug 資訊。`MdcVehicleCollideResyncTest` on／off 通過。
+
 <a id="2bj"></a>
 ## 2bj. 動物視線空間預篩（W47，server，預設 on）
 
@@ -3822,6 +3862,8 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - SmokeCheck：原版 `receiveSyncIsoObject` 恰一個 `IsoObject.syncIsoObject`，且是 GameServer 全 class 唯一；手術後方法文字（含 frames）只差這一個呼叫；helper 內原方法恰呼叫一次。
 - `SyncIsoObjectProbeTest`（on、off 兩個 JVM）：原版負對照——直接呼叫原方法（未改道的路徑）不記帳、不印；200 包不算 flood、第 201 包恰一行且欄位齊全（帳號、steamId、guid、物件與第一包物件、`sameAsFirst=150/201`）；同一視窗不重複計；10 秒內的下一次 flood 只計 suppressed，10 秒後再印並帶上 `suppressed=1`；另一條連線各自計數；beat 帶最大視窗與玩家、清掉閒置連線；log 時讀 sprite 拋例外只計 `anomalies`、原方法照常呼叫；原方法拋出的例外原樣上拋；`connection=null` 照常呼叫。off：原方法每包一次、不記帳、整個 JVM 零 log 行。
 
+**2026-11-10 42.22.2 對版**：保留。`receiveSyncIsoObject` 的改道點語境不變（差異只有 `getObjects()` 改回傳 `List`）；`IsoObject.syncIsoObject(ZBLUdpConnection;LByteBufferReader;)V` 簽名不變，本體只把連線多傳給新的 `syncIsoObjectReceive(ByteBufferReader, UdpConnection)`，helper 原樣呼叫它。`SyncIsoObjectProbeTest` on／off 通過。
+
 <a id="2bw"></a>
 ## 2bw. 世界地圖隊友點錯位（W59，server，預設 on）
 
@@ -4266,6 +4308,8 @@ console（每攔下一次一行，前 50 次之後每 1000 次一行）：
 - `BanditRaidLoopGuardTest`（`build.ps1` [9zm/10]，on、off 兩個 JVM）：同一個 JVM 載入 jar 裡的原版與 dist 內手術後的 `RDSBanditRaid`，只把碰世界與亂數的呼叫（`Rand` 15 處、取房間 6、`addZombies` 3、屍體 3＋3、車 1、世界 3）換成替身（世界格子一律 null、亂數照種子），迴圈、計數器與分支照原 bytecode 跑，以替身被呼叫的順序當紀錄。1–49 間房 × 40 個種子（取房間有 1/4 機會落空）兩份逐筆相同；50–100 間房、永遠找得到房間時，原版 33 組全部超過 5000 次替身呼叫（負對照），on 的 1020 組全部跑完、每組都和同種子的 45 間房紀錄相同、各 clamped 一次；off 跟原版一樣停不下來。
 
 **退場**：官方修好內層迴圈的計數器（SmokeCheck 存在理由轉紅）時撤刀。
+
+**2026-11-10 42.22.2 對版**：保留。`randomizeDeadSurvivor` 唯一 `Math.floor` 的語境（`/10`→`i2d`→`floor`→`d2i`→夾 10）與內外層共用 slot 9 都沒變，差異只有 `getObjects()` 改回傳 `List`。`BanditRaidLoopGuardTest` on／off 通過。
 
 <a id="2cg"></a>
 ## 2cg. 雞舍內動物產蛋不搜尋畜牧區雞舍（W72，server，預設 on）
@@ -4886,6 +4930,8 @@ console（首次生效一行、每 60 秒一行 beat、回原版或例外各一�
 
 **退場**：官方讓 native 只為搜尋範圍附近的載具建可見圖、或重建時不再線性搜尋全域 map 時撤刀；SmokeCheck 的呼叫點普查或 `addVehicle`／`removeVehicle` 本體 SHA 鎖變紅時先重新分析，不改斷言讓它變綠。
 
+**2026-11-10 42.22.2 對版**：保留。`BaseVehicle.addToWorld(Z)` 只在開頭多一行 `abandonReattachSeconds = 0`，`PathfindNative.addVehicle` 改道點語境不變；`scriptReloaded`、`removeFromWorld`、`PathfindNative.checkUseNativeCode`／`updateMain` 逐指令相同。`MdcPathfindVehicleScopeTest` 八個模式通過。
+
 ---
 
 <a id="2cu"></a>
@@ -4934,6 +4980,8 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行；沒�
 - `WorldMapVisibilityIndexTest`（`build.ps1` [9zz/10]，observe（出貨組態）、on、off 三個 JVM，帶 `-Xverify:all`，自驗 argv 與 MODE）：真 `SafeHouse`／`Faction`、真 `safehouseList`／`Faction.factions`。邊界資料：同名在 68 塊、非標記 owner 等於查詢名、只差大小寫的兩個名字、名單內重複名、空名單塊、第 70 塊（第二個 bitset word）；同名在兩個派系（第一個贏）、派系 0 的成員又是後面派系的 owner（原版回派系 0，「先放全部 owner 再放成員」會錯回後面那個）、owner 也列在成員、沒有成員的派系、只差大小寫的 owner、成員重複；不在任何地方的名字、null 名字、null 玩家。輪內 121 個有序名字對（含 null）安全屋逐值、11 個玩家派系逐參照等於原版，原版答案本身也釘住（避免全 false 假綠）；null 玩家兩邊都丟 NPE；經 dist 手術後的 `GameServer.isInSameFaction`／`isAnyPlayerInSameSafehouse`（反射呼叫）結果等於原版且真的進 helper（計數）；安全屋 owner 設 null、派系成員塞 null、派系成員塞非字串：這一輪那一種全走原版、與原版丟同一個例外類別，另一種照樣查表；安全屋名單塞非字串照樣查表且結果相同；`Faction.factions` 輪內被換掉回原版讀新清單；輪外改名單後回原版的新值；輪內改名單後其他執行緒的查詢看得到（走原版）；`round()` 讓原版 `sendWorldMapPlayerPosition()` 在輪內執行（替身 `udpEngine.connections` 記錄被讀時是否在輪內），原版丟例外照丟、輪照樣結束。**跨輪變動**：連續 5 輪 71 → 63（一個名字從第 3 塊移到最後一塊，words 2→1）→ 1（這一輪把 `Faction.factions` 順序反過來，同一個清單物件，B 第一個符合的派系從 0 變成 1）→ 65（名單順序打亂、派系順序恢復）→ 71 塊（名單與塊順序都打亂），每輪全部有序名字對與玩家都等於原版，原版答案本身在輪間確實改變（含 B 的派系），結束時派系恢復成原本的順序；抓 bitset 池重用時清零範圍、words 變動或派系表沒清空的錯。**原版負對照**：輪內把一個名字移出第 0 塊（實際不可能的輪內變動），on 的查表在停用前答錯 83 次、第 84 次的抽樣比對抓到（次數取決於前面累積的查詢數，斷言只要求 256 次內），`mismatches=1`、停用、之後都回原版的值，`round()` 不再進輪；observe 第一次查詢就抓到；停用後把心跳間隔設成已到期，下一輪原版跑完印一行 beat、帶 `disabled=true`。off 同一套全是原版的值、零計數、零 log。log 斷言：首次生效、停用、停用後的 beat 各恰一行，不含任何名字。另外用四個 helper mutant 確認新測試抓得到（不在 `build.ps1`）：拿掉 bitset 池的清零（跨輪 63／65／71 塊那三輪不符）、輪結束不清派系表（跨輪 1 塊那輪不符）、派系先放全部 owner（派系那條與跨輪全紅）、停用後不印心跳（心跳兩條紅）。
 
 **退場**：官方讓世界地圖可見性改用索引、或不再每秒全表掃描時撤刀；SmokeCheck 的語境、呼叫點普查或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
+
+**2026-11-10 42.22.2 對版**：保留。`GameServer.main` 的 `sendWorldMapPlayerPosition()` 呼叫語境（`sendWorldMapPlayerPositionLimiter.Check()` 後、Exception 例外區塊內）不變；`isInSameFaction`、`isAnyPlayerInSameSafehouse` 逐指令相同。`WorldMapVisibilityIndexTest` 三個模式通過。
 
 <a id="2cv"></a>
 ## 2cv. `Map=` 列了不存在的地圖資料夾時只略過那一項（W87，server，預設 on）
@@ -5007,7 +5055,7 @@ console（首次呼叫一行生效狀態；每次改走 non pvp 一行，玩家�
 
 **成本**：伺服器上 `MovingObjectUpdateScheduler.getUpdateSchedulerSimulationLevelForObject` 開頭 `!isEnabled || GameServer.server` 就回 FULL（frameMod 1），所以每輛載入的車每幀都跑 `preupdate`、`frameStep`、`update`、`postupdate`；原版連客戶端都把車釘在 FULL（`BaseVehicle.getMinimumSimulationLevel`）。2026-11-01 晚峰（45–47 人、約 2,090 輛載入車、FPS 9.2）60 份主執行緒 dump 有 12 份停在 `BaseVehicle.update`（約 20%），大多是沒人、熄火、沒在動的車：每幀約 23 次格子查詢、2×2 的作物查詢、掃全部零件找開著的燈，結果和上一幀相同。
 
-**做法**：`startFrame()` 把物件放進 bucket 時，伺服器主執行緒上「閒置」的車只在 `((frameCounter + vehicleId) & (N−1)) == 0` 的幀放進去（`-Dmdc.idleVehicleThrottleN`，2 的次方 1–64，預設 8；用 `vehicleId` 錯開輪次），其他幀四段一起跳過（`postupdate(I)` 走同一個 bucket，伺服器 frameMod 1）。閒置＝下面全部成立，全是 public 欄位或純讀取的 getter，每幀重算：`CarController` 存在且 `isEnable` 是 false、`physicActiveCheck` 與 `constraintChangedTime` 都是 −1、授權是 `Server`（伺服器的 `VehiclePhysicsPacket.processServer` 要 `hasAuthorization` 才收位置，沒有客戶端能推這台車）、每個座位沒人、拖車內沒有動物、沒拖也沒被拖、引擎 `Idle`、警報沒在響、燈條與警笛關、`needPartsUpdate` 是 false、沒開機修介面、沒有 `jniIsCollide`、有目前格子與 chunk、還在世界裡、沒有開著的收音機或 CD。上車、發動、警報、被推（授權改變）、被撞（`applyImpulse*` 讓 `isEnable` 變 true）、掛拖車（`constraintChanged`）都讓下一幀的判斷不成立，最多延後 1 幀就回到每幀更新。
+**做法**：`startFrame()` 把物件放進 bucket 時，伺服器主執行緒上「閒置」的車只在 `((frameCounter + vehicleId) & (N−1)) == 0` 的幀放進去（`-Dmdc.idleVehicleThrottleN`，2 的次方 1–64，預設 8；用 `vehicleId` 錯開輪次），其他幀四段一起跳過（`postupdate(I)` 走同一個 bucket，伺服器 frameMod 1）。閒置＝下面全部成立，全是 public 欄位或純讀取的 getter，每幀重算：`CarController` 存在且 `isEnable` 是 false、`physicActiveCheck` 與 `constraintChangedTime` 都是 −1、授權是 `Server`（伺服器的 `VehiclePhysicsPacket.processServer` 要 `hasAuthorization` 才收位置，沒有客戶端能推這台車）、每個座位沒人、拖車內沒有動物、沒拖也沒被拖、沒有等著重新掛回拖車（42.22.2 起，見本節末）、引擎 `Idle`、警報沒在響、燈條與警笛關、`needPartsUpdate` 是 false、沒開機修介面、沒有 `jniIsCollide`、有目前格子與 chunk、還在世界裡、沒有開著的收音機或 CD。上車、發動、警報、被推（授權改變）、被撞（`applyImpulse*` 讓 `isEnable` 變 true）、掛拖車（`constraintChanged`）都讓下一幀的判斷不成立，最多延後 1 幀就回到每幀更新。
 
 **收音機與 CD 開著不算閒置**：原版 `drainBatteryUpdateHack` 對 `getDeviceData() != null && getIsTurnedOn()` 的零件每幀 `updatePart` → `VehiclePart.updateSignalDevice` → 伺服器上 `DeviceData.update(true, …)`；裡面 `updateMediaPlaying`（播放行數與停止計數，伺服器送 `transmitDeviceDataStateServer` 與 `OnDeviceText`）、`updateSimple`（語音、訊號、聲音計數，伺服器上非物品欄裝置以 `WorldSoundManager.addSoundRepeating` 引殭屍）每次扣 `1.25×getMultiplier()`、`updateStaticSounds`（靜電倒數）每次扣 `getMultiplier()`，跳幀會讓這些計數器以 1/N 的速度走（被吃掉，不是延後）。零件掃描照 `drainBatteryUpdateHack` 的寫法，結果以 `vehicleId`（加 `identityHashCode` 防重用）快取，只在這一幀本來就會更新（輪到它或暖機中）或快取是「開著」（才能發現關掉）時重掃，所以沒人時被打開的收音機最多晚 N−1 幀被發現，那幾幀的計數器沒走；穩定時每台閒置車每 N 幀掃一次。
 
@@ -5046,6 +5094,8 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 
 **退場**：官方讓伺服器上的車降頻、或閒置路徑變便宜時重估；SmokeCheck 的語境、普查或原版本體 SHA 鎖變紅時先重新核對閒置路徑，不改斷言或 SHA 讓它變綠。
 
+**2026-11-10 42.22.2 對版**：保留，閒置條件加一項。改道點 `bucket.add` 的語境（`getUpdateSchedulerSimulationLevelForObject`→`simulationLevels[getUpdateOrderIndex()]`→`aload_3`→呼叫）不變。SmokeCheck 的原版本體 SHA 鎖紅了 6 個，逐一重核：`startFrame` 新增「`IDToPlayerMap` 每個玩家的 `Stats.numChasingZombies` 歸 0、殭屍目標是玩家就 +1」，與車無關；`VehiclePhysicsPacket.processServer` 的 `hasAuthorization` 仍在最前，只多丟比 `networkUpdateTime` 舊或與伺服器時間差 ≥1 秒的包；`hitCharacter` 把速度抽成等價的 `getImpactVelocity()`（`getLinearVelocity`、y 歸零、`min(length, 15)`，新加 SHA 鎖）；`constraintChanged` 的 `setPhysicsActive` 改看 `CarController.shouldBeActive()`，它設 `constraintChangedTime`＝不閒置；`tryReconnectToTowedVehicle` 只多一個「周圍 chunk 不足就早退」；`BaseVehicle.update` 的 `constraintChangedTime` 在物理沒開時續期（只會讓車更不閒置），以及新增**等著重新掛回拖車**的處理：`isWaitingToReattachTowingPartner()`（有拖車 ID 但 `constraintTowing == -1`）而周圍 chunk 都載入、對方不在時，`shouldAbandonReattachingTowingPartner()` 每次 update 累加 `getRealworldSecondsSinceLastUpdate()`，滿 5 秒清掉拖車 ID。原本的條件只看拖車物件，這種車（心跳的 `orphanTow`）算閒置，on 時這段計時會慢 N 倍；所以閒置條件加 `!isWaitingToReattachTowingPartner()`、state 指紋加 `reattach` 位元、兩個方法加 SHA 鎖，這種車照原版每幀跑，放棄後就回到一般判斷。`IdleVehicleThrottleTest` 真值表加這一項，orphanTow 那台車移到活動車；jar 原版負對照「來自 jar」的檢查改成看 `.jar` 結尾（42.22 起測試用拿掉簽章的 jar）。八個模式通過。
+
 <a id="2cy"></a>
 ## 2cy. 車輛聲音網路相關性預篩（W90，server，預設 observe）
 
@@ -5077,6 +5127,8 @@ console（首次生效一行、每 5 分鐘一行 beat，停用後照印、停�
 **部署**：manifest 新增 `MdcVehicleSoundPrefilter.class`、`MdcVehicleSoundPrefilter$1.class` 與 `Manager.class`。
 
 **退場**：官方讓聲音相關性不再逐連線掃全部車時撤刀；SmokeCheck 的語境或原版本體 SHA 鎖變紅時先重新核對等價，不改斷言或 SHA 讓它變綠。
+
+**2026-11-10 42.22.2 對版**：保留。`VehicleNetworkSoundManager$Manager` 改道的方法逐指令相同，SmokeCheck 的語境與原版本體 SHA 鎖照舊通過。`MdcVehicleSoundPrefilterTest` 的 jar 原版負對照「來自 jar」檢查改成看 `.jar` 結尾（42.22 起測試用拿掉簽章的 jar），其餘不變；全部模式通過。
 
 <a id="2cz"></a>
 ## 2cz. `checkIsNearVehicle` 只在潛行時跑（W91，server，預設 observe）

@@ -45,6 +45,9 @@ import zombie.vehicles.VehicleParts;
  * 才開始降頻；任何一幀不閒置（含裝置開著）或身分換了就歸 0。掉幀、卡頓、系統時鐘跳動都不會讓暖機變短。暖機期間閒置車不能新增接觸
  * （{@code hitCharacter}／{@code hitAnimal} 速度 &lt; 0.05 就提早回傳）。
  *
+ * <p><b>等著重新掛回拖車</b>（42.22.2）：{@code BaseVehicle.update} 對 {@code isWaitingToReattachTowingPartner()}（有拖車 ID 但沒有掛上）的車，
+ * 周圍 chunk 都載入而對方不在時，每次 update 累加牆鐘秒數，滿 5 秒就清掉拖車 ID；跳幀會讓這段計時慢 N 倍，所以等著重掛的車不算閒置。
+ *
  * <p><b>模式</b>（{@code -Dmdc.idleVehicleThrottle}，需重啟）：{@code 2|observe}（預設）一律放行，對「會跳」的車記這一幀與下一幀的指紋；
  * observe 只在每台車每 16 個輪次抽一個輪次記錄（{@link #observeSampled}），成本約 1/16；
  * {@code 1|on} 跳過，每 4096 次跳過抽一次放行並比對下一幀，{@code pos} 不一致就本次啟動永久回原版；{@code 0|off} 直接 {@code add}；
@@ -85,7 +88,7 @@ public final class IdleVehicleThrottle {
     /** state 指紋各位元的名字（位元 0–3 引擎狀態序號、4–6 授權序號，其餘一位一個）。 */
     static final String[] STATE_NAMES = {"engine", "engine", "engine", "engine", "auth", "auth", "auth", "isEnable",
             "physicActiveCheck", "constraintChangedTime", "alarm", "needPartsUpdate", "lightbar", "siren", "inCell",
-            "mechanicUI", "jniIsCollide", "passenger", "tow", "removed", "animals", "noSquare", "device"};
+            "mechanicUI", "jniIsCollide", "passenger", "tow", "removed", "animals", "noSquare", "device", "reattach"};
 
     private static volatile boolean disabled;
     private static boolean started;
@@ -301,6 +304,7 @@ public final class IdleVehicleThrottle {
             }
         }
         if (!v.getAnimals().isEmpty() || v.getVehicleTowing() != null || v.getVehicleTowedBy() != null
+                || v.isWaitingToReattachTowingPartner()
                 || v.getEngineState() != BaseVehicle.engineStateTypes.Idle) {
             return false;
         }
@@ -340,6 +344,7 @@ public final class IdleVehicleThrottle {
         bits |= (v.getAnimals().isEmpty() ? 0 : 1) << 20;
         bits |= (v.getCurrentSquare() == null || v.chunk == null ? 1 : 0) << 21;
         bits |= (devicesOn(v) ? 1 : 0) << 22;
+        bits |= (v.isWaitingToReattachTowingPartner() ? 1 : 0) << 23;
         return bits;
     }
 

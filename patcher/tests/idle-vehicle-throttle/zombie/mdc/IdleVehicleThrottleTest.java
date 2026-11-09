@@ -67,10 +67,11 @@ public final class IdleVehicleThrottleTest {
             v.getController().isEnable = true;   // 物理在動
             active.add(v);
         }
-        setInt(BaseVehicle.class, idle.get(3), "vehicleTowingId", 77);   // 找不到拖車對象的車（orphanTow）
+        // 找不到拖車對象的車（orphanTow）：42.22.2 起 isWaitingToReattachTowingPartner 成立＝不閒置，放在活動車裡只驗心跳計數
+        setInt(BaseVehicle.class, active.get(0), "vehicleTowingId", 77);
         if (mode.equals("vanilla")) {
             String src = MovingObjectUpdateScheduler.class.getProtectionDomain().getCodeSource().getLocation().toString();
-            check("vanilla：MovingObjectUpdateScheduler 來自 jar（classpath 不含 dist）", src.endsWith("projectzomboid.jar"));
+            check("vanilla：MovingObjectUpdateScheduler 來自 jar（classpath 不含 dist）", src.endsWith(".jar"));
             Map<BaseVehicle, Integer> counts = run(4 * n);
             check("原版負對照：" + 4 * n + " 幀內每台車（閒置 " + IDLE + "、活動 " + ACTIVE + "）都被 add " + 4 * n + " 次",
                     all(counts, idle, 4 * n) && all(counts, active, 4 * n));
@@ -128,6 +129,7 @@ public final class IdleVehicleThrottleTest {
         flips.put("沒有格子", b -> set(IsoMovingObject.class, v, "current", b ? null : square));
         flips.put("沒有 chunk", b -> v.chunk = b ? null : chunk);
         flips.put("已離開世界", b -> setBool(BaseVehicle.class, v, "removedFromWorld", b));
+        flips.put("等著重新掛回拖車（有拖車 ID、沒有掛上）", b -> setInt(BaseVehicle.class, v, "vehicleTowingId", b ? 77 : -1));
         VehiclePart radio = radio(v);
         flips.put("收音機開著", b -> setBool(DeviceData.class, radio.getDeviceData(), "isTurnedOn", b));
         for (Map.Entry<String, Flip> e : flips.entrySet()) {
@@ -519,6 +521,8 @@ public final class IdleVehicleThrottleTest {
         set(BaseVehicle.class, v, "lightbarLightsMode", new LightbarLightsMode());
         set(BaseVehicle.class, v, "lightbarSirenMode", new LightbarSirenMode());
         setInt(BaseVehicle.class, v, "vehicleTowingId", -1);
+        setInt(BaseVehicle.class, v, "vehicleTowedById", -1);
+        setInt(BaseVehicle.class, v, "constraintTowing", -1);
         v.physicActiveCheck = -1L;
         v.constraintChangedTime = -1L;
         v.netPlayerAuthorization = BaseVehicle.Authorization.Server;

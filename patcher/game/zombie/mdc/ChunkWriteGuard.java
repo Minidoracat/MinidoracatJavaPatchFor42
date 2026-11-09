@@ -107,7 +107,7 @@ public final class ChunkWriteGuard {
     private static final ThreadLocal<byte[]> SNAP = ThreadLocal.withInitial(() -> new byte[131072]);
     private static final ThreadLocal<CRC32> LOCAL_CRC = ThreadLocal.withInitial(CRC32::new);
 
-    /** IsoChunk.Save(Z)V ×2 與 ServerChunkLoader$SaveLoadedTask.save()V ×1 的改道目標。 */
+    /** IsoChunk.Save(Z)V ×2 與 ServerChunkLoader.writeChunk ×1（42.22.2 起；42.21 在 SaveLoadedTask.save）的改道目標。 */
     public static void safeWrite(int wx, int wy, ByteBuffer bb) throws IOException {
         if (MODE == MODE_OFF) {
             IsoChunk.SafeWrite(wx, wy, bb);
@@ -173,7 +173,7 @@ public final class ChunkWriteGuard {
     /**
      * 純函式：對快照驗證 header 自洽性。offset 是 42.20.2 格式的固定前綴
      * （[0] debug、[1,5) ver、[5,9) len、[9,17) crc、[17,len) body），與 worldVersion
-     * 分支無關（那些都在 body 內）；SmokeCheck 以 Save() 的 249/17 常數 pin 防格式漂移。
+     * 分支無關（那些都在 body 內）；SmokeCheck 以 Save() 的版本常數（42.22.2＝251）與 17 pin 防格式漂移。
      */
     static int verify(byte[] a, int len) {
         if (len <= HEADER_SIZE || len > a.length) {

@@ -59,7 +59,7 @@ public final class MdcVehicleSoundPrefilterTest {
         relevantMethod.setAccessible(true);
         if (vanilla) {
             String src = Manager.class.getProtectionDomain().getCodeSource().getLocation().toString();
-            check("vanilla：Manager 來自 jar（classpath 不含 dist）", src.endsWith("projectzomboid.jar"));
+            check("vanilla：Manager 來自 jar（classpath 不含 dist）", src.endsWith(".jar"));
         } else {
             int want = mode.equals("off") ? MdcVehicleSoundPrefilter.OFF : mode.equals("on") ? MdcVehicleSoundPrefilter.ON
                     : MdcVehicleSoundPrefilter.OBSERVE;

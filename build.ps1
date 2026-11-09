@@ -79,15 +79,11 @@ $helperEntries = @(
     'zombie/characters/animals/behavior/AnimalSpottedPrefilter.class',
     'zombie/mdc/VehicleCouldSeeGate.class',
     'zombie/mdc/ChunkRequestPacker.class',
-    'zombie/mdc/ContainerCycleGuard.class',
-    'zombie/mdc/ContainerCycleGuard$State.class',
     'zombie/mdc/ChunkLoadGuard.class',
-    'zombie/mdc/ForwardVectorGuard.class',
     'zombie/mdc/ChunkWriteGuard.class',
     'zombie/mdc/ChunkSaveIsolation.class',
     'zombie/mdc/NetTimedActionGuard.class',
     'zombie/mdc/AnimalSortGuard.class',
-    'zombie/mdc/VehicleChunkIndexGuard.class',
     'zombie/mdc/AnimalRelevancyGate.class',
     'zombie/mdc/AnimalRequestGate.class',
     'zombie/mdc/AnimalRequestGate$Bucket.class',
@@ -243,12 +239,8 @@ Write-Host "[9/10] entity removal 等價性、碰撞與 fallback 驗證..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalTest
 Assert-Ok "FastIdentityArrayRemovalTest"
 
-Write-Host "[9a/10] 容器環守衛（W5）行為驗證（含原版必爆負對照）＋kill switch..."
-java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ContainerCycleGuardTest
-Assert-Ok "ContainerCycleGuardTest"
-# 事故當下的緊急降級路徑，第一次跑它的時機不該是事故現場
-java "-Dmdc.cycleGuard.maxDepth=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ContainerCycleGuardTest
-Assert-Ok "ContainerCycleGuardTest（maxDepth=0 kill switch）"
+# 退役（2026-11-10，42.22.2 官方已修）：[9a/10] W5 容器環守衛測試隨刀移除（原版改成 depth<16 的有界迴圈）。
+# 復活：git checkout 3f79700 -- build.ps1 patcher/tests/cycle-guard
 
 
 Write-Host "[9b/10] chunk 供給併包（W4-1 v2）三模式行為驗證（獨立 JVM；模式是 static final）..."
@@ -307,11 +299,8 @@ Assert-Ok "AnimalSortGuardTest（on，出貨組態）"
 java "-Dmdc.animalSortGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalSortGuardTest off
 Assert-Ok "AnimalSortGuardTest（animalSortGuard=0 kill switch）"
 
-Write-Host "[9i/10] 車輛 DB chunk 索引守衛行為驗證＋kill switch（獨立 JVM）..."
-java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleChunkIndexGuardTest
-Assert-Ok "VehicleChunkIndexGuardTest（on，出貨組態）"
-java "-Dmdc.vehicleChunkIndexGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleChunkIndexGuardTest off
-Assert-Ok "VehicleChunkIndexGuardTest（off，vanilla 路徑）"
+# 退役（2026-11-10，42.22.2 官方已修）：[9i/10] W12 車輛 DB chunk 索引守衛測試隨刀移除（原版 set 改由座標推導 wx/wy）。
+# 復活：git checkout 3f79700 -- build.ps1 patcher/tests/vehicle-chunk-index
 
 Write-Host "[9j/10] 動物同步範圍對齊（W13）三模式行為驗證（獨立 JVM；MODE 是 static final）..."
 # 三個模式都必須真的跑過：enforce 是出貨組態、observe 只量測 `suppressed` 判定差集而
