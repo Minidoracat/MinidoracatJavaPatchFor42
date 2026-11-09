@@ -8,8 +8,8 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 - **Server patches**: loose `.class` overrides for the dedicated server. They address main-loop freezes
   and livelocks, lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed
   actions and log noise. 85 patched classes, 265 patch sites and 105 helper classes on 42.21.0.
-- **Client patches**: an optional package for players (invisible players/zombies/vehicles; three 42.21.0
-  player-built room bugs: vanishing objects, and two disconnects while chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate). Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
+- **Client patches**: an optional package for players (invisible players/zombies/vehicles; two disconnects while
+  chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate), loaded as a Java agent without changing game files. Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
 
 Every patch targets a specific vanilla defect or a measured hot spot and has a written root-cause analysis:
@@ -201,7 +201,6 @@ They write rate-limited heartbeat lines to the console and are how most of the i
 |---|---|---|---|
 | Texture pipeline limit and leak fixes ([2j](docs/patches.en.md#2j)) | Texture-loading threads sleep forever once 50 MB of decoded, not-yet-uploaded buffers pile up. Leaks (APNG frames, 64 MB fallback buffers) push that floor over the limit: players, zombies and vehicles render as a shadow and a name tag. | Fixes the leaks; the standard variant also raises the wait limit to 4 GiB. Invisibility stopped recurring. | [#100919](https://theindiestone.com/forums/topic/100919/) |
 | Chunk streaming log ([2o](docs/patches.en.md#2o)) | Black-edge incidents left no evidence on the client. | Logs streaming state and stalls; no behavior change. | — |
-| Player-built room XL tree fix ([2bl](docs/patches.en.md#2bl)) | 42.21.0: `IsoTree.isPlayerInsideARoom` reads `getRoom().getRectsBounds()` whenever `isInARoom()` is true, but `isInARoom()` is also true for enclosed player-built rooms that have no `IsoRoom`. The NPE aborts the frame: furniture, trees and fences vanish. | Treats such rooms as "not inside a room" for the XL tree fade. | [#101887](https://theindiestone.com/forums/topic/101887/) (fixed internally by TIS) |
 | W54 Skip unchanged vehicle part poses ([2br](docs/patches.en.md#2br)) | Every loaded vehicle calls `AnimationPlayer.Update` for every skinned part model every frame, whatever the distance, whether parked or visible; windows and armor share the door's player, so one skeleton is computed 2–3 times per frame. Mod vehicles with moving parts (KI5, rSemiTruck) cost 22–47 µs per vehicle per frame, vanilla vehicles 3–5 µs. | Skips the Update when no track is playing and the pose inputs match the last full computation; the renderer reuses the previous matrices. One in 256 skips is fully recomputed and compared; any difference reverts to vanilla for the session. Bit-identical poses in the synthetic tests. | not reported |
 | W55 `isBoneReparented` fast path ([2bs](docs/patches.en.md#2bs)) | The skeleton update calls `isBoneReparented` once per bone, each time allocating a pooled lambda and scanning a list that is empty for vehicles, zombies and most characters. | Returns false for an empty list, vanilla otherwise; bit-identical results for every character and vehicle. | not reported |
 | W57 Player-built room chunk-load disconnect ([2bu](docs/patches.en.md#2bu)) | 42.21.0: a chunk's squares are bound to rooms on the World Streamer thread. If the client rebuilds the player-built buildings of that area (any build or demolition in the same or a neighbouring cell) before the main thread takes the chunk over, the old `IsoRoom` is cleared (`def = null`) and `updateSquares` skips the queued chunk; `IsoLightSwitch.chunkLoaded` then throws and the client is disconnected to the main menu. | When the chunk has squares pointing at a cleared room, runs the game's own `updateSquares` steps on that chunk first (the rebuild vanilla skipped); otherwise vanilla. | [#102213](https://theindiestone.com/forums/topic/102213/) |
@@ -249,6 +248,7 @@ Patches we retired because TIS fixed the underlying issue:
 | `RequestData` ACK loop bound (W27, [2ao](docs/patches.en.md#2ao)) | 42.21.0 | — |
 | PopMan missing-cell generation vs background save (W28, [2ap](docs/patches.en.md#2ap)) | 42.21.0 | — |
 | `AnimationSet` / `ActionStateContainer` log noise ([1](docs/patches.en.md#1)) | 42.20 / 42.21.0 | — |
+| Player-built room XL tree exception ([2bl](docs/patches.en.md#2bl)) | 42.22.2 | [#101887](https://theindiestone.com/forums/topic/101887/) |
 
 ## How the patches work
 
@@ -306,34 +306,42 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
    when another mod already replaces the game classes the full variants patch), then `Y` to confirm.
 
 The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
-or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for: it
-checks the SHA-256 of `projectzomboid.jar` and of every file it writes, never touches files it does not own,
-and rolls back an interrupted install. **Run `Uninstall-Patches.bat` (choose `A`) before every game update**, so
-keep the extracted folder (or download the same zip again when you need it). If you forgot and the game no
-longer starts after an update, close it and run `Uninstall-Patches.bat` (choose `A`). It also recognizes the old
-TexPipeline v3.0 package (the one that only came with `uninstall.bat`), so installing the new package or removing
-cleans it up.
+or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for and checks
+the SHA-256 of `projectzomboid.jar` and of the agent jar. Since 0.3.0 the patches load as a Java agent (from 42.22 on
+the official jar is signed, and the old way of putting `.class` files into the game folder keeps the game from
+starting): the installer puts `MinidoracatClientPatches.jar` into the game folder's `.mdc-patches` and adds one
+`-javaagent:` launch option to `ProjectZomboid64.json`; the game's own files stay untouched. Uninstalling removes
+only that option and keeps your other settings (a custom `-Xmx`, for example), and an interrupted install rolls
+back. **No need to uninstall before a game update**: when the jar changes, the patches switch themselves off and the
+game runs vanilla. Steam updates often restore the original `ProjectZomboid64.json`; the patches are then inactive
+(the installer's status shows "installed but not active"), and running `Install-Patches.bat` from the package for the
+new version turns them back on. Do not delete the `.mdc-patches` folder by hand: with the launch option still there and
+the jar gone, the game does not start. Remove the patches with `Uninstall-Patches.bat` (choose `A`), so keep the
+extracted folder (or download the same zip again when you need it). Starting the game through `ProjectZomboid64.bat`
+or `ShowConsole.bat` skips `ProjectZomboid64.json`, so the patches do not load. Upgrading from 0.2.x: close the game
+and run the new `Install-Patches.bat`; the `.class` files the old version put into the game folder are removed in
+the same install. It also recognizes the old TexPipeline v3.0 package (the one that only came with `uninstall.bat`).
 
 | Module | Purpose |
 |---|---|
 | `core` | Shared Lua bridge, installation fingerprint check and startup status; installed automatically |
-| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, XL tree room fix, player-built room disconnect fix, vehicle animation speed-ups, vehicle teleport fixes, floor blood speed-up (32 GB RAM or more) |
+| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, player-built room disconnect fixes (two), vehicle animation speed-ups, vehicle teleport fixes (three), vehicle-under-the-floor fix, floor blood speed-up (32 GB RAM or more) |
 | `client-fixes-lowmem` | The same fixes with the vanilla 50 MiB texture limit; excludes the other variants |
-| `client-fixes-compat` | Only the XL tree room fix and the vehicle fixes, for use next to mods that replace the other classes (for example PZ_Optimization); excludes the other variants |
+| `client-fixes-compat` | Only the vehicle fixes (vehicle animation speed-up, the three teleport fixes, vehicle under the floor), for use next to mods that replace the other classes (for example PZ_Optimization); excludes the other variants |
 | `profiler` | DevProfiler for mod developers (Java → Lua call timing, CSV/JFR export); its UI is the separate mod `MinidoracatDevProfilerFor42` |
 
-**Mods that replace game classes.** Some mods, such as PZ_Optimization, also put `.class` files into the game
-folder. If one of them already replaces a class this package patches, the installer stops with code 7 and changes
-nothing, because only one copy of a class can load. Do not delete just the files it lists: the rest of that mod
-still needs them, and the game closes when you join a server
+**Mods that replace game classes.** Some mods, such as PZ_Optimization, put `.class` files into the game folder.
+If one of them replaces a class this package patches, our patch for that class would not take effect, so the
+installer stops with code 7 and changes nothing. Do not delete just the files it lists: the rest of that mod still
+needs them, and the game closes when you join a server
 ([issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)). Either keep that mod and install
 `client-fixes-compat` (the installer recommends it), or remove that mod with its own uninstaller (PZ_Optimization:
-`Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. That uninstaller deletes by path, so
-run this installer again afterwards if these patches were already installed. With PZ_Optimization, turn off its
-"Warm-start cache (Java AOT)" option before installing or removing: while it is on, the game loads classes from that
-cache instead of the game folder, and the installer refuses. The option takes effect at the next start, so after
-turning it off, start the game once more to the main menu and close it. You can turn it back on afterwards; turn it
-off again before the next install, update or removal.
+`Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. While PZ_Optimization's
+"Warm-start cache (Java AOT)" option is on, the game loads classes from that cache and the installer refuses to
+install; turn it off first (it takes effect at the next start, so start the game once more to the main menu and close
+it). Also, from 42.22 on, a `.class` file in the same package as an official class makes Java throw
+`SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
+their authors (inference: PZ_Optimization itself was not tested).
 
 Build the package yourself with `build-client.ps1`; installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`

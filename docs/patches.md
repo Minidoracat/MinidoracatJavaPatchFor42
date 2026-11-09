@@ -387,10 +387,9 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 現輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.21.0-0.2.11.zip`（42.20.4 時為 `-42.20.4-0.1.0`），不寫入 server manifest。client 原有 classpath `[".", "projectzomboid.jar"]` 保持不變，由 loose class 覆蓋對應 class。`Install-Patches.bat` 使用模組 manifest 選裝
-`core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`／`client-fixes-compat`（後三者互斥），驗 jar／payload SHA 與所有權後才寫入。`Uninstall-Patches.bat` 可只卸載所選模組；保留仍被依賴的 core，不明或被修改的 class 一律拒碰。交易中斷可依原包與 state 備份復原。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：遊戲已更新而殘留時，安裝會換成新版，卸載會整組移除（0.2.4 起；之前因為綁舊 jar，遊戲一更新就認不出，玩家只能回頭找舊包 `uninstall.bat`）。認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。Steam 驗證不會移除非 depot 的 loose class；遊戲更新前須先移除，而且**不可在 JVM 執行中卸載**。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
+**與 server 部署完全隔離**：`build-client.ps1` 輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.22.2-0.3.0.zip`（42.21.0 時為 `-42.21.0-0.2.11`），不寫入 server manifest。**0.3.0 起改用 Java agent 載入**（42.22 起官方 jar 簽章，見文件開頭）：包裡只有一個 `MinidoracatClientPatches.jar`（`AgentJarBuilder --modules` 建置，每個模組一組手術後的 class 與 helper），安裝器把它放在 `.mdc-patches/MinidoracatClientPatches.jar`，並在 `ProjectZomboid64.json` 頂層 `vmArgs` 末尾加一條 `-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<模組>`；官方 jar 與 classpath 都不動。相對路徑可用，因為原版 json 的 `-Djava.library.path=win64/;.` 本身就以遊戲資料夾為工作目錄。`Install-Patches.bat` 選裝 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`／`client-fixes-compat`（後三者互斥），驗 jar／agent SHA 後才寫入；`Uninstall-Patches.bat` 可只卸載所選模組（改寫那一條參數），全部卸載時拿掉參數與 agent jar。json 只改自己那一條：只替換頂層 `vmArgs` 陣列的文字範圍、寫完重新解析驗證，其他字元、BOM 與換行原樣保留，卸載後逐位元組回到安裝前；重複的自家參數收成一條，其他 Java agent 不動、只列出來。交易先寫後刪，中斷可依 state 備份復原，不會留下 json 指向已刪除 jar 的狀態：agent jar 不在時 JVM 直接起不來（`Error opening zip file or JAR manifest missing`，遊戲 JRE Zulu 25 實測）。Steam 更新或驗證會把 json 換回原版，此時 status 回報「已安裝但沒有啟用」；遊戲更新換了 jar 時 agent 比對 SHA 不符就 DISARMED、照原版執行，所以 0.3.0 起不必搶在更新前卸載。`ProjectZomboid64.bat`／`ShowConsole.bat` 直接呼叫 `jre64\bin\java.exe`、不讀 json，用它們啟動時修補不會載入。從 0.2.x（state `schemaVersion` 1、loose class）升級時，同一筆交易刪掉舊的 loose class（逐檔 SHA 相符才刪，否則 exit 8），42.22 起留著它們本身就會 `SecurityException`；0.2.x 安裝只能整組卸載。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：殘留時安裝會在同一筆交易移除，卸載會整組移除（0.2.4 起）；認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。不可在 JVM 執行中安裝或卸載。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
-**和其他替換遊戲 class 的 MOD 並存（client 包 0.2.10）**：PZ_Optimization（Workshop 3805285544）也替換 `AnimationPlayer`、`ImageData`、`TextureID`、`TextureIDAssetManager`、`WorldStreamer`、`IsoChunk`、`RoomDef`、`FBORenderCutaways`（2026-10-29 本機訂閱的版本另換 `FBORenderCell`），同一個 class 只能載入一份。第三個互斥變體 `client-fixes-compat`（`PatchConfig.clientCompat()`，Patcher／LoadCheck／SmokeCheck 的 mode 是 `client-compat`）只含 IsoTree、BaseVehicle、VehiclePacket 三個 class 的手術（自建房間 XL 樹、W54、W61–W63、W65），ClassPatch 直接取自 `client(false)`，手術與完整版逐位相同；貼圖、串流、W55、W57、W84 不在內，W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket 也不裝。安裝器另有三道檢查：(1) 完整版和遊戲資料夾裡別人的 class 衝突、相容版不衝突時，互動選單建議相容版，code 7 訊息也指向它，並要求玩家不要只刪列出的檔案。[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) 的玩家只刪了外層 class，留下的 PZ_Optimization `AnimationPlayer$L_*` 把暫存欄位改成每個實例一份，原版與本包的 `AnimationPlayer` 仍用 `getstatic` 讀，第一次更新角色動畫就丟 `IncompatibleClassChangeError`，主執行緒結束、遊戲直接關閉。(2) 要寫入的 class 在遊戲資料夾已有不屬於本包的同一 class 家族檔案（`X.class` 或 `X$*.class`）時，以 code 7 拒絕。(3) 只讀 `ProjectZomboid64.json`：classpath 沒有把 `.` 排在 `projectzomboid.jar` 前面時，安裝與卸載都拒絕並說明怎麼處理。PZ_Optimization 的 AOT 快取（預設開）把 classpath 換成 `pzopt/aot/pzopt.jar` 並把所有 loose class 打包進去，之後要重建 jar 時 Windows 不讓它覆寫使用中的 jar（`AccessDeniedException`），本包的安裝與卸載都不會生效。`MdcPatchRuntime` 從別人的 jar 載入時，往上找有 `projectzomboid.jar` 的資料夾讀安裝紀錄，不再誤報 `compatible=false`。
+**和其他替換遊戲 class 的 MOD 並存（client 包 0.2.10 起；0.3.0 改為 agent）**：PZ_Optimization（Workshop 3805285544）也替換 `AnimationPlayer`、`ImageData`、`TextureID`、`TextureIDAssetManager`、`WorldStreamer`、`IsoChunk`、`RoomDef`、`FBORenderCutaways`（2026-10-29 本機訂閱的版本另換 `FBORenderCell`），同一個 class 只能載入一份。第三個互斥變體 `client-fixes-compat`（`PatchConfig.clientCompat()`，Patcher／LoadCheck／SmokeCheck 的 mode 是 `client-compat`）只含 BaseVehicle、VehiclePacket 兩個 class 的手術（W54、W61–W63、W65；自建房間 XL 樹已在 42.22.2 退役，見 [§2bl](#2bl)），ClassPatch 直接取自 `client(false)`，手術與完整版逐位相同；貼圖、串流、W55、W57、W84 不在內，W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket 也不裝。agent 只換從官方 jar 載入的 class：遊戲資料夾裡別人的 class 家族檔案（`X.class` 或 `X$*.class`）蓋掉本包要修補的 class 時，那個 class 的手術不會生效，安裝器以 code 7 拒絕；完整版衝突、相容版不衝突時，互動選單建議相容版，code 7 訊息也指向它，並要求玩家不要只刪列出的檔案。[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) 的玩家只刪了外層 class，留下的 PZ_Optimization `AnimationPlayer$L_*` 把暫存欄位改成每個實例一份，原版與本包的 `AnimationPlayer` 仍用 `getstatic` 讀，第一次更新角色動畫就丟 `IncompatibleClassChangeError`，主執行緒結束、遊戲直接關閉。其他落在官方 jar package 裡的外來 loose class 只警告：42.22 起它們本身就會 `SecurityException`（Zulu 25 實測）。`ProjectZomboid64.json` 的 classpath 只准 `.` 排在 `projectzomboid.jar` 前面：PZ_Optimization 的 AOT 快取（預設開）把 classpath 換成 `pzopt/aot/pzopt.jar` 並把 loose class 打包進去，安裝會拒絕並說明怎麼關；卸載只要 `vmArgs` 可編輯就照常拿掉自己那一條。`MdcPatchRuntime` 只認 state `schemaVersion` 2：agent jar 路徑與 SHA、helper 所在的 jar、已安裝模組集合要和 `MdcAgent.status()` 回報的 `modules=` 相同，任一不符就 `compatible=false`。
 
 舊版 v3.0 包登記的路徑裡有四個是原版 class（`TextureIDAssetManager`、`ImageData`、`TextureID`、`WorldStreamer`），PZ_Optimization 也換它們。只有自家 helper（`zombie/mdc/…`、`Minidoracat…`）或內容等於舊版那一份時，才把這些路徑上的檔案當成認不出的舊版包擋下；否則交給一般衝突檢查，不然相容版也會被誤擋（安裝器測試 57）。
 
@@ -454,6 +453,10 @@ log**，我方這條（水位門檻讓載入執行緒無限 sleep）**零 log**�
 - 兩者都沒有 → 另闢分析，不要把「官方說修了」當成本節兩刀可退役的依據。
 
 ---
+
+### 2026-11-10 42.22.2 對版
+
+`TextureIDAssetManager`、`ImageData`、`TextureID` 在 42.22.2 與 42.21.0 的方法逐指令相同（ClassDiff），門檻與洩漏點都沒修，兩刀原樣保留；Patcher 命中數照舊，0.3.0 起改由 agent 載入。
 
 <a id="2k"></a>
 ## 2k. 效能第一波：載具視線預篩＋VehicleManager 512→256
@@ -699,6 +702,10 @@ largeArea 期間才有的假說 (a) 變成常態。四個 headCall 的掛點語�
 **判讀更新**：`STALL … sendGate=closed` → client 因在途上限完全停送新請求；搭配 `pending1`
 長期卡在 21 以上且 parts 凍結＝在途請求沒收尾（server 未回或回覆被丟）。上方判讀指南中
 `largeArea=true` 一條只適用 42.20.x。
+
+### 2026-11-10 42.22.2 對版
+
+`WorldStreamer` 只有 `compareSquares` 改了，本刀動到的四個方法逐指令未變（ClassDiff），命中數照舊，原樣保留。
 
 <a id="2p"></a>
 ## 2p. chunk 供給併包（W4-1 v2，server）＋請求逾時 8s→15s（W4-2，client，已撤刀）
@@ -3364,6 +3371,8 @@ fallback[notServer untrusted null coords] audits auditMisses observeMismatches d
 <a id="2bl"></a>
 ## 2bl. 自建房間 XL 樹例外（client，42.21.0；client 包 0.2.2）
 
+> **退役（2026-11-10，42.22.2 官方已修）**：42.22.2 的 `IsoTree.isPlayerInsideARoom` offset 0–18 是 `aload_1; invokevirtual isInARoom; ifeq 17; aload_1; getSquare; getRoom; ifnonnull 19; iconst_0; ireturn`，`IsoGameCharacter.isInARoom` 回傳 `square != null && square.isInARoom()`，與 `TreeRoomGuard` 的 null 檢查逐值相同，所以刪除 `PatchConfig.client()` 的 IsoTree 手術、`TreeRoomGuard`、行為測試與 SmokeCheck／LoadCheck 檢查，`client-fixes-compat` 只剩車輛修補。復活：`git checkout 2dd015f -- patcher/game-client/zombie/mdc/TreeRoomGuard.java patcher/tests-client/zombie/mdc/TreeRoomGuardBehaviorTest.java patcher/src/PatchConfig.java patcher/src/SmokeCheck.java patcher/src/LoadCheck.java build-client.ps1`，再對新 jar 重新驗證。
+
 **症狀**（2026-09-29 Player-I、Player-J 回報；官方 bug report
 [101887](https://theindiestone.com/forums/topic/101887-42210-entering-player-built-rooms-adjoining-pre-built-structures-causes-exceptions-visibility-glitches/)、[101955](https://theindiestone.com/forums/topic/101955-bugged-house-when-building-under-watchtower-b42/) 同一問題）：在預製建築旁邊加蓋、或疊在預製平房上的封閉自建房間，一走進去家具、樹、圍籬、路燈、窗戶都看不見（仍可互動），右下角 ERROR 每幀往上跳。兩份 client log 只有同一條例外：`Cannot invoke "IsoRoom.getRectsBounds()" because the
 return value of "IsoGridSquare.getRoom()" is null at IsoTree.isPlayerInsideARoom(IsoTree.java:327)`，由
@@ -3632,6 +3641,10 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **殘留**：簽章看不到的輸入（同一個 track 物件就地換骨頭遮罩、clip 資料被改、debug 選項）會讓畫面最多停在舊姿勢 256 次跳過，由抽樣比對抓到後本次回原版。
 
+### 2026-11-10 42.22.2 對版
+
+`AnimationPlayer` 整個 class 未變，`Update` 掛點的 javap offset 仍是 44。`BaseVehicle.update` 新增兩段（拖車重新連結 `isWaitingToReattachTowingPartner`／`shouldAbandonReattachingTowingPartner`，以及 `isPhysicsActive`／`constraintChangedTime`），都不碰本刀掛點；原樣保留。
+
 <a id="2bs"></a>
 ## 2bs. `isBoneReparented` 快速路徑（W55，client，預設 on；client 包 0.2.5）
 
@@ -3644,6 +3657,10 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 **守門與驗證**：
 - SmokeCheck（兩個變體）：存在理由——原版 `isBoneReparented` 以 `Lambda.predicate`＋`PZArrayUtil.contains` 掃 `reparentedBoneBindings`（TIS 自己加快速路徑時轉紅＝重估撤刀），欄位是 `ArrayList`；`AnimationPlayer` 內唯一的呼叫點在這個方法；手術後除了這一個呼叫之外方法文字與原版相同；`isBoneReparented` 本體未改。LoadCheck：helper 為 public static boolean。
 - `BoneReparentFastPathBehaviorTest`（兩個變體各跑 on、off）：沒有 reparent、有 reparent、池回收後清空三種狀態下每根骨頭 helper 與原版相同；60 幀真動畫（含 reparent 的 player）的 `modelTransforms` SHA-256 摘要 on 與 off 必須相同，由 `build-client.ps1` 比對。裸 JVM 微基準（只報告）：空清單時原版約 90–100 ns／次。
+
+### 2026-11-10 42.22.2 對版
+
+`AnimationPlayer` 整個 class 未變，`isBoneReparented` 掛點 offset 仍是 115，原樣保留；W55 摘要比對在 42.22.2 測試 jar 下照舊一致。
 
 <a id="2bt"></a>
 ## 2bt. 補算等畜牧區就緒（W56，server，預設 on）
@@ -3718,6 +3735,10 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - 實機重現與驗證（2026-10-09，本機 SP `-debug`，關殭屍）：起點 14322,4969（原版 Trailer3 蓋房示範的地點），在周圍 20–50 格蓋 8 間 3×3 封閉、z=1 鋪地板當屋頂的自建房，各在不同 chunk；每輪傳送到約 4000 格外、等 6 秒再傳回，接著 8 秒內每個 tick 在起點旁拆／放一面牆。Steam 原版（沒有任何 loose class）兩輪都在第一次傳回時拋出與玩家 log 逐行相同的 NPE（`IsoRoom.java:604` ← `IsoLightSwitch.java:879` ← `IsoChunk.java:2930` ← `IsoChunkMap.updateInternal`）並退回主選單。client 包 0.2.6（`client v3.3(b932af1)`，標準版，以安裝器裝在遊戲本體的 hardlink 複本）跑完 12 輪零例外，8 間房始終都認得；第一、二次傳回就記到 20 次補綁（每次啟動的記錄上限），每次 3–9 格。另一輪在進世界前視窗被關掉，未計。
 
 **退場**：官方修好後 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
+
+### 2026-11-10 42.22.2 對版
+
+`IsoChunk.loadInMainThread` 唯一的差別是 `getObjects` 回傳型別從 `PZArrayList` 改成 `List`，`IsoLightSwitch.chunkLoaded` 呼叫點從 offset 1863 移到 1895，指令本身不變；`RoomDef.getIsoRoom`、`IsoChunk.getRoom` 未變。官方沒修 roomDef 為 null 的路徑，原樣保留。
 
 <a id="2bv"></a>
 ## 2bv. SyncIsoObject 洪流觀測（W58，server，純觀測）
@@ -3858,6 +3879,10 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **退場**：官方修好（夾回前檢查 chunk，或卸載時解除車的參照）時 SmokeCheck 的存在理由會轉紅，屆時從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
 
+### 2026-11-10 42.22.2 對版
+
+`BaseVehicle.update` 新增兩段（見 §2br），只讓掛點位移：`setWorldTransform` 從 javap offset 1776 移到 1821，記錄目前 chunk 的位置從 1818 移到 1863，掛點指令與命中數不變，原樣保留。
+
 <a id="2bz"></a>
 ## 2bz. 車被留在已卸載 chunk 上的兩條路徑（W62、W63，client，預設 on；client 包 0.2.7）
 
@@ -3895,6 +3920,10 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - 實機驗證：未做（與 W61 同樣要先造出卸載時機）。上線後看玩家 console.txt 的 `VehicleOrphanGuard` 行，以及引擎聲突然消失的回報是否減少。
 
 **退場**：官方修好（卸載時把車移到已載入的 chunk、`update()` 不再對本機乘客的車提早 return，或 `doRemove` 不傳送本機模擬的車的駕駛）時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig.client()` 移除對應的改道，並刪除 helper 與測試。
+
+### 2026-11-10 42.22.2 對版
+
+W62：`BaseVehicle.update` 第一個 `contains` 仍在 offset 57，其餘三個從 206／1869／1920 移到 206／1914／1965（§2br 的兩段新增造成），命中數不變。W63：`VehiclePacket` 未變，`setPosition` 仍在 75。兩刀原樣保留。
 
 <a id="2ca"></a>
 ## 2ca. 車被推到地板下（W64 server，預設 on；W65 client，預設 on，client 包 0.2.7 起）
@@ -3947,6 +3976,10 @@ W64 的 `<結果>`：`lifted to <h> and sent a full update`（抬回）、`flipp
 - 實機 E2E（W65，2026-10-16，同一情境的 `client=1`，客戶端從裝了 client 包 0.2.8 標準版的遊戲複本開）：同樣把車轉成四輪朝天、−20 之後，11 ms 內 client console 記 `flipped (up -0.99999994), set upright keeping its heading, lifted to 0.382928 (#1)`；之後 15 秒車在本機一直是 y 0.374–0.383、up 1.000、車頭 (0.500, 0.866)，伺服器同值，畫面正常（駕駛沒有離線）。沒裝包的原版對照就是上一條 W64 那輪的場次 1：車設在 −20 之後 5 秒都留在 −20、四輪朝天。碰撞把車推進地板下的那種情況仍無法穩定重現；上線後看伺服器 console 的 `VehicleSinkRestore` 行與玩家 console.txt 的 `VehicleSinkGuard` 行。
 
 **退場**：官方在伺服器收高度時夾樓層，或在 `update()` 把掉到地板下的車放回地面時，SmokeCheck 的存在理由轉紅，屆時從 `PatchConfig` 移除對應的手術，並刪除 helper 與測試。
+
+### 2026-11-10 42.22.2 對版
+
+W65：`updateTransform` 掛點從 javap offset 1951 移到 1996（§2br 的兩段新增造成），指令與命中數不變，原樣保留。
 
 <a id="2cb"></a>
 ## 2cb. 畜牧區同步修補（W66，server，預設 on）
@@ -4089,6 +4122,10 @@ helper 照原版呼叫原方法一次，回傳值與例外不變。重建期間�
 - 實機 E2E（2026-10-19，本機 SP `-debug`，客戶端從裝了 0.2.9 標準版開發建置的遊戲複本開；`stale-room-sp` 情境，即 W57 的實機重現：8 間自建房，12 輪「傳送到約 4000 格外 6 秒 → 傳回 → 8 秒內每個 tick 在起點旁拆／放一面牆」，chunk 一邊載入、主執行緒一邊重建）：`RESULT PASS`，每輪 8 間房都認得，零例外，40,857 幀 p50 5 ms、p95 9 ms、最大 199 ms。console 有 `[MetaGridLock] active=true` 與 11 行等待（重建拿著鎖 0.4–4.7 ms，期間 1 條執行緒等著查房間，原版這 11 次都是兩邊同時碰房間表），W57 照常補綁（記滿 20 行）。原版的競態要剛好撞在 HashMap 寫入的同一刻，這個情境 12 輪重現不出來（2026-10-09 的 0.2.6 輪次也沒有），原版負對照以上一條的拋棄式重現為準。
 
 **退場**：官方修好後（SmokeCheck 的存在理由轉紅）從 `PatchConfig.client()` 移除本刀，並刪除 helper 與測試。
+
+### 2026-11-10 42.22.2 對版
+
+`MetaGridPacket`、`DataRoot` 整個 class 未變，`IsoBuilding.CreateFrom`、`RoomDef.getIsoRoom`、`IsoChunk.getRoom` 與兩個建構子、`FBORenderCutaways.CalculateBuildingsToCollapse` 逐指令未變；`IsoChunk.loadInMainThread` 只差 `getObjects` 回傳型別。SmokeCheck「會等待的 JDK 呼叫與已審清單相同（3947 個方法）」在 42.22.2 照樣通過，原樣保留。
 
 <a id="2ce"></a>
 ## 2ce. 實體 ID 撞號時照常移除（W69，server，預設 on）
@@ -4718,6 +4755,10 @@ console（首次生效一行、每 5 分鐘一行 beat、停用時一行）：
 **退場**：官方讓鄰居呼叫只讀靠交界的血跡（或改用空間索引）時撤刀；兩個多載的 SHA 轉紅時，先重核邊距證明再決定。
 
 ---
+
+### 2026-11-10 42.22.2 對版
+
+`FBORenderCell.renderOneLevel_Blood`（6 個參數）逐指令未變，SmokeCheck 的 SHA 釘選通過，W84 摘要比對在 42.22.2 測試 jar 下照舊一致，原樣保留。
 
 <a id="2ct"></a>
 ## 2ct. 只把動物附近的載具送進 native 尋路（W85，server，預設 observe）
