@@ -229,8 +229,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 ## 修補原理
 
-dedicated server 的 classpath 把 `java/.` 排在 `java/projectzomboid.jar` 前面，同路徑的 loose `.class` 會覆蓋 jar
-裡的類別。patcher 用 ASM 直接讀 jar 裡的原版類別並就地修改，不反編譯、也不重新編譯原始碼。
+42.22 起官方 `projectzomboid.jar` 是簽章 jar，同一個 package 裡混用沒有簽章的 loose `.class` 會丟 `SecurityException`。所以修補整包是一個 **Java agent**（`mdc-javapatch-agent.jar`）：官方 jar 與簽章不動，agent 在官方類別載入時把 bytes 換成建置期手術好的版本。patcher 用 ASM 直接讀 jar 裡的原版類別並就地修改，不反編譯、也不重新編譯原始碼。
 
 - **只做堆疊形狀不變的手術**：改道到堆疊效果與指令長度相同的 static helper、方法內常數替換、線性的頭部／尾部呼叫。Stack map frame 原樣保留（`ClassWriter(0)`）；helper 是對遊戲 jar 正常編譯的 Java 類別。
 - **逐方法命中數**：每個手術點都宣告必須命中幾條指令。遊戲更新後手術點移動或改變，建置直接失敗，而不是改錯地方。
@@ -238,26 +237,27 @@ dedicated server 的 classpath 把 `java/.` 排在 `java/projectzomboid.jar` 前
 - **驗證**：`LoadCheck` 以 `-Xverify:all` 載入每個類別，`BytecodeVerify` 跑 ASM 的資料流驗證，行為測試在裸 JVM
   中直接跑遊戲的真實類別。
 - **開關**：每項伺服器修補都讀一個 `-Dmdc.*` 屬性（`0`／`off` 回原版；很多項另有只量測、不改行為的 `observe` 模式）。
-- **失敗即停的安裝**：payload SHA、jar 同源與不明 loose class 巡檢三道閘都要通過。開服時印出版本橫幅（`server patch <commit> … jar=<sha>`）。
+- **失敗即停的安裝與全有或全無的載入**：安裝要過 agent jar SHA、jar 同源、衝突三道閘；每次開服啟動閘與 agent 都再比對一次兩個 SHA，遊戲更新換了 jar 就整包不啟用、以原版開服。開服時印 `[mdc-agent] ARMED` 與版本橫幅（`server patch <commit> … jar=<sha>`）。官方 `IntegrityReport` 照常運作：版本字串會多 `agents=1`，jar 仍判原版。
 
 ## 伺服器：建置與部署
 
-需求：JDK 25（42.21 的 jar 是 class file 版本 69）與伺服器的 `projectzomboid.jar`。
+需求：JDK 25（42.22 的 jar 是 class file 版本 69）與伺服器的 `projectzomboid.jar`。
 
 ```powershell
 copy <serverfiles>\java\projectzomboid.jar work\
-.\build.ps1        # 手術 → 命中數 → 連結、bytecode、行為檢查 → dist/
-wsl bash patcher/tests/install-roundtrip.sh   # 在暫存 serverfiles 上跑兩輪安裝／移除
+.\build.ps1        # 手術 → 命中數 → 連結、bytecode、行為檢查 → agent jar → 簽章 jar 下的載入檢查 → dist/
+bash patcher/tests/install-roundtrip.sh   # 在暫存 serverfiles 上跑兩輪安裝／移除（WSL 或 Git Bash）
 ```
 
 ```bash
-# 把 dist/ 複製到伺服器，在 serverfiles/java 內執行：
-bash install.sh    # payload SHA、jar 同源、衝突三道閘；下次重啟生效
-bash uninstall.sh  # 下次重啟回到原版
+# 把 dist/ 的 mdc-javapatch-agent.jar、agent-manifest.txt、install.sh、uninstall.sh 複製到伺服器同一個資料夾：
+bash install.sh    # agent SHA、jar 同源、衝突三道閘；裝到 serverfiles/mdc-javapatch/，下次開服生效
+bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原版
 ```
 
-**每次遊戲更新前都要先執行 `uninstall.sh`。** loose class 不在 Steam depot 裡，更新只會換掉 jar，舊的 patched class
-仍會留著。對新 jar 重新建置，並用 `javap` 確認每個手術點的語境（命中數對不代表意思沒變），再重新安裝。建置檢查與部署後驗證清單見 [docs/patches.md §3](docs/patches.md#3)。
+開服要經 `native-observer/deploy/run-with-pfguard.sh`：它驗過 agent jar 與遊戲 jar 的 SHA 才把 `-javaagent` 加進 `JAVA_TOOL_OPTIONS`，不符就以原版開服；JVM 設定檔不用改。不用這個啟動閘時，自己在 JVM 參數加 `-javaagent:<serverfiles>/mdc-javapatch/mdc-javapatch-agent.jar`（agent 自己也會比對 jar SHA，不符就不啟用）。
+
+**遊戲更新後**：agent 比對到 jar 換了就不啟用，伺服器照原版開，不會有「新 jar＋舊修補」。對新 jar 重新建置，並用 `javap` 確認每個手術點的語境（命中數對不代表意思沒變），再重新安裝。仍建議得知新版就先 `uninstall.sh`。建置檢查與部署後驗證清單見 [docs/patches.md §3](docs/patches.md#3)。
 
 ## 客戶端修補：安裝
 

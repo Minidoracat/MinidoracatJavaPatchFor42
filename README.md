@@ -252,9 +252,11 @@ Patches we retired because TIS fixed the underlying issue:
 
 ## How the patches work
 
-The dedicated server's classpath puts `java/.` before `java/projectzomboid.jar`, so a loose `.class` file
-overrides the class in the jar. The patcher reads the original class from the jar with ASM and changes it in
-place; nothing is decompiled or recompiled.
+Since 42.22 the official `projectzomboid.jar` is a signed jar, and mixing unsigned loose `.class` files into one of
+its packages throws `SecurityException`. The patch set therefore ships as one **Java agent**
+(`mdc-javapatch-agent.jar`): the official jar and its signature are untouched, and the agent swaps in the bytes
+patched at build time as the official classes load. The patcher reads the original class from the jar with ASM
+and changes it in place; nothing is decompiled or recompiled.
 
 - **Shape-preserving surgery only**: call redirects to a static helper with the same stack effect and
   instruction length, in-method constant changes, and linear head/tail calls. Stack map frames are kept
@@ -267,29 +269,37 @@ place; nothing is decompiled or recompiled.
   verifier, and behavior tests run the real game classes in a bare JVM.
 - **Kill switches**: every server patch reads a `-Dmdc.*` property (`0`/`off` restores vanilla; many offer an
   `observe` mode that measures without changing behavior).
-- **Fail-closed install**: payload SHA, jar identity and a scan for unknown loose classes must all pass. A
-  version banner (`server patch <commit> … jar=<sha>`) prints at startup.
+- **Fail-closed install, all-or-nothing loading**: installing requires the agent jar SHA, jar identity and conflict
+  gates to pass; at every start the launch gate and the agent compare both SHAs again, and a game update that
+  replaces the jar leaves the whole set off (the server starts vanilla). `[mdc-agent] ARMED` and a version banner
+  (`server patch <commit> … jar=<sha>`) print at startup. The official `IntegrityReport` works as designed: the
+  version string gains `agents=1` and the jar still reports original.
 
 ## Server: build and deploy
 
-Requirements: JDK 25 (the 42.21 jar is class file version 69) and the server's `projectzomboid.jar`.
+Requirements: JDK 25 (the 42.22 jar is class file version 69) and the server's `projectzomboid.jar`.
 
 ```powershell
 copy <serverfiles>\java\projectzomboid.jar work\
-.\build.ps1        # patch → hit counts → linkage, bytecode and behavior checks → dist/
-wsl bash patcher/tests/install-roundtrip.sh   # two install/uninstall rounds in a temporary serverfiles
+.\build.ps1        # patch → hit counts → linkage, bytecode and behavior checks → agent jar → load check under the signed jar → dist/
+bash patcher/tests/install-roundtrip.sh   # two install/uninstall rounds in a temporary serverfiles (WSL or Git Bash)
 ```
 
 ```bash
-# copy dist/ to the server, then in serverfiles/java:
-bash install.sh    # payload SHA, jar identity and conflict gates; takes effect at the next restart
-bash uninstall.sh  # restores vanilla at the next restart
+# copy mdc-javapatch-agent.jar, agent-manifest.txt, install.sh and uninstall.sh from dist/ into one folder on the server:
+bash install.sh    # agent SHA, jar identity and conflict gates; installs into serverfiles/mdc-javapatch/, active at the next start
+bash uninstall.sh  # moves that folder aside to patch-disabled-*; vanilla at the next start
 ```
 
-**Before every game update, run `uninstall.sh`.** Loose classes are not part of the Steam depot, so an update
-replaces the jar but leaves the old patched classes in place. Rebuild against the new jar, check every patch
-site's context with `javap` (a matching hit count does not prove the site means the same thing), then install
-again. Build-time checks and the deployment checklist are described in
+Start the server through `native-observer/deploy/run-with-pfguard.sh`: it adds `-javaagent` to `JAVA_TOOL_OPTIONS`
+only after the agent jar and the game jar match their SHAs, and starts vanilla otherwise; the JVM configuration
+file stays unchanged. Without that launch gate, add `-javaagent:<serverfiles>/mdc-javapatch/mdc-javapatch-agent.jar`
+to the JVM options yourself (the agent also compares the jar SHA and stays off on a mismatch).
+
+**After a game update** the agent sees the new jar and stays off, so the server runs vanilla instead of a new jar
+with old patches. Rebuild against the new jar, check every patch site's context with `javap` (a matching hit count
+does not prove the site means the same thing), then install again. Running `uninstall.sh` as soon as an update is
+known is still recommended. Build-time checks and the deployment checklist are described in
 [docs/patches.en.md §3](docs/patches.en.md#3).
 
 ## Client patches: install
