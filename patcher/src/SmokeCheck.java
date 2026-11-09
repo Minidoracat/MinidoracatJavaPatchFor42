@@ -104,32 +104,6 @@ public final class SmokeCheck {
                     onSeg == 0f && perp == 9f && beyond == 16f
                     && Math.abs(degen - (16f + 9f + 49f)) < 1e-4f);
 
-            // ---- W7 朝向暫存執行緒隔離：helper 的執行緒私有性（本刀的全部價值所在）----
-            // 修的是跨執行緒競態，故「跨執行緒拿到不同實例」是充要條件，必須真的開執行緒驗。
-            Class<?> fwdGuard = Class.forName("zombie.mdc.ForwardVectorGuard", true, patched);
-            Class<?> vec2Cls = Class.forName("zombie.iso.Vector2", true, patched);
-            Method swapM = fwdGuard.getMethod("swap", vec2Cls);
-            Object sharedSentinel = vec2Cls.getDeclaredConstructor().newInstance();
-            Object mainFirst = swapM.invoke(null, sharedSentinel);
-            Object mainSecond = swapM.invoke(null, sharedSentinel);
-            Object[] otherThread = new Object[1];
-            Thread worker = new Thread(() -> {
-                try {
-                    otherThread[0] = swapM.invoke(null, sharedSentinel);
-                } catch (ReflectiveOperationException e) {
-                    otherThread[0] = e;
-                }
-            }, "W7-smoke-worker");
-            worker.start();
-            worker.join();
-            failed += check("W7 helper：回傳非 null，且不是傳入的共享實例（確實換掉了）",
-                    mainFirst != null && mainFirst != sharedSentinel);
-            failed += check("W7 helper：同執行緒兩次呼叫回傳同一實例（① 寫 ② 讀語意與原版等價）",
-                    mainFirst == mainSecond);
-            failed += check("W7 helper：跨執行緒回傳不同實例（競態消失的充要條件）",
-                    otherThread[0] instanceof Object v && !(otherThread[0] instanceof Throwable)
-                            && v != mainFirst && v != sharedSentinel);
-
             // ---- W8 chunk 寫入閘：verify()/resolveMode() 純函式行為（不碰磁碟的可測核心）----
             Class<?> cwg = Class.forName("zombie.mdc.ChunkWriteGuard", true, patched);
             Method verifyM = cwg.getDeclaredMethod("verify", byte[].class, int.class);
@@ -565,61 +539,18 @@ public final class SmokeCheck {
                 !containsUtf8(distJava, fastRemoval, "setAutoCompactionFactor")
                 && !containsUtf8(distJava, fastRemoval + "$State", "setAutoCompactionFactor"));
 
-        // ---- W5 容器環防崩潰守衛（ItemContainer.getCharacter 遞迴點改道）----
+        // ---- W5 容器環防崩潰守衛：2026-11-10 隨 42.22.2 官方修正退役（docs/patches.md 2q）----
+        // 釘住官方修法：兩個方法都改成 `depth < 16` 的有界迴圈，零自身遞迴＝不會再 StackOverflowError。
+        // 轉紅＝原版又回到遞迴寫法，W5 要復活（git checkout 3f79700 -- <PatchConfig 註解列的檔案>）。
         String icCls = "zombie/inventory/ItemContainer";
-        String guardCls = "zombie/mdc/ContainerCycleGuard";
         String getCharDesc = "()Lzombie/characters/IsoGameCharacter;";
-        String guardDesc = "(Lzombie/inventory/ItemContainer;)Lzombie/characters/IsoGameCharacter;";
-        MethodNode vGetChar = methodFromJar(jar, icCls, "getCharacter", getCharDesc);
-        // vanilla 前提：方法內恰一個自我遞迴呼叫（就是要攔的那個），且尚未被改道
-        failed += check("vanilla 前提：getCharacter 內恰一個自身遞迴呼叫、零 guard 呼叫",
-                countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls, "getCharacter", getCharDesc) == 1
-                && countExactCalls(vGetChar, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc) == 0);
-        // vanilla 前提：無限遞迴的兩個前置條件仍在（getParent instanceof 分支＋containingItem 欄位）
-        failed += check("vanilla 前提：getCharacter 仍讀 containingItem 且有 getParent 分支",
-                countFieldTouches(vGetChar, icCls, "containingItem") >= 1
-                && countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls,
-                        "getParent", "()Lzombie/iso/IsoObject;") >= 1);
-        MethodNode pGetChar = method(distJava, icCls, "getCharacter", getCharDesc);
-        failed += check("W5 遞迴點改道恰一次且原自身遞迴歸零",
-                countExactCalls(pGetChar, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc) == 1
-                && countExactCalls(pGetChar, Opcodes.INVOKEVIRTUAL, icCls, "getCharacter", getCharDesc) == 0);
-        // 原體保留：非遞迴的兩條返回路徑（角色 parent／null）未被動
-        failed += check("W5 原體保留（getParent 呼叫數與 containingItem 觸碰數未變）",
-                countExactCalls(pGetChar, Opcodes.INVOKEVIRTUAL, icCls,
-                        "getParent", "()Lzombie/iso/IsoObject;")
-                == countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls,
-                        "getParent", "()Lzombie/iso/IsoObject;")
-                && countFieldTouches(pGetChar, icCls, "containingItem")
-                == countFieldTouches(vGetChar, icCls, "containingItem"));
-        // 指令總數不變＝redirect 是嚴格 1:1 替換（把「沒有增刪任何指令」變成結構事實）
-        failed += check("W5 getCharacter 指令總數未變（1:1 替換）",
-                pGetChar.instructions.size() == vGetChar.instructions.size());
-        // 第二刀：isInCharacterInventory（Transaction.getDuration 會走的那條）
         String inCharDesc = "(Lzombie/characters/IsoGameCharacter;)Z";
-        String guardInvDesc = "(Lzombie/inventory/ItemContainer;Lzombie/characters/IsoGameCharacter;)Z";
+        MethodNode vGetChar = methodFromJar(jar, icCls, "getCharacter", getCharDesc);
         MethodNode vInChar = methodFromJar(jar, icCls, "isInCharacterInventory", inCharDesc);
-        MethodNode pInChar = method(distJava, icCls, "isInCharacterInventory", inCharDesc);
-        failed += check("vanilla 前提：isInCharacterInventory 內恰一個自身遞迴呼叫",
-                countExactCalls(vInChar, Opcodes.INVOKEVIRTUAL, icCls,
-                        "isInCharacterInventory", inCharDesc) == 1);
-        failed += check("W5 isInCharacterInventory 改道恰一次、原遞迴歸零、指令總數未變",
-                countExactCalls(pInChar, Opcodes.INVOKESTATIC, guardCls,
-                        "isInCharacterInventory", guardInvDesc) == 1
-                && countExactCalls(pInChar, Opcodes.INVOKEVIRTUAL, icCls,
-                        "isInCharacterInventory", inCharDesc) == 0
-                && pInChar.instructions.size() == vInChar.instructions.size());
-        // 負對照：兩把刀都只在自己的方法內改道（method-scope 鎖定）
-        ClassNode pIc = classNode(distJava, icCls);
-        int guardCallsWholeClass = 0;
-        int guardInvCallsWholeClass = 0;
-        for (MethodNode m : pIc.methods) {
-            guardCallsWholeClass += countExactCalls(m, Opcodes.INVOKESTATIC, guardCls, "getCharacter", guardDesc);
-            guardInvCallsWholeClass += countExactCalls(m, Opcodes.INVOKESTATIC, guardCls,
-                    "isInCharacterInventory", guardInvDesc);
-        }
-        failed += check("W5 負對照：全 class 各僅一處改道（其他呼叫端保持 vanilla）",
-                guardCallsWholeClass == 1 && guardInvCallsWholeClass == 1);
+        failed += check("W5 退役前提：getCharacter／isInCharacterInventory 零自身遞迴、各有 bipush 16 迴圈上限",
+                countExactCalls(vGetChar, Opcodes.INVOKEVIRTUAL, icCls, "getCharacter", getCharDesc) == 0
+                && countExactCalls(vInChar, Opcodes.INVOKEVIRTUAL, icCls, "isInCharacterInventory", inCharDesc) == 0
+                && countIntConst(vGetChar, 16) >= 1 && countIntConst(vInChar, 16) >= 1);
 
         // ---- W41 跨執行緒 processItems 寫入改道（W5-2 已於 2026-09-27 退役）----
         // 存在理由：BaseVehicle.setCurrentKey（VehiclesDB2 在 ServerPlayersVehicles 執行緒載車時呼叫）
@@ -1004,121 +935,73 @@ public final class SmokeCheck {
         failed += check("W3-4 no-op 鏈結：getTargetAlpha server→1.0F 指紋",
                 checkGetTargetAlphaGuard(methodFromJar(jar, "zombie/iso/IsoObject", "getTargetAlpha", "(I)F")));
 
-        // ---- W12 車輛 DB chunk 索引一致性（VehiclesDB2$VehicleBuffer.set）----
+        // ---- W12 車輛 DB chunk 索引守衛：2026-11-10 隨 42.22.2 官方修正退役（docs/patches.md 2z）----
+        // 釘住官方修法：VehicleBuffer.set 零 vehicle.chunk 讀取、wx/wy 由 fastfloor 推導（x/y 各一次
+        // fastfloor(F)、FDIV x2），且 SQLStore.init 開檔時呼叫 repairStoredVehicleChunks。轉紅＝重估 W12 復活。
         String vbCls = "zombie/vehicles/VehiclesDB2$VehicleBuffer";
-        String vciCls = "zombie/mdc/VehicleChunkIndexGuard";
-        String vbSetDesc = "(L" + vehCls + ";)V";
-        String vciCoordDesc = "(L" + vehCls + ";FI)I";
-        MethodNode vVbSet = methodFromJar(jar, vbCls, "set", vbSetDesc);
-        failed += check("W12 vanilla 前提：chunk/wx/wy 讀取各為 2/1/1，且零 guard 呼叫",
-                countInstanceFieldReads(vVbSet, vehCls, "chunk") == 2
-                && countInstanceFieldReads(vVbSet, "zombie/iso/IsoChunk", "wx") == 1
-                && countInstanceFieldReads(vVbSet, "zombie/iso/IsoChunk", "wy") == 1
-                && countExactCalls(vVbSet, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 0
-                && countExactCalls(vVbSet, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 0);
-        MethodNode pVbSet = method(distJava, vbCls, "set", vbSetDesc);
-        failed += check("W12 手術後：captured x/y＋vanilla wx/wy 餵 helper、各覆寫正確欄位、只追加 16 條真指令",
-                countExactCalls(pVbSet, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 1
-                && countExactCalls(pVbSet, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 1
-                && countInstanceFieldReads(pVbSet, vehCls, "chunk") == 2
-                && countInstanceFieldReads(pVbSet, "zombie/iso/IsoChunk", "wx") == 1
-                && countInstanceFieldReads(pVbSet, "zombie/iso/IsoChunk", "wy") == 1
-                && realInsnCount(pVbSet) == realInsnCount(vVbSet) + 16
-                && vehicleChunkRepairSequence(pVbSet, vbCls, vehCls, vciCls, vciCoordDesc));
-        ClassNode pVbNode = classNode(distJava, vbCls);
-        failed += check("W12 負對照：VehicleBuffer 全 class 僅 set() 的兩個 guard 呼叫",
-                classWideCalls(pVbNode, Opcodes.INVOKESTATIC, vciCls, "wx", vciCoordDesc) == 1
-                && classWideCalls(pVbNode, Opcodes.INVOKESTATIC, vciCls, "wy", vciCoordDesc) == 1);
-        MethodNode vciCoord = method(distJava, vciCls, "chunkCoord", "(F)I");
-        failed += check("W12 helper 契約：chunkCoord 唯一 floor sink＝PZMath.fastfloor(F)I",
-                countExactCalls(vciCoord, Opcodes.INVOKESTATIC,
-                        "zombie/core/math/PZMath", "fastfloor", "(F)I") == 1);
+        MethodNode vVbSet = methodFromJar(jar, vbCls, "set", "(L" + vehCls + ";)V");
+        failed += check("W12 退役前提：VehicleBuffer.set 零 vehicle.chunk 讀取、wx/wy 各一個 putfield 且有 FDIV x2",
+                countInstanceFieldReads(vVbSet, vehCls, "chunk") == 0
+                && countInsns(vVbSet, in -> in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD
+                        && f.owner.equals(vbCls) && (f.name.equals("wx") || f.name.equals("wy"))) == 2
+                && countInsns(vVbSet, in -> in.getOpcode() == Opcodes.FDIV) == 2
+                && countExactCalls(vVbSet, Opcodes.INVOKESTATIC, "zombie/core/math/PZMath", "fastfloor", "(F)I") >= 2);
+        failed += check("W12 退役前提：SQLStore.init 開檔時呼叫 repairStoredVehicleChunks",
+                countExactCalls(methodFromJar(jar, "zombie/vehicles/VehiclesDB2$SQLStore", "init",
+                        "(Lgnu/trove/set/hash/TIntHashSet;Lgnu/trove/set/hash/TIntHashSet;)V"),
+                        Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehiclesDB2$SQLStore", "repairStoredVehicleChunks", "()V") == 1);
 
-        // ---- W7 朝向暫存執行緒隔離（IsoGameCharacter.setForwardDirectionFromIsoDirection）----
+        // ---- W7 朝向暫存執行緒隔離：2026-11-10 隨 42.22.2 官方修正退役（docs/patches.md 2s）----
+        // 釘住官方修法：方法內零 tempVector2_2 讀取、每次 new Vector2。轉紅＝重估 W7 復活。
         String igcCls = "zombie/characters/IsoGameCharacter";
-        String fwdGuardCls = "zombie/mdc/ForwardVectorGuard";
-        String vec2Desc = "Lzombie/iso/Vector2;";
-        String swapDesc = "(" + vec2Desc + ")" + vec2Desc;
         MethodNode vFwd = methodFromJar(jar, igcCls, "setForwardDirectionFromIsoDirection", "()V");
-        // vanilla 前提：方法體恰為 8 條無分支指令。PZ 若改寫此方法（例如自己修了競態、
-        // 或改用別的暫存），全序不符即建置失敗，而非默默把刀插到錯的地方。
-        failed += check("W7 vanilla 前提：方法體全序＝aload/getstatic/invokevirtual/pop ×2 收 return",
-                matchOpcodeSeq(vFwd, new int[]{
-                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKEVIRTUAL, Opcodes.POP,
-                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKEVIRTUAL, Opcodes.RETURN}));
-        failed += check("W7 vanilla 前提：方法內 getstatic tempVector2_2 恰 2 次",
-                countFieldReads(vFwd, igcCls, "tempVector2_2") == 2);
-        // matchOpcodeSeq 只比 opcode，operand-blind（codex 審查發現的 fail-closed 缺口）：
-        // PZ 若保留相同 opcode 形狀與兩個 tempVector2_2 讀取、只把 call target 換掉，
-        // 上面的全序閘仍會全綠，違反「任何方法改寫都讓建置失敗」的契約。故把兩個
-        // invokevirtual 的 owner/name/desc 一併鎖住——手術本身不動它們，前後都該恰 1 次。
-        String getVecDesc = "(" + vec2Desc + ")" + vec2Desc;
-        String setFwdDesc = "(" + vec2Desc + ")V";
-        failed += check("W7 vanilla 前提：兩個 invokevirtual 目標鎖定（getVectorFromDirection／setForwardDirection 各 1）",
-                countExactCalls(vFwd, Opcodes.INVOKEVIRTUAL, igcCls, "getVectorFromDirection", getVecDesc) == 1
-                && countExactCalls(vFwd, Opcodes.INVOKEVIRTUAL, igcCls, "setForwardDirection", setFwdDesc) == 1);
-        MethodNode pFwd = method(distJava, igcCls, "setForwardDirectionFromIsoDirection", "()V");
-        failed += check("W7 手術後：全序＝兩組 getstatic→swap→invokevirtual（swap 緊接 getstatic）",
-                matchOpcodeSeq(pFwd, new int[]{
-                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKESTATIC, Opcodes.INVOKEVIRTUAL,
-                        Opcodes.POP,
-                        Opcodes.ALOAD, Opcodes.GETSTATIC, Opcodes.INVOKESTATIC, Opcodes.INVOKEVIRTUAL,
-                        Opcodes.RETURN}));
-        failed += check("W7 手術後：swap 改道 x2，且 getstatic 保留 x2（吃掉共享值而非刪除讀取）",
-                countExactCalls(pFwd, Opcodes.INVOKESTATIC, fwdGuardCls, "swap", swapDesc) == 2
-                && countFieldReads(pFwd, igcCls, "tempVector2_2") == 2);
-        failed += check("W7 手術後：兩個 invokevirtual 目標未被動到（手術只插入，不改 call target）",
-                countExactCalls(pFwd, Opcodes.INVOKEVIRTUAL, igcCls, "getVectorFromDirection", getVecDesc) == 1
-                && countExactCalls(pFwd, Opcodes.INVOKEVIRTUAL, igcCls, "setForwardDirection", setFwdDesc) == 1);
+        failed += check("W7 退役前提：setForwardDirectionFromIsoDirection 零 getstatic tempVector2_2、new Vector2 x1",
+                countFieldReads(vFwd, igcCls, "tempVector2_2") == 0
+                && countNew(vFwd, "zombie/iso/Vector2") == 1);
+        ClassNode vIgcNode = classNodeFromJar(jar, igcCls);   // W34／W88 段共用
         ClassNode pIgcNode = classNode(distJava, igcCls);
-        failed += check("W7 負對照：IsoGameCharacter 其餘方法零 swap 改道",
-                pIgcNode.methods.stream()
-                        .filter(m -> !m.name.equals("setForwardDirectionFromIsoDirection"))
-                        .allMatch(m -> countExactCalls(m, Opcodes.INVOKESTATIC,
-                                fwdGuardCls, "swap", swapDesc) == 0));
-        // 耦合鎖：本刀移除了「setForwardDirectionFromIsoDirection 會在共享實例留下值」這個
-        // 副作用。原版其餘 10 個讀取點（processHitDamage x2／renderlast x4／isObjectBehind／
-        // isBehind／updateMovementStatistics x2）已逐一核對皆為先寫後讀，無人依賴該遺留值。
-        // 把類別內 getstatic 總數釘住——TIS 新增任何讀者都得重新做這份核對。
-        ClassNode vIgcNode = classNodeFromJar(jar, igcCls);
-        int vanillaReads = vIgcNode.methods.stream()
-                .mapToInt(m -> countFieldReads(m, igcCls, "tempVector2_2")).sum();
-        int patchedReads = pIgcNode.methods.stream()
-                .mapToInt(m -> countFieldReads(m, igcCls, "tempVector2_2")).sum();
-        failed += check("W7 耦合鎖：tempVector2_2 類別內 getstatic 總數＝12 且手術前後一致",
-                vanillaReads == 12 && patchedReads == 12);
 
-        // ---- W8 chunk 寫入閘（IsoChunk.Save(Z) ×2＋ServerChunkLoader$SaveLoadedTask.save ×1）----
+        // ---- W8 chunk 寫入閘（IsoChunk.Save(Z) ×2＋ServerChunkLoader.writeChunk ×1）----
+        // 42.22.2：伺服器存檔的 SafeWrite 從 SaveLoadedTask.save 搬進新的 private static writeChunk，
+        // SaveLoadedTask／SaveUnloadedTask 的 save() 都在 IsoChunk.WriteLock 內呼叫它。
         String w8IcCls = "zombie/iso/IsoChunk";
         String cwgCls = "zombie/mdc/ChunkWriteGuard";
         String swDesc = "(IILjava/nio/ByteBuffer;)V";
+        String sclCls = "zombie/network/ServerChunkLoader";
         String sltCls = "zombie/network/ServerChunkLoader$SaveLoadedTask";
+        String wcDesc = "(Lzombie/network/ClientChunkRequest$Chunk;)V";
+        String ckCls = "zombie/network/ChunkChecksum";
         // vanilla 前提：兩個手術方法內的 SafeWrite 呼叫數與 checksum 互動形狀
         MethodNode vSaveB = methodFromJar(jar, w8IcCls, "Save", "(Z)V");
         failed += check("W8 vanilla 前提：IsoChunk.Save(Z) 內 SafeWrite x2、setChecksum x1",
                 countExactCalls(vSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 2
-                && countExactCalls(vSaveB, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum",
-                        "setChecksum", "(IIJ)V") == 1);
-        MethodNode vSlt = methodFromJar(jar, sltCls, "save", "()V");
-        failed += check("W8 vanilla 前提：SaveLoadedTask.save 內 SafeWrite x1、setChecksum x1（歸零重試假設的錨）",
-                countExactCalls(vSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
-                && countExactCalls(vSlt, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum",
-                        "setChecksum", "(IIJ)V") == 1);
-        // 順序鎖（codex 審查修正）：guard 的 checksum 歸零假設「caller 先 setChecksum 再
-        // SafeWrite」；PZ 重排即建置失敗，而非讓歸零默默覆寫錯的時序
-        failed += check("W8 順序鎖：兩方法內 setChecksum 皆先於 SafeWrite（歸零重試假設的時序錨）",
-                firstCallIndex(vSaveB, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum", "setChecksum", "(IIJ)V")
+                && countExactCalls(vSaveB, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V") == 1);
+        MethodNode vWc = methodFromJar(jar, sclCls, "writeChunk", wcDesc);
+        failed += check("W8 vanilla 前提：writeChunk 內 SafeWrite x1、setChecksum x1，且兩個存檔 task 的 save() 各呼叫 writeChunk x1",
+                countExactCalls(vWc, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
+                && countExactCalls(vWc, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V") == 1
+                && countExactCalls(methodFromJar(jar, sltCls, "save", "()V"), Opcodes.INVOKESTATIC, sclCls, "writeChunk", wcDesc) == 1
+                && countExactCalls(methodFromJar(jar, "zombie/network/ServerChunkLoader$SaveUnloadedTask", "save", "()V"),
+                        Opcodes.INVOKESTATIC, sclCls, "writeChunk", wcDesc) == 1);
+        // 順序鎖：IsoChunk.Save(Z) 先 setChecksum 再 SafeWrite（helper 歸零最後生效）；42.22.2 的 writeChunk
+        // 反過來先 SafeWrite 再 setChecksum(本次 buffer 的 CRC)——擋下時 checksum 記成「從沒寫進磁碟的壞 buffer」，
+        // 下一輪乾淨序列化 bytes 必不同照樣重寫（相同就是同一份壞資料，dedup 跳過＝等同再擋一次）。
+        // PZ 再改順序或改 dedup 依據即建置失敗，重新分析。
+        failed += check("W8 順序鎖：Save(Z) setChecksum 先於 SafeWrite；writeChunk SafeWrite 先於 setChecksum、dedup 比 getChecksumIfExists",
+                firstCallIndex(vSaveB, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V")
                         < firstCallIndex(vSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc)
-                && firstCallIndex(vSlt, Opcodes.INVOKESTATIC, "zombie/network/ChunkChecksum", "setChecksum", "(IIJ)V")
-                        < firstCallIndex(vSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc));
+                && firstCallIndex(vWc, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc)
+                        < firstCallIndex(vWc, Opcodes.INVOKESTATIC, ckCls, "setChecksum", "(IIJ)V")
+                && firstCallIndex(vWc, Opcodes.INVOKESTATIC, ckCls, "getChecksumIfExists", "(II)J")
+                        < firstCallIndex(vWc, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc));
         // 全 jar census（總數）＋逐類分佈（堵「舊點消失＋新點出現」互相抵銷的 false-green）
         failed += check("W8 census：全 jar SafeWrite 呼叫點恰 5 個（新增即代表有未設閘的寫檔路徑）",
                 jarWideCallsiteCensus(jar, w8IcCls, "SafeWrite", swDesc) == 5);
-        failed += check("W8 census 分佈：IsoChunk=2／ChunkSaveWorker=1／WorldGenerate=1／SaveLoadedTask=1",
+        failed += check("W8 census 分佈：IsoChunk=2／ChunkSaveWorker=1／WorldGenerate=1／ServerChunkLoader=1",
                 classWideCalls(classNodeFromJar(jar, w8IcCls), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 2
                 && classWideCalls(classNodeFromJar(jar, "zombie/iso/ChunkSaveWorker"), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
                 && classWideCalls(classNodeFromJar(jar, "zombie/iso/WorldGenerate"), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1
-                && classWideCalls(classNodeFromJar(jar, sltCls), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1);
+                && classWideCalls(classNodeFromJar(jar, sclCls), Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 1);
         // 排除論證的錨 1：ChunkSaveWorker 唯一入列點 AddHotSave 被 GameServer.server 閘住，
         // 且方向鎖定（getstatic server 緊接 ifne＝server 為真即跳離；codex 審查補強）
         MethodNode vIcmUpd = methodFromJar(jar, "zombie/iso/IsoChunkMap", "updateInternal", "()V");
@@ -1127,11 +1010,12 @@ public final class SmokeCheck {
                         "AddHotSave", "(Lzombie/iso/IsoChunk;)V") == 1
                 && existsFieldReadThenJump(vIcmUpd, "zombie/network/GameServer", "server", Opcodes.IFNE));
         // 格式前提：helper 硬編 offset 的語境鎖（非僅常數存在）——17 必須是 CRC32.update 的
-        // offset 引數、5 必須是 position() 的引數；版本常數 249 恰 1（codex 審查補強）
+        // offset 引數、5 必須是 position() 的引數；版本常數恰 1（codex 審查補強）。42.22.2 版本 249→251，
+        // 該方法其餘指令與 42.21 逐條相同（header：debug byte、ver int、len int、crc long 版面不變）。
         MethodNode vSaveBuf = methodFromJar(jar, w8IcCls, "Save",
                 "(Ljava/nio/ByteBuffer;Ljava/util/zip/CRC32;Z)Ljava/nio/ByteBuffer;");
-        failed += check("W8 格式前提：249 恰 1、17→CRC32.update 語境、5→ByteBuffer.position 語境",
-                countIntConst(vSaveBuf, 249) == 1
+        failed += check("W8 格式前提：251 恰 1、17→CRC32.update 語境、5→ByteBuffer.position 語境",
+                countIntConst(vSaveBuf, 251) == 1
                 // 17 與 update 之間隔著 len-1-4-4-8 的四次 isub 展開（javap 實測 9 條真指令）
                 && existsConstThenCall(vSaveBuf, 17, "java/util/zip/CRC32", "update", 12)
                 && existsConstThenCall(vSaveBuf, 5, "java/nio/ByteBuffer", "position", 2));
@@ -1140,10 +1024,16 @@ public final class SmokeCheck {
         failed += check("W8 手術後：Save(Z) 改道 x2、原 SafeWrite 呼叫歸零",
                 countExactCalls(pSaveB, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 2
                 && countExactCalls(pSaveB, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
-        MethodNode pSlt = method(distJava, sltCls, "save", "()V");
-        failed += check("W8 手術後：SaveLoadedTask.save 改道 x1、原呼叫歸零",
-                countExactCalls(pSlt, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 1
-                && countExactCalls(pSlt, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0);
+        MethodNode pWc = method(distJava, sclCls, "writeChunk", wcDesc);
+        failed += check("W8 手術後：writeChunk 改道 x1、原呼叫歸零、其餘指令不變",
+                countExactCalls(pWc, Opcodes.INVOKESTATIC, cwgCls, "safeWrite", swDesc) == 1
+                && countExactCalls(pWc, Opcodes.INVOKESTATIC, w8IcCls, "SafeWrite", swDesc) == 0
+                && methodText(vWc).replace("INVOKESTATIC " + w8IcCls + ".SafeWrite", "INVOKESTATIC " + cwgCls + ".safeWrite")
+                        .equals(methodText(pWc)));
+        failed += check("W8 負對照：ServerChunkLoader 除 writeChunk 外零 safeWrite 改道",
+                classNode(distJava, sclCls).methods.stream()
+                        .filter(m -> !(m.name.equals("writeChunk") && m.desc.equals(wcDesc)))
+                        .allMatch(m -> countCallsToOwner(m, cwgCls) == 0));
         // 負對照：SafeWrite 本體必須保持 vanilla（helper 委派回它——改道到它自己＝無限遞迴）。
         // 排除條件鎖到精確簽名 Save(Z)V——其他 Save 多載也在受檢範圍（codex 審查修正）
         ClassNode pIcNode = classNode(distJava, w8IcCls);
@@ -1167,22 +1057,22 @@ public final class SmokeCheck {
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 1
                 && countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
         // 退役前提（2026-09-28，42.21.0）：W9 之一／之二（共用 CRC32 → ThreadLocal）因官方修正退役。
-        // 釘住官方修法：addLoadedJob、SaveLoadedTask.save 各自 new CRC32（區域變數），且
+        // 釘住官方修法：addLoadedJob、writeChunk（42.22.2 起存檔 dedup CRC 在這裡）各自 new CRC32（區域變數），且
         // ServerChunkLoader／SaveChunkThread／SaveLoadedTask／IsoChunk 沒有任何 CRC32 型別欄位。
         // TIS 若退回共用實例＝這條紅，重新評估是否復活兩刀（git checkout 8d2bee8）。
         String crcDesc = "Ljava/util/zip/CRC32;";
         boolean noSharedCrc = true;
-        for (String c : new String[]{"zombie/network/ServerChunkLoader", sctCls, sltCls, w8IcCls}) {
+        for (String c : new String[]{sclCls, sctCls, sltCls, w8IcCls}) {
             for (var fn : classNodeFromJar(jar, c).fields) {
                 if (crcDesc.equals(fn.desc)) {
                     noSharedCrc = false;
                 }
             }
         }
-        failed += check("W9 退役前提：addLoadedJob／SaveLoadedTask.save 各 new CRC32 x1，存檔管線四類零 CRC32 欄位",
+        failed += check("W9 退役前提：addLoadedJob／writeChunk 各 new CRC32 x1，存檔管線四類零 CRC32 欄位",
                 noSharedCrc
                 && countNew(vAdd, "java/util/zip/CRC32") == 1
-                && countNew(vSlt, "java/util/zip/CRC32") == 1);
+                && countNew(vWc, "java/util/zip/CRC32") == 1);
         // 之三存在理由：SaveChunkThread.update() 仍以欄位 savedChunks 逐一 release、全程無鎖
         // （主迴圈與 shutdown hook 並行 updateSaved 可雙重 release），且 ClientChunkRequest
         // 的 freeChunks／freeBuffers 仍是 static 全域池。TIS 若加鎖或改成 per-instance 池＝這條紅，
@@ -1240,18 +1130,30 @@ public final class SmokeCheck {
                 && wxPutIdx >= 0 && wyPutIdx >= 0 && gbCallIdx >= 0
                 && wxPutIdx < gbCallIdx && wyPutIdx < gbCallIdx);
         MethodNode vRel = methodFromJar(jar, sltCls, "release", "()V");
-        failed += check("W9 vanilla 前提：SaveLoadedTask.release 內 releaseChunk x1",
-                countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1);
-        // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者恰 2 且逐類分佈釘死（codex 修正：
-        // 只比總數會讓「舊點消失＋新點出現」互抵通過）。addLoadedJob＝本刀隔離；
-        // PlayerDownloadServer.update 用 per-connection CRC32 且僅主緒＝分析上安全。
+        // 42.22.2 的 release 變 synchronized、先設 isReleased，但不讀它就歸還＝雙重 release 仍會雙重入池
+        failed += check("W9 vanilla 前提：SaveLoadedTask.release 內 releaseChunk x1，且不讀 isReleased（雙重 release 不擋）",
+                countExactCalls(vRel, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 1
+                && countInstanceFieldReads(vRel, sltCls, "isReleased") == 0);
+        // 序列化者清冊：全 jar SaveLoadedChunk 呼叫者逐類分佈釘死（codex 修正：只比總數會讓
+        // 「舊點消失＋新點出現」互抵通過）。addLoadedJob＝本刀隔離；PlayerDownloadServer.update 用
+        // per-connection CRC32 且僅主緒＝分析上安全；42.22.2 新增 SaveUnloadedTask.serialize（卸載存檔不再經
+        // IsoChunk.Save(Z)），它向全域池租殼，但 serialize／release 同為 synchronized、release 歸還後把
+        // chunkData 設 null＝恰好歸還一次，不需要私有池。
         String slcDesc = "(L" + chunkRef + ";Ljava/util/zip/CRC32;)V";
-        failed += check("W9 census：全 jar SaveLoadedChunk 呼叫點恰 2 且分佈＝SaveChunkThread 1／PlayerDownloadServer 1",
-                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 2
+        String sutCls = "zombie/network/ServerChunkLoader$SaveUnloadedTask";
+        MethodNode vSutRel = methodFromJar(jar, sutCls, "release", "()V");
+        failed += check("W9 census：全 jar SaveLoadedChunk 呼叫點恰 3＝SaveChunkThread 1／PlayerDownloadServer 1／SaveUnloadedTask 1，"
+                        + "且 SaveUnloadedTask.release synchronized、歸還後清 chunkData",
+                jarWideCallsiteCensus(jar, Opcodes.INVOKEVIRTUAL, "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 3
                 && classWideCalls(classNodeFromJar(jar, sctCls), Opcodes.INVOKEVIRTUAL,
                         "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1
                 && classWideCalls(classNodeFromJar(jar, "zombie/network/PlayerDownloadServer"), Opcodes.INVOKEVIRTUAL,
-                        "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1);
+                        "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1
+                && classWideCalls(classNodeFromJar(jar, sutCls), Opcodes.INVOKEVIRTUAL,
+                        "zombie/iso/IsoChunk", "SaveLoadedChunk", slcDesc) == 1
+                && (vSutRel.access & Opcodes.ACC_SYNCHRONIZED) != 0
+                && countInsns(vSutRel, in -> in instanceof FieldInsnNode f && f.getOpcode() == Opcodes.PUTFIELD
+                        && f.owner.equals(sutCls) && f.name.equals("chunkData")) == 1);
         // 手術後：三呼叫改道到位、原呼叫歸零；addLoadedJob 對 helper 的呼叫恰 3（CRC 改道已退役）
         MethodNode pAdd = method(distJava, sctCls, "addLoadedJob", addLoadedDesc);
         failed += check("W9 手術後：addLoadedJob 三呼叫改道（helper 呼叫恰 3）、原 invokevirtual 歸零",
@@ -1265,8 +1167,8 @@ public final class SmokeCheck {
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getChunk", getChunkDesc) == 0
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "getByteBuffer", chunkArgDesc) == 0
                 && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, ccrRef, "releaseChunk", chunkArgDesc) == 0);
-        failed += check("W9 負對照：SaveLoadedTask.save 零 ChunkSaveIsolation 呼叫（只剩 W8 改道）",
-                countCallsToOwner(pSlt, csiCls) == 0);
+        failed += check("W9 負對照：SaveLoadedTask.save 零 ChunkSaveIsolation 呼叫",
+                countCallsToOwner(method(distJava, sltCls, "save", "()V"), csiCls) == 0);
         MethodNode pRel = method(distJava, sltCls, "release", "()V");
         failed += check("W9 手術後：release() releaseChunk 改道 x1、原呼叫歸零",
                 countExactCalls(pRel, Opcodes.INVOKESTATIC, csiCls, "releaseChunk",
@@ -6753,47 +6655,6 @@ public final class SmokeCheck {
         return count;
     }
 
-    /** 鎖定 W12 在 captured y PUTFIELD 後的完整 operand/order，避免 helper 結果寫錯欄位。 */
-    static boolean vehicleChunkRepairSequence(MethodNode method, String bufferOwner,
-                                              String vehicleOwner, String helperOwner,
-                                              String helperDesc) {
-        int anchors = 0;
-        int matches = 0;
-        for (AbstractInsnNode in : method.instructions) {
-            if (!isField(in, Opcodes.PUTFIELD, bufferOwner, "y", "F")) {
-                continue;
-            }
-            anchors++;
-            AbstractInsnNode[] s = new AbstractInsnNode[16];
-            AbstractInsnNode cursor = in;
-            for (int i = 0; i < s.length; i++) {
-                cursor = nextReal(cursor);
-                s[i] = cursor;
-            }
-            boolean ok =
-                    isVar(s[0], Opcodes.ALOAD, 0)
-                    && isVar(s[1], Opcodes.ALOAD, 1)
-                    && isVar(s[2], Opcodes.ALOAD, 0)
-                    && isField(s[3], Opcodes.GETFIELD, bufferOwner, "x", "F")
-                    && isVar(s[4], Opcodes.ALOAD, 0)
-                    && isField(s[5], Opcodes.GETFIELD, bufferOwner, "wx", "I")
-                    && isCall(s[6], Opcodes.INVOKESTATIC, helperOwner, "wx", helperDesc)
-                    && isField(s[7], Opcodes.PUTFIELD, bufferOwner, "wx", "I")
-                    && isVar(s[8], Opcodes.ALOAD, 0)
-                    && isVar(s[9], Opcodes.ALOAD, 1)
-                    && isVar(s[10], Opcodes.ALOAD, 0)
-                    && isField(s[11], Opcodes.GETFIELD, bufferOwner, "y", "F")
-                    && isVar(s[12], Opcodes.ALOAD, 0)
-                    && isField(s[13], Opcodes.GETFIELD, bufferOwner, "wy", "I")
-                    && isCall(s[14], Opcodes.INVOKESTATIC, helperOwner, "wy", helperDesc)
-                    && isField(s[15], Opcodes.PUTFIELD, bufferOwner, "wy", "I");
-            if (ok) {
-                matches++;
-            }
-        }
-        return anchors == 1 && matches == 1;
-    }
-
     static boolean isVar(AbstractInsnNode in, int opcode, int var) {
         return in instanceof VarInsnNode v && v.getOpcode() == opcode && v.var == var;
     }
@@ -8381,13 +8242,17 @@ public final class SmokeCheck {
     }
 
     /**
-     * W89 閒置車降頻的原版前提（42.21，去 debug 的 methodText SHA-256），{class, name, desc, sha}。研究 §4c 的 1–8 項：startFrame 與伺服器
+     * W89 閒置車降頻的原版前提（去 debug 的 methodText SHA-256），{class, name, desc, sha}。研究 §4c 的 1–8 項：startFrame 與伺服器
      * 回 FULL（1、2）、update／postupdate 走同一個 bucket（3）、跳過的四段本體與 ECS frameStep（4）、會動就會讓 isEnable 變 true（5）、
      * 授權是 Server 就沒有客戶端能推（6）、Idle 引擎沒有每幀工作、耗電照遊戲時間（7）、車仍釘在 FULL（8）；再加閒置條件讀的 getter
      * （純讀取、沒有副作用）與 O(全部車) 的拖車重連。
+     * 2026-11-10 42.22.2 重核後換值的 6 個：startFrame（新增殭屍追擊計數，車的 add 語境不變）、BaseVehicle.update（新增等著重掛拖車
+     * 5 秒放棄的牆鐘計時＝閒置條件加 isWaitingToReattachTowingPartner；constraintChangedTime 在物理沒開時續期＝只會更不閒置）、
+     * constraintChanged（setPhysicsActive 改看 CarController.shouldBeActive）、VehiclePhysicsPacket.processServer（hasAuthorization 仍在最前，
+     * 只多丟舊包與時差 ≥1 秒的包）、hitCharacter（速度抽成等價的 getImpactVelocity）、tryReconnectToTowedVehicle（周圍 chunk 不足時早退）。
      */
     static final String[][] IDLE_VEHICLE_LOCKED = {
-            {"zombie/MovingObjectUpdateScheduler", "startFrame", "()V", "f6dbc411b6c84f5b67e29cadfad250d1a4afd1fe03e219a0dfb5f13238f8dff5"},
+            {"zombie/MovingObjectUpdateScheduler", "startFrame", "()V", "ea171492c27615efbbf09af745e203f974deba65f2ee581cae11735887b3cf36"},
             {"zombie/MovingObjectUpdateScheduler", "getUpdateSchedulerSimulationLevelForObject",
                     "(Lzombie/iso/IsoMovingObject;F)Lzombie/UpdateSchedulerSimulationLevel;",
                     "7d2479cb7a9264fbdfe7b6609be27b9a213c89994cbcdd8f623ca667c52cbe00"},
@@ -8399,7 +8264,7 @@ public final class SmokeCheck {
                     "e7f8937e47e7fa7cbc233d6a33f8ac4a23edcfd0ef0846edfb51bdc1931248c3"},
             {"zombie/MovingObjectUpdateSchedulerUpdateBucket", "add", "(Lzombie/iso/IsoMovingObject;)V",
                     "fadacf1cfbccb4a72b18454fb3efafad0282ddc55a01ca54f9bc93abbc7c03ee"},
-            {"zombie/vehicles/BaseVehicle", "update", "()V", "aba48244ac37136c0a5d9b8303eabbd7cf858155784fd8d6a8f565dbf97ad4dc"},
+            {"zombie/vehicles/BaseVehicle", "update", "()V", "892215e297cbba16deeb35a9cf9593af2b03963da45bbfdb8e4cbf3cf4e84f70"},
             {"zombie/vehicles/BaseVehicle", "postupdate", "()V", "9a0cebc19da0cb45e57b66bb24bbb7b851a357f1e2f73dc0906e4e110a550666"},
             {"zombie/vehicles/BaseVehicle", "shouldAnimRecorderBeActive", "()Z", "6e966828a2229cf8a69cab2b2befef73dd79c4aaea70ea132309e225ecb0eb66"},
             {"zombie/iso/IsoMovingObject", "update", "()V", "608cfb0faa8c2dab03e692960b1773ac130a9241ea1478807e305df0dcfa0ef5"},
@@ -8407,7 +8272,7 @@ public final class SmokeCheck {
             {"zombie/characters/ecs/ECSEntity", "frameStep", "()V", "678fed6cbfdac91045dc89576aafdcb0975a93cbc09b09cdcd4d70f6b803b1a4"},
             {"zombie/vehicles/BaseVehicle", "setPhysicsActive", "(Z)V", "5e88424e48e11f2f92ca7b0d7948c0d8f921a6f460a6ca4fb663153cb1e6ba03"},
             {"zombie/vehicles/BaseVehicle", "setPhysicsActive", "(ZZ)V", "07017fb998f7a78942cc3df1c16390aedff124039adcc7b7bcb5a8b2b806edf0"},
-            {"zombie/vehicles/BaseVehicle", "constraintChanged", "()V", "24872ddc1ddcd468f2bd9bdac0072a1d0687f2336f10790e38a58f66421768d5"},
+            {"zombie/vehicles/BaseVehicle", "constraintChanged", "()V", "efad755a5f7981d93d231e387787a31fc6bb33a4ae515e92a4901c15697f668d"},
             {"zombie/vehicles/BaseVehicle", "applyImpulseFromHitObject", "(Lzombie/iso/IsoObject;F)V",
                     "1b99b9eb3692fec3a29c8bbf5d43162d2a79276b0b58dfb91df224e68f421b30"},
             {"zombie/vehicles/BaseVehicle", "applyImpulseFromHitPlant", "(Lzombie/iso/IsoObject;F)V",
@@ -8415,7 +8280,7 @@ public final class SmokeCheck {
             {"zombie/vehicles/BaseVehicle", "applyImpulseGeneric", "(FFFFFFF)V", "0bbccb865607d384f8642ec61ff6a2efb518b1c078973fdea911c99c931f65b7"},
             {"zombie/network/packets/vehicle/VehiclePhysicsPacket", "processServer",
                     "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
-                    "7c20ac2eb3c2569b0c4371a557ce37b2d94638f78607cbc27b130347418975e4"},
+                    "b2f68fa0b6c2917d164b67d7c7f2d6f7eda8e6d845a0281ffb5781590f8eb67f"},
             {"zombie/vehicles/BaseVehicle", "hasAuthorization", "(Lzombie/core/raknet/UdpConnection;)Z",
                     "a44e5e352cf853f5bcf3a60c6e2bca4a1c0b1167fac864de59ba46adcae85587"},
             {"zombie/vehicles/VehicleEngine", "update", "()V", "a526764eacec764e5da52ba3a3db1fbc2fec07c46a4a6d8c86a34a497e4cfcaa"},
@@ -8446,7 +8311,8 @@ public final class SmokeCheck {
             {"zombie/vehicles/VehiclePedestrianContactTracking", "updateTimeNow", "()V", "eb8df1319199e2eb80ae6e963e3d3f7381e5b51a09a1f3cf65ea81bd6b8890c1"},
             {"zombie/vehicles/VehiclePedestrianContactTracking", "clearOldContacts", "()V", "44ca74eea8281c7efbfaeabe243ecbdb4b8049c92ce742b0ca7223c6a2ec594f"},
             {"zombie/vehicles/BaseVehicle", "hitCharacter", "(Lzombie/characters/IsoGameCharacter;Lzombie/iso/Vector2;)F",
-                    "bd821455561c644481618c471d2a89821f32b330d1f50cbfb53ae50e93257c0d"},
+                    "815b191f43d74aebe0616c95f2969e4bb13be430ab4baa76f23a2ce6857bba06"},
+            {"zombie/vehicles/BaseVehicle", "getImpactVelocity", "()F", "1e834402229ec44b5674cdaa9c9ab72e9dba9436b324230653d3c4a9104674d4"},
             {"zombie/vehicles/BaseVehicle", "hitAnimal", "(Lzombie/characters/animals/IsoAnimal;)V",
                     "d93001de17ea33ff1704d5a0214d683b80182427141087cd9c035b62dc0c8273"},
             // 暖機累加的物理秒＝接觸時鐘 updateTimeNow 每次加的值
@@ -8479,7 +8345,11 @@ public final class SmokeCheck {
             {"zombie/vehicles/BaseVehicle", "isRemovedFromWorld", "()Z", "c9d27babecec56077ee8d278281d3424b4cb02a408819aa4e8824a5e7ba398d4"},
             {"zombie/vehicles/LightbarLightsMode", "isEnable", "()Z", "1df2c8c528f8d9f9756c207bfac08263f18e16b1bd969d8aecad760f3a8c09e1"},
             {"zombie/vehicles/LightbarSirenMode", "isEnable", "()Z", "34c10999b8dfe5d4224dae3f7b24b3b2c09f21a4a9cc61ae2211b131bb02b644"},
-            {"zombie/vehicles/BaseVehicle", "tryReconnectToTowedVehicle", "()V", "63dc0365450174adb06c96036e79f1c9bce9319687ad70d9f052decbb3e38c5e"},
+            {"zombie/vehicles/BaseVehicle", "tryReconnectToTowedVehicle", "()V", "84f70866007cfd781904ade985f26e168fe95a822bfdc57d62f31e4d3937d1db"},
+            // 42.22.2：等著重掛拖車的放棄計時（閒置條件讀的 getter，與累加牆鐘秒數的那個方法）
+            {"zombie/vehicles/BaseVehicle", "isWaitingToReattachTowingPartner", "()Z", "f6a95a383c96dee5fd0e0d8ded3d59468597991c73f8e4779e0bae408be1fa95"},
+            {"zombie/vehicles/BaseVehicle", "shouldAbandonReattachingTowingPartner", "()Z",
+                    "842ab024698456e4a142585f6b7648b16c0e6c15a9c788698f1e2a22eb194960"},
     };
 
     /**

@@ -55,7 +55,7 @@ method entry) and **tail call** (a static call inserted before each `RETURN`); e
 ---
 
 <a id="1"></a>
-## 1. Log-noise suppression (server; 8 active: #2–#8 in the table + #10 in §2bf; #1 and #9 retired in 42.21.0)
+## 1. Log-noise suppression (server; 7 active: #2–#5, #7, #8 in the table + #10 in §2bf; #1 and #9 retired in 42.21.0, #6 retired in 42.22.2)
 
 On the production server (78 maps, multiplayer), `console.txt` received dozens to hundreds of
 meaningless warnings per minute: (a) real errors were buried (OOM and other incident diagnosis got
@@ -69,7 +69,7 @@ synchronization cost on hot call paths.
 | 3 | SpriteConfig.initObjectInfo | `Invalid SpriteConfig object!` for an **exact allow-list of 37 names** (initial: MetalBigWireFence / WoodFloorLvl3 / Wooden_Windows; 42.20 added DoubleWireGate / BrickWallLvl2 / MetalSmallWireFence / BrickWindowFrameLvl2 / Piano / WoodenWallLvl3; 42.20.3 added SandFloor / WoodenDarkWallLvl3 / GravelFloor / Floor_SpringGrass / DoubleDoor / WoodenWindowFrameLvl3 / WoodFloorLvl2 / Wood_DoubleDoorDark / WoodDoorFrameLvl3 / Fences_MetalFarmGate; 42.20.4 added Commercial_FullGlassBlackWall / Commercial_GridGlassBlackWall / Commercial_HalfGlassRedWall / Commercial_FullGlassRedWall / Commercial_HalfGlassBlackWall / Commercial_GridGlassRedWall / MetalFloorLvl1 / Wood_Crate_Lvl2 / Floor_SummerGrass / WoodFloorLvl1 / WoodenDarkDoorFrameLvl3 / Composter / BrickFloorLvl1 / Floor_SummerGrassCorner / ComposterShoddy / DoubleFenceGate / WoodenDarkWindowFrameLvl3 / Floor_Concrete, see §2bf). Full-message `equals`; admission threshold ≥4 lines/h; list behavior pinned by `LogFilterNoiseTest` | Fires on every load of these objects (the 42.20 six: 1,183 lines in 5.5 h; the 42.20.3 ten: 23,517 lines in 26 h, then the largest remaining noise source; 17 low-volume names at ≤86 lines deliberately left out). All 37 definitions come from a building mod's entity overrides (22 share vanilla names, 15 are mod-only), so retirement follows that mod's updates, not PZ versions (42.21.0 audit: trigger code bit-identical, no name removable) | **Any other name (including null and low-volume names) still warns**; `resetObjectInfo` cleanup still runs |
 | 4 | ItemPickInfo.GetPickInfo | Prefix `ItemPickInfo -> cannot get ID for ` (container/room/tile/zone variants) | Mod maps with custom containers/rooms not registered in ItemConfigurator; fires on every loot roll and is **not gated by debug mode** | The 4 debug-mode diagnostics use different prefixes and still print; loot fallback unchanged |
 | 5 | NetworkZombieManager.moveZombie | `moveZombie: There are no zombies in nz.zombies.` (full-string `equals`; **not printed, counted instead**, total reported as `nzMissing` in the W80 heartbeat) | The old owner's list does not contain the zombie when ownership changes. At least part of it is recycled zombie objects keeping the previous owner (a vanilla bug fixed by [W80](#2co)); other sources not investigated | Ownership transfer logic unchanged |
-| 6 | PacketsCache.\<init\> | Prefix `No packet handler for type:` | Several vanilla PacketTypes are handled by a built-in switch instead of a handler class, so **every player connection prints a long burst** | `printException` (real errors) and `Packets limit has exceeded` (real rate limiting) untouched |
+| 6 | ~~PacketsCache.\<init\>~~ (**retired in 42.22.2**) | Prefix `No packet handler for type:` | Several vanilla PacketTypes are handled by a built-in switch instead of a handler class, so **every player connection prints a long burst** | 42.22.2 prints it only when `Core.IS_DEV` (always false on a dedicated server); redirect and `OBJ_PREFIX` deleted |
 | 7 | INetworkPacket.logInconsistentPacket | Format constant `The packet %s is not consistent: %s` (`equals`) | Routine desync message for vehicle packets | **The `sync` self-repair still runs**; the anti-cheat `The packet %s is not valid` stays in `onServerPacket` and **never passes through our code** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]` (`startsWith` prefix) | The mod PSR (Plysken Solar Revolution) periodically calls `IsoBuilding.setToxic`, randomly refreshing building toxicity, broadcast to all players | **Only the log line is dropped; the broadcast packet is untouched**; clients mark generator-in-building themselves |
 | 9 | ~~IsoObject.syncIsoObject~~ (**retired in 42.21.0**) | `ERROR: IsoThumpable not found on square x,y,z` (`System.out.println`, invokedynamic-built → `startsWith` prefix) | B42 construction calls `setHealth` before the IsoThumpable is added to the square → server `sync()` → `getObjectIndex()==-1` always prints; 11,567 lines in 4 days on production (≈120/h ≫ 4/h threshold) | 42.21 changed `IsoThumpable.setHealth` to sync only when `server && getObjectIndex() != -1`, removing the source; remaining not-found lines are a low-frequency breakage signal and print as in vanilla |
@@ -88,6 +88,8 @@ synchronization cost on hot call paths.
 > `suppressesPrintln` were deleted. The audit confirmed the trigger code and frequency premise of
 > the other 7 (+ #10 in §2bf) still hold. Revive with
 > `git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`.
+
+> **42.22.2 changes (2026-11-10)**: #6 retired — 42.22.2's `PacketsCache.<init>` wraps `No packet handler for type:` (and the new `No packet validation for type:`) in `if (Core.IS_DEV)`; nothing in the jar does `putstatic Core.IS_DEV`, so it is always false on a dedicated server and vanilla no longer prints it (the second `warn(Object)` in the method made the hit count 2 != 1). The redirect and `LogFilter.OBJ_PREFIX` were deleted; `LogFilterNoiseTest` now asserts the old prefix passes through. Other sites checked: the 9 `DebugLog.log` calls in `ItemPickInfo.GetPickInfo`, `getZone` / `getContainerCount` in `LootRespawn.respawnInChunk` and the vehicle-unload log in `IsoChunk.removeFromWorld` have unchanged surroundings (the only difference in all three methods is `IsoGridSquare.getObjects()` returning `List` instead of `PZArrayList`); `SkinningBoneHierarchy`, `SpriteConfig.initObjectInfo`, `INetworkPacket.logInconsistentPacket`, `NetworkZombieManager.moveZombie` and `GameServer.sendToxicBuilding` are instruction-identical. Revive with `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java patcher/tests/log-filter`.
 
 Trade-off: these messages disappear from the log. To diagnose exactly the problem one of them
 describes, run `uninstall.sh` first and observe vanilla. Each spec's `verification` section lists
@@ -170,6 +172,8 @@ patched must return quietly — proves guard placement) plus ASM structure asser
 **Future (not done)**: a more fundamental fix is `Zombie.isConsistent()` checking
 `getZombie()!=null` (it currently checks ID existence, not type); `hit/Player` has a symmetric risk.
 
+**2026-11-10 42.22.2 re-validation**: kept. `hit/Zombie.process` differs from 42.21 only in one flag constant (`sipush 128` → `bipush 64`); it still calls `super.process()` and then `getZombie().setAttackOutcome` directly, and `getZombie()` is still `Type.tryCastTo` (may return null). The caller moved from `PlayerHitZombiePacket.preProcess` / `postProcess` to `processTarget` (42.22 merged WeaponHit into `Hit`); SmokeCheck's vanilla-must-NPE control and the patched quiet return still hold. `Fall.process` is instruction-identical.
+
 ---
 
 <a id="2d"></a>
@@ -219,6 +223,8 @@ normal `HoursForLootRespawn` cycle** (no claim/unclaim farming). `explored`, `ha
 **Known limits**: a square with no Zone at all has no `hourLastSeen` to keep, so the fallback uses 0
 (production runs `SeenHoursPreventLootRespawn=0`, so no current effect). This fixes periodic respawn
 only; it does not force unexplored containers to spawn or rewrite existing `lootRespawnHour`.
+
+**2026-11-10 42.22.2 re-validation**: kept. Both redirect sites in `respawnInChunk` (`IsoGridSquare.getZone`, `IsoObject.getContainerCount`) have unchanged surroundings; the method only walks square objects through `List.size()` / `get(i)` now, and the helper's `getObjects()` loop just recompiles against the `List` return type.
 
 ---
 
@@ -583,6 +589,8 @@ missing from the manifest would not be copied by `install.sh` → `NoClassDefFou
 production (SmokeCheck's URLClassLoader loads all of `dist/java`, so it could not catch this). A
 two-way check now aborts the build if `dist/java` and the manifest differ.
 
+**2026-11-10 42.22.2 re-validation**: kept. The surroundings of the single `couldSeeIntersectedSquare(I)Z` in `BaseVehicle.update` (the `numPlayers` loop, the `current` null check, then `ifne` / `setTargetAlpha(I,0)`) match 42.21; `couldSeeIntersectedSquare` itself and the `render` call site are instruction-identical.
+
 ---
 
 <a id="2l"></a>
@@ -729,8 +737,10 @@ The old helper counted in order: `queue<2` → `skipShort`, then `head.largeArea
 
 **42.20.3 migration (2026-08-17)**: TIS refactored the same area (fixing "Loading Map forever"): pending mechanism (`PendingChunk` ≤4096, `OutOfRangeRequest` ≤1024, new `ChunkNotReady` packet); **server retry mechanism removed** (`Chunk.retriesCount`, `MAX_CHUNK_SEND_TRIES`, `getRetryChunk`); worker refill moved to a `queuedByWorker` concurrent queue, so `WorkerThread` no longer writes `ccrWaiting` (the hook's exclusion precondition is looser; hook unchanged). `update()` now runs ready gate → `updatePendingChunks()` → dedupe (hook); ccrs refilled from pending are ordinary non-largeArea ccrs and safe to pack. **The throughput bottleneck was not fixed** (`RequestZipListPacket` bit-identical, still one ccr per tick) ⇒ W4-1 kept; the official changelog says additional black-edge causes are still under investigation. Client side: `WorldStreamer` was substantially refactored — W4-2 retired; the v2.2 client package was fully invalidated and **rebuilt as v3.0** (2o observability re-verified plus the 4th head call `receiveChunkNotReady(I)V`; the three texture-line classes were instruction-identical and reused; 42.20.3 client and server jars have the same whole-file SHA `bda809fb…`, so the install same-source check works as-is). The `retriesCount` SmokeCheck assertion was removed with the vanilla field. Full analysis: `docs/report/pz-42.20.3-update-analysis.md`.
 
+**2026-11-10 42.22.2 re-validation**: kept. `PlayerDownloadServer.update` differs from 42.21 only by `ZLogger.write(Exception)` → `write(Throwable)` on the exception path; the `SaveLoadedChunk` redirect and the head `onUpdate` hook have unchanged surroundings and `removeOlderDuplicateRequests` is instruction-identical. `ChunkRequestPackerTest` passes in all four modes.
+
 <a id="2q"></a>
-## 2q. Container-cycle crash guard (W5, server)
+## 2q. Container-cycle crash guard (W5, server; retired in 42.22.2 — fixed upstream by TIS)
 
 **Incident**: On 2026-08-13 21:31:10 the production server's main loop died with `java.lang.StackOverflowError`: 1024 frames, all `ItemContainer.getCharacter` recursing into itself. The server hung for 13 minutes (frame counter frozen at f:54247), a graceful `quit` was never processed, and the watchdog force-restarted it. The last world save (21:30:10) succeeded, so only ~1 minute of world data was lost, but every player action during the 13-minute hang was never received by the server.
 
@@ -759,6 +769,10 @@ The second site was flagged in review as "the next one to blow up": `Transaction
 - `isInside` and `InventoryContainer.save` still have no cycle protection; the W5 guard remains the backstop. We cannot yet claim "cycles cannot form".
 
 **Verification**: SmokeCheck pins, for each site: the vanilla precondition (exactly one self-recursion), exactly one redirect with the original recursion count at zero, **unchanged total instruction count** (structural proof of 1:1 replacement), original body preserved (`getParent` call count and `containingItem` access count unchanged), and a whole-class negative control (the other 27 call sites stay vanilla). Behavior tests (7 cases + kill-switch mode): **vanilla must overflow** (vanilla climbing logic on the same cycle throws SOE, proving the cycle is real); guard cuts and returns null; **positive case returns the real owner** (blocks a fake "always null" helper from passing); normal nesting never trips; diagnostics identify the closing point; depth counter resets cleanly; threshold boundary (63 does not trip / 66 trips). Tests build cycles from uninitialized objects allocated via `sun.reflect.ReflectionFactory` (the `InventoryItem` constructor pulls in ZomboidFileSystem); `dist\java` precedes the jar on the classpath, so the **redirected** methods are what is tested.
+
+### 2026-11-10 — 42.22.2 re-validation (retired)
+
+**Fixed upstream, retired.** In 42.22.2 `getCharacter()` and `isInCharacterInventory(IsoGameCharacter)` are bounded loops: `for (depth = 0; depth < 16; depth++)` walks up `containingItem.getContainer()`, stopping on null or when it comes back to itself (`== this`), with no self-recursion (javap: a `bipush 16` / `if_icmpge` loop, no `invokevirtual ItemContainer.getCharacter`). A cycle can no longer throw StackOverflowError and the result is null / false, the same as when our guard cut it. Both `AddItem` overloads first check the new `chainContainsContainingItem` and refuse to put a container inside its own descendants (`can't add item … the item contains this container`); `containsRecursive` and the other recursions now carry a depth and a visited set. The redirect sites are gone (drift 0 != 1), so `ContainerCycleGuard`, `ContainerCycleGuardTest`, build [9a/10] and the SmokeCheck assertions were deleted; SmokeCheck now pins "retirement preconditions" (zero self-recursion in both methods, a bound of 16 in each). The only loss is the diagnostic log line for a cycle; W41 (`AddItem`) on the same `ItemContainer` ClassPatch is unchanged. Revive with `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ContainerCycleGuard.java patcher/tests/cycle-guard patcher/src/SmokeCheck.java build.ps1`.
 
 <a id="2r"></a>
 ## 2r. Grid-square load catcher (W6, server)
@@ -893,8 +907,12 @@ Behavior tests (16 cases + kill-switch mode): stand-in must throw (negative cont
 
 **Mutation results** (both passed green before the fix): `catch (RuntimeException)` → `catch (Throwable)` ⇒ `struct FAIL` on the main-catch-type lock; deleting the production log line ⇒ "expected exactly one line, got 0".
 
+### 2026-11-10 — 42.22.2 re-validation
+
+**Kept; premise partly changed.** The three `addToWorld` calls in `doLoadGridsquare` have unchanged surroundings (the method only differs in `getObjects()` returning `List` and `getBuildingsIntersecting` taking an extra boolean), so both redirects hit as before. Vanilla added a safety net: `ServerMap.preupdate` wraps `ServerCell.Load2()` (boolean in 42.21, void in 42.22; it reaches `doLoadGridsquare` through `RecalcAll2`) in `try/catch (Exception)`, and on an exception prints `Dropping cell`, calls `Unload()` on the whole cell and removes it from `cellMap` / `loadedCells`, so one throwing object no longer freezes the main loop by retrying every 0.1 s. The patch still pays off: vanilla drops the whole cell of 64 chunks (queued and dropped again while players stay nearby), while the patch only skips that one object's `addToWorld` and the cell loads normally. `ChunkLoadGuard`'s diagnostics used `isAddedToEngine()`, which 42.22 removed (the new `isAddedOrScheduledForEngine()` also counts scheduled entities); it now reads the field `GameEntity.addedToEngine` by reflection (42.21's `isAddedToEngine()` was exactly `getfield addedToEngine; ireturn`), only on the diagnostic log path, with failures counted in `diagFailures`. `ChunkLoadGuardTest` passes in both modes.
+
 <a id="2s"></a>
-## 2s. Thread-isolated forward-direction temp vector (W7, server)
+## 2s. Thread-isolated forward-direction temp vector (W7, server; retired in 42.22.2 — fixed upstream by TIS)
 
 **Incident**: On 2026-08-13 19:55:03, Player-A's hutch and the adjacent water bucket vanished. A chunk failed to load 4 seconds after a restart and was wiped and regenerated by vanilla `Blam + LoadBrandNew`: **46,142 bytes → 8,549 bytes**; the hutch, 32 poultry with full genomes, and a `Base.Bucket` were destroyed, leaving only grass. (The full forensic report is kept privately; all its technical conclusions are included here.)
 
@@ -976,6 +994,10 @@ The two `invokevirtual` target pins close a fail-open gap found in review: `matc
 
 **No kill switch** (deliberate, departing from the W4-1 / W5 / W6 convention): those patches **change behavior** (batching changes send groups, the guard swallows exceptions, the catcher skips world entry), so a switch lets admins turn one off on suspicion without uninstalling everything. W7 is **semantics-preserving**: the whole-class javap multiset diff proves zero deletions and only two added instructions, and same-thread behavior is identical to vanilla. More importantly, "turning it off" means **putting the shared static back, i.e. restoring the save-wiping race** — a switch that only hurts. The correct exit is `uninstall.sh` (whole package). The one scenario a switch could not rescue (helper fails to load) does not need one: as analyzed above, it is a loud thread death, not data loss.
 
+### 2026-11-10 — 42.22.2 re-validation (retired)
+
+**Fixed upstream, retired.** In 42.22.2 `setForwardDirectionFromIsoDirection` is `setForwardDirection(getVectorFromDirection(new Vector2()))` (javap: `new Vector2` / `invokespecial <init>` passed straight in, zero `getstatic tempVector2_2` in the method), so the main thread and `LoaderThread` no longer share a temp and the race is gone (drift 0 != 2). `ForwardVectorGuard`, the PatchConfig FieldGetSwap, the W7 SmokeCheck preconditions / post-patch assertions, the coupling lock and the cross-thread behavior smoke were deleted; SmokeCheck now pins "retirement preconditions" (zero `tempVector2_2` reads, one `new Vector2`). The `IsoGameCharacter` ClassPatch stays for W34 and W88. Revive with `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ForwardVectorGuard.java patcher/src/SmokeCheck.java build.ps1`.
+
 <a id="2t"></a>
 ## 2t. Chunk write gate (W8, server, default enforce)
 
@@ -1036,6 +1058,14 @@ Cost: hardware CRC32 on ≤64 KB ≈ 30 µs; worst case 200 chunks/s < 1% of one
 
 **Restoring historical losses** (done separately, only after the gate went live so restored chunks could not be hit again): group A (16) is restorable by rewriting the header CRC; group B (27) bodies may be torn mixtures and need per-file analysis. On 2026-08-14 all 16/16 group-A chunks were restored, including Player-B's base (<x>,<y>).
 
+### 2026-11-10 — 42.22.2 re-validation
+
+**Re-anchored.** 42.22.2 moves the server's chunk file writes into a new `private static ServerChunkLoader.writeChunk(ClientChunkRequest$Chunk)`: `new CRC32` over the whole buffer → `IsoChunk.SafeWrite` only if `getChecksumIfExists` differs → `setChecksum`. Both `SaveLoadedTask.save()` and `SaveUnloadedTask.save()` (the unload save, which went through `IsoChunk.Save(Z)` in 42.21) call it inside `synchronized (IsoChunk.WriteLock)`, and `SaveLoadedTask.save` no longer has a `SafeWrite` (drift 0 != 1). The redirect moved from `SaveLoadedTask.save` to `writeChunk` (a new `ServerChunkLoader` ClassPatch, 1 hit, all other instructions unchanged). The jar still has exactly 5 `SafeWrite` calls (IsoChunk 2 / ChunkSaveWorker 1 / WorldGenerate 1 / ServerChunkLoader 1); `IsoChunk.Save(Z)` is instruction-identical to 42.21 and keeps its 2 redirects; unload saves now go through `writeChunk` and are covered by the same redirect.
+
+**Zero-and-retry timing changed**: `writeChunk` calls `SafeWrite` before `setChecksum(this buffer's CRC)`, the reverse of 42.21, so when the helper blocks a write the checksum it zeroed is then overwritten by vanilla with the CRC of the bad buffer that never reached disk. The next clean serialization has different bytes, so dedup lets the rewrite through; identical bytes mean the same bad data, and dedup skipping it is the same as blocking it again (disk keeps the previous version). SmokeCheck's ordering locks are now: `Save(Z)` calls `setChecksum` before `SafeWrite`; `writeChunk` calls `getChecksumIfExists`, then `SafeWrite`, then `setChecksum`. Either goes red if PZ changes it again.
+
+**Format precondition**: the version constant in `IsoChunk.Save(ByteBuffer,CRC32,Z)` went 249 → 251; every other instruction of that method is identical (the debug byte, version int, len int and crc long header layout is unchanged), so the helper's offsets stay and SmokeCheck's constant is now 251.
+
 <a id="2u"></a>
 ## 2u. Save pipeline isolation (W9, server; CRC parts retired in 42.21 — fixed upstream by TIS; private pool still active)
 
@@ -1079,6 +1109,10 @@ The `crc32 → headerCrc` and `crcSave → dedupCrc ×4` shape-preserving swaps 
 **SmokeCheck re-pinned**: removed the crc32/crcSave preconditions, jar-wide coupling pin, swap adjacency and CRC behavior smoke. Added "retirement preconditions" (`addLoadedJob`/`save()` each have exactly one `new CRC32`; `ServerChunkLoader`/`SaveChunkThread`/`SaveLoadedTask`/`IsoChunk` have zero CRC32 fields — goes red if TIS reintroduces a shared instance; revive the two patches with `git checkout 8d2bee8`) and "reason for patch 3" (`update()` is unlocked and reads `savedChunks`; both `ClientChunkRequest` pools are still static — goes red if TIS adds a lock or per-instance pools, prompting re-evaluation). Negative control: `save()` has zero `ChunkSaveIsolation` calls. Build step 9d's off-path test now covers only the three pool helpers.
 
 **Verification loop unchanged**: W8 `flagged` should stay 0 on 42.21; non-zero means a mechanism covered by neither the upstream fix nor the private pool — check the BLOCKED stacks.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+**Private pool kept.** In `addLoadedJob` the surroundings of `getChunk` / `getByteBuffer` / `releaseChunk` are unchanged (only the final enqueue became `addTask` and the exception path uses `ZLogger.write(Throwable)`). `SaveLoadedTask.release()` is now `synchronized` and sets `isReleased = true` before returning the buffer (for the new `copyChunkData`), but never reads it before releasing; `SaveChunkThread.update()` still calls `release()` on each entry of the unlocked `savedChunks`, so a double release still returns the same buffer to the global pool twice and the private pool is still needed. Our `releaseChunk` runs inside `release()`'s lock, so it is mutually exclusive with `copyChunkData`. The new `SaveUnloadedTask.serialize()` rents a shell from the global pool (`SaveLoadedChunk` callers 2 → 3), but `serialize` / `release` are both `synchronized` and `release` sets `chunkData` to null afterwards, so it returns exactly once and is not redirected. The save-dedup `new CRC32` moved from `SaveLoadedTask.save` to `writeChunk`, so the SmokeCheck retirement precondition now checks `writeChunk`; the census is now 3 and pins `SaveUnloadedTask.release` being synchronized and clearing `chunkData`. `ChunkSaveIsolationTest` (off) passes.
 
 <a id="2v"></a>
 ## 2v. Log-noise suppression #8 — toxic-building log redirect (server)
@@ -1287,7 +1321,7 @@ non-IAE and `Error` propagate.
 `IngameState.updateInternal> Exception thrown` with this stack; no stuck timed actions, no restart. `anomalies` stays 0.
 
 <a id="2z"></a>
-## 2z. Vehicle DB chunk-index consistency guard (W12, server, default on)
+## 2z. Vehicle DB chunk-index consistency guard (W12, server; retired in 42.22.2 — fixed upstream by TIS)
 
 **Incident** (2026-08-23/24): three vehicles became invisible after a player got stuck, disconnected while seated, or a
 crash. Rows and blobs were intact in `vehicles.db`, but the header `wx,wy` contradicted `x,y`:
@@ -1327,6 +1361,10 @@ vanilla values.
 **Kill switch**: `-Dmdc.vehicleChunkIndexGuard=0`.
 
 **Report to TIS**: `docs/report/2026-08-24-vehicle-chunk-index-corruption-tis.md`.
+
+### 2026-11-10 — 42.22.2 re-validation (retired)
+
+**Fixed upstream, retired.** 42.22.2's `VehicleBuffer.set` no longer reads `vehicle.chunk`: after storing x / y it sets `wx = PZMath.fastfloor(x / 8.0F)` (and `wy` likewise — our derivation), and prints `vehicle %d has invalid coordinates` for non-finite or invalid squares. On open, `SQLStore.init` first calls the new `repairStoredVehicleChunks()`, which scans the whole `vehicles` table, fixes rows whose wx / wy disagree with the coordinates and commits; the three vehicle-loading queries skip non-finite coordinates. The reported bug is fixed, including existing bad rows. The `Patcher.VehicleChunkIndexRepair` surgery shape was used only by this patch; `VehicleChunkIndexGuard`, `VehicleChunkIndexGuardTest`, build [9i/10], the `$helperEntries` entry and the `-Dmdc.vehicleChunkIndexGuard` flag were deleted, and SmokeCheck now pins "retirement preconditions" (`set` reads no `vehicle.chunk`, wx / wy derived by FDIV + fastfloor, `SQLStore.init` calls `repairStoredVehicleChunks`). Revive with `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/VehicleChunkIndexGuard.java patcher/tests/vehicle-chunk-index patcher/src/SmokeCheck.java build.ps1` (if the surgery shape has been removed from `Patcher.java`, take it from 3f79700 as well).
 
 ---
 
@@ -1575,6 +1613,8 @@ observe-only.
 a "main loop frozen `<ms>` (snapshot n/12)" line with `ticks=… state=… heapUsedMB=…` plus the stack; on recovery a
 "freeze ended" line with `observedMs≈… ticksDuringStall=…`. `anomalies` must stay 0. With no freezes it is a zero-cost
 fuse and stays.
+
+**2026-11-10 42.22.2 re-validation**: kept. The head `tick()` hook is unchanged (42.22.2's `preupdate` now starts with `lastTick = System.nanoTime()`, which nothing in the jar reads — not an official watchdog), and `GameServer.main` still calls `preupdate` exactly once. The method's other change is `ServerCell.Load2()` becoming void and dropping the whole cell on an exception (see [2r](#2r)), which does not affect this patch. `MainLoopWatchdogTest` passes in all three modes.
 
 <a id="2ad"></a>
 ## 2ad. Animal unload hand-off guard (W16, server, observe) (retired: 2026-09-02)
@@ -2570,6 +2610,8 @@ vehicles may move only on that player's screen (inferred, not observed).
 authorization once then stops, off doesn't; ignored release (`Local(5)`) is sent back; requests don't touch the cache; no entry created. Production
 acceptance: a new 30 s inbound capture shows no `collide=0`-only loops, post-stall warning spikes drop sharply, `invalidated` grows with `anomalies=0`.
 
+**2026-11-10 42.22.2 re-validation**: kept. The player field in `processServer` changed from `PlayerID playerId` to `OnlinePlayer player` (`getId()`); everything else is identical. The head hook (slots 0, 2) and the helper read only `vehicleId`, `isCollide` and the connection's `vehicleStates`, never the player field, and `ServerVehicleState` only differs in debug info. `MdcVehicleCollideResyncTest` passes on / off.
+
 <a id="2bj"></a>
 ## 2bj. Spatial prefilter for animal line-of-sight (W47, server, default on)
 
@@ -3414,6 +3456,8 @@ vanilla's 1000, so the flood is logged before the warning.
   while reading the sprite during logging only counts `anomalies` and the original method is still called; an exception from the original method
   propagates unchanged; `connection=null` still calls through. off: the original method runs once per packet, nothing is counted, zero log lines in the
   whole JVM.
+
+**2026-11-10 42.22.2 re-validation**: kept. The redirect surroundings in `receiveSyncIsoObject` are unchanged (only `getObjects()` now returns `List`); `IsoObject.syncIsoObject(ZBLUdpConnection;LByteBufferReader;)V` keeps its signature and now just passes the connection on to the new `syncIsoObjectReceive(ByteBufferReader, UdpConnection)`; the helper still calls it unchanged. `SyncIsoObjectProbeTest` passes on / off.
 
 <a id="2bw"></a>
 ## 2bw. Teammates missing from the map (W59, server, default on)
@@ -4362,6 +4406,8 @@ that drew this story loads.
   the 45-room record for the same seed and clamping once; off never ends, like vanilla.
 
 **Retirement**: remove the patch when TIS fixes the inner loop counter (the SmokeCheck reason to exist turns red).
+
+**2026-11-10 42.22.2 re-validation**: kept. The surroundings of the single `Math.floor` in `randomizeDeadSurvivor` (`/10` → `i2d` → `floor` → `d2i` → clamp to 10) and the shared slot 9 of the inner and outer loops are unchanged; the only difference is `getObjects()` returning `List`. `BanditRaidLoopGuardTest` passes on / off.
 
 <a id="2cg"></a>
 ## 2cg. Hutch animals skip the paddock hutch search when laying (W72, server, default on)
@@ -5335,6 +5381,8 @@ Fields (M2 observation, in observe and on; the bracketed part is on only): `anim
 
 **Retirement**: remove the patch when TIS makes native build visibility graphs only for vehicles near a search, or stops scanning the global map linearly during the rebuild; if the SmokeCheck call-site census or the `addVehicle`/`removeVehicle` SHA lock turns red, redo the analysis first instead of changing the assertion to make it green.
 
+**2026-11-10 42.22.2 re-validation**: kept. `BaseVehicle.addToWorld(Z)` only adds `abandonReattachSeconds = 0` at the top; the `PathfindNative.addVehicle` redirect surroundings are unchanged, and `scriptReloaded`, `removeFromWorld`, `PathfindNative.checkUseNativeCode` / `updateMain` are instruction-identical. `MdcPathfindVehicleScopeTest` passes in all eight modes.
+
 ---
 
 <a id="2cu"></a>
@@ -5383,6 +5431,8 @@ Fields: `rounds` is the number of rounds entered (one per second; it stops growi
 - `WorldMapVisibilityIndexTest` (`build.ps1` [9zz/10], three JVMs with `-Xverify:all`: observe (shipping config), on and off; each checks its argv against MODE): real `SafeHouse`/`Faction`, real `safehouseList`/`Faction.factions`. Edge data: one name in 68 blocks, a non-marker owner equal to a query name, two names differing only in case, a duplicate name in one list, an empty block, block 70 (second bitset word); one name in two factions (the first wins), a member of faction 0 who owns a later faction (vanilla returns faction 0; "all owners first, then members" would wrongly return the later one), an owner also listed as member, a faction without members, an owner differing only in case, a duplicate member; a name found nowhere, a null name, a null player. Inside a round, all 121 ordered name pairs (including null) match vanilla for safehouses and all 11 players match vanilla's faction by reference, and vanilla's own answers are pinned (no all-false false green); a null player throws NPE on both sides; the patched `GameServer.isInSameFaction`/`isAnyPlayerInSameSafehouse` from dist (called by reflection) match vanilla and really go through the helper (counters); a null safehouse owner, a null faction member, a non-string faction member: that half of the round goes to vanilla and throws the same exception class, the other half still uses the table; a non-string safehouse member still uses the table with the same result; `Faction.factions` replaced inside a round goes to vanilla and reads the new list; a list changed outside a round returns vanilla's new value; a list changed inside a round is seen by another thread's query (vanilla); `round()` runs vanilla `sendWorldMapPlayerPosition()` inside the round (a fake `udpEngine.connections` records whether it was read inside), vanilla exceptions propagate and the round still ends. **Cross-round changes**: five consecutive rounds with 71 → 63 (one name moved from block 3 to the last block, words 2→1) → 1 (this round reverses the order of `Faction.factions`, the same list object, so B's first matching faction changes from 0 to 1) → 65 (member order shuffled, faction order restored) → 71 blocks (member and block order shuffled); every round matches vanilla for all ordered name pairs and players, vanilla's own answers really change between rounds (B's faction included), and the faction order is restored at the end; this catches errors in clearing pooled bitsets, a changing word count or a faction table that is not cleared. **Vanilla negative control**: removing a name from block 0 inside a round (an impossible in-round change) makes on's table answer wrong 83 times until the audit at query 84 catches it (the count depends on how many queries ran before; the assertion only requires it within 256), `mismatches=1`, the patch disables itself, every later query returns vanilla's value and `round()` no longer enters a round; observe catches it at the first query; after the disable, with the heartbeat interval forced to have elapsed, the next vanilla round prints one beat line with `disabled=true`. off returns vanilla's value throughout with zero counters and zero log lines. Log assertions: exactly one first-use, one disable and one post-disable beat line, no names. Four helper mutants (not in `build.ps1`) confirm the new tests bite: dropping the pooled-bitset clearing (the 63/65/71-block rounds mismatch), not clearing the faction table at the end of a round (the 1-block round mismatches), putting all faction owners first (the faction check and every cross round turn red), and no beat after a disable (both heartbeat checks turn red).
 
 **Retirement**: remove the patch when TIS indexes world-map visibility or stops scanning everything every second; if the SmokeCheck context, call-site census or vanilla method SHA locks turn red, recheck the equivalence first instead of changing the assertion or SHA to make it green.
+
+**2026-11-10 42.22.2 re-validation**: kept. The surroundings of the `sendWorldMapPlayerPosition()` call in `GameServer.main` (after `sendWorldMapPlayerPositionLimiter.Check()`, inside the Exception handler range) are unchanged; `isInSameFaction` and `isAnyPlayerInSameSafehouse` are instruction-identical. `WorldMapVisibilityIndexTest` passes in all three modes.
 
 <a id="2cv"></a>
 ## 2cv. Skip only the missing folder when `Map=` lists a map folder that does not exist (W87, server, default on)
@@ -5495,6 +5545,8 @@ Fields: `vehicles` is the size of `IsoCell.getVehicles()` at the beat; `frames`,
 
 **Retirement**: re-evaluate when TIS throttles vehicles on the server or makes the idle path cheap; if the SmokeCheck context, census or vanilla method SHA locks turn red, recheck the idle path first instead of changing the assertion or SHA to make it green.
 
+**2026-11-10 42.22.2 re-validation**: kept, with one more idle condition. The surroundings of the `bucket.add` redirect (`getUpdateSchedulerSimulationLevelForObject` → `simulationLevels[getUpdateOrderIndex()]` → `aload_3` → call) are unchanged. Six vanilla method SHA locks turned red and each was rechecked: `startFrame` now resets every player's `Stats.numChasingZombies` in `IDToPlayerMap` and increments it for zombies targeting a player, unrelated to vehicles; `VehiclePhysicsPacket.processServer` still checks `hasAuthorization` first and only also drops packets older than `networkUpdateTime` or ≥1 s off server time; `hitCharacter` moved its speed into the equivalent `getImpactVelocity()` (`getLinearVelocity`, y zeroed, `min(length, 15)`; new SHA lock); `constraintChanged`'s `setPhysicsActive` now follows `CarController.shouldBeActive()` and sets `constraintChangedTime` (= not idle); `tryReconnectToTowedVehicle` only adds an early return when surrounding chunks are not loaded; `BaseVehicle.update` renews `constraintChangedTime` while physics is off (only makes vehicles less idle) and adds handling for **waiting to reattach a tow partner**: when `isWaitingToReattachTowingPartner()` (a tow ID but `constraintTowing == -1`), surrounding chunks are loaded and the partner is absent, `shouldAbandonReattachingTowingPartner()` adds `getRealworldSecondsSinceLastUpdate()` on every update and clears the tow IDs after 5 s. The old conditions only looked at the tow objects, so such a vehicle (the heartbeat's `orphanTow`) counted as idle and with on this timer would run N times slower. Idle now also requires `!isWaitingToReattachTowingPartner()`, the state fingerprint gains a `reattach` bit, and both methods get SHA locks; such a vehicle updates every frame as in vanilla and returns to the normal check once it gives up. `IdleVehicleThrottleTest` adds this row to the truth table and moves the orphanTow vehicle to the active set; the jar vanilla control's "came from the jar" check now accepts any `.jar` suffix (since 42.22 the tests use the unsigned jar). All eight modes pass.
+
 <a id="2cy"></a>
 ## 2cy. Vehicle sound relevance prefilter (W90, server, default observe)
 
@@ -5526,6 +5578,8 @@ Fields: `rounds` is the number of `Manager.update` calls in these 5 minutes, `co
 **Deployment**: the manifest adds `MdcVehicleSoundPrefilter.class`, `MdcVehicleSoundPrefilter$1.class` and `Manager.class`.
 
 **Retirement**: remove the patch when TIS stops scanning every vehicle per connection for sound relevance; if the SmokeCheck context or vanilla method SHA locks turn red, recheck the equivalence first instead of changing the assertion or SHA to make it green.
+
+**2026-11-10 42.22.2 re-validation**: kept. The redirected `VehicleNetworkSoundManager$Manager` methods are instruction-identical, and the SmokeCheck context and vanilla method SHA locks still pass. `MdcVehicleSoundPrefilterTest`'s jar vanilla control "came from the jar" check now accepts any `.jar` suffix (since 42.22 the tests use the unsigned jar); nothing else changed. All modes pass.
 
 <a id="2cz"></a>
 ## 2cz. Run `checkIsNearVehicle` only while sneaking (W91, server, default observe)

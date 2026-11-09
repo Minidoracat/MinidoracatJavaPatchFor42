@@ -62,11 +62,10 @@ public final class PatchConfig {
         // 不再觸發；復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java
         patches.add(nzm);
 
-        Patcher.ClassPatch cache = new Patcher.ClassPatch("zombie/network/PacketsCache");
-        Patcher.MethodOps cacheM = cache.method("<init>", "()V");
-        cacheM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, DT, "warn", WARN_OBJ, "warnObj"));
-        cacheM.expectedHits = 1;
-        patches.add(cache);
+        // 退役（2026-11-10，42.22.2 官方已修）：PacketsCache 建構子的 `No packet handler for type:` 抑噪。
+        // 42.22.2 的 <init> 把它（與新加的 `No packet validation for type:`）包在 `if (Core.IS_DEV)` 裡，
+        // 全 jar 零 PUTSTATIC Core.IS_DEV＝專用伺服器恆 false，原版就不印；
+        // 復活：git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java
 
         // 42.20：consistency log 從 PacketType.onServerPacket 抽到 INetworkPacket.logInconsistentPacket
         // （interface default method，訊息文字未變）。改道那唯一一個 warn，onServerPacket 內剩下的
@@ -359,21 +358,11 @@ public final class PatchConfig {
         vehRemoveWorld.expectedHits = 1;
         patches.add(baseVeh);
 
-        // W12 車輛 DB chunk 索引一致性：VehicleBuffer.set 原版把 wx/wy 取自
-        // vehicle.chunk、x/y 取自 physics。若 chunk 已 reset/reuse，會寫出
-        // (wx,wy)=(0,0)/任意值、x/y 正確的矛盾列，重啟後正確 chunk 永遠載不到車。
-        // 在原 y 欄位保存後以 x/y 推導值覆寫 wx/wy；原指令完整保留，kill switch
-        // 由 helper 回傳 vanilla chunk 值。全序掛點漂移＝expectedHits 0＝建置失敗。
-        Patcher.ClassPatch vehicleBuffer = new Patcher.ClassPatch(
-                "zombie/vehicles/VehiclesDB2$VehicleBuffer");
-        Patcher.MethodOps vehicleSet = vehicleBuffer.method("set",
-                "(Lzombie/vehicles/BaseVehicle;)V");
-        vehicleSet.vehicleChunkIndexRepair = new Patcher.VehicleChunkIndexRepair(
-                "zombie/vehicles/VehiclesDB2$VehicleBuffer",
-                "zombie/vehicles/BaseVehicle",
-                "zombie/mdc/VehicleChunkIndexGuard");
-        vehicleSet.expectedHits = 1;
-        patches.add(vehicleBuffer);
+        // 退役（2026-11-10，42.22.2 官方已修）：W12 車輛 DB chunk 索引守衛（VehicleBuffer.set）。
+        // 42.22.2 的 set 不再讀 vehicle.chunk：x/y 存入後 `wx = PZMath.fastfloor(x / 8.0F)`、`wy` 同理
+        // （就是 W12 的推導式），開檔時 SQLStore.init → repairStoredVehicleChunks 依 x/y 修正既有列，
+        // 讀車時跳過非 finite 座標。復活：git checkout 3f79700 -- patcher/src/PatchConfig.java
+        // patcher/game/zombie/mdc/VehicleChunkIndexGuard.java patcher/tests/vehicle-chunk-index patcher/src/SmokeCheck.java build.ps1
 
         // ---- W4-1 v2 chunk 供給併包（2026-09-07 復活，預設 observe；docs/patches.md 2p）----
         // vanilla 供給＝主迴圈每幀、每連線只交付一個 ccr（update() 的 ready 閘內 remove(0) 一次），
@@ -421,35 +410,13 @@ public final class PatchConfig {
         txUpdate.expectedHits = 3;
         patches.add(txManager);
 
-        // ---- W5 容器環防崩潰守衛（2026-08-13 全服假死實案；docs/patches.md 2q）----
-        // 事故：主迴圈死於 StackOverflowError，堆疊 1024 層全是 ItemContainer.getCharacter
-        // 自我遞迴 → 假死 13 分鐘、graceful quit 收不進去、看門狗強制重啟。
-        // vanilla 沿「容器→裝著它的物品→該物品所在容器」爬升找擁有者且零迴圈偵測，
-        // 而 AddItem 只擋同 ID 重複、不阻止把容器放進自己的子孫——MP 封包驅動搬移即可造環。
-        // 改道 getCharacter() 內唯一的遞迴呼叫點（javap offset 42），讓每層遞迴都經過 helper
-        // 以計深度並在失控前切斷回 null（vanilla 對「不屬於任何角色」本就回 null，
-        // 呼叫端普遍做 null 檢查），同時印出環上物品供事後追查。
+        // 退役（2026-11-10，42.22.2 官方已修）：W5 容器環防崩潰守衛（docs/patches.md 2q）。42.22.2 把
+        // getCharacter／isInCharacterInventory 改成有界迴圈（`depth < 16`，走回自己 `== this` 也停），
+        // 方法內沒有自身遞迴可改道、也不會再 StackOverflowError；AddItem 兩個多載另先查
+        // chainContainsContainingItem，拒絕把容器放進自己的子孫。容器環捕手的診斷 log 隨刀移除。
+        // 復活：git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ContainerCycleGuard.java
+        // patcher/tests/cycle-guard patcher/src/SmokeCheck.java build.ps1
         Patcher.ClassPatch itemCont = new Patcher.ClassPatch("zombie/inventory/ItemContainer");
-        Patcher.MethodOps getChar = itemCont.method("getCharacter",
-                "()Lzombie/characters/IsoGameCharacter;");
-        getChar.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/inventory/ItemContainer", "getCharacter",
-                "()Lzombie/characters/IsoGameCharacter;",
-                "zombie/mdc/ContainerCycleGuard", "getCharacter"));
-        getChar.expectedHits = 1;
-        // 同一條鏈上的第二條無防環遞迴，且是「下一個最可能炸的」：Transaction.getDuration()
-        // 會呼叫它，而 getDuration() 只在 server 端、於 ItemTransactionPacket 驅動的
-        // Transaction 建構時執行——正是造出環的同一條封包路徑。截斷回 false 與 vanilla
-        // 走完鏈的 fall-through 同值。
-        Patcher.MethodOps inCharInv = itemCont.method("isInCharacterInventory",
-                "(Lzombie/characters/IsoGameCharacter;)Z");
-        inCharInv.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/inventory/ItemContainer", "isInCharacterInventory",
-                "(Lzombie/characters/IsoGameCharacter;)Z",
-                "zombie/mdc/ContainerCycleGuard", "isInCharacterInventory"));
-        inCharInv.expectedHits = 1;
-        // W5-2 環「門口」偵測（2026-08-29 observe）已於 2026-09-27 退役：9/23–9/26 共 40 個 session 的 wouldCycle／depthCapped 全為 0，
-        // 容器環未曾形成；W5 捕手仍在。復活見 docs/patches.md 2q 後記。
         // ---- W41 跨執行緒 processItems 寫入改道主執行緒（docs/patches.md 2bd）----
         // ServerPlayersVehicles 執行緒載入車輛時經 BaseVehicle.setCurrentKey → AddItem 直接寫主執行緒的
         // IsoCell.processItems（ArrayList）；AddItem 兩個多載內唯一的 addToProcessItems 1:1 改道，
@@ -516,41 +483,13 @@ public final class PatchConfig {
         chunkUnload.expectedHits = 1;   // W37 段另加兩個 IsoMovingObject.removeFromWorld
         patches.add(isoChunk);
 
-        // ---- W7 朝向暫存執行緒隔離（2026-08-13 Player-A 雞舍實案；docs/patches.md 2s）----
-        // 事故：chunk <chunk-A>（方格 <squares of chunk-A>）在 19:55:03 載入失敗被 Blam 重生，
-        // 46,142 → 8,549 bytes（雞舍＋32 隻家禽的完整基因組＋水桶全滅，只剩草地）。
-        // 根因是 vanilla 的共用 static 暫存競態，**非本專案所致**（三重實證）：
-        //   (a) 正式服 jar sha256 09a80a46… 與反編譯快照來源逐位元組相同，jar 未被改動；
-        //   (b) 崩潰路徑上的 IsoGameCharacter／IsoMovingObject／IsoChunk／IsoGridSquare／
-        //       IsoHutch 全部不在 loose class 覆寫清單內，直接由 jar 載入；
-        //   (c) 堆疊上唯一被我方 patch 的 IsoAnimal，其 load() 經常數池正規化後與原版
-        //       411 條指令逐條相同（本 class 的四刀全在 updateStress／respondToSound／
-        //       killed／updateLOS，皆不在 chunk 載入路徑上）。
-        // 機制：setForwardDirectionFromIsoDirection() 用全域共用的 tempVector2_2 當暫存，
-        // 而 IsoMovingObject.getVectorFromDirection 開頭無條件把 x、y 歸零再填值——
-        // 主執行緒與 ServerChunkLoader$LoaderThread 同時走這段就可能讀到 (0,0)，
-        // normalize() 長度 0 → IllegalStateException → chunk 載入失敗 → Blam + LoadBrandNew。
-        //
-        // 手術：方法內兩處 getstatic tempVector2_2 各接一個 INVOKESTATIC 到 helper，
-        // 回傳執行緒私有替身。vanilla 方法體只有 8 條指令、無分支無 frame：
-        //   0: aload_0 / 1: getstatic tempVector2_2 / 4: invokevirtual getVectorFromDirection
-        //   7: pop / 8: aload_0 / 9: getstatic tempVector2_2
-        //  12: invokevirtual setForwardDirection / 15: return
-        // getstatic 與插入的 invokestatic 皆 3 bytes、堆疊 1→1，形狀最單純的一類手術。
-        //
-        // **範圍界定**：本刀只治「毀存檔」那條路徑。全 log 保留期 67 次同一例外中，
-        // 另外 66 次走的是 IsoDirections.TEMP（ToVector() 直接回傳共用 static 實例）
-        // → VirtualZombieManager.createRealZombieAlways 這條**獨立**競態，落在主執行緒、
-        // 被 IngameState.UpdateStuff 的 try 吞掉（每次帶掉一個 tick，無資料損失）。
-        // IsoDirections 是全遊戲高流量核心 enum，爆炸半徑與本刀不同級，故不併入；
-        // 待本刀上線觀察後另案評估。
+        // 退役（2026-11-10，42.22.2 官方已修）：W7 朝向暫存執行緒隔離（docs/patches.md 2s）。42.22.2 的
+        // setForwardDirectionFromIsoDirection 改成 `setForwardDirection(getVectorFromDirection(new Vector2()))`，
+        // 方法內零 getstatic tempVector2_2，主執行緒與 LoaderThread 不再共用暫存。
+        // 復活：git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/ForwardVectorGuard.java
+        // patcher/src/SmokeCheck.java build.ps1
         Patcher.ClassPatch gameChr = new Patcher.ClassPatch("zombie/characters/IsoGameCharacter");
-        Patcher.MethodOps fwdFromIso = gameChr.method("setForwardDirectionFromIsoDirection", "()V");
-        fwdFromIso.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETSTATIC,
-                "zombie/characters/IsoGameCharacter", "tempVector2_2", "Lzombie/iso/Vector2;",
-                "zombie/mdc/ForwardVectorGuard", "swap");
-        fwdFromIso.expectedHits = 2;
-        patches.add(gameChr);   // W7＋W34＋W88 共用；emitter、DoDeath 於下方掛入同一 ClassPatch
+        patches.add(gameChr);   // W34＋W88 共用；emitter、DoDeath 於下方掛入同一 ClassPatch
 
         // 退役（2026-09-28，42.21.0 官方已修）：W22 面向物件 sprite-grid null 守衛
         // （faceThisObject 的 getClosestSpriteGridObject 改道）。42.21 faceThisObject 開頭新增
@@ -607,15 +546,25 @@ public final class PatchConfig {
                 "zombie/mdc/ChunkWriteGuard", "safeWrite"));
         chunkSaveB.expectedHits = 2;   // 單機分支＋伺服器 checksum-diff 分支（伺服器只走後者，前者改道無害）
 
-        Patcher.ClassPatch sclSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveLoadedTask");
-        Patcher.MethodOps sclSaveM = sclSave.method("save", "()V");
-        sclSaveM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+        // 42.22.2 對版：SaveLoadedTask.save 與 SaveUnloadedTask.save 都改成在 IsoChunk.WriteLock 內呼叫新的
+        // private static ServerChunkLoader.writeChunk(Chunk)（算 CRC→不同才 SafeWrite→setChecksum），伺服器存檔
+        // 的 SafeWrite 從 SaveLoadedTask.save 搬到這裡（卸載存檔也不再經 IsoChunk.Save(Z)）。全 jar 仍恰 5 個。
+        // 新原版先寫檔再 setChecksum(本次 buffer 的 CRC)，helper 擋下時歸零的 checksum 會被蓋成壞 buffer 的
+        // CRC；下一輪乾淨序列化的 bytes 必不同（相同就一樣壞、一樣該擋），dedup 照樣放行重寫。
+        Patcher.ClassPatch sclWrite = new Patcher.ClassPatch("zombie/network/ServerChunkLoader");
+        Patcher.MethodOps sclWriteM = sclWrite.method("writeChunk", "(Lzombie/network/ClientChunkRequest$Chunk;)V");
+        sclWriteM.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/iso/IsoChunk", "SafeWrite", "(IILjava/nio/ByteBuffer;)V",
                 "zombie/mdc/ChunkWriteGuard", "safeWrite"));
+        sclWriteM.expectedHits = 1;
+        patches.add(sclWrite);
+
         // 退役（2026-09-28，42.21.0 官方已修）：W9 之二 crcSave ×4 → dedupCrc（官方刪除共用
         // ServerChunkLoader.crcSave，save() 改用區域 new CRC32）；復活：git checkout 8d2bee8 -- <檔案>
-        sclSaveM.expectedHits = 1;   // W8 SafeWrite 改道 ×1
-        // W9 之三（後半）：release() 歸還改道私有池（與 addLoadedJob 的租用配對）
+        Patcher.ClassPatch sclSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveLoadedTask");
+        // W9 之三（後半）：release() 歸還改道私有池（與 addLoadedJob 的租用配對）。42.22.2 的 release 變成
+        // synchronized、先設 isReleased 再歸還，但不檢查已歸還；SaveChunkThread.update() 仍以無同步的
+        // savedChunks 逐一 release，雙重 release 照樣會把同一 buffer 還給全域池兩次。
         Patcher.MethodOps sclRelM = sclSave.method("release", "()V");
         sclRelM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/network/ClientChunkRequest", "releaseChunk",
