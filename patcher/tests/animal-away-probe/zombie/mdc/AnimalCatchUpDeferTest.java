@@ -14,7 +14,6 @@ import zombie.GameTime;
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
 import zombie.iso.IsoGridSquare;
-import zombie.iso.areas.DesignationZone;
 import zombie.iso.areas.DesignationZoneAnimal;
 import zombie.iso.objects.IsoFeedingTrough;
 import zombie.util.PZCalendar;
@@ -24,7 +23,8 @@ import zombie.util.PZCalendar;
  * {@code noown}＝{@code -Dmdc.animalOwnClock=0}（延後依賴自身時鐘，一併停用）、{@code notrough}＝{@code -Dmdc.troughZoneRegister=0}）。
  * 畜牧區用 serialization 配置的真 {@code DesignationZoneAnimal}（getZoneF／getAllDZones 走原版），「chunk 已載入」與
  * 「check() 重建」以替身傳進 drain：重建時往槽清單放一個槽，委派時記下當下看不看得到槽。
- * 原版負對照（nodefer）：chunk 路徑補算時槽清單是空的，之後 zone 路徑被 W42 截成 0 小時——就是玩家回報的「當成沒吃沒喝」。
+ * 負對照（nodefer）：chunk 路徑自身時鐘補算時槽清單是空的，之後 zone 路徑被 W42 截成 0 小時——就是玩家回報的「當成沒吃沒喝」。
+ * noown＝42.22.2 原版 chunk 路徑：不補、留給 doMeta（check() 之後）以 zone 時數補。
  */
 public final class AnimalCatchUpDeferTest {
 
@@ -52,7 +52,7 @@ public final class AnimalCatchUpDeferTest {
             // 逾時 0 時同一次 zoneUpdate 就補完。
             DesignationZoneAnimal pen = zone(100, 100, 10, 10);
             Fake cow = animal(102, 102, now - 7 * HOUR);
-            AnimalAwayProbe.updateStatsAway(cow, 7);
+            AnimalAwayProbe.chunkCatchUp(cow);
             expect("deferms0：先排隊", cow.calls == 0 && cow.fromMeta && AnimalAwayProbe.pendingForTest() == 1);
             AnimalAwayProbe.zoneUpdate();
             expect("deferms0：zoneUpdate 照原版更新後排空（逾時路徑）、補 7h、解凍",
@@ -78,11 +78,21 @@ public final class AnimalCatchUpDeferTest {
             z.troughs.add(rawTrough());
         };
 
-        // fromWorker 在畜牧區已知時傳入 zone 時數（這裡 30h，與動物自身離線時數相同）。
+        // chunk 路徑（fromWorker）以動物自身時鐘補算（這裡離線 30h）。
         Fake cow = animal(102, 102, now - 30 * HOUR);
-        AnimalAwayProbe.updateStatsAway(cow, 30);
+        AnimalAwayProbe.chunkCatchUp(cow);
+        if (mode.equals("noown")) {
+            // 42.22.2 原版：chunk 路徑不補；doMeta（check() 之後）以 zone 時數補，看得到槽。
+            expect("noown：chunk 路徑不補、不排隊", cow.calls == 0 && AnimalAwayProbe.pendingForTest() == 0);
+            a.troughs.add(rawTrough());
+            AnimalAwayProbe.updateStatsAwayZone(cow, 30);
+            expect("noown：zone 路徑補 30h、看得到槽", cow.calls == 1 && cow.lastHours == 30 && cow.sawTroughs);
+            troughCase(trough);
+            finish(mode);
+            return;
+        }
         if (!defer) {
-            // 原版負對照：chunk 路徑當場補算，槽清單還是空的；zone 路徑（doMeta，check() 之後）被 W42 截成 0 小時。
+            // 負對照：chunk 路徑當場補算，槽清單還是空的；zone 路徑（doMeta，check() 之後）被 W42 截成 0 小時。
             expect("不延後：chunk 路徑當場補 30h，當下看不到槽", cow.calls == 1 && cow.lastHours == 30 && !cow.sawTroughs);
             a.troughs.add(rawTrough());
             AnimalAwayProbe.updateStatsAwayZone(cow, 30);
@@ -97,7 +107,7 @@ public final class AnimalCatchUpDeferTest {
 
         expect("延後：chunk 路徑不當場補算、凍結（fromMeta）並排隊", cow.calls == 0 && cow.fromMeta
                 && AnimalAwayProbe.pendingForTest() == 1 && AnimalAwayProbe.awaitingCatchUp(cow));
-        AnimalAwayProbe.updateStatsAway(cow, 30);
+        AnimalAwayProbe.chunkCatchUp(cow);
         expect("同一隻再走 chunk 路徑：不重複排隊", AnimalAwayProbe.pendingForTest() == 1
                 && AnimalAwayProbe.deferredForTest() == 1 && cow.calls == 0);
         AnimalAwayProbe.updateStatsAwayZone(cow, 40);
@@ -120,8 +130,8 @@ public final class AnimalCatchUpDeferTest {
         refreshed.clear();
         Fake first = animal(103, 103, now - 5 * HOUR);
         Fake second = animal(112, 104, now - 6 * HOUR);
-        AnimalAwayProbe.updateStatsAway(first, 0);
-        AnimalAwayProbe.updateStatsAway(second, 0);
+        AnimalAwayProbe.chunkCatchUp(first);
+        AnimalAwayProbe.chunkCatchUp(second);
         AnimalAwayProbe.drain(System.nanoTime(), loaded, refresh);
         expect("同一批：相連畜牧區各重建一次、依延後順序補算",
                 refreshed.size() == 2 && first.calls == 1 && second.calls == 1 && first.order < second.order
@@ -130,7 +140,7 @@ public final class AnimalCatchUpDeferTest {
         // 逾時：C 一直沒載入，逾時後以現況補算。
         refreshed.clear();
         Fake far = animal(303, 303, now - 8 * HOUR);
-        AnimalAwayProbe.updateStatsAway(far, 0);
+        AnimalAwayProbe.chunkCatchUp(far);
         long t1 = System.nanoTime();
         AnimalAwayProbe.drain(t1, loaded, refresh);
         expect("未載入、未逾時：等待", far.calls == 0);
@@ -140,7 +150,7 @@ public final class AnimalCatchUpDeferTest {
 
         // 延後中被卸載：原版 unloaded() 把時鐘寫成現在，還原成延後當下；之後不再補。
         Fake unloaded = animal(304, 304, now - 12 * HOUR);
-        AnimalAwayProbe.updateStatsAway(unloaded, 0);
+        AnimalAwayProbe.chunkCatchUp(unloaded);
         AnimalAwayProbe.unloaded(unloaded);
         expect("延後中卸載：原版 unloaded() 照跑、時鐘還原成延後當下、移出佇列",
                 unloaded.unloadedCalls == 1 && unloaded.timeSinceLastUpdate == now - 12 * HOUR
@@ -151,36 +161,35 @@ public final class AnimalCatchUpDeferTest {
 
         // 延後中死亡：不補、解凍。
         Fake dead = animal(105, 105, now - 9 * HOUR);
-        AnimalAwayProbe.updateStatsAway(dead, 0);
+        AnimalAwayProbe.chunkCatchUp(dead);
         dead.dead = true;
         // 延後中被直接呼叫（管理員指令）接手：取消延後。
         Fake direct = animal(106, 106, now - 4 * HOUR);
-        AnimalAwayProbe.updateStatsAway(direct, 0);
+        AnimalAwayProbe.chunkCatchUp(direct);
         expect("直接呼叫接手：時數照傳入值", AnimalAwayProbe.entryHours(direct, 5) == 5
                 && AnimalAwayProbe.deferDirectForTest() == 1);
         AnimalAwayProbe.drain(System.nanoTime(), loaded, refresh);
         expect("延後中死亡：不補算、解凍", dead.calls == 0 && !dead.fromMeta && AnimalAwayProbe.deferDeadForTest() == 1);
         expect("被直接呼叫接手的那筆排空時不再補", direct.calls == 0 && AnimalAwayProbe.pendingForTest() == 0);
 
-        // 不延後的三種：畜牧區外、野生、沒有時鐘紀錄。
+        // 不延後的：畜牧區外當場補算；野生、沒有時鐘紀錄的 chunk 路徑不補（42.22.2 原版留給 doMeta）。
         Fake outside = animal(900, 900, now - 7 * HOUR);
-        AnimalAwayProbe.updateStatsAway(outside, 0);
+        AnimalAwayProbe.chunkCatchUp(outside);
         Fake wild = animal(107, 107, now - 7 * HOUR);
         wild.wild = true;
-        AnimalAwayProbe.updateStatsAway(wild, 0);
+        AnimalAwayProbe.chunkCatchUp(wild);
         Fake noClock = animal(108, 108, -1L);
-        AnimalAwayProbe.updateStatsAway(noClock, 3);
-        expect("畜牧區外、野生、無時鐘：當場補算（7h／0h／3h）", outside.calls == 1 && outside.lastHours == 7
-                && wild.calls == 1 && wild.lastHours == 0 && noClock.calls == 1 && noClock.lastHours == 3
-                && AnimalAwayProbe.pendingForTest() == 0);
+        AnimalAwayProbe.chunkCatchUp(noClock);
+        expect("畜牧區外當場補 7h；野生、無時鐘不補、不排隊", outside.calls == 1 && outside.lastHours == 7
+                && wild.calls == 0 && noClock.calls == 0 && AnimalAwayProbe.pendingForTest() == 0);
 
         // 例外：重建失敗只計數、照樣補；委派失敗不外拋、解凍、不影響同批下一隻。
         loadedZones.add(d);
         Fake broken = animal(503, 303, now - 3 * HOUR);
         broken.toThrow = new IllegalStateException("boom");
         Fake after = animal(504, 304, now - 3 * HOUR);
-        AnimalAwayProbe.updateStatsAway(broken, 0);
-        AnimalAwayProbe.updateStatsAway(after, 0);
+        AnimalAwayProbe.chunkCatchUp(broken);
+        AnimalAwayProbe.chunkCatchUp(after);
         boolean escaped = false;
         try {
             AnimalAwayProbe.drain(System.nanoTime(), loaded, refresh);
@@ -198,7 +207,7 @@ public final class AnimalCatchUpDeferTest {
 
         // 延後中要離開世界（抱起、放進拖車、被移除）：removeFromWorld 頭部當場補完。C 沒有載入，不等逾時。
         Fake picked = animal(303, 305, now - 4 * HOUR);
-        AnimalAwayProbe.updateStatsAway(picked, 4);
+        AnimalAwayProbe.chunkCatchUp(picked);
         AnimalAwayProbe.leavingWorld(picked);
         AnimalAwayProbe.leavingWorld(plain);
         expect("延後中離開世界：當場補 4h、移出佇列、解凍；不在佇列的不做事",
@@ -207,7 +216,7 @@ public final class AnimalCatchUpDeferTest {
 
         // 放下時原版 copyFrom 建立新物件、共用 AnimalData（parent 改指新物件）：補算跟著資料擁有者。
         Fake old = animal(104, 104, now - 6 * HOUR);
-        AnimalAwayProbe.updateStatsAway(old, 6);
+        AnimalAwayProbe.chunkCatchUp(old);
         Fake placed = animal(104, 104, -1L);
         old.ownerData = (AnimalData) raw(AnimalData.class);
         old.ownerData.parent = placed;
@@ -327,11 +336,6 @@ public final class AnimalCatchUpDeferTest {
         @Override
         public float getZ() {
             return 0;
-        }
-
-        @Override
-        public DesignationZone getZone() {
-            return null;
         }
 
         @Override

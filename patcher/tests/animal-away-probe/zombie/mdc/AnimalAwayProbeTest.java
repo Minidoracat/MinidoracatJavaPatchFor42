@@ -5,7 +5,7 @@ import java.lang.reflect.Constructor;
 import zombie.GameTime;
 import zombie.characters.animals.IsoAnimal;
 import zombie.characters.animals.datas.AnimalData;
-import zombie.iso.areas.DesignationZone;
+import zombie.core.skinnedmodel.advancedanimation.AdvancedAnimator;
 import zombie.util.PZCalendar;
 
 /**
@@ -13,8 +13,9 @@ import zombie.util.PZCalendar;
  * {@code nocap}＝W42 kill switch（W49 自身時鐘一併停用）、{@code noown}＝只關 W49 自身時鐘、
  * {@code nocarcass}＝只關屠體守衛）。
  * 鎖：委派恰一次；自身離線時數於委派「前」讀取；W42 zone 路徑取較小值、無紀錄沿用 vanilla、時鐘在未來補 0；
- * W49 chunk 路徑改用自身時數（原版 zone null 補 0 時照樣補）、野生不改、超過上限時先把時鐘移到「現在 − 上限」；
- * 掛鉤屠體不補算且清 fromMeta；活著與雞舍內每小時刷新時鐘；委派例外穿透；off 完全不計數。
+ * W49 chunk 路徑（42.22 原版不補，noown／nocap 不委派）以自身時數補算、野生與無時鐘不補、超過上限時先把時鐘移到
+ * 「現在 − 上限」、補算例外不外拋只計數；掛鉤屠體不補算且清 fromMeta；活著與雞舍內每小時刷新時鐘；zone 路徑委派例外穿透；
+ * off 完全不計數。
  */
 public final class AnimalAwayProbeTest {
 
@@ -41,48 +42,41 @@ public final class AnimalAwayProbeTest {
         PZCalendar cal = gt.getCalender();
         long now = cal.getTimeInMillis();
 
-        // 陳舊 zone：vanilla 算出 200h，但動物 2h 前才卸載。
+        // chunk 路徑（fromWorker）：42.22 原版不補算；W49 以動物自身離線時數補算。
         Fake a = fake();
         a.timeSinceLastUpdate = now - 2 * HOUR;
-        a.zone = (DesignationZone) raw(DesignationZone.class);
-        a.zone.name = "pen";
         expect("動物自身離線時數＝2", AnimalAwayProbe.animalHoursAway(a) == 2L);
-        AnimalAwayProbe.updateStatsAway(a, 200);
-        expect("陳舊 zone：委派恰一次，補 2h（nocap 補 200h）", a.calls == 1 && a.lastHours == (cap ? 2 : 200));
+        AnimalAwayProbe.chunkCatchUp(a);
+        expect("chunk：自身時鐘補 2h（noown／nocap 照 42.22 原版不補）", own ? a.calls == 1 && a.lastHours == 2 : a.calls == 0);
 
-        // 正常：兩者一致。
         Fake b = fake();
         b.timeSinceLastUpdate = now - 3 * HOUR;
-        AnimalAwayProbe.updateStatsAway(b, 3);
-        expect("正常路徑時數不變", b.calls == 1 && b.lastHours == 3);
+        AnimalAwayProbe.chunkCatchUp(b);
+        expect("chunk：補 3h", own ? b.calls == 1 && b.lastHours == 3 : b.calls == 0);
 
-        // W49：本次開機首次進世界（connectedDZone 未填，原版補 0），動物已離線 30h。
         Fake first = fake();
         first.timeSinceLastUpdate = now - 30 * HOUR;
-        AnimalAwayProbe.updateStatsAway(first, 0);
-        expect("首次進世界：自身時鐘補 30h（noown／nocap 維持原版 0h）", first.calls == 1
-                && first.lastHours == (own ? 30 : 0));
-
-        // W49：zone 只部分串流（hourLastSeen 比卸載晚），原版只補 5h，動物其實離線 20h。
-        Fake partial = fake();
-        partial.timeSinceLastUpdate = now - 20 * HOUR;
-        AnimalAwayProbe.updateStatsAway(partial, 5);
-        expect("zone 比卸載晚：自身時鐘補 20h（其餘組態 5h）", partial.lastHours == (own ? 20 : 5));
+        AnimalAwayProbe.chunkCatchUp(first);
+        expect("chunk：離線 30h 補 30h", own ? first.calls == 1 && first.lastHours == 30 : first.calls == 0);
 
         // W49：長離線上限，動物離線 200h：先把時鐘移到「現在 − 168h」，補 168h，跑完時鐘恰為現在。
         Fake away = fake();
         away.timeSinceLastUpdate = now - 200 * HOUR;
-        AnimalAwayProbe.updateStatsAway(away, 0);
-        expect("長離線：補 168h 並從「現在 − 168h」起算（noown／nocap 補 0h、時鐘不動）",
+        AnimalAwayProbe.chunkCatchUp(away);
+        expect("長離線：補 168h 並從「現在 − 168h」起算（noown／nocap 不補、時鐘不動）",
                 own ? away.lastHours == 168 && away.startClock == now - 168 * HOUR && away.timeSinceLastUpdate == now
-                        : away.lastHours == 0 && away.startClock == now - 200 * HOUR);
+                        : away.calls == 0 && away.timeSinceLastUpdate == now - 200 * HOUR);
 
-        // W49：野生動物在 chunk 路徑維持原版時數。
+        // 野生、無時鐘：chunk 路徑不補（留給 doMeta，與 42.22 原版相同）。
         Fake wild = fake();
         wild.wild = true;
         wild.timeSinceLastUpdate = now - 30 * HOUR;
-        AnimalAwayProbe.updateStatsAway(wild, 0);
-        expect("野生：chunk 路徑不改用自身時鐘", wild.lastHours == 0);
+        AnimalAwayProbe.chunkCatchUp(wild);
+        Fake c = fake();
+        c.timeSinceLastUpdate = -1L;
+        expect("無時間戳回 NO_RECORD", AnimalAwayProbe.animalHoursAway(c) == AnimalAwayProbe.NO_RECORD);
+        AnimalAwayProbe.chunkCatchUp(c);
+        expect("野生、無時鐘：chunk 路徑不補", wild.calls == 0 && c.calls == 0);
 
         // zone 路徑（doMeta）維持 W42 的較小值；超過上限同樣截斷。
         Fake z = fake();
@@ -95,12 +89,14 @@ public final class AnimalAwayProbeTest {
         expect("zone 路徑 min(250, 300)＝250，上限截成 168（noown 250、nocap 250）",
                 zoneStale.lastHours == (own ? 168 : 250));
         expect("zone 路徑截斷時時鐘同樣移到「現在 − 168h」", !own || zoneStale.startClock == now - 168 * HOUR);
+        // 陳舊 zone：zone 算出 200h，但動物 2h 前才卸載。
+        Fake stale = fake();
+        stale.timeSinceLastUpdate = now - 2 * HOUR;
+        AnimalAwayProbe.updateStatsAwayZone(stale, 200);
+        expect("陳舊 zone：補 2h（nocap 補 200h）", stale.calls == 1 && stale.lastHours == (cap ? 2 : 200));
 
-        // 無時間戳（-1）：沿用 vanilla 時數（W49 開啟時仍受上限約束）。
-        Fake c = fake();
-        c.timeSinceLastUpdate = -1L;
-        expect("無時間戳回 NO_RECORD", AnimalAwayProbe.animalHoursAway(c) == AnimalAwayProbe.NO_RECORD);
-        AnimalAwayProbe.updateStatsAway(c, 500);
+        // 無時間戳（-1）：zone 路徑沿用 vanilla 時數（W49 開啟時仍受上限約束）。
+        AnimalAwayProbe.updateStatsAwayZone(c, 500);
         expect("無時間戳沿用 vanilla（W49 截成 168h，其餘 500h）、時鐘不動",
                 c.lastHours == (own ? 168 : 500) && c.startClock == -1L);
 
@@ -111,35 +107,60 @@ public final class AnimalAwayProbeTest {
         expect("時鐘在未來：補 0h（nocap 補 48h）", f.calls == 1 && f.lastHours == (cap ? 0 : 48));
         Fake futureChunk = fake();
         futureChunk.timeSinceLastUpdate = now + 5 * HOUR;
-        AnimalAwayProbe.updateStatsAway(futureChunk, 0);
-        expect("時鐘在未來（chunk 路徑）：補 0h", futureChunk.lastHours == 0);
+        AnimalAwayProbe.chunkCatchUp(futureChunk);
+        expect("時鐘在未來（chunk 路徑）：補 0h", own ? futureChunk.calls == 1 && futureChunk.lastHours == 0 : futureChunk.calls == 0);
 
         // B3：掛鉤屠體不委派、清 fromMeta（nocarcass 照原版委派）。
         Fake carcass = fake();
         carcass.setOnHook(true);
         carcass.fromMeta = true;
         carcass.timeSinceLastUpdate = now - 40 * HOUR;
-        AnimalAwayProbe.updateStatsAway(carcass, 40);
-        expect("屠體：不補算且清 fromMeta（nocarcass 委派 40h）", carcassGuard
-                ? carcass.calls == 0 && !carcass.fromMeta && AnimalAwayProbe.carcassSkipsForTest() == 1
-                : carcass.calls == 1 && carcass.lastHours == 40 && AnimalAwayProbe.carcassSkipsForTest() == 0);
+        AnimalAwayProbe.chunkCatchUp(carcass);
+        expect("屠體：不補算且清 fromMeta（nocarcass 委派 40h；noown／nocap 照 42.22 原版不碰）",
+                !own ? carcass.calls == 0 && carcass.fromMeta && AnimalAwayProbe.carcassSkipsForTest() == 0
+                        : carcassGuard
+                        ? carcass.calls == 0 && !carcass.fromMeta && AnimalAwayProbe.carcassSkipsForTest() == 1
+                        : carcass.calls == 1 && carcass.lastHours == 40 && AnimalAwayProbe.carcassSkipsForTest() == 0);
 
+        // 委派例外：zone 路徑原樣穿透；chunk 路徑（原版這裡沒有補算）不外拋、計 chunkFailures。
         Fake d = fake();
         d.toThrow = new IllegalStateException("boom");
+        d.timeSinceLastUpdate = now - 5 * HOUR;
         boolean thrown = false;
         try {
-            AnimalAwayProbe.updateStatsAway(d, 5);
+            AnimalAwayProbe.updateStatsAwayZone(d, 5);
         } catch (IllegalStateException e) {
             thrown = e == d.toThrow;
         }
-        expect("委派例外原樣穿透", thrown);
+        expect("zone 路徑委派例外原樣穿透", thrown);
+        Fake e = fake();
+        e.toThrow = new IllegalStateException("boom");
+        e.timeSinceLastUpdate = now - 5 * HOUR;
+        AnimalAwayProbe.chunkCatchUp(e);
+        expect("chunk 路徑委派例外不外拋、計 chunkFailures＝" + (own ? 1 : 0),
+                AnimalAwayProbe.chunkFailuresForTest() == (own ? 1 : 0) && e.calls == (own ? 1 : 0));
+
+        // fromWorker 兩個掛點：getAdvancedAnimator 照原版取 animator 並記下動物；OnAnimDataChanged 照原版呼叫，
+        // 原版例外原樣外拋、不補算（補算在原版呼叫之後，順序由 SmokeCheck W32 釘住）。
+        Fake glue = fake();
+        glue.timeSinceLastUpdate = now - 4 * HOUR;
+        glue.animator = (AdvancedAnimator) raw(AdvancedAnimator.class);
+        AdvancedAnimator got = AnimalAwayProbe.fromWorkerAnimator(glue);
+        boolean vanillaThrew = false;
+        try {
+            AnimalAwayProbe.fromWorkerAnimDataChanged(got, false);
+        } catch (NullPointerException npe) {
+            vanillaThrew = true;   // 未初始化的 animator 沒有 character：原版 OnAnimDataChanged 自己丟
+        }
+        expect("fromWorker 掛點：回傳原 animator、原版例外外拋、不補算",
+                got == glue.animator && vanillaThrew && glue.calls == 0);
 
         // 委派票證只給正在補算的那隻、而且只用一次：委派中（例如 MOD 回呼）對同一隻再呼叫或對別隻直接呼叫，
         // 都走直接呼叫的上限（W49 開啟時 200h 截成 168h）。
         Fake host = fake();
         host.timeSinceLastUpdate = now - 3 * HOUR;
         host.other = fake();
-        AnimalAwayProbe.updateStatsAway(host, 3);
+        AnimalAwayProbe.updateStatsAwayZone(host, 3);
         int capped = own ? 168 : 200;
         expect("委派中：本隻第一次入口憑票放行（50）、第二次與別隻都當直接呼叫（" + capped + "）",
                 host.nestedSelf == 50 && host.nestedSelfAgain == capped && host.nestedOther == capped
@@ -166,14 +187,16 @@ public final class AnimalAwayProbeTest {
         if (off) {
             expect("off 不計數", AnimalAwayProbe.callsForTest() == 0);
         } else {
-            int delegated = carcassGuard ? 12 : 13;
+            // zone 6 筆（z、zoneStale、stale、c、f、host；例外那筆不計）＋chunk 自身時鐘 5 筆（a、b、first、away、futureChunk）
+            int delegated = 6 + (own ? 5 + (carcassGuard ? 0 : 1) : 0);
             expect("calls=" + delegated + "（例外那筆不計、屠體依守衛）", AnimalAwayProbe.callsForTest() == delegated);
             expect("anomalies=0", AnimalAwayProbe.anomaliesForTest() == 0);
         }
         expect("上限截斷次數＝" + (own ? 3 : 0), AnimalAwayProbe.limitedForTest() == (own ? 3 : 0));
-        // 首次進世界 30＋部分串流 15＋長離線 168（原版三者合計 5）。
-        expect("自身時鐘多補 ownGainHours＝" + (own ? 213 : 0), AnimalAwayProbe.ownGainHoursForTest() == (own ? 213 : 0));
-        expect("委派例外計入 delegateFailures＝1", AnimalAwayProbe.delegateFailuresForTest() == 1);
+        // chunk 路徑 2＋3＋30＋168＋例外那筆 5（時數在委派前就算好）＝208（42.22 原版這條路徑 0），nocarcass 另加屠體 40。
+        int gain = own ? 208 + (carcassGuard ? 0 : 40) : 0;
+        expect("自身時鐘多補 ownGainHours＝" + gain, AnimalAwayProbe.ownGainHoursForTest() == gain);
+        expect("委派例外計入 delegateFailures＝" + (own ? 2 : 1), AnimalAwayProbe.delegateFailuresForTest() == (own ? 2 : 1));
 
         // 連續補算累計：三筆首尾相接、各 60ms 的補算是同一段 180ms；隔 220ms 之後重新起算。
         long base = System.nanoTime() + 10_000_000_000L;
@@ -212,13 +235,13 @@ public final class AnimalAwayProbeTest {
         int lastHours;
         long startClock = Long.MIN_VALUE;
         boolean wild;
-        DesignationZone zone;
         RuntimeException toThrow;
         /** 設定時，委派中模擬 MOD 回呼：先後以本隻、本隻、別隻走 updateStatsAway 頭部的時數過濾。 */
         IsoAnimal other;
         int nestedSelf;
         int nestedSelfAgain;
         int nestedOther;
+        AdvancedAnimator animator;
 
         /** 僅供編譯；實例一律由 serialization 分配器產生，不跑 IsoAnimal 建構子。 */
         Fake() {
@@ -242,11 +265,6 @@ public final class AnimalAwayProbeTest {
         }
 
         @Override
-        public DesignationZone getZone() {
-            return zone;
-        }
-
-        @Override
         public boolean isWild() {
             return wild;
         }
@@ -264,6 +282,11 @@ public final class AnimalAwayProbeTest {
         @Override
         public int getAnimalID() {
             return 7;
+        }
+
+        @Override
+        public AdvancedAnimator getAdvancedAnimator() {
+            return animator;
         }
     }
 

@@ -774,27 +774,15 @@ public final class PatchConfig {
         // 結論已達；heartbeat 每 256 unload 一行佔正式服 log 7.3%（5274/71806 行）。
         // 詳見 docs/patches.md 2ad；復活方式：從退役前最後一版 13650e1 取回（`git checkout 13650e1 -- <檔案>`＋回填 PatchConfig／SmokeCheck／build.ps1 對應段）。
 
-        // ---- W17 hutch 載入回傳檢查 enforce（靜態已定罪；docs/patches.md 2ae）----
-        // IsoHutch.load 逐隻 addAnimalInside(animal,false) 忽略 boolean 回傳（offset 526：
-        // invokevirtual; pop 恰 1）；addAnimalInside 骰位重試 >100 次跳出後最終落位只查
-        // animalInside（offset 148-151），佔用即 false ⇒ 該動物不進任何容器、隨 GC 消失＝
-        // 載入即滅失。接近滿舍（屍體/nestBox 佔位擠掉有效槽）時機率性觸發，兔群 16→3 正對
-        // 此形。helper 委派後對 false 強制入位（順序掃、零 Rand、map/backlink/preferred/
-        // hutchPosition/itemID/tryRemove 六步對齊 vanilla；tryRemove body 是 client-only，
-        // server 上 no-op，照呼維持同構）。
-        // client 端 load 在 wv≥212 skip 動物 blob（offset 191-209）＝redirect 死碼，且 loose
-        // class 只部署 server——無 2n 型 desync 面。
-        // kill switch：-Dmdc.hutchLoadGuard（1 enforce 預設／2 observe 只記不救／0 off 純委派）。
+        // ---- W17 hutch 載入回傳檢查（docs/patches.md 2ae）：2026-11-10 42.22.2 退役 ----
+        // 42.22.2 原版 IsoHutch.load 改成 `!addAnimalInside(animal,false) && !addAnimalInsideFirstFreePosition(animal)` 才 warn，
+        // addAnimalInside 本身也改成先列出空位再隨機挑（isHutchPositionOccupied／pickRandomUnoccupiedHutchPosition），
+        // 「有空槽卻回 false、動物隨 GC 消失」已由原版修掉。復活：git checkout 3f79700 -- patcher/game/zombie/mdc/HutchLoadGuard.java
+        // patcher/tests/hutch-load-guard，再回填本段、SmokeCheck W17 段、build.ps1 [9n] 與 $helperEntries。
         Patcher.ClassPatch hutch = new Patcher.ClassPatch("zombie/iso/objects/IsoHutch");
-        Patcher.MethodOps hutchLoad = hutch.method("load", "(Ljava/nio/ByteBuffer;IZ)V");
-        hutchLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/objects/IsoHutch", "addAnimalInside",
-                "(Lzombie/characters/animals/IsoAnimal;Z)Z",
-                "zombie/mdc/HutchLoadGuard", "addInside"));
-        hutchLoad.expectedHits = 1;
 
         // W26：只過濾 update 內髒污變化與週期/size 變化的兩個自發 sync。
-        // 操作、remote relay、初次 load/save 與 W17 保持原版；不改 IsoObject 的通用廣播。
+        // 操作、remote relay、初次 load/save 保持原版；不改 IsoObject 的通用廣播。
         String hutchSyncGate = "zombie/mdc/HutchSyncGate";
         Patcher.MethodOps hutchUpdate = hutch.method("update", "()V");
         hutchUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
@@ -803,13 +791,14 @@ public final class PatchConfig {
         patches.add(hutch);
 
         // Server 送出 teleport 後，client 新位置可能早於 server 位置回報；先豁免該角色。
-        // 掛在 wire 身分寫入漏斗，既不改 PlayerID/XYZ，也不猜測轉場完成時間。
-        // 豁免名單在 RecipientWindow，W26 雞舍與 W36 GameEntity 廣播共用。
+        // 掛在 wire 身分寫入漏斗，既不改玩家身分欄位/XYZ，也不猜測轉場完成時間。
+        // 豁免名單在 RecipientWindow，W26 雞舍與 W36 GameEntity 廣播共用。42.22 起身分欄位是 OnlinePlayer
+        // （42.21 是 PlayerID）；write 內唯一 OnlinePlayer.write（javap offset 5，先於三個 putFloat）。
         Patcher.ClassPatch hutchTeleport = new Patcher.ClassPatch("zombie/network/packets/TeleportPacket");
         Patcher.MethodOps hutchTeleportWrite = hutchTeleport.method("write",
                 "(Lzombie/core/network/ByteBufferWriter;)V");
         hutchTeleportWrite.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/network/fields/character/PlayerID", "write",
+                "zombie/network/fields/character/OnlinePlayer", "write",
                 "(Lzombie/core/network/ByteBufferWriter;)V", "zombie/mdc/RecipientWindow", "writeTeleportPlayer"));
         hutchTeleportWrite.expectedHits = 1;
         patches.add(hutchTeleport);
@@ -1041,21 +1030,28 @@ public final class PatchConfig {
         }
         patches.add(fishSchool);
 
-        // W32：動物離線補算觀測＋W42 補算時數上限。全 jar 三個 updateStatsAway 呼叫點 1:1 改道
-        // （fromWorker ×1、DesignationZoneAnimal.doMeta ×2，兩者皆以 zone.hourLastSeen 推算時數），
-        // 記錄該時數對照動物自身 timeSinceLastUpdate，W42 取兩者較小值；docs/patches.md 2au／2be。
+        // W32：動物離線補算觀測＋W42 補算時數上限；docs/patches.md 2au／2be。doMeta 的兩個 updateStatsAway（以 zone.hourLastSeen
+        // 推算時數）1:1 改道，記錄該時數對照動物自身 timeSinceLastUpdate，W42 取兩者較小值。
+        // chunk 路徑（W49／W56）：42.22 原版 fromWorker 不再呼叫 updateStatsAway，改成「不在載入中且站在畜牧區」就設 fromMeta=true
+        // 凍結、等畜牧區 doMeta 才補。42.21 原版的補算位置在 addToWorld→setGroup→OnAnimDataChanged 之後、objectList／
+        // AnimalInstanceManager 登記之前；42.22 這段兩個唯一呼叫同形改道接回同一個位置：getAdvancedAnimator()（javap offset 468，
+        // receiver＝動物）記下這隻、OnAnimDataChanged(Z)（offset 472）照原版呼叫後走 W49 自身時鐘補算。
         String awayProbe = "zombie/mdc/AnimalAwayProbe";
+        String animator = "zombie/core/skinnedmodel/advancedanimation/AdvancedAnimator";
         Patcher.ClassPatch animalMain = new Patcher.ClassPatch("zombie/characters/animals/AnimalManagerMain");
         Patcher.MethodOps fromWorker = animalMain.method("fromWorker", "(Ljava/util/ArrayList;)V");
         fromWorker.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/characters/animals/IsoAnimal", "updateStatsAway", "(I)V", awayProbe, "updateStatsAway"));
-        fromWorker.expectedHits = 1;
+                "zombie/characters/animals/IsoAnimal", "getAdvancedAnimator", "()L" + animator + ";",
+                awayProbe, "fromWorkerAnimator"));
+        fromWorker.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                animator, "OnAnimDataChanged", "(Z)V", awayProbe, "fromWorkerAnimDataChanged"));
+        fromWorker.expectedHits = 2;
         patches.add(animalMain);
         Patcher.ClassPatch zoneAnimal = new Patcher.ClassPatch("zombie/iso/areas/DesignationZoneAnimal");
         Patcher.MethodOps zoneMeta = zoneAnimal.method("doMeta", "(I)V");
         zoneMeta.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/characters/animals/IsoAnimal", "updateStatsAway", "(I)V", awayProbe, "updateStatsAwayZone"));
-        zoneMeta.expectedHits = 2;   // 成年、幼體兩個迴圈
+        zoneMeta.expectedHits = 2;   // 成年、幼體兩個迴圈（javap offset 47、106）
         patches.add(zoneAnimal);
 
         // W33：分娩品種守衛。checkPregnancy 內唯一 addBaby() 1:1 改道；幼崽品種查不到就不生，
@@ -1092,8 +1088,11 @@ public final class PatchConfig {
 
         // ---- W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）----
         // 純觀測、kill switch -Dmdc.animalLossProbe=0|off。之一：放下動物時以手上動物的 onlineID 查前持有者並移出世界
-        // （雞舍載入的動物在伺服器上沒有登記 onlineID）；之二：chunk 卸載存檔還在寫時同一個 chunk 被重新載入；
-        // 之三（grow）掛在上面的 AnimalData ClassPatch。
+        // （雞舍載入的動物在伺服器上沒有登記 onlineID）；之三（grow）掛在上面的 AnimalData ClassPatch。
+        // 之二（chunk 卸載存檔還在寫時同一個 chunk 被重新載入）2026-11-10 42.22.2 退役：原版 LoaderThread 改成
+        // LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))，佇列中或正在寫（currentTask）的卸載存檔直接當載入來源，
+        // SaveUnloadedTask.save 也改成 synchronized serialize＋WriteLock 下 writeChunk；復活：git checkout 3f79700 -- 本檔與
+        // AnimalLossProbe、AnimalLossProbeTest、SmokeCheck W60 段。
         Patcher.ClassPatch dropSquare = new Patcher.ClassPatch("zombie/iso/IsoGridSquare");
         Patcher.MethodOps dropOps = dropSquare.method("AddWorldInventoryItem",
                 "(Lzombie/inventory/InventoryItem;FFFZZ)Lzombie/inventory/InventoryItem;");
@@ -1108,20 +1107,6 @@ public final class PatchConfig {
                 lossProbe, "dropRegister"));
         dropOps.expectedHits = 3;   // javap offset 144 copyFrom、168 get、210 add
         patches.add(dropSquare);
-
-        Patcher.ClassPatch chunkLoaderThread = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$LoaderThread");
-        Patcher.MethodOps loaderRun = chunkLoaderThread.method("run", "()V");
-        loaderRun.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/IsoChunk", "LoadChunk", "(IILjava/nio/ByteBuffer;)Z", lossProbe, "loadChunk"));
-        loaderRun.expectedHits = 1;   // offset 226，緊接在 saveNow(wx, wy) 之後
-        patches.add(chunkLoaderThread);
-
-        Patcher.ClassPatch unloadedSave = new Patcher.ClassPatch("zombie/network/ServerChunkLoader$SaveUnloadedTask");
-        Patcher.MethodOps unloadedSaveOps = unloadedSave.method("save", "()V");
-        unloadedSaveOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/iso/IsoChunk", "Save", "(Z)V", lossProbe, "saveUnloaded"));
-        unloadedSaveOps.expectedHits = 1;
-        patches.add(unloadedSave);
 
         // W37：動物半建構物件守衛＋apop 存檔先序列化再開檔（docs/patches.md 2az）。
         // (1) IsoAnimal 四個帶座標建構子每個 RETURN 前 afterCtor：建構檢查失敗（data null）時把
@@ -1161,7 +1146,7 @@ public final class PatchConfig {
         //     setMovingSquareNow（offset 240）把它放回格子、sendToRelative（offset 418，DropAnimal）告訴附近客戶端；
         //     cell 卸載時 removeFromWorld 對它 NPE、整個 cell 卸不掉。兩個呼叫改道 dropPlace／dropSend（掛在 W60 的
         //     IsoGridSquare ClassPatch）。IsoChunk.removeFromWorld 的兩個 removeFromWorld（offset 332 movingObjects、
-        //     506 staticMovingObjects）改道 chunkRemove 當保底：只對 adef 為 null 的動物吞例外（掛在抑噪 #10 的 ClassPatch）。
+        //     510 staticMovingObjects；42.21 是 506）改道 chunkRemove 當保底：只對 adef 為 null 的動物吞例外（掛在抑噪 #10 的 ClassPatch）。
         dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/characters/animals/IsoAnimal", "setMovingSquareNow", "()V", spawnGuard, "dropPlace"));
         dropOps.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/network/packets/INetworkPacket",
@@ -1177,16 +1162,15 @@ public final class PatchConfig {
         dropOps.fieldGetRedirects.add(new Patcher.FieldGetRedirect("zombie/iso/IsoGridSquare", "y", "I", spawnGuard, "dropY"));
         dropOps.expectedHits += 2;
 
-        // W38：doMeta 補算快照（docs/patches.md 2ba）。updateStatsAway→checkZone→setDZone 會把動物
-        // 移到 zone.animals 尾端，原版索引迴圈因而重複補算／漏算。頭部 begin、RETURN 前 end，方法內
-        // 8 個 GETFIELD animals 之後換成本次 doMeta 的快照（W32 的兩個 redirect 同一個 MethodOps）。
+        // W38：doMeta 每隻動物只補算一次（docs/patches.md 2ba）。42.21 原版以索引走訪 zone.animals、補算中 setDZone 把動物移到
+        // 清單尾端而重複／漏算；42.22.2 原版改走 getAnimalsInZone() 的 HashSet 複本（不再重排），但幼體迴圈寫成
+        // `for (i < size) for (animal : set) if (isBaby) updateStatsAway(hours)`，每隻幼體被補算「動物總數」次。頭部 begin、
+        // 唯一 RETURN 前 end 標出一次 doMeta，W32 的 updateStatsAwayZone 在同一次 doMeta 內第二次遇到同一隻就略過。
         String metaSnap = "zombie/mdc/AnimalMetaSnapshot";
         String zoneDesc = "(Lzombie/iso/areas/DesignationZoneAnimal;)V";
         zoneMeta.headCall = new Patcher.HeadCall(metaSnap, "begin", zoneDesc);
         zoneMeta.tailCall = new Patcher.TailCall(metaSnap, "end", zoneDesc);
-        zoneMeta.fieldGetSwap = new Patcher.FieldGetSwap(Opcodes.GETFIELD,
-                "zombie/iso/areas/DesignationZoneAnimal", "animals", "Ljava/util/ArrayList;", metaSnap, "animals");
-        zoneMeta.expectedHits = 2 + 1 + 1 + 8;   // W32 redirect 2＋head＋tail（單一 RETURN）＋8 個 GETFIELD
+        zoneMeta.expectedHits = 2 + 1 + 1;   // W32 redirect 2＋head＋tail（單一 RETURN）
 
         // W39：動物死亡帳本（純觀測，docs/patches.md 2bb）。OnDeath 頭部記錄死亡當下狀態與來源。
         Patcher.MethodOps onDeath = animal.method("OnDeath", "()V");
@@ -1642,7 +1626,7 @@ public final class PatchConfig {
                 "()Z", "zombie/mdc/NearVehicleSneakGate", "checkIsNearVehicle"));
         playerNearVehicle.expectedHits = 2;
         // ---- W94 伺服器跳過 setBodyPartsLastState（docs/patches.md 2dc；併在 W83 的 IsoPlayer ClassPatch）----
-        // postupdateInternal 唯一的 invokevirtual BodyDamage.setBodyPartsLastState()V（javap offset 121，前面 aload_0→getBodyDamage，
+        // postupdateInternal 唯一的 invokevirtual BodyDamage.setBodyPartsLastState()V（javap offset 97，42.21 是 121；前面 aload_0→getBodyDamage，
         // 後面 return）同形改道 BodyLastStateGate：伺服器上這份狀態唯一的讀者 Bandages.update 開頭就回傳，on 時跳過。
         // -Dmdc.bodyLastStateSkip=2|observe（預設）／1|on／0|off。
         Patcher.MethodOps playerPostupdate = isoPlayer.method("postupdateInternal", "()V");

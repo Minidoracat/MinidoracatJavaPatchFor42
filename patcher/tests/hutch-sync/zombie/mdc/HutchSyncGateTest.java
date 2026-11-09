@@ -28,8 +28,7 @@ import zombie.iso.Vector3;
 import zombie.iso.objects.IsoHutch;
 import zombie.network.GameServer;
 import zombie.network.PacketTypes;
-import zombie.network.fields.character.PlayerID;
-import zombie.util.list.PZArrayList;
+import zombie.network.fields.character.OnlinePlayer;
 import zombie.vehicles.BaseVehicle;
 
 /**
@@ -349,10 +348,10 @@ public final class HutchSyncGateTest {
                     !HutchSyncGate.shouldSend(warping, 0.0f, 0.0f));
         }
 
-        PlayerID id = playerId(traveller, (short) 7);
+        OnlinePlayer id = playerId(traveller, (short) 7);
         byte[] written = capture(out -> RecipientWindow.writeTeleportPlayer(id, out));
         byte[] vanillaId = capture(id::write);
-        expect("teleport wire：改道後與原版 PlayerID.write 逐位元相同",
+        expect("teleport wire：改道後與原版 OnlinePlayer.write 逐位元相同",
                 Arrays.equals(written, vanillaId));
 
         if (JUDGE) {
@@ -376,10 +375,10 @@ public final class HutchSyncGateTest {
             expect("豁免不外溢到其他角色", !HutchSyncGate.shouldSend(bystander, 0.0f, 0.0f));
         }
 
-        PlayerID orphan = new PlayerID();
-        orphan.setID((short) 9);
+        OnlinePlayer orphan = new OnlinePlayer();
+        orphan.setId((short) 9);
         byte[] orphanWire = capture(out -> RecipientWindow.writeTeleportPlayer(orphan, out));
-        expect("PlayerID 尚未解析出角色：不記豁免、不炸、照樣寫入",
+        expect("OnlinePlayer 尚未解析出角色：不記豁免、不炸、照樣寫入",
                 Arrays.equals(orphanWire, capture(orphan::write)));
     }
 
@@ -446,7 +445,7 @@ public final class HutchSyncGateTest {
 
         Hutch detached = hutch(0, 0, new int[] {0});
         setDeclared(IsoGridSquare.class, detached.square, "objects",
-                new PZArrayList<IsoObject>(IsoObject.class, 2));
+                new ArrayList<IsoObject>(2));
         expect("前提：物件已不在格上（objectIndex == -1）",
                 detached.object.getObjectIndex() == -1);
         CaptureConnection near2 = nearConn();
@@ -547,7 +546,7 @@ public final class HutchSyncGateTest {
         byte[] vanilla = vanillaWire(hutch);
 
         LinkageFailingPlayerID linkage = new LinkageFailingPlayerID();
-        linkage.setID((short) 11);
+        linkage.setId((short) 11);
         Error linkageError = null;
         byte[] linkageWire = null;
         try {
@@ -571,7 +570,7 @@ public final class HutchSyncGateTest {
         }
 
         RuntimeFailingPlayerID faulty = new RuntimeFailingPlayerID();
-        faulty.setID((short) 13);
+        faulty.setId((short) 13);
         byte[] faultyWire = capture(out -> RecipientWindow.writeTeleportPlayer(faulty, out));
         // 沒有 try/catch：writeTeleportPlayer 若讓 RuntimeException 外逃，這裡會直接以堆疊終止
         expect("簿記 RuntimeException：不外逃且 id 仍原樣寫入",
@@ -693,14 +692,14 @@ public final class HutchSyncGateTest {
         }
     }
 
-    static final class LinkageFailingPlayerID extends PlayerID {
+    static final class LinkageFailingPlayerID extends OnlinePlayer {
         @Override
         public IsoPlayer getPlayer() {
             throw new NoSuchMethodError("<test> 模擬手術後簽名不合");
         }
     }
 
-    static final class RuntimeFailingPlayerID extends PlayerID {
+    static final class RuntimeFailingPlayerID extends OnlinePlayer {
         @Override
         public IsoPlayer getPlayer() {
             throw new IllegalStateException("<test> 簿記入口壞掉");
@@ -733,7 +732,7 @@ public final class HutchSyncGateTest {
         square.x = x;
         square.y = y;
         square.z = 0;
-        PZArrayList<IsoObject> objects = new PZArrayList<>(IsoObject.class, 2);
+        ArrayList<IsoObject> objects = new ArrayList<>(2);
         objects.add(object);
         setDeclared(IsoGridSquare.class, square, "objects", objects);
         IsoChunk chunk = alloc(IsoChunk.class);
@@ -845,9 +844,9 @@ public final class HutchSyncGateTest {
         c.releventPos[slot] = new Vector3(x, y, 0.0f);
     }
 
-    private static PlayerID playerId(IsoPlayer player, short onlineId) throws Exception {
-        PlayerID id = new PlayerID();
-        id.setID(onlineId);
+    private static OnlinePlayer playerId(IsoPlayer player, short onlineId) throws Exception {
+        OnlinePlayer id = new OnlinePlayer();
+        id.setId(onlineId);
         setAny(id, "player", player);
         return id;
     }

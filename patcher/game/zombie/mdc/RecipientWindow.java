@@ -10,7 +10,7 @@ import zombie.core.raknet.UdpConnection;
 import zombie.iso.Vector3;
 import zombie.network.GameClient;
 import zombie.network.GameServer;
-import zombie.network.fields.character.PlayerID;
+import zombie.network.fields.character.OnlinePlayer;
 
 /**
  * 遠距收件人排除規則；W26 雞舍自發 sync 與 W36 GameEntity 廣播共用同一份判定。
@@ -44,8 +44,8 @@ public final class RecipientWindow {
         return disabled;
     }
 
-    /** TeleportPacket.write 的 PlayerID.write 改道；先豁免，再原樣寫入玩家 ID。 */
-    public static void writeTeleportPlayer(PlayerID id, ByteBufferWriter out) {
+    /** TeleportPacket.write 的 OnlinePlayer.write 改道（42.21 是 PlayerID.write）；先豁免，再原樣寫入玩家 ID。 */
+    public static void writeTeleportPlayer(OnlinePlayer id, ByteBufferWriter out) {
         try {
             if (ACTIVE && GameServer.server && !GameClient.client) {
                 IsoPlayer player = id.getPlayer();
