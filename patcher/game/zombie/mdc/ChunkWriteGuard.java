@@ -52,14 +52,27 @@ import zombie.network.ChunkChecksum;
  *       建立全走原版）；</li>
  *   <li><b>失敗</b> → <b>跳過寫入</b>（磁碟保留上一版好檔案）＋完整 stack log（兇手路徑
  *       直接寫在 log 裡＝蒐證）＋損毀 buffer 傾印到 {@code blamguard/}（供離線比對）＋
- *       {@code ChunkChecksum.setChecksum(wx,wy,0)} 邀請下個存檔週期用乾淨的序列化重寫（自癒重試）。</li>
+ *       {@code ChunkChecksum.setChecksum(wx,wy,0)}。{@code IsoChunk.Save(Z)} 先 setChecksum 再寫，
+ *       這個 0 會留下、下輪必然重寫；42.22.2 的 {@code ServerChunkLoader.writeChunk} 在 helper 返回後
+ *       仍 {@code setChecksum(本次壞 buffer 的 CRC)}，0 會被原版覆寫——重試靠下一輪乾淨序列化的
+ *       bytes CRC 不同，bytes 相同就是同一份壞資料，由 dedup 跳過＝再擋一次。</li>
  * </ol>
  *
  * <p><b>取捨（誠實記錄）</b>：跳過寫入代表該 chunk 磁碟版本暫時停留在上一版——若它在
- * 下次內容變更前一直閒置，磁碟就是舊資料。「舊而有效」勝過「被 Blam 全滅」；且 checksum
- * 歸零保證下次存檔週期必然重試。另一個閘門攔不住的殘餘情境：buffer 被<b>完整地</b>填成
+ * 下次內容變更前一直閒置，磁碟就是舊資料。「舊而有效」勝過「被 Blam 全滅」；重試語意見上面
+ * 第 4 點（writeChunk 路徑靠下一輪 bytes 不同才重寫）。另一個閘門攔不住的殘餘情境：buffer 被<b>完整地</b>填成
  * 另一塊 chunk 的自洽資料（header 沒有座標欄位，CRC 驗不出「內容對但主人錯」）——
  * 已觀測的 43 筆全是不自洽型，全數會被本閘攔下。
+ *
+ * <p><b>載入側（42.22.2 起）</b>：{@code ServerChunkLoader$LoaderThread.run} 改成
+ * {@code chunk.LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))}——存檔佇列裡或存檔執行緒
+ * 正在處理的那份 buffer（{@code copyData}：{@code Arrays.copyOf(bb.array(), bb.position())} 包成
+ * position 0、limit＝長度的私有副本）直接拿來載入，不經寫入閘。它若是本閘會拒寫的損毀資料，原版
+ * {@code LoadChunk} 失敗就 {@code setChecksum(0)}＋{@code Blam}＋{@code LoadBrandNew}，重生的 chunk
+ * 下一輪存檔會通過本閘、蓋掉磁碟上最後一份好檔。{@link #loadChunk} 是該呼叫的同形改道：同一個
+ * {@link #verify}（與原版載入側 {@code checkLength}／{@code checkCRC}、{@code validateByteBufferHeader}
+ * 是同一個判斷，所以只會拒絕原版本來就會 Blam 的 buffer）；enforce 不通過就以 null 呼叫原版
+ * {@code LoadChunk}＝改讀磁碟上一版好檔，與寫入側擋下時保留上一版的語意一致。
  *
  * <p><b>不涵蓋的兩條寫檔路徑</b>（全 jar 共 5 個 SafeWrite 呼叫點，SmokeCheck census 釘死）：
  * {@code ChunkSaveWorker.WriteQueuedSave}——唯一入列點 {@code AddHotSave} 被
@@ -93,19 +106,66 @@ public final class ChunkWriteGuard {
     private static final int MAX_DETAIL_LOGS = 10;
     private static final int MAX_DUMPS = 16;
 
-    private static final int MODE = resolveMode(System.getProperty("mdc.chunkWriteGuard"));
+    static final int MODE = resolveMode(System.getProperty("mdc.chunkWriteGuard"));
     /** 傾印目錄覆寫（-Dmdc.chunkWriteGuard.dumpDir）。SmokeCheck 用它把測試傾印導離真實存檔目錄。 */
     private static final String DUMP_DIR = System.getProperty("mdc.chunkWriteGuard.dumpDir");
 
     private static final AtomicLong passed = new AtomicLong();
     private static final AtomicLong flagged = new AtomicLong();
     private static final AtomicLong anomalies = new AtomicLong();
+    /** 載入側：損毀的 pending buffer（enforce 改讀磁碟、observe 照傳）。 */
+    static final AtomicLong pendingFlagged = new AtomicLong();
     private static final AtomicInteger detailLogs = new AtomicInteger();
     private static final AtomicInteger dumps = new AtomicInteger();
 
     /** 寫檔執行緒有限（主執行緒＋loader/saver），每緒一份快照陣列與 CRC，無累積疑慮。 */
     private static final ThreadLocal<byte[]> SNAP = ThreadLocal.withInitial(() -> new byte[131072]);
     private static final ThreadLocal<CRC32> LOCAL_CRC = ThreadLocal.withInitial(CRC32::new);
+
+    /**
+     * {@code ServerChunkLoader$LoaderThread.run} 的 {@code IsoChunk.LoadChunk(IILByteBuffer)Z} ×1 同形改道目標
+     * （42.22.2 起；receiver 變第一參數）。原版 {@code LoadChunk} 恰呼叫一次，它的例外原樣穿透。
+     */
+    public static boolean loadChunk(IsoChunk chunk, int wx, int wy, ByteBuffer pending) {
+        return chunk.LoadChunk(wx, wy, loadSource(wx, wy, pending));
+    }
+
+    /**
+     * 交給原版 {@code LoadChunk} 的資料來源：原 buffer，或 null（原版改讀磁碟上一版）。只讀不改 buffer。
+     * {@code copyData} 給的是 position 0、limit＝長度的私有副本，原版載入側以 limit 當長度、從 array 的
+     * 17 起算 CRC，與 {@code verify(array, limit)} 是同一個判斷。簿記（log／傾印／checksum）例外不外拋；
+     * 守衛自身故障（非 heap buffer 等）＝anomaly、照原樣傳（fail-open＝原版行為）。
+     */
+    static ByteBuffer loadSource(int wx, int wy, ByteBuffer pending) {
+        if (MODE == MODE_OFF || pending == null) {
+            return pending;
+        }
+        int verdict;
+        try {
+            verdict = verify(pending.array(), pending.limit());
+        } catch (RuntimeException e) {
+            anomalies.incrementAndGet();
+            safeLogAnomaly(wx, wy, e);
+            return pending;
+        }
+        if (verdict == VERIFY_OK) {
+            return pending;
+        }
+        long n = pendingFlagged.incrementAndGet();
+        byte[] arr = pending.array();
+        logBlock(wx, wy, arr, pending.limit(), verdict, n, true);
+        dumpEvidence(wx, wy, arr, pending.limit());
+        if (MODE == MODE_OBSERVE) {
+            return pending;
+        }
+        // 與原版載入失敗、寫入側擋下一樣歸零：這塊 chunk 下輪存檔必然重寫，客戶端快取比對也不會誤用舊 CRC
+        try {
+            ChunkChecksum.setChecksum(wx, wy, 0L);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
+        }
+        return null;
+    }
 
     /** IsoChunk.Save(Z)V ×2 與 ServerChunkLoader.writeChunk ×1（42.22.2 起；42.21 在 SaveLoadedTask.save）的改道目標。 */
     public static void safeWrite(int wx, int wy, ByteBuffer bb) throws IOException {
@@ -119,7 +179,7 @@ public final class ChunkWriteGuard {
         // observe 的「零行為改變」承諾在毀檔面前讓位。
         if (bb == null || !bb.hasArray()) {
             long fu = flagged.incrementAndGet();
-            logBlock(wx, wy, null, -1, VERIFY_UNWRITABLE, fu);
+            logBlock(wx, wy, null, -1, VERIFY_UNWRITABLE, fu, false);
             if (MODE == MODE_ENFORCE) {
                 ChunkChecksum.setChecksum(wx, wy, 0L);
             }
@@ -155,14 +215,16 @@ public final class ChunkWriteGuard {
             return;
         }
         long b = flagged.incrementAndGet();
-        logBlock(wx, wy, snap, len, verdict, b);
+        logBlock(wx, wy, snap, len, verdict, b, false);
         dumpEvidence(wx, wy, snap, len);
         if (MODE == MODE_OBSERVE) {
             IsoChunk.SafeWrite(wx, wy, bb);
             return;
         }
         // 不寫入：磁碟保留上一版好檔案。checksum 歸零的效果誠實界定（codex 審查修正）：
-        // 仍載入的 chunk 在下輪週期存檔會因 CRC 不符而重寫乾淨序列化；unload/quit 的
+        // Save(Z) 先 setChecksum 再呼叫本 helper，0 會留下，下輪必然重寫；writeChunk（42.22.2）
+        // 在本 helper 返回後仍 setChecksum(壞 buffer 的 CRC)，0 被覆寫——下輪乾淨序列化的 bytes
+        // CRC 不同照樣重寫，bytes 相同就是同一份壞資料，dedup 跳過＝再擋一次。unload/quit 的
         // 最終存檔被擋則「無下一輪」——該 chunk 回退到上次成功落盤的版本（損失上限＝
         // 上次成功存檔以來的變更，仍嚴格優於 vanilla 寫壞檔→Blam 全滅）。
         // 刻意不做 A 簽名 header 修復：物件池重用下 body 可能屬於別塊 chunk，
@@ -216,7 +278,7 @@ public final class ChunkWriteGuard {
         return arr;
     }
 
-    private static void logBlock(int wx, int wy, byte[] snap, int len, int verdict, long count) {
+    private static void logBlock(int wx, int wy, byte[] snap, int len, int verdict, long count, boolean pendingLoad) {
         // W6 教訓沿用：log 基礎設施本身的 RuntimeException／LinkageError 不得外逃進存檔路徑
         try {
             String kind = switch (verdict) {
@@ -236,9 +298,11 @@ public final class ChunkWriteGuard {
                     crcField = (crcField << 8) | (snap[i] & 0xFF);
                 }
             }
-            // UNWRITABLE 在各模式都拒寫；其餘 verdict 依模式標示（observe 照常寫入，不得謊稱擋下）
+            // UNWRITABLE 在各模式都拒寫；其餘 verdict 依模式標示（observe 照常寫入，不得謊稱擋下）。
+            // 載入側的 BLOCKED＝不拿 pending buffer 載入、改讀磁碟上一版。
             String action = (MODE == MODE_ENFORCE || verdict == VERIFY_UNWRITABLE) ? "BLOCKED" : "FLAGGED";
             String msg = "[MinidoracatJavaPatch][ChunkWriteGuard] " + action + " " + kind
+                    + (pendingLoad ? " source=pendingLoad" : "")
                     + " chunk=" + wx + "," + wy + " len=" + len + " lenField=" + lenField
                     + " crcField=" + crcField + " mode=" + MODE
                     + " flagged=" + count + " thread=" + Thread.currentThread().getName();
@@ -257,7 +321,7 @@ public final class ChunkWriteGuard {
         try {
             DebugType.General.printException(e,
                     "[MinidoracatJavaPatch][ChunkWriteGuard] anomaly at chunk " + wx + "," + wy
-                            + " — fallback to vanilla write", LogSeverity.Error);
+                            + " — fallback to vanilla", LogSeverity.Error);
         } catch (RuntimeException | LinkageError ignored) {
             // anomalies 已由呼叫端計數
         }
@@ -295,7 +359,8 @@ public final class ChunkWriteGuard {
         }
         try {
             DebugLog.log("[MinidoracatJavaPatch][ChunkWriteGuard] passed=" + passed.get()
-                    + " flagged=" + flagged.get() + " anomalies=" + anomalies.get() + " mode=" + MODE);
+                    + " flagged=" + flagged.get() + " pendingFlagged=" + pendingFlagged.get()
+                    + " anomalies=" + anomalies.get() + " mode=" + MODE);
         } catch (RuntimeException | LinkageError ignored) {
         }
     }
