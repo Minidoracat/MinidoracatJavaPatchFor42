@@ -276,7 +276,9 @@ and changes it in place; nothing is decompiled or recompiled.
   `observe` mode that measures without changing behavior).
 - **Fail-closed install, all-or-nothing loading**: installing requires the agent jar SHA, jar identity and conflict
   gates to pass; at every start the launch gate and the agent compare both SHAs again, and a game update that
-  replaces the jar leaves the whole set off (the server starts vanilla). `[mdc-agent] ARMED` and a version banner
+  replaces the jar leaves the whole set off (the server starts vanilla). The agent also stays off when a class it
+  patches is already loaded or a loose class on the class path would shadow the patch, and if defining its helpers
+  fails it restores the classes it already replaced. `[mdc-agent] ARMED` and a version banner
   (`server patch <commit> … jar=<sha>`) print at startup. The official `IntegrityReport` works as designed: the
   version string gains `agents=1` and the jar still reports original.
 

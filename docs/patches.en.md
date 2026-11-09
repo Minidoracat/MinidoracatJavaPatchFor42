@@ -35,10 +35,21 @@ ProtectionDomain. Helpers that must live in a vanilla package (package-private a
 `MethodHandles.Lookup.defineClass`, anchored on a vanilla class of the same package (same ProtectionDomain); all
 other helpers live in our own packages (e.g. `zombie.mdc`) and load from the agent jar.
 
-- **All or nothing**: the agent patches only if the game jar's SHA-256 equals the build base and every payload
-  entry's SHA matches; otherwise it replaces nothing (vanilla game) and does not block startup
-  (console `[mdc-agent] DISARMED`). A game update that replaces the jar disables the agent by itself, so a new jar
-  can no longer run with stale patches.
+- **All or nothing**: the agent patches only if the game jar's SHA-256 equals the build base, every payload
+  entry's SHA matches, none of the classes to patch is loaded yet (another `-javaagent` listed first may have
+  touched one), and no directory on the class path holds a loose class that would shadow the patch (a file with the
+  name of a class to patch or define, or any `.class` under `zombie/mdc/`: leftovers of an old loose-class install).
+  Otherwise it replaces nothing (vanilla game) and does not block startup (console `[mdc-agent] DISARMED`, with the
+  reason on the same line). A game update that replaces the jar disables the agent by itself, so a new jar can no
+  longer run with stale patches. If defining the helpers in vanilla packages fails (the jar was compared byte for
+  byte and the build ran the same code, so this does not happen in practice), the agent calls `retransformClasses`
+  to put the classes it already replaced back to vanilla, checks for each one that the original bytes the JVM hands
+  back are the build base, and then continues vanilla as `DISARMED`. Only if that restore is incomplete does it end
+  the JVM (exit 78) instead of starting half patched. The restore works because the patches never change a class's
+  shape (modifiers, supertype, interfaces, names and signatures of fields and methods); `AgentJarBuilder` checks
+  this for every class when it builds the jar. A class that loads after arming with bytes that are not the build
+  base (for example because another agent changed it first) is left alone and `[mdc-agent] NOT APPLIED` is
+  printed: the patch set is then incomplete, so fix the cause and restart.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.
@@ -72,8 +83,8 @@ method entry) and **tail call** (a static call inserted before each `RETURN`); e
 | LoadCheck link verification + helper signature assertions | Redirect target missing or signature mismatch |
 | CheckClassAdapter JVMS data-flow verification | Any stack/frame error (verifier-level, run offline first) |
 | `install.sh` three gates | Corrupted artifact (agent jar SHA), game already updated (jar SHA differs from the build base → refuse), duplicate installs and leftover loose classes |
-| Launch gate + agent | Both SHAs are checked again at every start; on mismatch the server starts vanilla. The agent also checks the jar SHA itself, all or nothing |
-| `AgentLoadCheck` | Loads and verifies every class under the official signed jar + `-javaagent`, signers unchanged, `IntegrityReport` reports original; the kill-switch and wrong-jar paths are actually run |
+| Launch gate + agent | Both SHAs are checked again at every start; on mismatch the server starts vanilla. The agent also checks the jar SHA itself, that no class to patch is loaded yet and that no class path directory holds a loose class shadowing the patch, all or nothing; if defining helpers fails it restores the classes it replaced |
+| `AgentLoadCheck` | Loads and verifies every class under the official signed jar + `-javaagent`, signers unchanged, `IntegrityReport` reports original; six off paths are actually run: kill switch, wrong jar, another agent loading a class to patch first, a loose class on the class path (one under `zombie/mdc`, one named like a patched class), and restore after a helper definition failure (fault injection) |
 | `uninstall.sh` | Moves the install directory aside atomically; one-step rollback |
 
 ---
@@ -6042,11 +6053,13 @@ Console:
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 
-1. **Boot health**: (a) the console shows `[mdc-javagate] AGENT ARMED` and `[mdc-agent] ARMED`, and `patched=` on the `[mdc-agent]` line equals
-   the `patched` count in this build's `dist/agent-manifest.txt`; `AGENT DISARMED` or `[mdc-agent] DISARMED`/`PARTIAL`/`NOT APPLIED` means the
-   patches are not active (the reason is on the same line). (b) The version line ends in `agents=1` (the official `IntegrityReport` result; the jar
-   still reports original). (c) No `VerifyError` / `ClassFormatError` / `NoSuchMethodError` / `SecurityException`; if present, run `uninstall.sh`
-   and restart (or add `-Dmdc.agent=off` to the JVM options).
+1. **Boot health**: (a) the console shows `[mdc-javagate] AGENT ARMED` and `[mdc-agent] ARMED: N patched classes`, where N equals the `patched`
+   count in this build's `dist/agent-manifest.txt`. `AGENT DISARMED` or `[mdc-agent] DISARMED` means the whole set is off and the server runs
+   vanilla (the reason is on the same line). `[mdc-agent] NOT APPLIED <class>` means that class was not replaced and the set is incomplete: fix
+   the cause and restart. `[mdc-agent] FATAL` (the JVM ends with exit 78) means defining the helpers failed and the restore failed too: run
+   `uninstall.sh` or add `-Dmdc.agent=off` before starting again. (b) The version line ends in `agents=1` (the official `IntegrityReport`
+   result; the jar still reports original). (c) No `VerifyError` / `ClassFormatError` / `NoSuchMethodError` / `SecurityException`; if present,
+   run `uninstall.sh` and restart (or add `-Dmdc.agent=off` to the JVM options).
 2. **Log-noise suppression**: the messages in section 1 no longer appear (#2/#4/#6 normally show within minutes of boot).
 3. **No over-suppression**: in debug mode, ItemPickInfo diagnostics, other SpriteConfig warnings and anticheat `is not valid` still print.
 4. **Behavior**: animal panel (admin cheat) shows stress recovering ~2× faster and gunshot increments ~1/3.

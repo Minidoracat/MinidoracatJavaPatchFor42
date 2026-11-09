@@ -281,8 +281,9 @@ foreach ($variant in @('client-fixes-standard', 'client-fixes-lowmem', 'client-f
 }
 Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'armed'
 Invoke-AgentLoadCheck 'core,client-fixes-standard' @('core', 'client-fixes-standard') 'off' -JvmArgs @('-Dmdc.agent=off')
-# helper 定義失敗（故障注入）：已換上的 class 全部還原成原版
-Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'restored' -JvmArgs @('-Dmdc.agent.testFailDefine=1')
+# helper 定義失敗（故障注入）：不啟用、要換的 class 以原版載入。client 包定義 helper 的期間沒有 class 被換上（實測還原 0 個）；
+# 換上後再還原的路徑由 build.ps1 [5b] 的 restored 驗（伺服器包定義 helper 時會先換上父型別）
+Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'disarmed' -JvmArgs @('-Dmdc.agent.testFailDefine=1')
 # 遊戲更新的情境：classpath 上的 projectzomboid.jar 不是建置基準（拿 bytes 不同的測試 jar 改名頂替）
 $mismatchDir = Join-Path $R 'work/agent-mismatch-client'
 New-Item -ItemType Directory -Path $mismatchDir -Force | Out-Null
@@ -451,10 +452,12 @@ Modules
 Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
   never removes other authors' tools.
-- Changes ProjectZomboid64.json only by adding or removing its own -javaagent option. It
-  does not change the game jar. Other Java agents (-javaagent, -agentlib, -agentpath)
-  stay; if one of them changes a class this package patches first, this package leaves
-  that class alone and prints [mdc-agent] NOT APPLIED in the console.
+- Changes ProjectZomboid64.json only by adding or removing its own -javaagent option (it
+  goes first in vmArgs, so this package gets the original classes before other agents).
+  It does not change the game jar. Other Java agents (-javaagent, -agentlib, -agentpath)
+  stay. If a class this package patches was still loaded or changed before it, the whole
+  package stays off ([mdc-agent] DISARMED) or that class is skipped ([mdc-agent] NOT
+  APPLIED in the console).
 - The console shows [mdc-agent] ARMED when the patches are active and [mdc-agent]
   DISARMED (with the reason) when they switched themselves off.
 - Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
@@ -566,8 +569,9 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進遊戲�
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
-- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -javaagent；不改遊戲 JAR。其他 Java agent（-javaagent、-agentlib、-agentpath）
-  照樣保留；它們若先改了本包要修補的 class，本包就不換那個 class，console 印 [mdc-agent] NOT APPLIED。
+- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -javaagent（排在 vmArgs 最前面，比其他 agent 先拿到原版 class）；不改遊戲 JAR。
+  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留；仍有 class 在本包之前就被載入或改過時，本包整包不啟用
+  （console 印 [mdc-agent] DISARMED）或那個 class 不換（印 [mdc-agent] NOT APPLIED）。
 - console 印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
 - 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - JVM 執行中不得移除修補。交易中斷時，先重跑管理器復原，再開遊戲。

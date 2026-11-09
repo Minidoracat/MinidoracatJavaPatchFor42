@@ -9,7 +9,7 @@
 
 現在伺服器修補整包是一個 **Java agent jar**（`mdc-javapatch-agent.jar`，`install.sh` 裝到 `serverfiles/mdc-javapatch/`）。開服時啟動閘（`run-with-pfguard.sh`）先驗 agent jar 與遊戲 jar 的 SHA-256，都對才用 `JAVA_TOOL_OPTIONS=-javaagent:…` 把它帶進遊戲 JVM；agent（`zombie.mdc.MdcAgent`）在官方 jar 的 class 載入時，把 bytes 換成建置期手術好的版本。官方 jar 與它的簽章不動，換上的 class 保留官方的 ProtectionDomain。要讀 package-private 成員、放在原版 package 的 helper，以同 package 的原版 class 為錨、用 `MethodHandles.Lookup.defineClass` 定義（同一個 ProtectionDomain）；其餘 helper 在我們自己的 package（例如 `zombie.mdc`），直接從 agent jar 載入。
 
-- **全有或全無**：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對，agent 才換；任何一步不符就一個 class 都不換（原版遊戲），也不擋開服（console `[mdc-agent] DISARMED`）。遊戲更新換了 jar，agent 自己就不啟用，不會再有「新 jar＋舊修補」混跑。
+- **全有或全無**：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對、要換的 class 一個都還沒被載入（排在前面的另一個 `-javaagent` 可能先碰它）、classpath 的資料夾裡沒有會蓋掉修補的 loose class（與要換或要定義的 class 同名的檔，或 `zombie/mdc/` 底下任何 `.class`：舊版 loose-class 安裝的殘留），agent 才換；任何一步不符就一個 class 都不換（原版遊戲），也不擋開服（console `[mdc-agent] DISARMED`，原因在同一行）。遊戲更新換了 jar，agent 自己就不啟用，不會再有「新 jar＋舊修補」混跑。定義原版 package 的 helper 失敗時（jar 已逐位元比對過、建置期跑過同一段，實際上不會發生），agent 用 `retransformClasses` 把已經換上的 class 還原成原版，並逐個核對 JVM 交回的原始 bytes 是建置基準，然後照 `DISARMED` 以原版繼續；連還原都不完整才結束 JVM（exit 78），不帶著半套修補開服。能還原是因為手術不改 class 的形狀（修飾字、父型別、介面、欄位、方法的名稱與簽章），`AgentJarBuilder` 打包時逐 class 檢查。啟用之後才載入的 class 若 bytes 不是建置基準（例如別的 agent 先改過），那一個不換並印 `[mdc-agent] NOT APPLIED`：修補不完整，要先排除原因再重啟。
 - **官方完整性檢查照常運作**：42.22 的 `IntegrityReport` 把 `agents=1` 附在版本字串（console、`statistics`、Prometheus `pz_info`），jar 判原版。我們不改 jar、不改 `IntegrityReport`、也不藏 agent；建置期 `AgentLoadCheck` 釘住這兩個結果。
 - **移除**：`uninstall.sh` 把 `serverfiles/mdc-javapatch/` 整個搬到 `patch-disabled-*`，下次開服就是原版；不用重寫 JVM 設定。執行中的 JVM 不受影響：agent jar 在開服時就開著，搬走後照常可讀，沒有 loose class 時代「刪檔後冷路徑 `NoClassDefFoundError`」的問題。kill switch：`-Dmdc.agent=off`。
 
@@ -27,8 +27,8 @@
 | LoadCheck 連結驗證＋helper 簽名斷言 | 改道目標方法缺失／簽名不符 |
 | CheckClassAdapter JVMS 資料流驗證 | 任何堆疊／frame 層面的錯誤（JVM verifier 等級，離線先跑） |
 | install.sh 三道閘 | 產物損壞（agent jar SHA）、遊戲已更新（jar SHA 與建置基準不同即拒裝）、重複安裝與殘留 loose class |
-| 啟動閘＋agent | 開服時再驗一次兩個 SHA，不符就以原版開服；agent 自己也比對 jar SHA，全有或全無 |
-| AgentLoadCheck | 官方簽章 jar＋`-javaagent` 下載入並驗證全部 class、簽章者不變、`IntegrityReport` 判原版；kill switch 與 jar 不同兩條路都真的跑過 |
+| 啟動閘＋agent | 開服時再驗一次兩個 SHA，不符就以原版開服；agent 自己也比對 jar SHA、檢查要換的 class 還沒被載入、classpath 資料夾沒有蓋掉修補的 loose class，全有或全無；helper 定義失敗就把已換上的 class 還原 |
+| AgentLoadCheck | 官方簽章 jar＋`-javaagent` 下載入並驗證全部 class、簽章者不變、`IntegrityReport` 判原版；kill switch、jar 不同、別的 agent 先載入要換的 class、classpath 有 loose class（`zombie/mdc` 與手術 class 同名各一）、helper 定義失敗後還原（故障注入）六條路都真的跑過 |
 | uninstall.sh | 安裝目錄整個原子搬走，一鍵回退 |
 
 ---
@@ -5448,7 +5448,7 @@ console：
 <a id="3"></a>
 ## 3. 部署後驗證清單
 
-1. **開機健檢**：(a) console 有 `[mdc-javagate] AGENT ARMED`、`[mdc-agent] ARMED`，`[mdc-agent]` 那行的 `patched=` 等於這次 build `dist/agent-manifest.txt` 的 `patched` 筆數；看到 `AGENT DISARMED`、`[mdc-agent] DISARMED`／`PARTIAL`／`NOT APPLIED` 就是沒有生效（原因印在同一行）。(b) 版本行是 `… agents=1`（官方 `IntegrityReport` 的正常結果，jar 仍判原版）。(c) 無 `VerifyError`／`ClassFormatError`／`NoSuchMethodError`／`SecurityException`；有就執行 `uninstall.sh` 後重啟（或 JVM 參數加 `-Dmdc.agent=off`）。
+1. **開機健檢**：(a) console 有 `[mdc-javagate] AGENT ARMED`、`[mdc-agent] ARMED: N patched classes`，N 等於這次 build `dist/agent-manifest.txt` 的 `patched` 筆數；看到 `AGENT DISARMED`、`[mdc-agent] DISARMED` 就是整包沒有生效、以原版執行（原因印在同一行）；看到 `[mdc-agent] NOT APPLIED <class>` 是那個 class 沒換上、修補不完整，排除原因後重啟；`[mdc-agent] FATAL`（JVM 以 exit 78 結束）是 helper 定義失敗又還原不了，先 `uninstall.sh` 或加 `-Dmdc.agent=off` 再開服。(b) 版本行是 `… agents=1`（官方 `IntegrityReport` 的正常結果，jar 仍判原版）。(c) 無 `VerifyError`／`ClassFormatError`／`NoSuchMethodError`／`SecurityException`；有就執行 `uninstall.sh` 後重啟（或 JVM 參數加 `-Dmdc.agent=off`）。
 2. **抑噪生效**：上表 7 種訊息不再出現（開機幾分鐘內原本必有 2/4/6）。
 3. **未誤攔**（反向）：debug 模式下 ItemPickInfo 診斷訊息、SpriteConfig 其他名稱警告、anticheat `is not valid` 仍會輸出。
 4. **行為觀察**：動物面板（admin cheat）壓力恢復約快一倍、槍聲增量約 1/3。（殭屍 `zombiesCulled` 觀察項隨 2a 一併移除。）

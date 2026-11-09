@@ -12,9 +12,10 @@ import zombie.network.GameServer;
  * W69 實體 ID 撞號時照常移除（2026-10-19；docs/patches.md 2ce）。
  *
  * <p><b>原版缺陷</b>：{@code IsoObject.getEntityNetID} 以「座標＋物件在格子清單的序號」組 ID。42.21 地板一律算序號 0，
- * 玩家後蓋的地板與排第 0 個的實體同 ID（42.22.2 已改成地板也用實際序號）。42.22.2 仍會撞號：序號只在下次
- * {@code getEntityNetID} 才換，{@code checkEntityIDChange} 遇到新號被佔只記錯誤、不放入；同格前面的物件被移走後，
- * 排後面的先換號就與還沒換號的前一個同 ID。伺服器移除它時 {@code GameEntityManager.UnregisterEntity} 從
+ * 玩家後蓋的地板與排第 0 個的實體同 ID（42.22.2 已改成地板也用實際序號）。同格前面的物件被移走、序號往前移時不撞號：
+ * {@code checkEntityIDChange} 換號遇到新號被佔，會先讓佔號物件自己換號（測試釘住）。42.22.2 剩下的撞號來源只有
+ * 推論中的情形（ID 表那一格被沒有格子、或不是 IsoObject 的實體佔著），沒有實例；心跳的 {@code collisions}／
+ * {@code missing} 是撤刀依據。真的撞號時，伺服器移除它，{@code GameEntityManager.UnregisterEntity} 從
  * {@code idToEntityMap} 拿出的是別人，丟 {@code Stored entity mismatch}：佔號物件的登記先被拿掉，被移除的實體不取消登記、
  * 不轉存 MetaEntity；{@code RemoveItemFromSquarePacket.removeItemFromMap} 停在 {@code removeFromSquare} 之前，但移除封包
  * 已先送給客戶端（伺服器留著物件，重登後變成拆不掉的殘件）；chunk 卸載時整個 cell 的卸載中斷。ID 為空時原版

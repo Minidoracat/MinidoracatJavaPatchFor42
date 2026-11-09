@@ -42,16 +42,21 @@ echo "== 3/3 衝突檢查 =="
 { [ -e "$DEST" ] || [ -L "$DEST" ]; } && abort "已有安裝 $DEST——升級請先 bash uninstall.sh"
 [ -e "$SF/java/patch-manifest.txt" ] && abort "42.21 以前的 loose class 安裝還在（java/patch-manifest.txt）——先用那一版的 uninstall.sh 移除"
 # 不明 loose class（fail-closed）：簽章 jar 之下，遊戲 package 裡的 loose class 會讓 JVM 丟 SecurityException；
-# 確認來源無害時以 ALLOW_FOREIGN_LOOSE=1 明示放行。
+# 確認來源無害時以 ALLOW_FOREIGN_LOOSE=1 明示放行。java/zombie/mdc/ 底下的不放行：那是我方舊版的 helper，classpath
+# 上 java/. 排在 agent jar 前面，會蓋掉新 helper，agent 開服時看到就整包不啟用。
 foreign="$(find "$SF/java" -name '*.class' 2>/dev/null | sed "s|^$SF/java/||" || true)"
 if [ -n "$foreign" ]; then
     echo "[中止] java/ 底下有 loose class：" >&2
     echo "$foreign" | head -20 | sed 's/^/    /' >&2
+    if echo "$foreign" | grep -q '^zombie/mdc/'; then
+        echo "       java/zombie/mdc/ 底下是我方舊版殘留，agent 看到就整包不啟用（ALLOW_FOREIGN_LOOSE 不放行）→ 用該版的 uninstall.sh 移除，或確認後搬走，再重試" >&2
+        exit 1
+    fi
     if [ "${ALLOW_FOREIGN_LOOSE:-0}" != "1" ]; then
         echo "       我方舊版殘留 → 用該版的 uninstall.sh 移除後重試；確認無害 → ALLOW_FOREIGN_LOOSE=1 bash install.sh" >&2
         exit 1
     fi
-    echo "[警告] ALLOW_FOREIGN_LOOSE=1 已明示放行" >&2
+    echo "[警告] ALLOW_FOREIGN_LOOSE=1 已明示放行（其中若有與修補的 class 同名的檔，agent 開服時仍會整包不啟用）" >&2
 fi
 echo "OK  無衝突"
 

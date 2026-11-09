@@ -137,7 +137,7 @@ function Get-OurArgs { return @(Get-TopVmArgs | Where-Object { $_ -like '-javaag
 function Test-ArgModules([string]$mods) {
     $ours = @(Get-OurArgs)
     $all = @(Get-TopVmArgs)
-    return ($ours.Count -eq 1 -and $ours[0] -ceq "$ARG_PREFIX$mods" -and $all[-1] -ceq "$ARG_PREFIX$mods")
+    return ($ours.Count -eq 1 -and $ours[0] -ceq "$ARG_PREFIX$mods" -and $all[0] -ceq "$ARG_PREFIX$mods")
 }
 function Test-JsonIsOriginal { return ((Get-GameText $LAUNCHER_REL) -ceq $ORIG_JSON) }
 
@@ -322,10 +322,10 @@ try {
     $r = Invoke-Install @('profiler') $PkgV1
     Check ($r.Code -eq 0) '結束代碼 0'
     Check (Test-GameFileIs $AGENT_REL $C_AGENT_V1) 'agent jar 放進 .mdc-patches'
-    Check (Test-ArgModules 'core,profiler') '啟動設定加上一條 -javaagent（core,profiler），排在頂層 vmArgs 最後'
+    Check (Test-ArgModules 'core,profiler') '啟動設定加上一條 -javaagent（core,profiler），排在頂層 vmArgs 最前面'
     $j = [System.IO.File]::ReadAllText((GameFile $LAUNCHER_REL)) | ConvertFrom-Json
     Check (@($j.windows.'10.0.17134'.vmArgs) -join ',' -ceq '-XX:+UseZGC') 'windows 區段沒動'
-    Check ((@(Get-TopVmArgs) | Select-Object -First 4) -join ',' -ceq '-Djava.awt.headless=true,--enable-native-access=ALL-UNNAMED,-Xmx3072m,-Djava.library.path=win64/;.') '其他 vmArgs 原樣、原順序'
+    Check ((@(Get-TopVmArgs) | Select-Object -Skip 1) -join ',' -ceq '-Djava.awt.headless=true,--enable-native-access=ALL-UNNAMED,-Xmx3072m,-Djava.library.path=win64/;.') '其他 vmArgs 原樣、原順序'
     Check (Test-ModuleSet @('core', 'profiler')) 'state.json 記錄 core + profiler'
     Check ((Get-InstalledState).schemaVersion -eq 2 -and (Get-InstalledState).agent.path -ceq $AGENT_REL) 'state.json 是 schemaVersion 2，記錄 agent 路徑'
     Check ((Get-InstalledState).agent.sha256 -eq (Get-TextSha $C_AGENT_V1)) 'state.json 記錄 agent SHA'
@@ -1144,7 +1144,7 @@ try {
     Check ($r.Code -eq 0) '結束代碼 0'
     Check ($r.Out -match 'ZombieBuddy\.jar' -and $r.Out -match 'zbNative') '列出其他 Java agent、說明不動它們'
     $args62 = @(Get-TopVmArgs)
-    Check (($args62 -join '|') -ceq "-Djava.awt.headless=true|--enable-native-access=ALL-UNNAMED|-Xmx8g|-Djava.library.path=win64/;.|-javaagent:ZombieBuddy.jar|-Duser.language=CH|$($ARG_PREFIX)core,profiler") '使用者的參數原樣、自己那條加在最後'
+    Check (($args62 -join '|') -ceq "$($ARG_PREFIX)core,profiler|-Djava.awt.headless=true|--enable-native-access=ALL-UNNAMED|-Xmx8g|-Djava.library.path=win64/;.|-javaagent:ZombieBuddy.jar|-Duser.language=CH") '使用者的參數原樣、自己那條排在最前面（先於其他 Java agent）'
     $j = [System.IO.File]::ReadAllText((GameFile $LAUNCHER_REL)) | ConvertFrom-Json
     Check ((@($j.windows.'10.0.17134'.vmArgs) -join '|') -ceq '-XX:+UseZGC|-agentlib:zbNative') 'windows 區段原樣'
     $r = Invoke-UninstallAll
@@ -1192,6 +1192,38 @@ try {
     $r = Invoke-Install @('profiler') $PkgNew
     Check ($r.Code -eq 0 -and $r.Out -match '不同遊戲版本') '新版包照常安裝（提示舊安裝是別的遊戲版本）'
     Check ((Get-InstalledState).packageVersion -eq 'v5.0' -and (Test-GameFileIs $AGENT_REL 'agent-for-new-game') -and (Test-ArgModules 'core,profiler')) '換成新版 agent，啟動參數仍只有一條'
+
+    Start-Case '67. 巢狀 class 的修補（LuaManager$Exposer）：資料夾裡的外層或同名內部類別都算蓋掉'
+    Reset-GameDir
+    Write-TextFile (GameFile 'zombie/Lua/LuaManager.class') 'foreign-outer'
+    $r = Invoke-Install @('core') $PkgV1
+    Check ($r.Code -eq 7 -and $r.Out -match '蓋掉本包要修補的 class') '外層 LuaManager.class：結束代碼 7'
+    Check ((Test-JsonIsOriginal) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '什麼都沒寫'
+    Reset-GameDir
+    Write-TextFile (GameFile 'zombie/Lua/LuaManager$Exposer.class') 'foreign-inner'
+    $r = Invoke-Install @('core') $PkgV1
+    Check ($r.Code -eq 7) '同名內部類別 LuaManager$Exposer.class：結束代碼 7'
+    Check (Test-GameFileIs 'zombie/Lua/LuaManager$Exposer.class' 'foreign-inner') '外來檔案原封不動'
+
+    Start-Case '68. 安裝紀錄被刪掉但啟動設定還留著本包的參數：卸載拿掉它，不回「沒東西要卸載」'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 0 -and (Test-ArgModules 'core,profiler')) '前置安裝成功'
+    Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 0 -and $r.Out -notmatch '沒有東西需要卸載') '結束代碼 0，有動作'
+    Check (Test-JsonIsOriginal) '啟動設定逐位元組回到原樣（遊戲不會因為找不到 agent jar 起不來）'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '沒有留下狀態目錄'
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '再跑一次：沒東西要卸載'
+
+    Start-Case '69. zombie/mdc 底下沒有紀錄的 class（舊版殘留）：拒裝，不讓它蓋掉 agent jar 的同名 class'
+    Reset-GameDir
+    Write-TextFile (GameFile 'zombie/mdc/MdcPatchRuntime.class') 'stale-helper'
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 7 -and $r.Out.Contains('zombie/mdc/MdcPatchRuntime.class')) '結束代碼 7，訊息指出那個檔'
+    Check (Test-GameFileIs 'zombie/mdc/MdcPatchRuntime.class' 'stale-helper') '殘留檔原封不動'
+    Check ((Test-JsonIsOriginal) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '什麼都沒寫'
 }
 finally {
     Write-Host ''

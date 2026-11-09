@@ -20,7 +20,7 @@
 | 防崩潰 | W5 容器環守衛 ×2（**42.22.2 官方已修，退役**） | `ItemContainer`（getCharacter／isInCharacterInventory） | 1+1 | ContainerCycleGuard | 容器互裝成環的 StackOverflow 假死，identity 路徑偵測環＋深度保險絲切斷；42.22.2 原版改成有上限的迴圈、`AddItem` 先拒絕成環 |
 | 防凍結 | W6 地圖格載入捕手 | `IsoChunk`（doLoadGridsquare） | 2 | ChunkLoadGuard | 「Entity is already registered」每 0.1 秒重撞的活鎖，記座標＋sprite 後跳過該物件 |
 | 防資損 | W7 朝向暫存執行緒隔離（**42.22.2 官方已修，退役**） | `IsoGameCharacter` | 2 | ForwardVectorGuard | 共用 static `tempVector2_2` 競態致 chunk 載入失敗被 Blam 抹除，換執行緒私有替身；42.22.2 原版改成每次 `new Vector2()` |
-| 防資損 | W8 chunk 寫入閘 | `IsoChunk`（Save）＋`ServerChunkLoader`（writeChunk；42.21 是 `$SaveLoadedTask.save`） | 2+1 | ChunkWriteGuard | 寫入前快照驗 len/CRC，損毀就擋下（磁碟保留上一版）＋蒐證＋checksum 歸零重試 |
+| 防資損 | W8 chunk 寫入閘 | `IsoChunk`（Save）＋`ServerChunkLoader`（writeChunk；42.21 是 `$SaveLoadedTask.save`）＋`ServerChunkLoader$LoaderThread`（run 的 LoadChunk，42.22.2 新增） | 2+1+1 | ChunkWriteGuard | 寫入前快照驗 len/CRC，損毀就擋下（磁碟保留上一版）＋蒐證＋checksum 歸零重試；42.22.2 起載入會先拿存檔佇列裡的資料，那份驗不過就改讀磁碟上一版 |
 | 防資損 | W9 存檔管線隔離 | `ServerChunkLoader$SaveChunkThread`（addLoadedJob）＋`$SaveLoadedTask`（release） | 3+1 | ChunkSaveIsolation | 存檔管線改用私有池，退出全域 chunk 池（雙重 release 孔）；共用 CRC32 兩刀 42.21 官方已修、已退役 |
 | 抑噪 | 已知噪音樣式過濾 ×6 | `SkinningBoneHierarchy`/`SpriteConfig`/`ItemPickInfo`/`INetworkPacket`/`NetworkZombieManager`＋`GameServer`（sendToxicBuilding）（`PacketsCache` 那條 42.22.2 原版只在開發模式印，退役） | 1+1+9+1+1+1 | LogFilter | 只攔已知樣式，未知警告與反作弊照常輸出；toxic 那條抑噪前佔 console **45.5%**（15.41h／8 session 實測 164,176／360,669 行；PSR `suppressToxic` 每 2.5 真實秒逐 powerbank 廣播），**只攔 log 不動封包** |
 | 觀測 | LoginMetrics | `LoginPacket` | 3 | MinidoracatLoginMetrics | 登入三個同步 DB 寫入的 elapsedNs |

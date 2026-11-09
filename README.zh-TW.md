@@ -240,7 +240,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 - **驗證**：`LoadCheck` 以 `-Xverify:all` 載入每個類別，`BytecodeVerify` 跑 ASM 的資料流驗證，行為測試在裸 JVM
   中直接跑遊戲的真實類別。
 - **開關**：每項伺服器修補都讀一個 `-Dmdc.*` 屬性（`0`／`off` 回原版；很多項另有只量測、不改行為的 `observe` 模式）。
-- **失敗即停的安裝與全有或全無的載入**：安裝要過 agent jar SHA、jar 同源、衝突三道閘；每次開服啟動閘與 agent 都再比對一次兩個 SHA，遊戲更新換了 jar 就整包不啟用、以原版開服。開服時印 `[mdc-agent] ARMED` 與版本橫幅（`server patch <commit> … jar=<sha>`）。官方 `IntegrityReport` 照常運作：版本字串會多 `agents=1`，jar 仍判原版。
+- **失敗即停的安裝與全有或全無的載入**：安裝要過 agent jar SHA、jar 同源、衝突三道閘；每次開服啟動閘與 agent 都再比對一次兩個 SHA，遊戲更新換了 jar 就整包不啟用、以原版開服。要換的 class 已經被載入、或 classpath 上有會蓋掉修補的 loose class 時 agent 也不啟用；helper 定義失敗時把已換上的 class 還原。開服時印 `[mdc-agent] ARMED` 與版本橫幅（`server patch <commit> … jar=<sha>`）。官方 `IntegrityReport` 照常運作：版本字串會多 `agents=1`，jar 仍判原版。
 
 ## 伺服器：建置與部署
 

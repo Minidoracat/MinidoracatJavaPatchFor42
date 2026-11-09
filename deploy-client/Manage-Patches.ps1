@@ -521,10 +521,12 @@ function Read-Launcher([string]$gameRoot) {
     return $r
 }
 
-# 頂層 vmArgs 換成「拿掉自己的 -javaagent、需要時在最後補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes
+# 頂層 vmArgs 換成「拿掉自己的 -javaagent、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
+# 排最前面：JVM 照順序跑各 agent 的 premain，本包先註冊就先拿到原版 bytes；排在後面時，前面的 agent 若先載入或
+# 改了本包要換的 class，本包就整包不啟用（DISARMED）或那個 class 不換（NOT APPLIED）。
 function New-LauncherBytes($launcher, [string]$newArg) {
     $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
-    $desired = @(if ($newArg) { @($kept) + $newArg } else { $kept })
+    $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })
     if (($desired -join "`n") -ceq (@($launcher.VmArgs) -join "`n") -and $desired.Count -eq @($launcher.VmArgs).Count) { return $null }
     $text = $launcher.Text
     $open = $launcher.Span.Open
@@ -560,6 +562,7 @@ function New-LauncherBytes($launcher, [string]$newArg) {
 
 # ---------------------------------------------------------------- 遊戲資料夾裡的 loose class
 # 42.22 起官方 jar 簽章：jar 裡有的 package，資料夾裡只要有一個 loose class，載入時就丟 SecurityException（遊戲 JRE 實測）。
+# 讀不出 jar 的內容就不能判斷衝突：中止，不當成「jar 裡沒有任何 package」繼續。
 function Get-JarPackages([string]$jarPath) {
     $set = @{}
     try {
@@ -572,7 +575,12 @@ function Get-JarPackages([string]$jarPath) {
                 if ($slash -gt 0 -and $n.EndsWith('.class') -and -not $n.StartsWith('META-INF/')) { $set[$n.Substring(0, $slash)] = $true }
             }
         } finally { $zip.Dispose() }
-    } catch { }
+    } catch {
+        Fail $EXIT_JAR (L "讀不出 projectzomboid.jar 的內容（$($_.Exception.Message)），無法檢查遊戲資料夾裡的 class 檔會不會衝突。請用 Steam 驗證遊戲檔案的完整性後再試。" "Cannot read the contents of projectzomboid.jar ($($_.Exception.Message)), so class files in the game folder cannot be checked for conflicts. Verify the game files with Steam and try again.")
+    }
+    if ($set.Count -eq 0) {
+        Fail $EXIT_JAR (L 'projectzomboid.jar 裡沒有任何 class，無法檢查衝突。請用 Steam 驗證遊戲檔案的完整性後再試。' 'projectzomboid.jar has no classes in it, so conflicts cannot be checked. Verify the game files with Steam and try again.')
+    }
     return $set
 }
 
@@ -1217,11 +1225,15 @@ function Resolve-InstallModules($manifest, [string[]]$installed, [string[]]$requ
     return @{ Modules = $ordered; Replaced = $replaced }
 }
 
-# 選定模組換掉的原版 class（內部名稱，不分大小寫）
+# 選定模組換掉的原版 class（內部名稱，不分大小寫）。巢狀 class（X$Y）連外層 X 一起登記：
+# 衝突檢查以外層名稱比對，資料夾裡的 X.class／X$*.class 都算蓋掉。
 function Get-PatchedClassSet($manifest, [string[]]$targetIds) {
     $set = @{}
     foreach ($id in $targetIds) {
-        foreach ($c in (ConvertTo-Array (Get-Prop (Get-Module $manifest $id) 'patchedClasses'))) { $set[[string]$c] = $true }
+        foreach ($c in (ConvertTo-Array (Get-Prop (Get-Module $manifest $id) 'patchedClasses'))) {
+            $set[[string]$c] = $true
+            $set[([string]$c).Split('$')[0]] = $true
+        }
     }
     return $set
 }
@@ -1278,6 +1290,7 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
     }
 
     # 別人的 loose class：蓋掉本包要換的 class（X.class／X$*.class）＝衝突（遊戲先載入資料夾那一份，agent 換不到）；
+    # 本包自己的 package（zombie/mdc）底下沒有紀錄的 .class ＝衝突（會蓋掉 agent jar 的同名 class，agent 看到就整包不啟用）；
     # 其餘在 jar 裡有的 package ＝警告（42.22 起它們自己就讓遊戲丟 SecurityException）
     $patched = Get-PatchedClassSet $manifest $targetIds
     foreach ($p in @(Get-LooseClasses $gameRoot $jarPackages)) {
@@ -1287,6 +1300,8 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
         $outer = $cls.Split('$')[0]
         if ($patched.ContainsKey($outer)) {
             $conflicts += @{ Path = $p; Text = (L "$p 不是本安裝器裝的檔案，它蓋掉本包要修補的 class（$outer）：遊戲會先載入資料夾裡這一份，修補就換不到。" "$p was not installed by this installer and shadows a class this package patches ($outer): the game loads the copy in the folder first, so the patch cannot be applied.") }
+        } elseif ($cls.StartsWith('zombie/mdc/', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $conflicts += @{ Path = $p; Text = (L "$p 是舊版 Minidoracat 修補留下的檔案，但不在安裝紀錄裡：留著會蓋掉本包同名的 class，本包看到它就整包不啟用。請用當初那個版本附的 uninstall.bat 移除，或確認後手動刪除遊戲資料夾裡的 zombie\mdc 資料夾，再執行本安裝器。" "$p is a leftover of an older Minidoracat patch that is not in the install record: it would shadow this package's own classes, and this package turns itself off when it finds it. Remove it with the uninstall.bat that came with that version, or check and delete the zombie\mdc folder in the game folder by hand, then run this installer again.") }
         } else {
             $slash = $cls.LastIndexOf('/')
             if ($slash -gt 0 -and $jarPackages.ContainsKey($cls.Substring(0, $slash))) { $warnings += $p }
@@ -1311,7 +1326,7 @@ function Write-ForeignLooseWarning([string[]]$paths) {
 function Write-OtherAgentsNote([string[]]$agents) {
     if (@($agents).Count -eq 0) { return }
     Write-Info ((L '  啟動設定裡另有其他 Java agent（本包不動它們）：' '  The launch settings also load other Java agents (this package leaves them alone): ') + (@($agents) -join ' '))
-    Write-Info (L '  它們若也改本包修補的 class，先改的生效；本包遇到已被改過的 class 就不換，console 印 [mdc-agent] NOT APPLIED。' '  If one of them changes a class this package patches, whichever runs first wins; this package skips a class that was already changed and prints [mdc-agent] NOT APPLIED in the console.')
+    Write-Info (L '  本包的啟動參數排在最前面，先換上修補。若仍有 class 在本包之前就被載入或改過，本包整包不啟用（console 印 [mdc-agent] DISARMED）或那個 class 不換（印 [mdc-agent] NOT APPLIED）。' '  This package''s launch option goes first, so its patches are applied first. If a class was still loaded or changed before this package, the whole package stays off (the console prints [mdc-agent] DISARMED) or that class is skipped (it prints [mdc-agent] NOT APPLIED).')
 }
 
 function New-StateModuleEntries($manifest, [string[]]$targetIds) {
@@ -1545,11 +1560,30 @@ function Invoke-Uninstall {
         $state = Read-State $GameRoot
         if (-not $state -or (Get-StateModuleIds $state).Count -eq 0) {
             $legacy = Assert-NoUnknownLegacy $Manifest $GameRoot
+            # 安裝紀錄不見了（例如 .mdc-patches 被手動刪掉）但啟動設定還留著本包那一條：agent jar 不在時 JVM 起不來，要拿掉
+            $orphanWrites = @()
+            $launcher = Read-Launcher $GameRoot
+            if ($launcher.Editable -and $launcher.Ours.Count -gt 0) {
+                $bytes = New-LauncherBytes $launcher $null
+                if ($bytes) { $orphanWrites += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
+            }
             if ($legacy.Packages.Count -eq 0) {
-                Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
+                if ($orphanWrites.Count -eq 0) {
+                    Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
+                    return
+                }
+                Write-Head (L '卸載計畫' 'Removal plan')
+                Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
+                Write-Info (L '  沒有安裝紀錄，但 ProjectZomboid64.json 還留著本包的啟動參數：拿掉它' '  There is no install record, but ProjectZomboid64.json still has this package''s launch option: removing it')
+                if ($Interactive) {
+                    $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
+                    if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
+                }
+                Invoke-PatchTransaction -GameRoot $GameRoot -Writes $orphanWrites -Deletes @() -NewState $null
+                Write-Good (L '完成：已拿掉本包的啟動參數，遊戲回到原版狀態。' 'Done: this package''s launch option was removed; the game is back to vanilla.')
                 return
             }
-            # loose class 刪了就生效，不必看啟動設定
+            # loose class 刪了就生效；啟動設定只在還留著本包那一條時一起拿掉
             # 舊版包沒有模組可挑，只能整組移除
             if (-not $RemoveAll -and -not $Interactive) {
                 Fail $EXIT_USAGE (L '偵測到舊版包，只能整組移除：請用 -All。' 'An old package was found; it can only be removed as a whole. Use -All.')
@@ -1564,7 +1598,7 @@ function Invoke-Uninstall {
                 $ans = Read-Host (L '確定要移除嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Remove now? Type Y and press Enter to start (N to cancel)')
                 if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
             }
-            Invoke-PatchTransaction -GameRoot $GameRoot -Writes @() -Deletes $deletes -NewState $null
+            Invoke-PatchTransaction -GameRoot $GameRoot -Writes $orphanWrites -Deletes $deletes -NewState $null
             Write-Good (L '完成：已移除舊版包，遊戲回到原版狀態。' 'Done: the old package was removed; the game is back to vanilla.')
             return
         }

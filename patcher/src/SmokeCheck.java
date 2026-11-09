@@ -3845,9 +3845,10 @@ public final class SmokeCheck {
 
         // ---- W69 實體 ID 撞號時照常移除（docs/patches.md 2ce；掛在 W35 的 GameEntity ClassPatch）----
         // 存在理由（42.22.2 重估）：42.21 的「地板一律算序號 0」與「ID 表沒有它就 return、不離開 engine」已由 TIS 修掉
-        // （getEntityNetID 不再呼叫 isFloor；UnregisterEntity 開頭先 Engine.removeEntity）。仍成立的是：序號只在下次
-        // getEntityNetID 才換、checkEntityIDChange 遇到新號被佔只記錯誤不放入，同格物件被移走後排後面的先換號就撞號，
-        // 移除它時原版丟 Stored entity mismatch（佔號物件的登記被拿掉）；ID 未登記時原版離開 engine 但不取消登記、不轉存。
+        // （getEntityNetID 不再呼叫 isFloor；UnregisterEntity 開頭先 Engine.removeEntity）。同格物件被移走、序號往前移也
+        // 不撞號（checkEntityIDChange 換號遇到新號被佔會先讓佔號物件自己換號，MdcEntityIdGuardTest 釘住）。仍成立的是：
+        // 真的撞號（ID 表那一格存的是別的實體；42.22.2 只剩推論中的來源、沒有實例）時原版丟 Stored entity mismatch
+        // （佔號物件的登記被拿掉）；ID 未登記時原版離開 engine 但不取消登記、不轉存。
         // 下列任一條紅＝TIS 又改了這段，重估撤刀。
         String w69Mgr = "zombie/entity/GameEntityManager";
         String w69Ge = "zombie/entity/GameEntity";

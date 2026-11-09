@@ -2,8 +2,8 @@
 # install.sh / uninstall.sh 的閘門行為驗證（改動這兩個腳本後必跑）。
 #
 # 用 dist\ 的產物（mdc-javapatch-agent.jar、agent-manifest.txt）與 work\projectzomboid.jar 在暫存目錄搭一個
-# 假的 serverfiles，跑七個情境：乾淨安裝、uninstall 搬走不刪、遊戲更新後拒裝、payload 損壞拒裝、重複安裝拒裝、
-# 舊版 loose class 殘留拒裝（ALLOW_FOREIGN_LOOSE=1 明示放行）、42.21 以前的安裝紀錄還在時一律拒裝。
+# 假的 serverfiles，跑八個情境：乾淨安裝、uninstall 搬走不刪、遊戲更新後拒裝、payload 損壞拒裝、重複安裝拒裝、
+# 舊版 loose class 殘留拒裝（ALLOW_FOREIGN_LOOSE=1 明示放行；java/zombie/mdc 底下的不放行）、42.21 以前的安裝紀錄還在時一律拒裝。
 #
 #   bash deploy/install-gate-test.sh
 #
@@ -64,6 +64,13 @@ bash "$R/dist/install.sh" >/dev/null 2>&1; check "殘留 loose class 時中止" 
 check "中止後沒有安裝目錄" 0 "$(installed)"
 ALLOW_FOREIGN_LOOSE=1 bash "$R/dist/install.sh" >/dev/null 2>&1; check "明示放行後安裝成功" 0 $?
 bash "$R/dist/uninstall.sh" >/dev/null 2>&1
+rm -rf "$SF/java/zombie"
+
+echo "== F2) java/zombie/mdc 的舊 helper 殘留：ALLOW_FOREIGN_LOOSE=1 也不放行（會蓋掉 agent jar 的 helper）=="
+mkdir -p "$SF/java/zombie/mdc"
+echo "stale-helper" >"$SF/java/zombie/mdc/LogFilter.class"
+ALLOW_FOREIGN_LOOSE=1 bash "$R/dist/install.sh" >/dev/null 2>&1; check "zombie/mdc 殘留時明示放行也中止" 1 $?
+check "中止後沒有安裝目錄" 0 "$(installed)"
 rm -rf "$SF/java/zombie"
 
 echo "== G) 42.21 以前的安裝紀錄還在時一律拒裝 =="
