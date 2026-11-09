@@ -321,6 +321,10 @@ negative control with compaction disabled reaches maxRemoved = 6,500 and fails).
 ns/entity, doubling ratio and thread allocation; timings are report-only, with no machine-dependent
 pass/fail threshold.
 
+### 42.22.2 re-validation (2026-11-10)
+
+`EngineEntityManager.removeEntityInternal` changed: vanilla now clears `scheduledForEngineRemoval` before the `entitySet.remove` success check instead of inside it. The `Array.removeValue(Object,Z)` redirect is still inside the success branch, with the same surrounding instructions (`getfield entities` / `aload_1` / `iconst_1` → `pop`). `addEntityInternal` and `EntityBucket.updateMembership` are instruction-for-instruction unchanged. All four redirects stay as they are; `FastIdentityArrayRemovalTest` passes.
+
 ---
 
 <a id="2h"></a>
@@ -583,6 +587,10 @@ missing from the manifest would not be copied by `install.sh` → `NoClassDefFou
 production (SmokeCheck's URLClassLoader loads all of `dist/java`, so it could not catch this). A
 two-way check now aborts the build if `dist/java` and the manifest differ.
 
+### 42.22.2 re-validation (2026-11-10)
+
+`IsoZombie.isVehicleBetween` is instruction-for-instruction unchanged; 2k-1 stays as it is.
+
 ---
 
 <a id="2l"></a>
@@ -728,6 +736,10 @@ The old helper counted in order: `queue<2` → `skipShort`, then `head.largeArea
 **v1 checks**: SmokeCheck — vanilla preconditions (exactly 3 same-signature `List.remove(I)` + 1 dedupe call in `update`), hook inside the ready gate (dedupe head order + zero packer calls in `update()`), both original bodies preserved, three public field contracts, `isChunksFilled`'s `bipush 20` pinned (if TIS lowers it and we don't follow = oversending). 8 behavior tests: conservation, batch cap, dedupe preserved, largeArea both ways, ordering, degenerate input, never above vanilla cap, window budget cap.
 
 **42.20.3 migration (2026-08-17)**: TIS refactored the same area (fixing "Loading Map forever"): pending mechanism (`PendingChunk` ≤4096, `OutOfRangeRequest` ≤1024, new `ChunkNotReady` packet); **server retry mechanism removed** (`Chunk.retriesCount`, `MAX_CHUNK_SEND_TRIES`, `getRetryChunk`); worker refill moved to a `queuedByWorker` concurrent queue, so `WorkerThread` no longer writes `ccrWaiting` (the hook's exclusion precondition is looser; hook unchanged). `update()` now runs ready gate → `updatePendingChunks()` → dedupe (hook); ccrs refilled from pending are ordinary non-largeArea ccrs and safe to pack. **The throughput bottleneck was not fixed** (`RequestZipListPacket` bit-identical, still one ccr per tick) ⇒ W4-1 kept; the official changelog says additional black-edge causes are still under investigation. Client side: `WorldStreamer` was substantially refactored — W4-2 retired; the v2.2 client package was fully invalidated and **rebuilt as v3.0** (2o observability re-verified plus the 4th head call `receiveChunkNotReady(I)V`; the three texture-line classes were instruction-identical and reused; 42.20.3 client and server jars have the same whole-file SHA `bda809fb…`, so the install same-source check works as-is). The `retriesCount` SmokeCheck assertion was removed with the vanilla field. Full analysis: `docs/report/pz-42.20.3-update-analysis.md`.
+
+### 42.22.2 re-validation (2026-11-10)
+
+`PlayerDownloadServer.update` differs only in its exception handler (`ZLogger.write(Exception)` became `write(Throwable)`). The head `onUpdate` call and the single `IsoChunk.SaveLoadedChunk` redirect have the same context, and `removeOlderDuplicateRequests` is unchanged. The patch stays as it is; `ChunkRequestPackerTest` passes in all four configurations.
 
 <a id="2q"></a>
 ## 2q. Container-cycle crash guard (W5, server)
@@ -1733,7 +1745,7 @@ Kill switch `-Dmdc.vehicleRemoveGuard=2|observe` (default) / `1|enforce` (**an o
 - **Closed 2026-09-02 (08-28 to 09-02, 6 days, 285 removals)**: `claim=unclaimed` 264 / `stale-imprint` 16 / `claimed:<owner>` 5 (**all by the owner**, near=[owner]); 100% `lua=true` (Kahlua reflection chain); `nearest ≤ 2` tiles in 267 = players dismantling by hand; scripts are ordinary vehicles (SmallCar 30, CarNormal 23, SmallCar02 17, …), `CarNormalBurnt` only 4. **Zero cases of someone else's claimed vehicle being dismantled** ⇒ "protect claimed vehicles only" would have blocked 0 removals, and "deny intact unclaimed" would have blocked 264 legitimate ones. No enforce rule is supported by the data. **Decision: keep this patch as a pure forensic ledger (observe, every removal logged within the rate limit), no enforce; Player-F-type incidents are handled by after-the-fact ledger reconciliation plus operational rules (MVCK claims).**
 
 <a id="2ah"></a>
-## 2ah. Clothing sync guard (W20, server, default observe; (b) has an opt-in enforce)
+## 2ah. Clothing sync guard (W20, server, default observe; (b) retired: fixed upstream by TIS in 42.22.2)
 
 ### Incident (2026-08-28, three log clusters)
 
@@ -1797,6 +1809,12 @@ The `nullVisual` path could not print the item because the redirected `getTint` 
 The three hooks (`SyncClothingPacket.set`, `ItemDescription.<init>`, `SyncVisualsPacket.parse`) are instruction-for-instruction unchanged. The constructor still has no `getVisual()==null` guard on tint (`IFNONNULL` still 2), and `WornItems.getItemVisuals` still skips null visuals. The patch stays as-is with no code changes. The patch-note item "Clothing condition is now handled server-side" is the new `BloodClothingType.setConditionAndSync`, which does not touch visual or tint.
 
 **Open observation (not yet measured).** In 42.21, `SyncVisualsPacket.processServer` no longer uses a hand-written loop (skip the sender + `isRelevantTo`). It now calls `sendToClients(SyncVisuals, connection)`, which only skips the sender and requires the client to be fully connected, **with no distance filter**. This implements the patch note "Synchronized players' appearance between chunks". Each appearance sync now goes to every online player instead of only nearby ones, which is a new bandwidth amplifier. It does not affect this patch's mismatch check, which runs once per inbound packet in `parse`. Whether to filter it with `RecipientWindow` (as in W26/W36) needs a packet capture of outbound `SyncVisuals` traffic first. Filtering by distance without that data would bring back the cross-chunk appearance desync TIS just fixed.
+
+### 42.22.2 re-validation (2026-11-10)
+
+**(b) and W20-2 retired (fixed upstream in 42.22.2).** `SyncClothingPacket$ItemDescription.<init>(WornItem)` now calls `getItem().getVisual()` once and keeps it in slot 2. On `ifnull` it sets `baseTexture` / `textureChoice` to -1; otherwise it reads `getBaseTexture` / `getTextureChoice` / `getTint`. Afterwards, a null `tint` is replaced with `ImmutableColor.white`, which is exactly what our enforce mode did. The guard predicted by this section's retirement signal has landed, but in a different shape (one `IFNULL` + one `IFNONNULL` instead of three `IFNONNULL`), so this was decided by hand. Removed: the `getTint` redirect and the head `onItemDescription` call in `ItemDescription.<init>`, and the head `onClothingSet` call in `SyncClothingPacket.set` (it only recorded the player for (b)'s log lines). Neither class ships any more. `ClothingSyncGuard` keeps only (c), and `-Dmdc.clothingTintGuard` no longer does anything (the `=1` in the production JVM json is harmless). SmokeCheck now pins the retirement evidence: constructor `getVisual` = 1, `IFNULL` = 1, `getTint` = 1, one read of `ImmutableColor.white`, and neither class shipped. To revive: `git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/src/SmokeCheck.java build.ps1 patcher/game/zombie/mdc/ClothingSyncGuard.java patcher/tests/clothing-sync-guard` (take only the W20 parts of the first three files).
+
+**(c) re-anchored.** In 42.22 the packet's player field changed from `PlayerID playerId` to `ConnectionPlayer player`. After `isConsistent`, `parse` calls `ConnectionPlayer.getPlayer()` once and keeps the result in slot 3; the later `getPrimaryHandItem` / `getInventory` calls read `aload_3` (three `PlayerID.getPlayer()` calls became one). The redirect target is now `ConnectionPlayer.getPlayer()`, `parsePlayer` takes the new type, and `expectedHits` went from 4 to 2 (getPlayer 1 + error 1). The mismatch `DebugType.error(Object)` call site, `getItemVisuals`, and the whole-packet return are unchanged. `ClothingSyncGuardTest` now runs two configurations, observe and off (`parseCounts`, `parsePlayer` delegation and capture, mismatch buckets).
 
 ---
 
@@ -2003,6 +2021,10 @@ The only semantic difference: `ByteBlock.End`'s `assert !Core.debug || !pool.con
 - No linkage errors at startup; exactly one `[IoPoolIsolation]` first-activation banner line; `slotOverflow` should stay 0 in production (no periodic line; inspect via jcmd / test accessor).
 - Re-evaluate 4→8 workers only after W25 is live (only then is it real CPU scaling). Not covered here: 0.4–0.7s of main-thread RUNNABLE after the workers finish (`ServerPlayerDB` / visited / `GameEntityManager.Save`).
 
+### 42.22.2 re-validation (2026-11-10)
+
+The four `BitHeader` subclasses, `BitHeader`, and `ByteBlock` are byte-for-byte identical. The patch stays as it is; `IoPoolIsolationTest` passes in both configurations.
+
 ---
 
 <a id="2an"></a>
@@ -2156,6 +2178,10 @@ SmokeCheck pins 1 vanilla call site (1 class-wide), post-patch redirect 1 / orig
 
 **Other conclusions from the same JFR**: `RBTrashed.trashHouse` / `isKidsRoom` 0 samples, `requestSaveCell` 8 samples, zero main-thread `ThreadPark` >20 ms, 85 deopts in 5 minutes — so several other candidate optimizations (kids-room memo, async save-cell, JIT steady-state tuning) were not pursued. New hotspots tracked separately: `UsingPlayerUpdateSystem.update` 5.9% (full scan of the IsoObject entity bucket every frame just to clear `usingPlayer` beyond 10 squares → [2ax](#2ax)), and `WorldSoundManager.getSoundAttractAnimal` 4.7% (the attributed line is a plain distance calculation; the real cost is inferred to be the preceding `getSoundAnimal` linear scan of the global soundList per animal — attribution is imprecise because `DebugNonSafepoints` was off).
 
+### 42.22.2 re-validation (2026-11-10)
+
+`updateEmitter` changed: its first call is still `getFMODParameters().update()` (the redirect site is unchanged), and the early-return condition after it gained an `isSoundListener()` check. `FMODParameterList.update` is still called only once in the class. The patch stays as it is; `EmitterParamGateTest` passes in all three configurations.
+
 <a id="2ax"></a>
 ## 2ax. Active using-player index (W35, server, default observe)
 
@@ -2169,6 +2195,10 @@ SmokeCheck pins 1 vanilla call site (1 class-wide), post-patch redirect 1 / orig
 Three-state `-Dmdc.usingPlayerIndex`: `2|observe` (default; returns the vanilla full table, only tracks and audits), `1|enforce`, `0|off` (no tracking either); restart required. One line every 5 minutes: `[UsingPlayerIndex] mode= calls= bucket= active= activeMax= audits= missed= fellBack= anomalies=`. **Criterion for enabling enforce**: `missed=0` over at least one evening peak in observe, and `bucket` ≫ `activeMax`.
 
 SmokeCheck pins usingPlayer being private, the distribution of the 7 putfields (fails if TIS adds a write site → the index would miss it), the shape-preserving `update` redirect with unchanged real instruction count, and the 1+1+2 tracking points in GameEntity. `MdcUsingPlayerIndexTest` uses a real `IsoObjectBucket` and the patched `setUsingPlayer` across all three modes: enforce returns only in-use entities present in the bucket, entities are dropped after being nulled, and a write bypassing the tracking points is caught by the audit and falls back to the full table.
+
+### 42.22.2 re-validation (2026-11-10)
+
+`setUsingPlayer`, the two receive methods, and `UsingPlayerUpdateSystem.update` are instruction-for-instruction unchanged. `GameEntity.reset` changed, but the `usingPlayer` putfield distribution is still 1 / 3 / 2 / 1 (SmokeCheck green). The patch stays as it is; `MdcUsingPlayerIndexTest` passes in all three configurations.
 
 ---
 
@@ -2217,6 +2247,10 @@ SmokeCheck pins: the argument context of the single `sendToAll` in the `sendPack
 `GameEntityTrafficTest` (one JVM per mode) runs the patched real `sendPacketData` and real `CraftLogic.onUpdate` from dist: in-window receives, out-of-window skipped only in enforce, vehicles and untrusted widths receive, excluded connection and not-fully-connected behave as vanilla, wire bit-identical to vanilla `sendToAll`, InventoryItem stays server-wide; unchanged integer percentage not sent, percentage crossing and list growth sent, same identity/percentage restart after explicit sync still sent; recipe, owner and wetness-display changes alter the signature; signature failure sends. A variant of `explicitSync` that skips recording the baseline is caught by the tests. Full build and two install round-trips passed. **None of this is production acceptance.**
 
 Production acceptance: correct package loaded, both switches `mode=1`, `scopeErrors`/`sigErrors`/`logErrors` 0, `disabled=false`, `wetness=ok`, and `skipped`/`suppressed` increasing. Then repeat the packet capture and compare the share of `86 01 25` (GameEntity) packets in outbound UDP (17.5% lower bound before the patch), and check a drying rack in game: tooltip progress when walking up from afar and when arriving by car, rain pause and wetness, output on completion. The `skipped` ratio must not be quoted as the same ratio of bandwidth saved.
+
+### 42.22.2 re-validation (2026-11-10)
+
+`GameEntityNetwork.sendPacketData`, `CraftLogic.onUpdate`, and `CraftLogicSystem.stop` are instruction-for-instruction unchanged (other methods in the two CraftLogic classes changed, but none are hooks). The patch stays as it is; `GameEntityTrafficTest` passes in all three configurations. The test's stand-in square now uses an `ArrayList` instead of the deleted `PZArrayList` (in 42.22, `IsoGridSquare.objects` is a `List`).
 
 <a id="2az"></a>
 ## 2az. Half-constructed animal guard + serialize-before-open for apop files (W37, server, default on)
@@ -2339,6 +2373,10 @@ details were the `ServerPlayersVehicles` thread loading vehicles: `VehiclesDB2$S
 `contains(SENTINEL)` every 256 calls) and heartbeat fields `scanUsAvg` / `estScanMs` were removed; `addCalls`, `addAllItems` etc. remain. In 42.21
 `IsoCell.ProcessItems` and the four write entry points are instruction-identical; other behavior unchanged.
 
+### 42.22.2 re-validation (2026-11-10)
+
+`IsoCell.ProcessItems` and the four add/remove entry points are instruction-for-instruction unchanged. The patch stays as it is; `ProcessItemsGuardTest` passes in all three configurations. For the `ItemContainer.AddItem(InventoryItem)` change, see §2bd.
+
 <a id="2bd"></a>
 ## 2bd. Redirect off-main-thread item registration to the main thread (W41, server, default on)
 
@@ -2360,6 +2398,10 @@ SmokeCheck: `BaseVehicle.setCurrentKey` adds the key via `ItemContainer` (reason
 `beginPass` + `endPass` = +4 real instructions; head-call shape on all four write entry points. `ProcessItemsGuardTest nodefer` checks the vanilla direct write;
 `on` checks queueing without touching the list and registration + processing on the next pass. Production acceptance: `off-main-thread write` → 0,
 `deferred ≈ drained`, small `pending`, `overflow=0`, `nulls=0`.
+
+### 42.22.2 re-validation (2026-11-10)
+
+`ItemContainer.AddItem(InventoryItem)` changed: it now starts with a `chainContainsContainingItem` check (if the item contains this container, it logs an error and returns null). The `addToProcessItems` redirect has the same context (`IsoWorld.instance.currentCell` null check → `aload_1` → call). `AddItem(String)` is unchanged. The patch stays as it is; `ProcessItemsGuardTest` passes in the nodefer configuration. The W5 redirects in the same `ItemContainer` ClassPatch (`getCharacter` / `isInCharacterInventory`) are handled by the W5 re-validation.
 
 <a id="2be"></a>
 ## 2be. Cap on animal catch-up hours (W42, server, default on)
@@ -2461,6 +2503,10 @@ a chunk the client read from disk aren't notified. Both leave ghosts, expected t
 local dedicated-server end-to-end run exists; production acceptance = `can't find world item` lines drop sharply, `WorldItemExpiry removed` grows with
 `anomalies=0`, `TransactionReject sent` accounts for remaining pickup failures.
 
+### 42.22.2 re-validation (2026-11-10)
+
+W43: the drop-condition counts in `IsoGridSquare.load` and index-based lookup in `RemoveItemFromSquarePacket.set` match 42.21 (SmokeCheck green); `WorldItemExpirySyncTest` passes, and the patch stays as it is. For W44, see the timed-actions re-validation note in this section.
+
 <a id="2bh"></a>
 ## 2bh. Identity index for the item-processing list (W45, server, default on; W30 retired in the same batch)
 
@@ -2524,6 +2570,10 @@ the only FPS 1–2 cause (first-time map generation and mods' `LoadGridsquare` L
   `ArrayList.indexOfRange ← IsoCell.addToProcessItems`. (W40 `scanUsAvg` falling below 1 µs was the initial signal; that field is gone since 42.21.0.)
 
 **Upstream report**: `docs/report/2026-09-27-processitems-linear-contains-tis.md` (draft, not yet submitted).
+
+### 42.22.2 re-validation (2026-11-10)
+
+`IsoCell.<init>(II)` is instruction-for-instruction unchanged, and the W45 SmokeCheck gates (single PUTFIELD, no merge point between NEW and PUTFIELD, no `equals` / `hashCode` override in the `InventoryItem` family) are green. `ProcessItemsIndexTest` passes in all four configurations. The patch stays as it is.
 
 <a id="2bi"></a>
 ## 2bi. Force authorization resend after a VehicleCollide release (W46, server, default on)
@@ -4290,6 +4340,18 @@ After it goes live, check the banner fingerprint and `[mdc-javagate] OK: 143`; t
 
 **Retirement**: reassess when TIS fixes the ID scheme or how `UnregisterEntity` handles a mismatch (the SmokeCheck reasons to exist turn red).
 
+### 42.22.2 re-validation (2026-11-10)
+
+**Most of the reason for this patch was fixed upstream. The redirect stays; whether to retire it is pending a decision.** (`IsoObject.getEntityNetID` and `GameEntityManager.UnregisterEntity(GameEntity,Z)` checked with javap against the 42.22.2 jar.)
+
+- `getEntityNetID` no longer calls `isFloor()`; floors use their real index. Root cause 1 of this section (floors always count as index 0) is fixed.
+- `UnregisterEntity` now calls `Engine.removeEntity` first (after the null check, before the `addedToEntityManager` check), so the entity leaves the engine even when its ID slot is empty or held by another entity. A collision still throws `Stored entity mismatch` (the holder loses its registration, the removed entity stays registered and is not offloaded to a MetaEntity, and `removeItemFromMap` still stops before `removeFromSquare`). An unregistered ID still returns early (no unregistration, no offload).
+- `checkEntityIDChange` is identical to 42.21. When the new ID is taken, it first calls the holder's `getEntityNetID()`, which re-keys the holder if its index changed (or returns -1 and clears the slot if it left the square). So "an earlier object on the same square is removed and later indices shift down" does not collide (the test pins this). In 42.22.2 the only remaining collision source is inferred (a slot held by an entity that has no square or is not an IsoObject); no instance is known.
+
+The hook `removeFromWorld(Z)` is unchanged and the redirect stays. SmokeCheck now pins the 42.22.2 shape: `UnregisterEntity` still throws the mismatch, has two `LongMap.remove`, and exactly one leading `Engine.removeEntity`; `getEntityNetID` does not call `isFloor` and re-keys through `checkEntityIDChange`; `checkEntityIDChange` only logs when the new ID is taken (`put` 1, `error` 2). `MdcEntityIdGuardTest` now covers: a later floor and index 0 get different IDs in 42.22; vanilla self-heals when indices shift (same in both modes); a collision made by putting another entity in the slot (on removes normally and restores the holder; off throws and drops the holder's registration); an unregistered ID (both modes leave the engine, on also unregisters); and a normal removal. The test squares use `ArrayList` instead of the deleted `PZArrayList`.
+
+**Pending decision:** after deployment, watch `collisions` / `missing` in the `[EntityIdGuard]` heartbeat. If both stay 0 for a week, retire the patch (redirect, helper, SmokeCheck W69 section, test, and build.ps1 [9zl/10]). If `missing` is non-zero, keep it (vanilla's path neither unregisters nor offloads).
+
 <a id="2cf"></a>
 ## 2cf. Bandit Raid story infinite loop (W70, server, default on)
 
@@ -4535,6 +4597,10 @@ line with `mode=observe`, and the first beat line 5 minutes later.
 **Retirement**: reassess when TIS stops registering `IsoThumpable` for per-frame updates or a SmokeCheck reason to exist turns red; remove the whole
 patch if observe data shows the skippable part is under 2 ms per frame.
 
+### 42.22.2 re-validation (2026-11-10)
+
+`IsoCell.ProcessIsoObject` / `addToProcessIsoObject` / `addToProcessIsoObjectRemove` and `IsoThumpable.update` (same SHA) are instruction-for-instruction unchanged; the patch stays as it is. `IsoObject.getObjectIndex` changed: `PZArrayList` was deleted, so it now uses `getObjects()Ljava/util/List;` plus `List.indexOf`. Re-evaluated: `IsoGridSquare.objects` is a final `List` written once in the class, by `new ArrayList(2)` in the constructor; `ArrayList.indexOf` only calls the argument's `equals` and writes nothing; and the IsoThumpable chain does not override `equals` (existing census). The side-effect-free premise of the skip still holds. SmokeCheck re-pins the `getObjectIndex` SHA (42.21 `f82a5485…` → 42.22.2 `5add6b9b…`) and replaces the PZArrayList indexOf/objectsEqual no-write check with the three facts above. `IsoObjectUpdateGateTest` passes in all four configurations; its test squares use `ArrayList` instead of `PZArrayList`.
+
 <a id="2ci"></a>
 ## 2ci. Pathfinding thread probe (W74, server, default on, observe only)
 
@@ -4703,6 +4769,10 @@ heartbeat every 5 minutes, cumulative values):
 **Retirement**: remove the patch when TIS stops calling `removeFromWorld` from background vehicle loading, or makes these `IsoCell` sets
 thread-safe.
 
+### 42.22.2 re-validation (2026-11-10)
+
+`IsoObject.removeFromWorld` is instruction-for-instruction unchanged; the patch stays as it is. `IsoObjectRemoveDeferTest` passes in all three configurations.
+
 ---
 
 <a id="2ck"></a>
@@ -4784,6 +4854,10 @@ equals `drained` + `cancelled` (per operation) plus the shared `pending`, with `
 
 **Retirement**: remove the patch when TIS moves the butcher hook registration into `addToWorld`, or makes these three `IsoCell` collections
 thread-safe.
+
+### 42.22.2 re-validation (2026-11-10)
+
+The two `IsoButcherHook` constructors differ only in the field type (`PlayerID usingPlayerId` became `OnlinePlayer usingPlayer`; the `new` / `putfield` changed type). The `addToProcessIsoObject` redirects (one each in `<init>(IsoGridSquare)` and `<init>(IsoCell)`) and their surrounding instructions are unchanged, and `load` is unchanged. The patch stays as it is; `IsoObjectAddDeferTest` passes in all three configurations.
 
 ---
 
@@ -5231,6 +5305,10 @@ Console (one first-effective line, one beat every 5 minutes, one line on disable
 - `PlayerLosFilterTest` (`build.ps1` [9zx/10], seven JVMs: vanilla, observe, on, off, violation, phase50, phase64, all with `-XX:hashCode=2` (fixed identity hash, so HashSet iteration order is the same across JVMs) and `-XX:-OmitStackTraceInFastThrow`; the six patched ones also get `-Dmdc.playerLosFilter.seed=83`, and the test reruns the same xorshift64* from that seed to know what every call draws): the vanilla classpath has no dist, so it runs the jar's original `updateLOS` and writes one trace line per call; observe, on and off run the patched dist version on the same worlds and compare 1,105 calls line by line: exception class and message, the `TestZombieSpotPlayer`/`spotted` call sequence, spottedList/lastSpotted, every primitive field of the viewer and its stats, every primitive field of every object, and the GameTime multiplier. The worlds cover ±1 tile around all four window edges and the z bounds, the player itself, physics objects, vehicles, objects without a square, grapple-only zombies, players, animals (including attached ones), survivors, a sleeping viewer, duplicate PlayerData (two entries for the same player: the first has the real window and visibility, the second a window 300 tiles away and a separate all-false `visible`, so taking the second would skip visible targets; plus a case where the first is not `BusyInMain` and the second is, which must fall back as notBusy) and missing PlayerData, status other than `BusyInMain`, adding an element, removing the element being processed or another one inside `TestZombieSpotPlayer` (CME, including when the modified element is the last one), null and non-`IsoMovingObject` elements, and calls off the main thread. Stand-ins are only at the exits: the viewer overrides `TestZombieSpotPlayer` to record calls (zombies are not passed down: `IsoZombie` is final and the real `spotted`/`ZombieControl` need a full world and network) and `getDetectionRange` (the real one needs traits and worn items; it changes no branch on the server), and player and animal targets override `spotted` to record. The test JVM cannot build `SandboxOptions` (`isFakeDead`) or a zombie's `StateMachineComponent`, so zombies on the same floor within 7 tiles are always ghosts and zombies have no target; the `ticksSinceSeenZombie` part of the near branch and the target-based music branches are not reached (they are all inside the window, which the patch passes through unchanged). Observe, on and off all match vanilla line by line, and all three fallbacks (notBusy, noData, thread) are exercised; in observe and on, `audits` and `plains` equal the values recomputed from the seed (18 and 12 at `engaged=899`), the generator state matches the test's copy, `mismatches=0`, and the audits really call `isCouldSee`; off counts nothing and logs nothing. A probe also calls `getCell`/`iterator` directly 640 times (8 zombies inside and 8 outside the window), predicts each draw from the seed and checks it: the 15 vanilla timings get a `Plain`, walk every element and leave the `isCouldSee` counter unchanged; the 10 audits call it once for each of the 8 outside zombies; for the other 615 calls observe gets the vanilla iterator itself (the same object) and on gets a filtering iterator that yields only the player and the 8 inside zombies. Violation (on): inside `TestZombieSpotPlayer` the PlayerData is moved 30 tiles in +x so a zombie that was outside the window when the iterator was created becomes visible; using the seed, the 5 audits drawn before a drifting vanilla timing and a drifting filtered call have been seen run without drift (zero mismatches), the zombie is skipped in the 244 filtered calls (when the premise is broken, on differs from vanilla), the 1 vanilla timing yields everything so vanilla processes it without a check, and call 251 is the first audit under drift: it yields everything, vanilla processes the zombie, the mismatch is recorded, the filter is disabled for the session and the disable line carries the player and coordinates; afterwards the same drift behaves as vanilla. Phase50/phase64 (on): 50 or 64 players, each with its own PlayerData, run `updateLOS` once per round in a fixed order, and only player 4 (of 50) or player 5 (of 64) drifts inside the loop — positions that the old "sequence number & 63" sampling never audits; with random sampling the drift is caught and the filter disabled in round 164 and round 87 respectively, the disable line names that player, and the other players were audited 133 and 83 times in between with zero mismatches. Eight hand-mutated helpers (the low and high x bound, the high y bound and the low and high z bound each narrowed by one tile, skipping the player itself, skipping null, taking the last matching PlayerData) were also run: in on mode every one differs from vanilla (3–782 lines); in observe the behavior stays vanilla (0 lines), the 5 window-bound mutants are caught as audit mismatches, skipping the player or null does not affect observe at all (observe never filters and an audit yields everything), and taking the last PlayerData also behaves as vanilla in observe; none of this run's audits landed on a duplicate-PlayerData call.
 
 **Retirement**: remove the patch when TIS makes the server's `updateLOS` walk only objects inside the window (or adds a spatial index); if the vanilla method SHA lock, the override census or the `isCouldSee` fingerprint in SmokeCheck turns red, redo the equivalence analysis first instead of updating the SHA to make it green.
+
+### 42.22.2 re-validation (2026-11-10)
+
+`updateLOS` changed; re-evaluated, kept, and re-pinned. Before the loop, the `lastNumChasingZombies` / `numChasingZombies` writes are now under a `!GameServer.server` guard (the server no longer writes them). Inside the loop, the only change is the block order of the four music-stat branches in the "zombie can be seen" path (the moving / not-moving decision and the fields written are unchanged). The `getCell` and `Set.iterator` redirect sites, the iterator in slot 9, and the loop's call multiset (66 calls) are unchanged, so objects outside the window reach the same code. Of the 33 SmokeCheck SHA locks only `updateLOS` drifted; it was re-pinned to the 42.22.2 value (42.21 `854e9828…` → `4dda69b3…`), and the other 32 are unchanged. The negative control still holds. `PlayerLosFilterTest` passes all seven configurations on the 42.22.2 test jar (vanilla writes the trace; observe / on / off / violation / phase50 / phase64 compare line by line). W91 / W94 in the same `IsoPlayer` ClassPatch are re-validated by their own areas.
 
 ---
 

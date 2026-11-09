@@ -400,16 +400,13 @@ Assert-Ok "VehicleRemoveGuardTest（mode=1，本版 observe-alias）"
 java "-Dmdc.vehicleRemoveGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleRemoveGuardTest off
 Assert-Ok "VehicleRemoveGuardTest（off 文字別名，純早退 kill switch）"
 
-Write-Host "[9q/10] 衣物同步守衛（W20）三組態行為驗證（獨立 JVM）..."
-# observe＝預設出貨（(b) 記錄後拋 NPE 保 vanilla 語意、(c) 資訊超集行）；
-# enforce＝(b) null→white 修復（僅 tint 刀有 enforce 語意）；off＝兩把 kill switch 全關、
-# 純直通/早退。三組態都真跑並自驗模式，property 拼錯不得假綠。
+Write-Host "[9q/10] 衣物同步觀測（W20 (c)）兩組態行為驗證（獨立 JVM）..."
+# observe＝預設出貨（(c) 資訊超集行）；off＝kill switch 純直通。兩組態都真跑並自驗模式，
+# property 拼錯不得假綠。(b) tint 修復於 42.22.2 原版修好退役，enforce 組態隨之移除。
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest observe
 Assert-Ok "ClothingSyncGuardTest（observe，預設出貨模式）"
-java "-Dmdc.clothingTintGuard=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest enforce
-Assert-Ok "ClothingSyncGuardTest（tint enforce，null→white 修復）"
-java "-Dmdc.clothingTintGuard=off" "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest off
-Assert-Ok "ClothingSyncGuardTest（兩把 kill switch 全關，純直通）"
+java "-Dmdc.visualsMismatchProbe=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ClothingSyncGuardTest off
+Assert-Ok "ClothingSyncGuardTest（kill switch 關，純直通）"
 
 Write-Host "[9q2/10] 伺服器角色聲音參數跳過（W34）三態行為驗證（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.EmitterParamGateTest observe

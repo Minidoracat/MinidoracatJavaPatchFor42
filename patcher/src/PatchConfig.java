@@ -879,62 +879,34 @@ public final class PatchConfig {
                 "(Lzombie/vehicles/BaseVehicle;)V");
         permRemove.expectedHits = 1;
 
-        // ---- W20 衣物同步守衛（2026-08-28 立案；docs/patches.md 2ah）----
-        // 8/28 當輪三個 log 叢集（send Exception ×362 per-connection 放大＋SyncVisuals
-        // mismatch ×129）。(a) ContainerID.set 雙參的 ObjectContainer/IsoObject 分支直讀
-        // o.square.getObjects()（offset 197/233）無守衛——上游 Unwear 用 getSquare()
-        // （current?:square）放行、此處讀 raw square＝矛盾根源；純觀測分解（headCall
-        // slots={1,2}，多 slot 版首用）。(b) ItemDescription ctor 對 baseTexture/
-        // textureChoice 有 getVisual()==null 守衛、唯 tint 直呼 getVisual().getTint()
-        // （offset 91-101）漏——redirect getTint→tintOf（observe 記錄後拋 NPE 保 vanilla
-        // 語意；enforce null→ImmutableColor.white 只保序列化）。禁止 lambda 過濾整件：
-        // process 會把未列出 worn item 從遠端 WornItems.remove＝遠端脫裝。(c) SyncVisuals
-        // 是純 positional 協定（wire 無 item identity），跳項/clamp 會索引錯位套錯衣服，
-        // vanilla 整包拒絕反而安全——只觀測：redirect parse 的 3 處 PlayerID.getPlayer
-        // （捕獲 parse 對象）＋mismatch error callsite（資訊超集行：player＋signed diff）。
-        // 共同根因假說（observe 證偽）：同一件 null-visual worn item 令 (b) 炸且令
-        // getItemVisuals 少算 1 ⇒ (c) wire-local=+1。kill switch 兩把：
-        // -Dmdc.clothingTintGuard（0/1/2 預設）、-Dmdc.visualsMismatchProbe（0/2 預設）。
+        // ---- W20 衣物同步觀測（2026-08-28 立案；docs/patches.md 2ah）----
+        // 8/28 當輪 log 叢集：SyncVisuals mismatch ×129。(c) SyncVisuals 是純 positional 協定
+        // （wire 無 item identity），跳項/clamp 會索引錯位套錯衣服，vanilla 整包拒絕反而安全——
+        // 只觀測：redirect parse 的 ConnectionPlayer.getPlayer（捕獲 parse 對象）＋mismatch error
+        // callsite（資訊超集行：player＋signed diff）。kill switch -Dmdc.visualsMismatchProbe（0/2 預設）。
+        // 42.22.2：PlayerID playerId 欄位改成 ConnectionPlayer player，parse 只在 isConsistent
+        // 後取一次 getPlayer 存進 slot 3，後段 getPrimaryHandItem／getInventory 改讀 aload_3
+        // （原 3 處 getPlayer → 1 處）；error callsite 與整包 return 語境不變。
         // (a) ContainerIdProbe 已於 2026-09-27 退役：9/23–9/26 共 40 個 session 每 session 僅 0–3 次 square-null，屬低頻原版現象。
-
-        Patcher.ClassPatch syncClothing = new Patcher.ClassPatch(
-                "zombie/network/packets/SyncClothingPacket");
-        Patcher.MethodOps scpSet = syncClothing.method("set", "(Lzombie/characters/IsoPlayer;)V");
-        scpSet.headCall = new Patcher.HeadCall("zombie/mdc/ClothingSyncGuard", "onClothingSet",
-                "(Lzombie/characters/IsoPlayer;)V", new int[]{1});
-        scpSet.expectedHits = 1;
-        patches.add(syncClothing);
-
-        Patcher.ClassPatch itemDesc = new Patcher.ClassPatch(
-                "zombie/network/packets/SyncClothingPacket$ItemDescription");
-        Patcher.MethodOps idCtor = itemDesc.method("<init>",
-                "(Lzombie/characters/WornItems/WornItem;)V");
-        idCtor.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/core/skinnedmodel/visual/ItemVisual", "getTint",
-                "()Lzombie/core/ImmutableColor;",
-                "zombie/mdc/ClothingSyncGuard", "tintOf"));
-        // W20-2（2026-09-02 巡檢）：enforce 後 nullVisual 仍恆為同一玩家（Player-G，8 天
-        // 480+ 筆）但 nullVisual 路徑拿不到 item（redirect 只換 getTint 的 receiver，
-        // 那個 receiver 就是 null）。ctor 頭部 headCall slot 1 把 WornItem 交給 helper
-        // ThreadLocal，nullVisual 行才印得出 fullType／bodyLocation＝物品歸因的唯一路徑。
-        // ctor 頭部 aload_1 只碰參數不碰 uninitializedThis，verifier 合法（super 之前）。
-        idCtor.headCall = new Patcher.HeadCall("zombie/mdc/ClothingSyncGuard", "onItemDescription",
-                "(Lzombie/characters/WornItems/WornItem;)V", new int[]{1});
-        idCtor.expectedHits = 2;   // headCall 1 + getTint redirect 1
-        patches.add(itemDesc);
+        // (b) ItemDescription ctor tint 修復（getTint→tintOf）＋W20-2 ctor 頭部 onItemDescription＋
+        // SyncClothingPacket.set 頭部 onClothingSet 已於 2026-11-10 42.22.2 對版退役：原版 ctor 改成
+        // getVisual() 存 slot 2、null 時 baseTexture/textureChoice 給 -1，之後 tint 為 null 補
+        // ImmutableColor.white（與 enforce 相同）；-Dmdc.clothingTintGuard 失效。
+        // 復活：git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/src/SmokeCheck.java build.ps1
+        //   patcher/game/zombie/mdc/ClothingSyncGuard.java patcher/tests/clothing-sync-guard（三檔只取 W20 段）
 
         Patcher.ClassPatch syncVisuals = new Patcher.ClassPatch(
                 "zombie/network/packets/SyncVisualsPacket");
         Patcher.MethodOps svpParse = syncVisuals.method("parse",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
         svpParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
-                "zombie/network/fields/character/PlayerID", "getPlayer",
+                "zombie/network/fields/character/ConnectionPlayer", "getPlayer",
                 "()Lzombie/characters/IsoPlayer;",
                 "zombie/mdc/ClothingSyncGuard", "parsePlayer"));
         svpParse.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/debug/DebugType", "error", "(Ljava/lang/Object;)V",
                 "zombie/mdc/ClothingSyncGuard", "onVisualsMismatch"));
-        svpParse.expectedHits = 4;   // getPlayer 3 + error 1
+        svpParse.expectedHits = 2;   // getPlayer 1 + error 1
         patches.add(syncVisuals);
 
         // ---- W23 每 Steam 身分帳號上限的登入期執法（2026-09-06；docs/patches.md 2ak）----
