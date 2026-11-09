@@ -715,7 +715,8 @@ public final class AnimalAwayProbe {
             suppressed++;
             return;
         }
-        DesignationZone z = animal.getZone();
+        // 42.22 刪了 getZone()（它從 connectedDZone 隨機挑一個、會消耗遊戲亂數）；log 改讀動物自己的 dZone
+        DesignationZone z = animal.getDZone();
         DebugLog.log(TAG + "source=" + source + " hoursAway=" + hours + " applied=" + applied
                 + " animalHoursAway=" + (animalHours == NO_RECORD ? "none" : String.valueOf(animalHours))
                 + " worldAgeHours=" + (int) GameTime.getInstance().getWorldAgeHours()

@@ -319,9 +319,18 @@ public final class ChunkLoadGuard {
         return sb.toString();
     }
 
+    /** 42.22 刪了 {@code GameEntity.isAddedToEngine()}；欄位仍在（package-private），診斷路徑才讀、照讀原值。 */
+    private static java.lang.reflect.Field addedToEngineField;
+
     private static String safeAddedToEngine(IsoObject object) {
         try {
-            return String.valueOf(object.isAddedToEngine());
+            java.lang.reflect.Field f = addedToEngineField;
+            if (f == null) {
+                f = zombie.entity.GameEntity.class.getDeclaredField("addedToEngine");
+                f.setAccessible(true);
+                addedToEngineField = f;
+            }
+            return String.valueOf(f.getBoolean(object));
         } catch (Throwable t) {
             rethrowFatal(t);
             diagFailures++;

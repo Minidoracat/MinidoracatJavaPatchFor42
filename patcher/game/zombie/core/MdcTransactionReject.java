@@ -61,7 +61,7 @@ public final class MdcTransactionReject {
             if (hasFloorSource(packet)) {
                 skippedFloor++;
             } else {
-                IsoPlayer player = packet.playerId.getPlayer();
+                IsoPlayer player = packet.player.getPlayer();
                 UdpConnection connection = player == null ? null : GameServer.getConnectionFromPlayer(player);
                 if (connection == null || !connection.isFullyConnected()) {
                     skippedNoConn++;

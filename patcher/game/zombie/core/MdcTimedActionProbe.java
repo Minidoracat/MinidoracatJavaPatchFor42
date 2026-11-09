@@ -9,7 +9,6 @@ import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
 import zombie.network.GameServer;
 import zombie.network.PacketTypes;
-import zombie.network.fields.character.PlayerID;
 import zombie.network.packets.INetworkPacket;
 import zombie.network.packets.NetTimedActionPacket;
 import zombie.network.packets.sound.MdcWorldSoundProbe;
@@ -89,21 +88,21 @@ public final class MdcTimedActionProbe {
 
     // ---- W10-C（B）：stopPlayerActions redirect ----
 
-    public static void stopPlayerActions(PlayerID playerId) {
+    public static void stopPlayerActions(IsoPlayer player) {
         if (MODE != MODE_OFF) {
             try {
-                inspectInterrupted(playerId);
+                inspectInterrupted(player);
             } catch (RuntimeException e) {
                 anomalies++;
             }
         }
-        ActionManager.stopPlayerActions(playerId);
+        ActionManager.stopPlayerActions(player);
         if (MODE != MODE_OFF) {
             maybeBeat();
         }
     }
 
-    private static void inspectInterrupted(PlayerID playerId) {
+    private static void inspectInterrupted(IsoPlayer player) {
         if (!bannerShown) {
             showBanner();
         }
@@ -116,7 +115,7 @@ public final class MdcTimedActionProbe {
         int requestId = request == null ? Integer.MIN_VALUE : request.id;
         for (Object o : actions) {
             if (!(o instanceof Action old)
-                    || old.playerId.getID() != playerId.getID()
+                    || !sameOnlineId(old, player)
                     || old.state != Transaction.TransactionState.Accept) {
                 continue;
             }
@@ -134,7 +133,7 @@ public final class MdcTimedActionProbe {
     /** 比照 ActionManager.update 的 Reject 分支：state→Reject 後以同一物件序列化送出。 */
     private static boolean sendReject(Action action) {
         try {
-            IsoPlayer player = action.playerId.getPlayer();
+            IsoPlayer player = action.player.getPlayer();
             UdpConnection connection = player == null ? null : GameServer.getConnectionFromPlayer(player);
             if (connection == null || !connection.isFullyConnected()) {
                 rejectsSkippedNoConn++;
@@ -198,12 +197,18 @@ public final class MdcTimedActionProbe {
      */
     private static boolean ownedByConnection(Action action, UdpConnection connection) {
         if (connection == null || connection.players == null) return false;
-        IsoPlayer owner = action.playerId.getPlayer();
-        if (owner == null || action.playerId.getID() != owner.getOnlineID()) return false;
+        IsoPlayer owner = action.player.getPlayer();
+        if (owner == null || action.player.getId() != owner.getOnlineID()) return false;
         for (IsoPlayer player : connection.players) {
             if (player == owner) return true;
         }
         return false;
+    }
+
+    /** 42.22 原版 {@code ActionManager.isActionOf} 的同一判斷：動作的玩家與 {@code player} 的 onlineID 相同。 */
+    private static boolean sameOnlineId(Action action, IsoPlayer player) {
+        IsoPlayer actionPlayer = action.player.getPlayer();
+        return actionPlayer != null && player != null && actionPlayer.getOnlineID() == player.getOnlineID();
     }
 
     /**
@@ -219,7 +224,7 @@ public final class MdcTimedActionProbe {
             anomalies++;
             return;
         }
-        if (character == null || character == request.playerId.getPlayer()) {
+        if (character == null || character == request.player.getPlayer()) {
             return;
         }
         request.action = null;
@@ -261,7 +266,7 @@ public final class MdcTimedActionProbe {
             if (!allowLine()) return;
             DebugLog.log(TAG + " untrustedAction#" + unknownRefused
                     + " id=" + action.id + " state=" + action.state
-                    + " wireOnlineId=" + action.playerId.getID()
+                    + " wireOnlineId=" + action.player.getId()
                     + " owner=" + playerName(action)
                     + " connection=" + (connection == null ? "none" : connection.getConnectedGUID())
                     + " connectionPlayers=" + connectionPlayers(connection)
@@ -313,7 +318,7 @@ public final class MdcTimedActionProbe {
 
     private static String playerName(Action action) {
         try {
-            IsoPlayer p = action.playerId.getPlayer();
+            IsoPlayer p = action.player.getPlayer();
             return p == null ? "?" : p.getOnlineID() + ":" + safeName(p.getUsername());
         } catch (RuntimeException e) {
             return "?";

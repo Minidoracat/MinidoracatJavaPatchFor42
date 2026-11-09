@@ -126,7 +126,7 @@ public final class MdcBuildActionGuard {
     }
 
     private static boolean inRange(BuildAction action) {
-        IsoPlayer owner = action.playerId.getPlayer();
+        IsoPlayer owner = action.player.getPlayer();
         if (owner == null) {
             return false;
         }
@@ -166,7 +166,7 @@ public final class MdcBuildActionGuard {
             if (!allowLine()) {
                 return;
             }
-            IsoPlayer owner = action.playerId.getPlayer();
+            IsoPlayer owner = action.player.getPlayer();
             DebugLog.log(TAG + " refused reason=" + reason
                     + " type=" + MdcTimedActionProbe.safeName((String) OBJECT_TYPE.get(action))
                     + " owner=" + (owner == null ? "?" : owner.getOnlineID() + ":" + MdcTimedActionProbe.safeName(owner.getUsername()))

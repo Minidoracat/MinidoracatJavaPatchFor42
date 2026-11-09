@@ -699,9 +699,10 @@ public final class PatchConfig {
         // (PlayerID,id) 分鍵、GeneralActionPacket.setReject 帶發送者）；
         // 復活：git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/core/MdcTimedActionProbe.java
         String taProbe = "zombie/core/MdcTimedActionProbe";
+        // 42.22：原版 stopPlayerActions 改收 IsoPlayer（ActionManager.isActionOf 比 onlineID）
         ntaProcess.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
                 "zombie/core/ActionManager", "stopPlayerActions",
-                "(Lzombie/network/fields/character/PlayerID;)V", taProbe, "stopPlayerActions"));
+                "(Lzombie/characters/IsoPlayer;)V", taProbe, "stopPlayerActions"));
         patches.add(ntaPkt);
 
         // 動作封包 owner 檢查＋W10-C Request 上下文＋WorldSound 觀測：在授權、解析、一致性與反作弊檢查之後、
