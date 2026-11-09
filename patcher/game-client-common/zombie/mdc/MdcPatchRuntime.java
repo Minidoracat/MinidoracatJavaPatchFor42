@@ -83,14 +83,41 @@ public final class MdcPatchRuntime {
         }
     }
 
-    /** agent 這次實際啟用的模組（{@code MdcAgent.status()} 的 {@code modules=}）；MdcAgent 不在 helper 的編譯路徑上，用反射。 */
+    /** agent 這次實際啟用的模組；MdcAgent 不在 helper 的編譯路徑上，用反射。 */
     static Set<String> agentModules() throws ReflectiveOperationException {
-        String status = (String) Class.forName("zombie.mdc.MdcAgent").getMethod("status").invoke(null);
-        int at = status.indexOf(" modules=");
-        if (at < 0) {
-            throw new IllegalStateException("unexpected agent status: " + clean(status, 120));
+        Class<?> agent = Class.forName("zombie.mdc.MdcAgent");
+        return agentModules((String) agent.getMethod("state").invoke(null),
+                (String) agent.getMethod("modules").invoke(null), agentMismatched());
+    }
+
+    /** agent 不是整套啟用（不是 armed，或有 class 該換卻沒換上）就不能宣稱 compatible。 */
+    static Set<String> agentModules(String state, String modules, int mismatched) {
+        if (!"armed".equals(state) || mismatched != 0) {
+            throw new IllegalStateException("patch agent is not fully active: " + clean(state, 40)
+                    + ", classes not patched: " + mismatched);
         }
-        return Set.of(status.substring(at + " modules=".length()).trim().split(","));
+        return Set.of(modules.split(","));
+    }
+
+    private static int agentMismatched() throws ReflectiveOperationException {
+        return (Integer) Class.forName("zombie.mdc.MdcAgent").getMethod("mismatched").invoke(null);
+    }
+
+    /** 啟動檢查通過，而且到現在都沒有換不上的 class（啟動後才載入的 class 也算）。 */
+    private static boolean compatible() {
+        if (compatible) {
+            try {
+                int mismatched = agentMismatched();
+                if (mismatched != 0) {
+                    compatible = false;
+                    stateError = "classes not patched: " + mismatched + "; run the patch manager";
+                }
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                compatible = false;
+                stateError = e.getClass().getSimpleName() + ": " + clean(e.getMessage(), 180);
+            }
+        }
+        return compatible;
     }
 
     /**
@@ -218,7 +245,7 @@ public final class MdcPatchRuntime {
     }
 
     public static boolean canProfile() {
-        return compatible && isInstalled("profiler") && MdcProfiler.isHookObserved();
+        return compatible() && isInstalled("profiler") && MdcProfiler.isHookObserved();
     }
 
     private static boolean isInstalled(String id) {
@@ -234,7 +261,7 @@ public final class MdcPatchRuntime {
         Map<String, Object> status = new LinkedHashMap<>();
         status.put("apiVersion", 1);
         status.put("version", MdcPatchBuildInfo.VERSION);
-        status.put("compatible", compatible);
+        status.put("compatible", compatible());
         status.put("error", stateError);
         List<Map<String, Object>> modules = new ArrayList<>();
         for (Map<String, Object> source : installedModules) {
@@ -277,7 +304,7 @@ public final class MdcPatchRuntime {
             if (overlayLines.isEmpty() || now - overlayUpdatedNs > 1_000_000_000L) {
                 List<String> lines = new ArrayList<>();
                 lines.add("Minidoracat patches " + MdcPatchBuildInfo.VERSION);
-                if (!compatible) {
+                if (!compatible()) {
                     lines.add("CHECK FAILED - run the patch manager before playing");
                     lines.add(clean(stateError, 95));
                 } else {

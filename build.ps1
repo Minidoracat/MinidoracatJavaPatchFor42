@@ -205,7 +205,7 @@ Write-Host "[5/10] 連結驗證（-Xverify:all）..."
 java -Xverify:all -cp "$R\work\out" LoadCheck "$R\dist\java" "$TJ" "$R\dist\manifest.txt"
 Assert-Ok "LoadCheck"
 
-Write-Host "[5b/10] 正式服載入路徑驗證（官方簽章 jar＋-javaagent，-Xverify:all）：armed／off／遊戲 jar 不同就不啟用..."
+Write-Host "[5b/10] 正式服載入路徑驗證（官方簽章 jar＋-javaagent，-Xverify:all）：armed／off／遊戲 jar 不同、別的 agent 先載入、helper 定義失敗都回原版..."
 # 工具單獨放一個目錄：classpath 上不要有 work\out 的測試 class 混進遊戲 package
 Copy-Item "$R\work\out\AgentLoadCheck.class" "$R\work\agentcheck\" -Force
 $agentJar = "-javaagent:$R\dist\mdc-javapatch-agent.jar"
@@ -219,6 +219,33 @@ New-Item -ItemType Directory -Force $mismatchDir | Out-Null
 Copy-Item $TJ "$mismatchDir\projectzomboid.jar" -Force
 java -Xverify:all $agentJar -cp "$R\work\agentcheck;$mismatchDir\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" disarmed
 Assert-Ok "AgentLoadCheck（遊戲 jar 不是建置基準：不啟用、原版）"
+# helper 定義失敗（故障注入）：已換上的 class 全部還原成原版，不帶著半套修補開服
+java -Xverify:all $agentJar "-Dmdc.agent.testFailDefine=1" -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" restored
+Assert-Ok "AgentLoadCheck（helper 定義失敗：已換上的 class 還原、原版）"
+# 排在前面的另一個 agent 先載入了要換的 class：少換一個就不是整套，不啟用
+$preloadDir = "$R\work\agentcheck\preload"
+New-Item -ItemType Directory -Force $preloadDir | Out-Null
+Copy-Item "$R\work\out\PreloadAgent.class" $preloadDir -Force
+[System.IO.File]::WriteAllText("$preloadDir\manifest.mf", "Premain-Class: PreloadAgent`n", $utf8NoBom)
+jar --create --file "$preloadDir\preload-agent.jar" --manifest "$preloadDir\manifest.mf" -C $preloadDir PreloadAgent.class
+Assert-Ok "jar（PreloadAgent）"
+$firstPatched = ((Get-Content "$R\dist\manifest.txt" | Where-Object { ($_ -split "`t")[1] -ne '-' } | Select-Object -First 1) -split "`t")[0]
+$preloadClass = $firstPatched.Substring(0, $firstPatched.Length - '.class'.Length).Replace('/', '.')
+java -Xverify:all "-javaagent:$preloadDir\preload-agent.jar=$preloadClass" $agentJar -cp "$R\work\agentcheck;$R\work\projectzomboid.jar" AgentLoadCheck "$R\dist\manifest.txt" disarmed
+Assert-Ok "AgentLoadCheck（別的 agent 先載入 $preloadClass：不啟用、原版）"
+# classpath 的資料夾裡有會蓋掉修補的 loose class（舊版 loose-class 安裝的殘留）：不啟用。
+# 資料夾排在 jar 後面：檢查只看檔案在不在，簽章 package 的 loose 檔真的被載入會 SecurityException
+$looseOwn = "$R\work\agentcheck\loose-own"
+$loosePatched = "$R\work\agentcheck\loose-patched"
+Remove-Item -Recurse -Force $looseOwn, $loosePatched -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$looseOwn\zombie\mdc" | Out-Null
+[System.IO.File]::WriteAllBytes("$looseOwn\zombie\mdc\RetiredHelper.class", [byte[]](1, 2, 3))
+java -Xverify:all $agentJar -cp "$R\work\agentcheck;$R\work\projectzomboid.jar;$looseOwn" AgentLoadCheck "$R\dist\manifest.txt" disarmed
+Assert-Ok "AgentLoadCheck（classpath 資料夾有 zombie/mdc 的 loose class：不啟用、原版）"
+New-Item -ItemType Directory -Force (Split-Path "$loosePatched\$firstPatched") | Out-Null
+[System.IO.File]::WriteAllBytes("$loosePatched\$firstPatched", [byte[]](1, 2, 3))
+java -Xverify:all $agentJar -cp "$R\work\agentcheck;$R\work\projectzomboid.jar;$loosePatched" AgentLoadCheck "$R\dist\manifest.txt" disarmed
+Assert-Ok "AgentLoadCheck（classpath 資料夾有與手術 class 同名的 loose 檔：不啟用、原版）"
 
 Write-Host "[6/10] JVMS 資料流驗證（CheckClassAdapter）..."
 java -cp "$R\work\out;$ASM_CP" BytecodeVerify "$R\dist\java" "$TJ" "$R\dist\manifest.txt"

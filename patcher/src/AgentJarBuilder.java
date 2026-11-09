@@ -101,6 +101,7 @@ public final class AgentJarBuilder {
         Map<String, Set<String>> jarPackages = new TreeMap<>();
         readJar(baseJar, jarHeaders, jarPackages);
         Mod mod = readModule(new Mod("", "", List.of()), distJava, manifestPath);
+        checkShapes(baseJar, mod);
         Set<String> patched = mod.patchedSha.keySet();
 
         Set<String> defineSet = new TreeSet<>();
@@ -172,6 +173,7 @@ public final class AgentJarBuilder {
                 }
             }
             mods.add(readModule(new Mod(f[0], f[1].equals("-") ? "" : f[1], requires), Path.of(f[3]), Path.of(f[4])));
+            checkShapes(baseJar, mods.get(mods.size() - 1));
         }
         if (mods.isEmpty()) {
             throw new IllegalStateException("模組表是空的");
@@ -303,6 +305,47 @@ public final class AgentJarBuilder {
         return mod;
     }
 
+    /**
+     * 手術後的 class 與原版的「形狀」（修飾字、父型別、介面、欄位、方法的名稱與簽章）必須相同：agent 定義 helper 失敗時
+     * 靠 {@code retransformClasses} 把換上的 class 還原成原版，JVM 不接受形狀不同的重新定義。
+     */
+    static void checkShapes(Path baseJar, Mod mod) throws IOException {
+        try (ZipFile zf = new ZipFile(baseJar.toFile())) {
+            for (String internal : mod.patchedSha.keySet()) {
+                ZipEntry entry = zf.getEntry(internal + ".class");
+                if (entry == null) {
+                    throw new IllegalStateException("基準 jar 沒有 " + internal);
+                }
+                String vanilla = shape(zf.getInputStream(entry).readAllBytes());
+                String patched = shape(mod.bytes.get(internal));
+                if (!vanilla.equals(patched)) {
+                    throw new IllegalStateException(internal + " 手術後的形狀與原版不同（agent 失敗時無法還原）：\n原版 "
+                            + vanilla + "\n手術 " + patched);
+                }
+            }
+        }
+    }
+
+    static String shape(byte[] bytes) {
+        ClassReader cr = new ClassReader(bytes);
+        Set<String> members = new TreeSet<>();
+        cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+            @Override
+            public org.objectweb.asm.FieldVisitor visitField(int access, String name, String desc, String sig, Object value) {
+                members.add("F " + access + " " + name + " " + desc);
+                return null;
+            }
+
+            @Override
+            public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc, String sig,
+                                                               String[] exceptions) {
+                members.add("M " + access + " " + name + desc);
+                return null;
+            }
+        }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+        return cr.getAccess() + " " + cr.getSuperName() + " " + List.of(cr.getInterfaces()) + " " + members;
+    }
+
     /** 錨點：同 package 的原版 class，先挑沒被修補的頂層 class。 */
     static Map<String, String> anchors(Set<String> vanillaPackageHelpers, Map<String, Set<String>> jarPackages,
                                        Set<String> patched) {
@@ -355,7 +398,7 @@ public final class AgentJarBuilder {
         main.put(Attributes.Name.MANIFEST_VERSION, "1.0");
         main.put(new Attributes.Name("Premain-Class"), "zombie.mdc.MdcAgent");
         main.put(new Attributes.Name("Can-Redefine-Classes"), "false");
-        main.put(new Attributes.Name("Can-Retransform-Classes"), "false");
+        main.put(new Attributes.Name("Can-Retransform-Classes"), "true");   // 只用來在定義 helper 失敗時還原成原版
         main.put(Attributes.Name.IMPLEMENTATION_TITLE, title);
         main.put(Attributes.Name.IMPLEMENTATION_VERSION, version);
 

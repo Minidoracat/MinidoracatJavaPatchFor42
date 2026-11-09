@@ -281,6 +281,8 @@ foreach ($variant in @('client-fixes-standard', 'client-fixes-lowmem', 'client-f
 }
 Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'armed'
 Invoke-AgentLoadCheck 'core,client-fixes-standard' @('core', 'client-fixes-standard') 'off' -JvmArgs @('-Dmdc.agent=off')
+# helper 定義失敗（故障注入）：已換上的 class 全部還原成原版
+Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'restored' -JvmArgs @('-Dmdc.agent.testFailDefine=1')
 # 遊戲更新的情境：classpath 上的 projectzomboid.jar 不是建置基準（拿 bytes 不同的測試 jar 改名頂替）
 $mismatchDir = Join-Path $R 'work/agent-mismatch-client'
 New-Item -ItemType Directory -Path $mismatchDir -Force | Out-Null

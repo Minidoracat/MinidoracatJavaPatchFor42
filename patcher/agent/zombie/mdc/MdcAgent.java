@@ -21,6 +21,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -32,11 +33,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 保留官方的 ProtectionDomain。放在原版 package 的 helper 用 {@code MethodHandles.Lookup.defineClass} 以同 package
  * 的原版 class 為錨定義（同一個 ProtectionDomain）；其餘 helper 在我們自己的 package，直接從 agent jar 載入。
  *
- * <p><b>全有或全無</b>：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對，才註冊 transformer；任何一步不符
- * 就一個 class 都不換（原版遊戲），且不讓開服失敗——premain 丟例外會讓 JVM 直接結束。遊戲更新換了 jar 就不會啟用，
- * 沒有「新 jar＋舊修補」混跑。transformer 註冊後才定義原版 package 的 helper：錨點與 helper 的父型別（例如封包都實作
- * 被修補的 {@code INetworkPacket}）會在定義時載入，必須已經換得到。定義失敗時移除 transformer 並列出已換上的 class
- * （jar 已逐位元比對過建置基準、建置期 {@code AgentLoadCheck} 以同一個 jar 跑過同一段，實際上不會發生）。
+ * <p><b>全有或全無</b>：遊戲 jar 的 SHA-256 等於建置基準、payload 每一項的 SHA 都對、要換的 class 一個都還沒被載入，
+ * 才註冊 transformer；任何一步不符就一個 class 都不換（原版遊戲），且不讓開服失敗——premain 丟例外會讓 JVM 直接結束。
+ * 遊戲更新換了 jar 就不會啟用，沒有「新 jar＋舊修補」混跑。transformer 註冊後才定義原版 package 的 helper：錨點與
+ * helper 的父型別（例如封包都實作被修補的 {@code INetworkPacket}）會在定義時載入，必須已經換得到。定義失敗時移除
+ * transformer，再以 {@code retransformClasses} 把已換上的 class 還原成原版（手術不改 class 的欄位、方法與繼承，
+ * 建置期 {@code AgentJarBuilder} 逐 class 檢查），回到原版遊戲；連還原都失敗才結束 JVM（exit 78），不帶著半套修補開服。
  *
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
  *
@@ -55,6 +57,7 @@ public final class MdcAgent {
     private static volatile int armedClasses;
     private static final AtomicInteger APPLIED = new AtomicInteger();
     private static final AtomicInteger MISMATCHED = new AtomicInteger();
+    private static final AtomicInteger RESTORED = new AtomicInteger();
 
     private MdcAgent() {
     }
@@ -71,7 +74,22 @@ public final class MdcAgent {
     /** 給驗證與診斷用：armed／off／disarmed 的狀態、換上的 class 數與選的模組。 */
     public static String status() {
         return state + " patched=" + armedClasses + " applied=" + APPLIED.get() + " mismatched=" + MISMATCHED.get()
-                + " modules=" + selectedModules;
+                + " restored=" + RESTORED.get() + " modules=" + selectedModules;
+    }
+
+    /** armed＝整套修補已啟用；其餘（off／disarmed／not loaded）＝原版。 */
+    public static String state() {
+        return state;
+    }
+
+    /** 這次啟用的模組（逗號分隔；伺服器的 jar 沒有模組，回空字串）。 */
+    public static String modules() {
+        return selectedModules;
+    }
+
+    /** 該換卻沒換上的 class 數（載入的 bytes 不是建置基準）；不是 0 代表修補不完整。 */
+    public static int mismatched() {
+        return MISMATCHED.get();
     }
 
     static void arm(String args, Instrumentation inst) throws IOException, ReflectiveOperationException {
@@ -133,11 +151,34 @@ public final class MdcAgent {
             defines.add(bytes);
         }
 
-        // transformer 先註冊：錨點與 helper 的父型別在定義 helper 時載入，被修補的要換得到
+        // classpath 的資料夾排在 agent jar 前面：同名的 loose 檔會蓋掉 helper 或讓該換的 class 換不上
+        Set<String> names = new java.util.HashSet<>(patched.keySet());
+        for (Entry e : defineEntries) {
+            names.add(e.name());
+        }
+        String loose = shadowingLooseClass(names);
+        if (loose != null) {
+            disarm("loose class " + loose + " on the class path shadows the patch (left over from an older install?"
+                    + " move it away)");
+            return;
+        }
         ClassLoader app = ClassLoader.getSystemClassLoader();
+        // 已經載入的 class 換不到（例如排在前面的另一個 -javaagent 先碰了它）：少換一個就不是整套，寧可不啟用
+        for (Class<?> c : inst.getAllLoadedClasses()) {
+            if (c.getClassLoader() == app && patched.containsKey(c.getName().replace('.', '/'))) {
+                disarm("class " + c.getName() + " was loaded before the agent (another -javaagent listed first?)");
+                return;
+            }
+        }
+        if (!inst.isRetransformClassesSupported()) {
+            disarm("this JVM cannot retransform classes (no way back if defining helpers fails)");
+            return;
+        }
+        // transformer 先註冊：錨點與 helper 的父型別在定義 helper 時載入，被修補的要換得到。
+        // canRetransform=true：定義 helper 失敗時靠 retransform 還原；別的 agent 之後 retransform 這些 class 時也照樣換上。
         Swap swap = new Swap(app, patched);
         armedClasses = patched.size();
-        inst.addTransformer(swap, false);
+        inst.addTransformer(swap, true);
         Map<String, MethodHandles.Lookup> lookups = new HashMap<>();
         try {
             // 建置期排好的順序：依賴的模組在前、父型別在前。Lookup.defineClass 定義後立刻連結，驗證時要載入的 helper
@@ -166,7 +207,7 @@ public final class MdcAgent {
                         it.remove();
                     } catch (NoClassDefFoundError e) {
                         last = e;
-                        if (defined(app, name)) {
+                        if (defined(inst, app, name)) {
                             it.remove();
                         }
                     }
@@ -175,12 +216,40 @@ public final class MdcAgent {
                     throw last;
                 }
             }
+            if (System.getProperty("mdc.agent.testFailDefine") != null) {
+                // 建置期故障注入（AgentLoadCheck restored）：helper 全定義完、換上的 class 最多的時候失敗
+                throw new LinkageError("fault injection (-Dmdc.agent.testFailDefine)");
+            }
         } catch (Throwable t) {
+            // 還原：transformer 切到還原模式後 retransform，JVM 把原始 bytes 再交給它一次；它核對 SHA 是建置基準、回 null
+            // （不換），已換上的 class 就回到原版。定義成功的 helper 沒有人引用。核對數不等於換上的數＝還原不完整。
+            Set<String> swapped = Set.of();
+            try {
+                swap.restoring = true;
+                swapped = swap.applied();
+                List<Class<?>> classes = new ArrayList<>();
+                for (String n : swapped) {
+                    classes.add(Class.forName(n.replace('/', '.'), false, app));
+                }
+                if (!classes.isEmpty()) {
+                    inst.retransformClasses(classes.toArray(new Class<?>[0]));
+                }
+                if (!swap.restored().equals(swapped)) {
+                    throw new IllegalStateException("restored " + swap.restored().size() + " of " + swapped.size());
+                }
+            } catch (Throwable r) {
+                state = "partial";
+                say("FATAL: defining helpers failed (" + t + ") and restoring the swapped classes failed (" + r + "): "
+                        + swapped + " -- refusing to run half patched (exit 78); start without the agent"
+                        + " (-Dmdc.agent=off or uninstall.sh)");
+                System.exit(78);
+            }
             inst.removeTransformer(swap);
-            state = "partial";
-            say("PARTIAL: defining helpers failed (" + t + "); transformer removed, but " + APPLIED.get()
-                    + " classes were already patched: " + swap.appliedNames()
-                    + " -- RESTART WITHOUT THE AGENT (-Dmdc.agent=off or uninstall.sh)");
+            RESTORED.set(swapped.size());
+            APPLIED.set(0);
+            armedClasses = 0;
+            selectedModules = "-";
+            disarm("defining helpers failed (" + t + "); " + swapped.size() + " swapped classes restored to vanilla");
             return;
         }
         state = "armed";
@@ -189,14 +258,18 @@ public final class MdcAgent {
                 + "agent " + index.version + " built " + index.built + "; jar sha256 " + live.substring(0, 8));
     }
 
-    /** class 已經在 app loader 裡（定義成功但連結失敗的也算）。只載入、不初始化。 */
-    private static boolean defined(ClassLoader app, String internalName) {
-        try {
-            Class.forName(internalName.replace('/', '.'), false, app);
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
+    /**
+     * class 已經定義在 app loader 裡（定義成功但連結失敗的也算）。只看 JVM 已載入的清單，不用 {@code Class.forName}：
+     * 那會照 classpath 去找，遊戲資料夾若有同名的舊 loose 檔就會被載入、當成「已定義」。
+     */
+    private static boolean defined(Instrumentation inst, ClassLoader app, String internalName) {
+        String name = internalName.replace('/', '.');
+        for (Class<?> c : inst.getInitiatedClasses(app)) {
+            if (c.getName().equals(name)) {
+                return true;
+            }
         }
+        return false;
     }
 
     private static void disarm(String reason) {
@@ -207,6 +280,42 @@ public final class MdcAgent {
     static void say(String message) {
         System.out.println("[mdc-agent] " + message);
         System.out.flush();
+    }
+
+    /**
+     * classpath 的資料夾裡會蓋掉修補的 loose class：與要換、要定義的 class 同名的檔，或我方 package {@code zombie/mdc}
+     * 底下任何 .class（舊版 loose-class 安裝的殘留）。沒有就回 null。
+     */
+    static String shadowingLooseClass(Set<String> names) throws IOException {
+        for (String entry : System.getProperty("java.class.path", "").split(java.io.File.pathSeparator)) {
+            if (entry.endsWith("*")) {
+                continue;   // dir/* 只收 jar
+            }
+            Path dir;
+            try {
+                dir = Path.of(entry.isEmpty() ? "." : entry);
+            } catch (java.nio.file.InvalidPathException e) {
+                continue;
+            }
+            if (!Files.isDirectory(dir)) {
+                continue;
+            }
+            for (String n : names) {
+                if (Files.exists(dir.resolve(n + ".class"))) {
+                    return dir.resolve(n + ".class").toString();
+                }
+            }
+            Path own = dir.resolve("zombie/mdc");
+            if (Files.isDirectory(own)) {
+                try (java.util.stream.Stream<Path> s = Files.walk(own)) {
+                    java.util.Optional<Path> first = s.filter(p -> p.toString().endsWith(".class")).findFirst();
+                    if (first.isPresent()) {
+                        return first.get().toString();
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /** classpath 上第一個名為 projectzomboid.jar 的項目（相對路徑以工作目錄為準，同 JVM 的解讀）。 */
@@ -368,25 +477,46 @@ public final class MdcAgent {
         private final Map<String, Payload> table;
 
         private final java.util.Set<String> appliedNames = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private final java.util.Set<String> restoredNames = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        /** 還原模式：一個都不換；retransform 交來的原始 bytes 對過 SHA 就記為已還原。 */
+        volatile boolean restoring;
 
         Swap(ClassLoader app, Map<String, Payload> table) {
             this.app = app;
             this.table = table;
         }
 
-        String appliedNames() {
-            return new java.util.TreeSet<>(appliedNames).toString();
+        /** 換上過的 class（內部名稱，排序）。 */
+        Set<String> applied() {
+            return new java.util.TreeSet<>(appliedNames);
+        }
+
+        Set<String> restored() {
+            return new java.util.TreeSet<>(restoredNames);
         }
 
         @Override
         public byte[] transform(Module module, ClassLoader loader, String className, Class<?> redefined,
                                 ProtectionDomain pd, byte[] original) {
-            if (className == null || redefined != null || loader != app) {
+            if (className == null || loader != app) {
                 return null;
             }
             Payload p = table.get(className);
             if (p == null) {
                 return null;
+            }
+            if (restoring) {
+                try {
+                    if (redefined != null && sha256(original).equals(p.origSha())) {
+                        restoredNames.add(className);
+                    }
+                } catch (Throwable ignored) {
+                    // 沒記到＝還原數不符，由 arm() 判失敗
+                }
+                return null;
+            }
+            if (redefined != null && appliedNames.contains(className)) {
+                return p.bytes();   // 別的 agent retransform 已換上的 class：照樣給同一份，整套修補不因此少一個
             }
             try {
                 if (!sha256(original).equals(p.origSha())) {
@@ -400,8 +530,9 @@ public final class MdcAgent {
                 MISMATCHED.incrementAndGet();
                 return null;
             }
-            APPLIED.incrementAndGet();
-            appliedNames.add(className);
+            if (appliedNames.add(className)) {
+                APPLIED.incrementAndGet();
+            }
             return p.bytes();
         }
     }

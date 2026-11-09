@@ -85,9 +85,23 @@ public final class MdcPatchRuntimeTest {
                 throw new AssertionError("game folder not found from the agent jar inside it");
             }
 
+            // agent 健康狀態：只有 armed 且沒有換不上的 class 才回模組；其餘一律拒絕（compatible=false）
+            if (!MdcPatchRuntime.agentModules("armed", "core,client-fixes-compat", 0).equals(compat)) {
+                throw new AssertionError("armed agent modules not parsed");
+            }
+            for (Object[] bad : new Object[][]{{"disarmed", "-", 0}, {"partial", "core", 0}, {"off", "-", 0},
+                    {"not loaded", "-", 0}, {"armed", "core", 1}}) {
+                try {
+                    MdcPatchRuntime.agentModules((String) bad[0], (String) bad[1], (Integer) bad[2]);
+                } catch (IllegalStateException expected) {
+                    continue;
+                }
+                throw new AssertionError("accepted agent state " + bad[0] + " mismatched=" + bad[2]);
+            }
+
             save(root, good);
             if (MdcPatchRuntime.readInstallation(root, agentJar, CORE).size() != 1) throw new AssertionError("restored install rejected");
-            System.out.println("PASS runtime installation: valid/restored install, core+compat, game folder from the agent jar; 15 fail-closed boundaries");
+            System.out.println("PASS runtime installation: valid/restored install, core+compat, game folder from the agent jar; 15 fail-closed boundaries; agent must be armed with nothing unpatched");
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);

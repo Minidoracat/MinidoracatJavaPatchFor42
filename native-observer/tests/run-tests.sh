@@ -291,6 +291,17 @@ jg_check "agent gate: matching install -> ARMED, game JVM gets -javaagent" 0 \
 gate_run exec JAVA_TOOL_OPTIONS="-javaagent:/old/mdc-javapatch-agent.jar -Dfoo=1"
 jg_check "agent gate: inherited options kept, stale copy of this agent dropped" 0 \
     "^JTO=\[-javaagent:${ag_jar} -Dfoo=1\] " ag_kept
+gate_run exec JAVA_TOOL_OPTIONS="\"-javaagent:/old dir/mdc-javapatch-agent.jar\" -Dfoo=1"
+jg_check "agent gate: inherited value names this agent inside quotes -> whole inherited value dropped" 0 \
+    "^JTO=\[-javaagent:${ag_jar}\] " eval 'grep -q "WARNING: inherited JAVA_TOOL_OPTIONS names mdc-javapatch-agent inside quotes" "${log}"'
+gate_run exec JAVA_TOOL_OPTIONS="\"-Dbar=a b\" -Dfoo=1"
+jg_check "agent gate: quoted inherited option without this agent is kept as is" 0 \
+    "^JTO=\[-javaagent:${ag_jar} \"-Dbar=a b\" -Dfoo=1\] " ag_kept
+ag_spaced="${gate_root}/agent dir"
+mkdir -p "${ag_spaced}"; cp "${ag_jar}" "${ag_dir}/agent-manifest.txt" "${ag_spaced}/"
+gate_run exec PFG_AGENT_DIR="${ag_spaced}" JAVA_TOOL_OPTIONS="-Dfoo=1"
+jg_check "agent gate: agent path with whitespace -> DISARMED, never passed" 0 \
+    'AGENT DISARMED: agent jar path has whitespace or quotes' eval 'grep -q "^JTO=\[-Dfoo=1\] " "${log}"'
 jg_jar 'zombie/A.class=orig-A-42.23'
 gate_run exec JAVA_TOOL_OPTIONS="-javaagent:${ag_jar} -Dfoo=1"
 jg_check "agent gate: game jar updated -> DISARMED, vanilla JVM, files stay" 0 \

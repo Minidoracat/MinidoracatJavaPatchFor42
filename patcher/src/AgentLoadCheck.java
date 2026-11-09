@@ -15,23 +15,31 @@ import java.util.Set;
  *   <li>{@code armed}：agent 狀態 armed；manifest 每個 class（手術後的與 helper）都載得起來、連結（強制驗證）不出錯；
  *       手術後的 class 與原版 package 的 helper 仍帶官方簽章者（沒有 SecurityException 的前提），且換上的數目等於
  *       手術 class 數；官方 {@code IntegrityReport} 判 jar 為原版、agent 數 1（我們不改 jar、也不藏 agent）。</li>
- *   <li>{@code disarmed}：遊戲 jar 不是建置基準（拿測試 jar 跑）→ 一個 class 都不換，手術 class 以原版載入。</li>
- *   <li>{@code off}：{@code -Dmdc.agent=off} → 同上。</li>
+ *   <li>{@code disarmed}：遊戲 jar 不是建置基準（拿測試 jar 跑），或排在前面的另一個 agent 先載入了要換的 class
+ *       → 一個 class 都不換，手術 class 以原版載入。</li>
+ *   <li>{@code restored}：{@code -Dmdc.agent.testFailDefine=1} 讓 helper 定義完才失敗 → 已換上的 class（至少 1 個）
+ *       全部還原，狀態 disarmed、換上數 0，手術 class 都還載得起來、連結不出錯。</li>
+ *   <li>{@code off}：{@code -Dmdc.agent=off} → 同 disarmed。</li>
  * </ul>
  *
- * <p>用法：{@code java -Xverify:all -javaagent:<agent jar>[=modules=...] -cp <本工具>;<jar> AgentLoadCheck <manifest> armed|disarmed|off}
+ * <p>用法：{@code java -Xverify:all -javaagent:<agent jar>[=modules=...] -cp <本工具>;<jar> AgentLoadCheck <manifest> armed|disarmed|restored|off}
  */
 public final class AgentLoadCheck {
 
     public static void main(String[] args) throws Exception {
         Path manifest = Path.of(args[0]);
         String expect = args[1];
+        String expectState = expect.equals("restored") ? "disarmed" : expect;
         ClassLoader app = ClassLoader.getSystemClassLoader();
         Class<?> agent = Class.forName("zombie.mdc.MdcAgent", true, app);
         Method status = agent.getMethod("status");
         String before = (String) status.invoke(null);
-        if (!before.startsWith(expect + " ")) {
-            throw new AssertionError("agent 狀態應為 " + expect + "，實得：" + before);
+        if (!before.startsWith(expectState + " ")) {
+            throw new AssertionError("agent 狀態應為 " + expectState + "，實得：" + before);
+        }
+        int restored = Integer.parseInt(before.replaceAll(".*restored=(\\d+).*", "$1"));
+        if (expect.equals("restored") ? restored == 0 : restored != 0) {
+            throw new AssertionError("還原的 class 數不符（" + expect + "）：" + before);
         }
 
         // agent 以 Lookup.defineClass 定義的 helper 從 agent index 讀；錨點是原版 class 的才有官方簽章者

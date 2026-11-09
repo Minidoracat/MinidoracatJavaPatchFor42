@@ -128,7 +128,7 @@ if [[ -e "${patch_manifest}" || -L "${patch_manifest}" ]]; then
 else
     loose_total="$(javagate_loose_count)"
     (( loose_total == 0 )) \
-        || javagate_say "WARNING: ${loose_total} loose .class files under ${java_dir}/zombie but no patch-manifest.txt -- not verified, not moved"
+        || javagate_say "WARNING: ${loose_total} loose .class files under ${java_dir}/zombie but no patch-manifest.txt -- not verified, not moved. The signed jar (42.22+) makes the JVM throw SecurityException when one of them loads into a game package, and the patch agent stays off (DISARMED, vanilla) while any of them shadows a class it patches or sits in zombie/mdc"
 fi
 
 # ---- Java agent startup gate (added 2026-11-10 for PZ 42.22's signed jar) ---------------------------
@@ -141,11 +141,19 @@ fi
 # Any mismatch launches vanilla Java and leaves the files where they are: without the flag they are inert.
 # The agent re-checks the jar itself and stays vanilla on a mismatch. An inherited JAVA_TOOL_OPTIONS keeps
 # its other options but loses any -javaagent naming this agent, so a DISARMED launch cannot carry it in.
+# The JVM splits JAVA_TOOL_OPTIONS on whitespace and honours quotes; this script only splits on whitespace.
+# So an inherited value that names this agent inside quotes is dropped whole (it cannot be cut out safely),
+# and an agent path with whitespace or quotes is never passed (DISARMED).
 agent_dir="${PFG_AGENT_DIR:-${serverfiles}/mdc-javapatch}"
 agent_jar="${agent_dir}/mdc-javapatch-agent.jar"
 agent_manifest="${agent_dir}/agent-manifest.txt"
 java_tool_options=""
-read -r -a inherited_jto <<<"${JAVA_TOOL_OPTIONS:-}"   # whitespace split, no globbing
+inherited_jto_raw="${JAVA_TOOL_OPTIONS:-}"
+if [[ "${inherited_jto_raw}" == *mdc-javapatch-agent* && "${inherited_jto_raw}" == *[\"\']* ]]; then
+    javagate_say "WARNING: inherited JAVA_TOOL_OPTIONS names mdc-javapatch-agent inside quotes -- dropping the whole inherited value"
+    inherited_jto_raw=""
+fi
+read -r -a inherited_jto <<<"${inherited_jto_raw}"   # whitespace split, no globbing
 for opt in "${inherited_jto[@]}"; do
     [[ "${opt}" == -javaagent:*mdc-javapatch-agent* ]] && continue
     java_tool_options="${java_tool_options:+${java_tool_options} }${opt}"
@@ -154,6 +162,8 @@ done
 # Prints a short status and returns 0 when both gates pass; prints the reason otherwise.
 agentgate_verify() {
     local key value agent_sha="" base_sha="" live
+    [[ ! "${agent_jar}" =~ [[:space:]\"\'] ]] \
+        || { printf 'agent jar path has whitespace or quotes (cannot be passed in JAVA_TOOL_OPTIONS): %s' "${agent_jar}"; return 1; }
     [[ -f "${agent_manifest}" && -r "${agent_manifest}" ]] \
         || { printf 'agent manifest unreadable: %s' "${agent_manifest}"; return 1; }
     while IFS=$'\t' read -r key value || [[ -n "${key}" ]]; do
