@@ -124,8 +124,8 @@ public final class VehicleClampGuardBehaviorTest {
 
     /** 進入夾回區塊前的車：x、y＝物理位置（原版先從 jniTransform 回寫）、z＝0、chunk 指著 stored。 */
     static BaseVehicle vehicle(float x, float y, IsoChunk stored) throws Exception {
-        BaseVehicle car = TreeRoomGuardBehaviorTest.alloc(BaseVehicle.class);
-        TreeRoomGuardBehaviorTest.set(BaseVehicle.class, car, "jniTransform", new Transform());
+        BaseVehicle car = TestObjects.alloc(BaseVehicle.class);
+        TestObjects.set(BaseVehicle.class, car, "jniTransform", new Transform());
         car.jniTransform.origin.set(x - OFFSET_X, 0.35F, y - OFFSET_Y);
         car.chunk = stored;
         car.setX(x);
@@ -135,19 +135,19 @@ public final class VehicleClampGuardBehaviorTest {
     }
 
     static void world() throws Exception {
-        IsoCell cell = TreeRoomGuardBehaviorTest.alloc(IsoCell.class);
-        IsoWorld world = TreeRoomGuardBehaviorTest.alloc(IsoWorld.class);
+        IsoCell cell = TestObjects.alloc(IsoCell.class);
+        IsoWorld world = TestObjects.alloc(IsoWorld.class);
         world.currentCell = cell;
         IsoWorld.instance = world;
-        map = TreeRoomGuardBehaviorTest.alloc(IsoChunkMap.class);
+        map = TestObjects.alloc(IsoChunkMap.class);
         int slots = IsoChunkMap.chunkGridWidth * IsoChunkMap.chunkGridWidth;
-        TreeRoomGuardBehaviorTest.set(IsoChunkMap.class, map, "chunksSwapA", new IsoChunk[slots]);
-        TreeRoomGuardBehaviorTest.set(IsoChunkMap.class, map, "chunksSwapB", new IsoChunk[slots]);
+        TestObjects.set(IsoChunkMap.class, map, "chunksSwapA", new IsoChunk[slots]);
+        TestObjects.set(IsoChunkMap.class, map, "chunksSwapB", new IsoChunk[slots]);
         map.worldX = 246;
         map.worldY = 378;
         IsoChunkMap[] maps = new IsoChunkMap[4];
         maps[0] = map;
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "chunkMap", maps);
+        TestObjects.set(IsoCell.class, cell, "chunkMap", maps);
         WorldSimulation.instance.offsetX = OFFSET_X;
         WorldSimulation.instance.offsetY = OFFSET_Y;
     }

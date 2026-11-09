@@ -5,103 +5,89 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.Set;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import se.krka.kahlua.vm.LuaClosure;
 
-/** 啟動狀態不得把缺檔、變造、版本錯誤或路徑越界標成已安裝。 */
+/**
+ * 啟動狀態不得把缺檔、變造、版本錯誤、路徑越界或與 agent 實際啟用的模組不符標成已安裝。
+ * 遊戲 jar 取 {@code -Dmdc.baseJar}（建置基準；行為測試的 classpath 是拿掉簽章的測試 jar，SHA 不同），沒給就用 classpath 上那份。
+ */
 public final class MdcPatchRuntimeTest {
+    private static final Set<String> CORE = Set.of("core");
+
     public static void main(String[] args) throws Exception {
         Path root = Files.createTempDirectory("mdc-runtime-state-");
-        Path outside = Files.createTempFile(root.getParent(), "mdc-outside-", ".class");
+        Path outside = Files.createTempFile(root.getParent(), "mdc-outside-", ".jar");
         try {
-            Path jar = Path.of(LuaClosure.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            String base = System.getProperty("mdc.baseJar");
+            Path jar = base != null ? Path.of(base)
+                    : Path.of(LuaClosure.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Files.copy(jar, root.resolve("projectzomboid.jar"));
-            byte[] payload;
-            try (var in = MdcPatchRuntime.class.getResourceAsStream("MdcPatchRuntime.class")) {
-                if (in == null) throw new AssertionError("missing real runtime class");
-                payload = in.readAllBytes();
-            }
-            String relative = "zombie/mdc/MdcPatchRuntime.class";
-            Path installed = root.resolve(relative);
-            Files.createDirectories(installed.getParent());
-            Files.write(installed, payload);
+            byte[] payload = {0x50, 0x4b, 3, 4, 42};
+            Path agentJar = root.resolve(MdcPatchRuntime.AGENT_REL);
+            Files.createDirectories(agentJar.getParent());
+            Files.write(agentJar, payload);
             Files.write(outside, payload);
-            JSONObject good = state(relative, hash(payload));
+            JSONObject good = state(MdcPatchRuntime.AGENT_REL, hash(payload));
             save(root, good);
-            if (MdcPatchRuntime.readInstallation(root).size() != 1) throw new AssertionError("valid package rejected");
+            if (MdcPatchRuntime.readInstallation(root, agentJar, CORE).size() != 1) throw new AssertionError("valid install rejected");
 
-            Path hook = root.resolve("se/krka/kahlua/integration/LuaCaller.class");
-            Files.createDirectories(hook.getParent());
-            try (var in = LuaClosure.class.getClassLoader().getResourceAsStream("se/krka/kahlua/integration/LuaCaller.class")) {
-                if (in == null) throw new AssertionError("missing real LuaCaller class");
-                Files.copy(in, hook);
-            }
             Path journal = root.resolve(".mdc-patches/journal.json");
-            Files.writeString(journal, new JSONObject().put("schemaVersion", 1)
-                    .put("txId", "20260910_120000-abcdef12").put("committed", false)
-                    .put("entries", new JSONArray().put(new JSONObject()
-                            .put("path", "se/krka/kahlua/integration/LuaCaller.class").put("backup", JSONObject.NULL)))
-                    .put("createdDirs", new JSONArray()).toString());
-            reject(root, good, "pending transaction with uncommitted hook");
+            Files.writeString(journal, new JSONObject().put("schemaVersion", 1).put("txId", "0123456789ab")
+                    .put("committed", false).put("entries", new JSONArray()).toString());
+            reject(root, agentJar, CORE, good, "pending transaction");
             Files.delete(journal);
-            Files.delete(hook);
 
-            Files.write(installed, new byte[]{1, 2, 3});
-            reject(root, good, "modified payload");
-            Files.delete(installed);
-            reject(root, good, "missing payload");
-            Files.write(installed, payload);
+            Files.write(agentJar, new byte[]{1, 2, 3});
+            reject(root, agentJar, CORE, good, "modified agent jar");
+            Files.delete(agentJar);
+            reject(root, agentJar, CORE, good, "missing agent jar");
+            Files.write(agentJar, payload);
 
             JSONObject wrongJar = new JSONObject(good.toString());
             wrongJar.put("jarSha256", "0".repeat(64));
-            reject(root, wrongJar, "wrong game fingerprint");
+            reject(root, agentJar, CORE, wrongJar, "wrong game fingerprint");
+            JSONObject oldSchema = new JSONObject(good.toString()).put("schemaVersion", 1);
+            reject(root, agentJar, CORE, oldSchema, "0.2.x loose-class schema");
 
-            JSONObject traversal = state("zombie/../../" + outside.getFileName(), hash(payload));
-            reject(root, traversal, "path traversal to existing file");
-            JSONObject absolute = state(outside.toString(), hash(payload));
-            reject(root, absolute, "absolute payload path");
+            reject(root, agentJar, CORE, state("zombie/../../" + outside.getFileName(), hash(payload)), "path traversal");
+            reject(root, agentJar, CORE, state(outside.toString(), hash(payload)), "absolute agent path");
+            reject(root, agentJar, CORE, state(".mdc-patches/Other.jar", hash(payload)), "agent jar at another path");
+            reject(root, outside, CORE, good, "helpers loaded from another agent jar");
+            reject(root, agentJar, Set.of("core", "profiler"), good, "agent modules differ from the record");
 
             JSONObject noCore = new JSONObject(good.toString());
             noCore.getJSONArray("modules").getJSONObject(0).put("id", "profiler");
-            reject(root, noCore, "missing core dependency");
+            reject(root, agentJar, Set.of("profiler"), noCore, "missing core dependency");
             JSONObject unknown = new JSONObject(good.toString());
             unknown.getJSONArray("modules").getJSONObject(0).put("id", "foreign-module");
-            reject(root, unknown, "unknown module");
+            reject(root, agentJar, Set.of("foreign-module"), unknown, "unknown module");
             JSONObject duplicate = new JSONObject(good.toString());
             duplicate.getJSONArray("modules").put(new JSONObject(duplicate.getJSONArray("modules").getJSONObject(0).toString()));
-            reject(root, duplicate, "duplicate module");
-
+            reject(root, agentJar, CORE, duplicate, "duplicate module");
             JSONObject oversized = new JSONObject(good.toString()).put("extra", "x".repeat(270_000));
-            reject(root, oversized, "oversized installation state");
+            reject(root, agentJar, CORE, oversized, "oversized installation state");
 
-            Path fixA = root.resolve("zombie/mdc/CompatFixA.class");
-            Path fixB = root.resolve("zombie/mdc/CompatFixB.class");
-            Files.write(fixA, payload);
-            Files.write(fixB, payload);
             JSONObject withCompat = new JSONObject(good.toString());
-            withCompat.getJSONArray("modules").put(variant("client-fixes-compat", "zombie/mdc/CompatFixA.class", hash(payload)));
+            withCompat.getJSONArray("modules").put(module("client-fixes-compat"));
             save(root, withCompat);
-            if (MdcPatchRuntime.readInstallation(root).size() != 2) throw new AssertionError("core + compat variant rejected");
+            Set<String> compat = Set.of("core", "client-fixes-compat");
+            if (MdcPatchRuntime.readInstallation(root, agentJar, compat).size() != 2) throw new AssertionError("core + compat variant rejected");
             JSONObject twoVariants = new JSONObject(withCompat.toString());
-            twoVariants.getJSONArray("modules").put(variant("client-fixes-standard", "zombie/mdc/CompatFixB.class", hash(payload)));
-            reject(root, twoVariants, "two client-fixes variants");
-            Files.delete(fixA);
-            Files.delete(fixB);
+            twoVariants.getJSONArray("modules").put(module("client-fixes-standard"));
+            reject(root, agentJar, Set.of("core", "client-fixes-compat", "client-fixes-standard"), twoVariants, "two client-fixes variants");
 
-            // PZ_Optimization 的 AOT 快取把 loose class 打包進 pzopt/aot/pzopt.jar：從 jar 載入時仍要找到遊戲資料夾的安裝紀錄
-            Path packed = root.resolve("pzopt/aot/pzopt.jar");
-            Files.createDirectories(packed.getParent());
-            Files.write(packed, new byte[]{0});
-            if (!MdcPatchRuntime.gameRoot(packed).equals(root) || !MdcPatchRuntime.gameRoot(root).equals(root)) {
-                throw new AssertionError("game folder not found from a jar inside it");
+            if (!MdcPatchRuntime.gameRoot(agentJar).equals(root) || !MdcPatchRuntime.gameRoot(root).equals(root)) {
+                throw new AssertionError("game folder not found from the agent jar inside it");
             }
 
             save(root, good);
-            if (MdcPatchRuntime.readInstallation(root).size() != 1) throw new AssertionError("restored package rejected");
-            System.out.println("PASS runtime installation: valid/restored package, core+compat, game folder from a packed jar; 11 fail-closed boundaries");
+            if (MdcPatchRuntime.readInstallation(root, agentJar, CORE).size() != 1) throw new AssertionError("restored install rejected");
+            System.out.println("PASS runtime installation: valid/restored install, core+compat, game folder from the agent jar; 15 fail-closed boundaries");
         } finally {
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
@@ -110,17 +96,14 @@ public final class MdcPatchRuntimeTest {
         }
     }
 
-    private static JSONObject state(String path, String sha) {
-        JSONObject file = new JSONObject().put("path", path).put("sha256", sha);
-        JSONObject module = new JSONObject().put("id", "core").put("name", "Core").put("version", "test")
-                .put("files", new JSONArray().put(file));
-        return new JSONObject().put("schemaVersion", 1).put("jarSha256", MdcPatchBuildInfo.JAR_SHA256)
-                .put("packageVersion", "test").put("modules", new JSONArray().put(module));
+    private static JSONObject state(String agentPath, String sha) {
+        return new JSONObject().put("schemaVersion", 2).put("jarSha256", MdcPatchBuildInfo.JAR_SHA256)
+                .put("packageVersion", "test").put("agent", new JSONObject().put("path", agentPath).put("sha256", sha))
+                .put("modules", new JSONArray().put(module("core")));
     }
 
-    private static JSONObject variant(String id, String path, String sha) {
-        return new JSONObject().put("id", id).put("name", id).put("version", "test")
-                .put("files", new JSONArray().put(new JSONObject().put("path", path).put("sha256", sha)));
+    private static JSONObject module(String id) {
+        return new JSONObject().put("id", id).put("name", id).put("version", "test").put("requires", new JSONArray());
     }
 
     private static void save(Path root, JSONObject state) throws IOException {
@@ -129,12 +112,11 @@ public final class MdcPatchRuntimeTest {
         Files.writeString(file, state.toString());
     }
 
-    private static void reject(Path root, JSONObject state, String scenario) throws Exception {
+    private static void reject(Path root, Path agentJar, Set<String> agentModules, JSONObject state, String scenario) throws Exception {
         save(root, state);
         try {
-            MdcPatchRuntime.readInstallation(root);
+            MdcPatchRuntime.readInstallation(root, agentJar, agentModules);
         } catch (Exception expected) {
-            System.out.println("PASS rejected " + scenario);
             return;
         }
         throw new AssertionError("accepted " + scenario);

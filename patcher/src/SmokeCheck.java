@@ -4038,14 +4038,14 @@ public final class SmokeCheck {
     }
 
     /**
-     * Client patch 驗證。相容版（client-compat，PatchConfig.clientCompat）只含 IsoTree、BaseVehicle、VehiclePacket 的修補，
-     * 所以只跑樹與車輛那幾段；PZ_Optimization 也換的 class（貼圖、WorldStreamer、AnimationPlayer、IsoChunk 等）只在完整版驗。
+     * Client patch 驗證。相容版（client-compat，PatchConfig.clientCompat）只含 BaseVehicle、VehiclePacket 的修補，
+     * 所以只跑車輛那幾段；PZ_Optimization 也換的 class（貼圖、WorldStreamer、AnimationPlayer、IsoChunk 等）只在完整版驗。
      */
     static int clientChecks(Path distJava, Path jar, boolean lowmem, boolean compat) throws Exception {
         int failed = compat ? 0 : textureAndStreamChecks(distJava, jar, lowmem);
         failed += check("PatchInfo 版本指紋已生成且四個常數非空（client）",
                 patchInfoOk(distJava, "client"));
-        failed += treeAndVehicleChecks(distJava, jar, compat);
+        failed += vehicleChecks(distJava, jar, compat);
         if (!compat) {
             failed += metaGridLockChecks(distJava, jar);
             failed += bloodSplatChecks(distJava, jar);
@@ -4233,48 +4233,10 @@ public final class SmokeCheck {
         return failed;
     }
 
-    /** 自建房間 XL 樹與車輛（W54、W61–W63、W65）：完整版與相容版都有；W55、W57 只在完整版。 */
-    static int treeAndVehicleChecks(Path distJava, Path jar, boolean compat) throws Exception {
+    /** 車輛（W54、W61–W63、W65）：完整版與相容版都有；W55、W57 只在完整版。 */
+    static int vehicleChecks(Path distJava, Path jar, boolean compat) throws Exception {
         int failed = 0;
-        // ---- 42.21.0 自建房間 XL 樹例外（docs/patches.md 2bl）----
-        // 存在理由兩條：isPlayerInsideARoom 對 getRoom() 的結果不驗 null（TIS 補上檢查時紅＝撤刀），
-        // 以及 IsoGridSquare.isInARoom() 仍含 IsoRegions isPlayerRoom 分支（格子沒有 IsoRoom 也回 true）。
-        String treeCls = "zombie/iso/objects/IsoTree";
         String playerCls = "zombie/characters/IsoPlayer";
-        String squareCls = "zombie/iso/IsoGridSquare";
-        String playerArgDesc = "(L" + playerCls + ";)Z";
-        String treeRenderDesc = "(FFFLzombie/core/textures/ColorInfo;ZZLzombie/core/opengl/Shader;)V";
-        MethodNode vInside = methodFromJar(jar, treeCls, "isPlayerInsideARoom", playerArgDesc);
-        boolean unguardedRoom = false;
-        for (AbstractInsnNode in : vInside.instructions) {
-            if (in instanceof MethodInsnNode mi && mi.owner.equals(squareCls) && mi.name.equals("getRoom")) {
-                unguardedRoom = nextReal(in) instanceof MethodInsnNode next
-                        && next.owner.equals("zombie/iso/areas/IsoRoom") && next.name.equals("getRectsBounds");
-            }
-        }
-        failed += check("自建房間 XL 樹 vanilla 前提：isPlayerInsideARoom 恰一個 isInARoom，getRoom 後直接 getRectsBounds",
-                countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, playerCls, "isInARoom", "()Z") == 1
-                && countExactCalls(vInside, Opcodes.INVOKEVIRTUAL, squareCls, "getRoom",
-                        "()Lzombie/iso/areas/IsoRoom;") == 1
-                && unguardedRoom);
-        failed += check("自建房間 XL 樹 vanilla 前提：IsoGridSquare.isInARoom 含 IsoRegions isPlayerRoom 分支",
-                countExactCalls(methodFromJar(jar, squareCls, "isInARoom", "()Z"), Opcodes.INVOKEINTERFACE,
-                        "zombie/iso/areas/isoregion/regions/IWorldRegion", "isPlayerRoom", "()Z") == 1);
-        MethodNode pInside = method(distJava, treeCls, "isPlayerInsideARoom", playerArgDesc);
-        AbstractInsnNode[] insideHead = firstReal(pInside, 3);
-        failed += check("自建房間 XL 樹改道：aload_1→TreeRoomGuard.isInARoom→ifne，原呼叫歸零、真指令數不變",
-                insideHead[0] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ALOAD && load.var == 1
-                && insideHead[1] instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC
-                        && call.owner.equals("zombie/mdc/TreeRoomGuard") && call.name.equals("isInARoom")
-                        && call.desc.equals("(L" + playerCls + ";)Z")
-                && insideHead[2] != null && insideHead[2].getOpcode() == Opcodes.IFNE
-                && countExactCalls(pInside, Opcodes.INVOKEVIRTUAL, playerCls, "isInARoom", "()Z") == 0
-                && realInsnCount(pInside) == realInsnCount(vInside));
-        failed += check("自建房間 XL 樹負對照：isPlayerCloseToARoom 與 render 未改動",
-                methodText(method(distJava, treeCls, "isPlayerCloseToARoom", playerArgDesc))
-                        .equals(methodText(methodFromJar(jar, treeCls, "isPlayerCloseToARoom", playerArgDesc)))
-                && methodText(method(distJava, treeCls, "render", treeRenderDesc))
-                        .equals(methodText(methodFromJar(jar, treeCls, "render", treeRenderDesc))));
 
         // ---- W54 車輛靜止姿勢跳過（docs/patches.md 2br）----
         // 前提：updateAnimationPlayer 只由 postupdate 呼叫（2 次，車身＋models 迴圈），方法內恰一個 Update 且在

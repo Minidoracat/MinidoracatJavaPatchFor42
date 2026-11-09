@@ -29,8 +29,9 @@ import zombie.ui.UIFont;
 public final class MdcPatchRuntime {
     private static final Set<String> MODULE_IDS = Set.of(
             "core", "profiler", "client-fixes-standard", "client-fixes-lowmem", "client-fixes-compat");
+    /** 安裝器放 agent jar 的固定位置（遊戲資料夾相對、正斜線；Manage-Patches.ps1 的 $AGENT_REL）。 */
+    static final String AGENT_REL = ".mdc-patches/MinidoracatClientPatches.jar";
     private static final long MAX_STATE_BYTES = 262_144;
-    private static final int MAX_FILES = 256;
     private static final MdcLuaBridge BRIDGE = new MdcLuaBridge();
     private static volatile boolean initialized;
     private static volatile boolean fixesObserved;
@@ -58,9 +59,10 @@ public final class MdcPatchRuntime {
             return;
         }
         try {
+            // helper 由 agent 以 MdcAgent 為錨定義（同一個 ProtectionDomain），位置就是 agent jar
             Path location = Path.of(MdcPatchRuntime.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI()).toAbsolutePath().normalize();
-            installedModules = readInstallation(gameRoot(location));
+            installedModules = readInstallation(gameRoot(location), location, agentModules());
             compatible = true;
             stateError = "";
         } catch (Exception e) {
@@ -81,9 +83,18 @@ public final class MdcPatchRuntime {
         }
     }
 
+    /** agent 這次實際啟用的模組（{@code MdcAgent.status()} 的 {@code modules=}）；MdcAgent 不在 helper 的編譯路徑上，用反射。 */
+    static Set<String> agentModules() throws ReflectiveOperationException {
+        String status = (String) Class.forName("zombie.mdc.MdcAgent").getMethod("status").invoke(null);
+        int at = status.indexOf(" modules=");
+        if (at < 0) {
+            throw new IllegalStateException("unexpected agent status: " + clean(status, 120));
+        }
+        return Set.of(status.substring(at + " modules=".length()).trim().split(","));
+    }
+
     /**
-     * 遊戲資料夾。loose class 從 classpath 的 "." 載入時，位置就是遊戲資料夾；別的工具把 loose class 打包進自己的 jar 時
-     * （PZ_Optimization 的 AOT 快取 pzopt/aot/pzopt.jar），位置是那個 jar，往上找第一個有 projectzomboid.jar 的資料夾。
+     * 遊戲資料夾：helper 的位置是 agent jar（{@code <遊戲資料夾>/.mdc-patches/…jar}），往上找第一個有 projectzomboid.jar 的資料夾。
      */
     static Path gameRoot(Path location) {
         for (Path dir = Files.isDirectory(location) ? location : location.getParent(); dir != null; dir = dir.getParent()) {
@@ -94,52 +105,48 @@ public final class MdcPatchRuntime {
         return location;
     }
 
-    /** 只在啟動時讀取、驗證安裝記錄；任何不一致都不能宣稱 compatible。 */
-    static List<Map<String, Object>> readInstallation(Path root) throws Exception {
+    /**
+     * 只在啟動時讀取、驗證安裝記錄；任何不一致都不能宣稱 compatible。{@code agentJar} 是這次載入 helper 的 jar，
+     * 必須就是紀錄裡那一份；{@code agentModules} 是 agent 這次啟用的模組，必須等於紀錄的模組。
+     */
+    static List<Map<String, Object>> readInstallation(Path root, Path agentJar, Set<String> agentModules) throws Exception {
         if (!Files.notExists(root.resolve(".mdc-patches/journal.json"), LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("unfinished installation transaction; close the game and use the patch manager");
         }
-        Path state = safeFile(root, ".mdc-patches/state.json", false);
+        Path state = safeFile(root, ".mdc-patches/state.json");
         if (Files.size(state) > MAX_STATE_BYTES) {
             throw new IOException("installation state is too large");
         }
         JSONObject json = new JSONObject(Files.readString(state));
-        if (json.getInt("schemaVersion") != 1) {
+        if (json.getInt("schemaVersion") != 2) {
             throw new IOException("unsupported installation schema");
         }
         String jarSha = json.getString("jarSha256");
         if (!MdcPatchBuildInfo.JAR_SHA256.equals(jarSha)
-                || !jarSha.equals(sha256(safeFile(root, "projectzomboid.jar", false)))) {
+                || !jarSha.equals(sha256(safeFile(root, "projectzomboid.jar")))) {
             throw new IOException("game version mismatch; close the game and use the patch manager");
+        }
+        JSONObject agent = json.getJSONObject("agent");
+        String agentPath = agent.getString("path");
+        String agentSha = agent.getString("sha256");
+        if (!agentPath.equals(AGENT_REL) || !agentSha.matches("[0-9a-f]{64}")
+                || !agentSha.equals(sha256(safeFile(root, agentPath)))) {
+            throw new IOException("patch file mismatch: " + clean(agentPath, 120));
+        }
+        if (!root.resolve(AGENT_REL).normalize().equals(agentJar.toAbsolutePath().normalize())) {
+            throw new IOException("loaded from another agent jar: " + clean(agentJar.toString(), 120));
         }
         JSONArray modules = json.getJSONArray("modules");
         if (modules.length() == 0 || modules.length() > MODULE_IDS.size()) {
             throw new IOException("invalid installed module count");
         }
-        Set<String> seen = new java.util.HashSet<>();
-        Set<String> ownedPaths = new java.util.HashSet<>();
+        Set<String> seen = new java.util.LinkedHashSet<>();
         List<Map<String, Object>> result = new ArrayList<>();
         for (int i = 0; i < modules.length(); i++) {
             JSONObject module = modules.getJSONObject(i);
             String id = module.getString("id");
             if (!MODULE_IDS.contains(id) || !seen.add(id)) {
                 throw new IOException("invalid or duplicate module: " + clean(id, 60));
-            }
-            JSONArray files = module.getJSONArray("files");
-            if (files.length() == 0) {
-                throw new IOException("module has no payload: " + id);
-            }
-            for (int j = 0; j < files.length(); j++) {
-                JSONObject file = files.getJSONObject(j);
-                String rel = file.getString("path");
-                if (!ownedPaths.add(rel) || ownedPaths.size() > MAX_FILES) {
-                    throw new IOException("duplicate or excessive payload entries");
-                }
-                String expected = file.getString("sha256");
-                if (!expected.matches("[0-9a-f]{64}")
-                        || !expected.equals(sha256(safeFile(root, rel, true)))) {
-                    throw new IOException("payload mismatch: " + clean(rel, 120));
-                }
             }
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", id);
@@ -152,10 +159,14 @@ public final class MdcPatchRuntime {
         if (!seen.contains("core") || variants > 1) {
             throw new IOException("invalid module dependencies or variants");
         }
+        if (!seen.equals(agentModules)) {
+            throw new IOException("agent modules " + clean(String.join(",", agentModules), 100)
+                    + " differ from the installation record; install again with the patch manager");
+        }
         return List.copyOf(result);
     }
 
-    private static Path safeFile(Path root, String relative, boolean payload) throws IOException {
+    private static Path safeFile(Path root, String relative) throws IOException {
         if (relative.isEmpty() || relative.indexOf('\\') >= 0 || relative.indexOf(':') >= 0
                 || relative.startsWith("/") || relative.contains("//")) {
             throw new IOException("invalid installation path");
@@ -165,10 +176,6 @@ public final class MdcPatchRuntime {
             if (part.toString().equals("..") || part.toString().equals(".")) {
                 throw new IOException("relative traversal is not allowed");
             }
-        }
-        if (payload && (!(relative.startsWith("zombie/") || relative.startsWith("se/"))
-                || !relative.endsWith(".class"))) {
-            throw new IOException("unsupported payload path");
         }
         Path resolved = root.resolve(rel).normalize();
         if (!resolved.startsWith(root)) {

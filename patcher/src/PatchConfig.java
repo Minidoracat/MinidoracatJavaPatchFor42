@@ -1932,18 +1932,9 @@ public final class PatchConfig {
         // （盲等逾時重發由 ChunkNotReady 主動通知根治），手術目標方法不存在。
         patches.add(streamer);
 
-        // ---- 42.21.0 自建房間 XL 樹例外（docs/patches.md 2bl）----
-        // isPlayerInsideARoom（42.21 新增的 XXL 樹室內淡化）在 isInARoom() 為真時直接取
-        // getSquare().getRoom().getRectsBounds()；IsoGridSquare.isInARoom() 另含 IsoRegions
-        // 「封閉且屋頂全滿」分支，緊貼或疊在預製建築上的自建房間沒有 IsoRoom → 每幀 NPE，
-        // FBORenderCell.renderInternal 接住後該幀剩下的物件（家具、樹、圍籬）都不畫。
-        // 改道方法內唯一的 isInARoom：原版不拋例外時同值，原版會 NPE 時回 false。
-        Patcher.ClassPatch tree = new Patcher.ClassPatch("zombie/iso/objects/IsoTree");
-        Patcher.MethodOps inside = tree.method("isPlayerInsideARoom", "(Lzombie/characters/IsoPlayer;)Z");
-        inside.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer",
-                "isInARoom", "()Z", "zombie/mdc/TreeRoomGuard", "isInARoom"));
-        inside.expectedHits = 1;
-        patches.add(tree);
+        // ---- 42.21.0 自建房間 XL 樹例外（docs/patches.md 2bl）：2026-11-10 退役 ----
+        // 42.22.2 原版 isPlayerInsideARoom 自己補上 getRoom() 的 null 檢查（offset 0–18：isInARoom 為假或
+        // getSquare().getRoom() 為 null 就回 false），與 TreeRoomGuard 的結果逐值相同。
 
         // ---- W54 車輛靜止姿勢跳過（docs/patches.md 2br）----
         // updateAnimationPlayer 是 private、只在 postupdate 被呼叫兩次（車身＋models 迴圈），方法內唯一的
@@ -2095,14 +2086,13 @@ public final class PatchConfig {
     }
 
     /**
-     * client-fixes-compat：client() 裡不碰 PZ_Optimization 這類替換遊戲 class 的 MOD 所換 class 的幾刀——IsoTree（自建房間
-     * XL 樹）、BaseVehicle（W54、W61、W62、W65）、VehiclePacket（W63）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
+     * client-fixes-compat：client() 裡不碰 PZ_Optimization 這類替換遊戲 class 的 MOD 所換 class 的幾刀——BaseVehicle（W54、W61、
+     * W62、W65）、VehiclePacket（W63）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
      * IsoChunk、RoomDef、FBORenderCutaways（W57、W68）與 FBORenderCell（W84，另含 IsoChunk 建構子）不裝；W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket
      * 也不裝。ClassPatch 直接取自 client(false)，手術與完整版逐位相同。
      */
     public static List<Patcher.ClassPatch> clientCompat() {
-        List<String> compat = List.of("zombie/iso/objects/IsoTree", "zombie/vehicles/BaseVehicle",
-                "zombie/network/packets/vehicle/VehiclePacket");
+        List<String> compat = List.of("zombie/vehicles/BaseVehicle", "zombie/network/packets/vehicle/VehiclePacket");
         return client(false).stream().filter(p -> compat.contains(p.internalName)).toList();
     }
 

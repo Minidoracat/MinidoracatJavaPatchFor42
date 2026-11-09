@@ -63,7 +63,7 @@ public final class StaleRoomGuardBehaviorTest {
             failed += check("出貨組態：active=true（兩個 updateSquares lambda 都找得到）", StaleRoomGuard.active());
 
             IsoChunk rebuilt = staleChunk(true);
-            IsoLightSwitch wallSwitch = TreeRoomGuardBehaviorTest.alloc(IsoLightSwitch.class);
+            IsoLightSwitch wallSwitch = TestObjects.alloc(IsoLightSwitch.class);
             rebuilt.getGridSquare(2, 2, 0).getObjects().add(wallSwitch);
             String thrown = npeMessage(() -> StaleRoomGuard.chunkLoaded(rebuilt));
             IsoRoom live = IsoWorld.instance.getMetaGrid().getRoomByID(LIVE_ID);
@@ -114,17 +114,17 @@ public final class StaleRoomGuardBehaviorTest {
     }
 
     static IsoChunk world(boolean withRoom) throws Exception {
-        cell = TreeRoomGuardBehaviorTest.alloc(IsoCell.class);
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomLights", new ArrayList<>());
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomList", new ArrayList<>());
-        IsoWorld world = TreeRoomGuardBehaviorTest.alloc(IsoWorld.class);
+        cell = TestObjects.alloc(IsoCell.class);
+        TestObjects.set(IsoCell.class, cell, "roomLights", new ArrayList<>());
+        TestObjects.set(IsoCell.class, cell, "roomList", new ArrayList<>());
+        IsoWorld world = TestObjects.alloc(IsoWorld.class);
         world.currentCell = cell;
-        IsoMetaGrid grid = TreeRoomGuardBehaviorTest.alloc(IsoMetaGrid.class);
+        IsoMetaGrid grid = TestObjects.alloc(IsoMetaGrid.class);
         IsoMetaCell metaCell = new IsoMetaCell(0, 0);
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "grid", new IsoMetaCell[][] {{metaCell}});
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "width", 1);
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "height", 1);
-        TreeRoomGuardBehaviorTest.set(IsoWorld.class, world, "metaGrid", grid);
+        TestObjects.set(IsoMetaGrid.class, grid, "grid", new IsoMetaCell[][] {{metaCell}});
+        TestObjects.set(IsoMetaGrid.class, grid, "width", 1);
+        TestObjects.set(IsoMetaGrid.class, grid, "height", 1);
+        TestObjects.set(IsoWorld.class, world, "metaGrid", grid);
         IsoWorld.instance = world;
 
         building = new BuildingDef();

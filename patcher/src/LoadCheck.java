@@ -59,7 +59,7 @@ public final class LoadCheck {
             }
 
 
-            // client-compat 只含 IsoTree、BaseVehicle、VehiclePacket 的修補（PatchConfig.clientCompat），只驗它們的 helper
+            // client-compat 只含 BaseVehicle、VehiclePacket 的修補（PatchConfig.clientCompat），只驗它們的 helper
             boolean compat = args.length == 4 && args[3].equals("client-compat");
             boolean clientMode = args.length == 4
                     && (args[3].equals("client") || args[3].equals("client-lowmem") || compat);
@@ -102,13 +102,6 @@ public final class LoadCheck {
                     }
                     System.out.println("leak guard OK 四個手術簽名一致");
                 }
-                Class<?> treeGuard = Class.forName("zombie.mdc.TreeRoomGuard", false, cl);
-                Class<?> player = Class.forName("zombie.characters.IsoPlayer", false, cl);
-                var inRoom = treeGuard.getDeclaredMethod("isInARoom", player);
-                if (inRoom.getReturnType() != boolean.class || (inRoom.getModifiers() & psf) != psf) {
-                    throw new NoSuchMethodException("TreeRoomGuard.isInARoom signature");
-                }
-                System.out.println("tree room guard OK isInARoom(IsoPlayer) 簽名一致");
                 Class<?> animPlayer = Class.forName("zombie.core.skinnedmodel.animation.AnimationPlayer", false, cl);
                 var vehUpdate = Class.forName("zombie.mdc.VehicleAnimGate", false, cl)
                         .getDeclaredMethod("update", animPlayer, float.class);

@@ -50,9 +50,9 @@ public final class MetaGridLockBehaviorTest {
         int failed = 0;
         world();
         IsoChunk chunk = new IsoChunk(cell);
-        DataRoot dataRoot = TreeRoomGuardBehaviorTest.alloc(DataRoot.class);
+        DataRoot dataRoot = TestObjects.alloc(DataRoot.class);
         RebuildHook changedCells = new RebuildHook();
-        TreeRoomGuardBehaviorTest.set(DataRoot.class, dataRoot, "changedCells", changedCells);
+        TestObjects.set(DataRoot.class, dataRoot, "changedCells", changedCells);
 
         failed += check(off ? "kill switch off：不上鎖" : "出貨組態：上鎖", MetaGridLock.ENABLED == !off);
 
@@ -76,7 +76,7 @@ public final class MetaGridLockBehaviorTest {
 
         // 2. 另一個執行緒正在 getRoomByID 裡建新房間（停在 IsoCell.roomList.add），這時開始重建。
         BlockingRoomList roomList = new BlockingRoomList();
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomList", roomList);
+        TestObjects.set(IsoCell.class, cell, "roomList", roomList);
         Thread creating = new Thread(() -> chunk.getRoom(ids[1]), "World Streamer");
         creating.start();
         boolean entered = roomList.entered.await(5, TimeUnit.SECONDS);
@@ -109,10 +109,10 @@ public final class MetaGridLockBehaviorTest {
     }
 
     static int stress(IsoChunk chunk, DataRoot dataRoot, RebuildHook changedCells) throws Exception {
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomList", new ArrayList<IsoRoom>());
+        TestObjects.set(IsoCell.class, cell, "roomList", new ArrayList<IsoRoom>());
         Method recalc = WorldRegionToMetaGrid.class.getDeclaredMethod("recalculateBuildingAndRoomIDs", IsoMetaCell.class);
         recalc.setAccessible(true);
-        WorldRegionToMetaGrid rebuilder = TreeRoomGuardBehaviorTest.alloc(WorldRegionToMetaGrid.class);
+        WorldRegionToMetaGrid rebuilder = TestObjects.alloc(WorldRegionToMetaGrid.class);
         AtomicReference<Throwable> streamerError = new AtomicReference<>();
         AtomicReference<Throwable> rebuildError = new AtomicReference<>();
         java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
@@ -189,17 +189,17 @@ public final class MetaGridLockBehaviorTest {
 
     /** 一個 cell、ROOMS 間自建房，各自一棟建築；房間都還沒有 IsoRoom（第一次查才建）。 */
     static void world() throws Exception {
-        cell = TreeRoomGuardBehaviorTest.alloc(IsoCell.class);
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomLights", new ArrayList<>());
-        TreeRoomGuardBehaviorTest.set(IsoCell.class, cell, "roomList", new ArrayList<>());
-        IsoWorld world = TreeRoomGuardBehaviorTest.alloc(IsoWorld.class);
+        cell = TestObjects.alloc(IsoCell.class);
+        TestObjects.set(IsoCell.class, cell, "roomLights", new ArrayList<>());
+        TestObjects.set(IsoCell.class, cell, "roomList", new ArrayList<>());
+        IsoWorld world = TestObjects.alloc(IsoWorld.class);
         world.currentCell = cell;
-        IsoMetaGrid grid = TreeRoomGuardBehaviorTest.alloc(IsoMetaGrid.class);
+        IsoMetaGrid grid = TestObjects.alloc(IsoMetaGrid.class);
         metaCell = new IsoMetaCell(0, 0);
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "grid", new IsoMetaCell[][] {{metaCell}});
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "width", 1);
-        TreeRoomGuardBehaviorTest.set(IsoMetaGrid.class, grid, "height", 1);
-        TreeRoomGuardBehaviorTest.set(IsoWorld.class, world, "metaGrid", grid);
+        TestObjects.set(IsoMetaGrid.class, grid, "grid", new IsoMetaCell[][] {{metaCell}});
+        TestObjects.set(IsoMetaGrid.class, grid, "width", 1);
+        TestObjects.set(IsoMetaGrid.class, grid, "height", 1);
+        TestObjects.set(IsoWorld.class, world, "metaGrid", grid);
         IsoWorld.instance = world;
 
         ids = new long[ROOMS];

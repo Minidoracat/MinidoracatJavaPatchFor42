@@ -31,8 +31,8 @@ public final class VehicleOrphanGuardBehaviorTest {
         int failed = 0;
         VehicleClampGuardBehaviorTest.world();
         GameServer.server = false;
-        IsoPlayer local = TreeRoomGuardBehaviorTest.alloc(IsoPlayer.class);
-        IsoPlayer other = TreeRoomGuardBehaviorTest.alloc(IsoPlayer.class);
+        IsoPlayer local = TestObjects.alloc(IsoPlayer.class);
+        IsoPlayer other = TestObjects.alloc(IsoPlayer.class);
         IsoPlayer.players[0] = local;
 
         // ---- W62 ----
@@ -118,17 +118,17 @@ public final class VehicleOrphanGuardBehaviorTest {
 
     /** 掛在 chunk 上、0 號座位坐著 rider 的車。 */
     static BaseVehicle vehicle(IsoChunk chunk, IsoPlayer rider) throws Exception {
-        BaseVehicle car = TreeRoomGuardBehaviorTest.alloc(BaseVehicle.class);
-        BaseVehicle.Passenger seat = TreeRoomGuardBehaviorTest.alloc(BaseVehicle.Passenger.class);
+        BaseVehicle car = TestObjects.alloc(BaseVehicle.class);
+        BaseVehicle.Passenger seat = TestObjects.alloc(BaseVehicle.Passenger.class);
         seat.character = rider;
-        BaseVehicle.Passenger empty = TreeRoomGuardBehaviorTest.alloc(BaseVehicle.Passenger.class);
-        TreeRoomGuardBehaviorTest.set(BaseVehicle.class, car, "passengers", new BaseVehicle.Passenger[] {seat, empty});
+        BaseVehicle.Passenger empty = TestObjects.alloc(BaseVehicle.Passenger.class);
+        TestObjects.set(BaseVehicle.class, car, "passengers", new BaseVehicle.Passenger[] {seat, empty});
         car.chunk = chunk;
         return car;
     }
 
     static void seat(IsoPlayer player, BaseVehicle car) throws Exception {
-        TreeRoomGuardBehaviorTest.set(IsoGameCharacter.class, player, "vehicle", car);
+        TestObjects.set(IsoGameCharacter.class, player, "vehicle", car);
     }
 
     static boolean at(IsoPlayer player, float x, float y) {
