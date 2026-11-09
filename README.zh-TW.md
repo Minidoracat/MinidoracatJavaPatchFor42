@@ -6,7 +6,7 @@
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 80 個 patched class、244 個命中點、99 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；42.21.0 三個自建房間 bug：東西看不見，以及在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），從
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -174,7 +174,6 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 |---|---|---|---|
 | 貼圖管線門檻與洩漏修復（[2j](docs/patches.md#2j)） | 已解碼、尚未上傳的貼圖緩衝累積到 50 MB 時，貼圖載入執行緒會永久睡眠；洩漏（APNG 影格、64 MB 備用緩衝）把地板墊過門檻：玩家、殭屍、車輛只剩影子和名牌。 | 修掉洩漏；標準版另把等待門檻放寬到 4 GiB。隱形問題不再復發。 | [#100919](https://theindiestone.com/forums/topic/100919/) |
 | chunk 串流紀錄（[2o](docs/patches.md#2o)） | 黑邊發生時 client 端沒有任何證據。 | 記錄串流狀態與停滯；不改行為。 | — |
-| 自建房間 XL 樹修正（[2bl](docs/patches.md#2bl)） | 42.21.0：只要 `isInARoom()` 為真，`IsoTree.isPlayerInsideARoom` 就直接讀 `getRoom().getRectsBounds()`；但沒有 `IsoRoom` 的封閉自建房間 `isInARoom()` 也為真。NPE 中斷整幀繪製：家具、樹、圍籬消失。 | 這種房間在 XL 樹淡化判斷裡視為「不在房間內」。 | [#101887](https://theindiestone.com/forums/topic/101887/)（官方已內部修正） |
 | W54 車輛靜止姿勢跳過（[2br](docs/patches.md#2br)） | 每台已載入的車每幀對每個蒙皮零件模型無條件 `AnimationPlayer.Update`，不分遠近、停著或看不看得到；窗與裝甲共用門的 player，同一副骨架一幀算 2–3 次。門窗會動的模組車（KI5、rSemiTruck）每台每幀 22–47 µs，原版車 3–5 µs。 | 沒有 track 在播放、姿勢輸入與上一次完整計算相同時跳過 Update，renderer 沿用上一次的矩陣；每 256 次跳過抽查一次完整重算，不一致就本次回原版。合成測試中每幀姿勢與原版逐位相同。 | 未回報 |
 | W55 `isBoneReparented` 快速路徑（[2bs](docs/patches.md#2bs)） | 骨架更新每根骨頭呼叫一次 `isBoneReparented`，每次都從池配置一個 lambda 再掃清單；車輛、殭屍與多數角色的清單是空的。 | 清單為空直接回 false，否則照原版；結果逐位相同，所有角色與車都受惠。 | 未回報 |
 | W57 自建房 chunk 載入斷線（[2bu](docs/patches.md#2bu)） | 42.21.0：chunk 的格子在 World Streamer 執行緒就綁好房間。主執行緒接手前，client 若重建這一帶的自建建築（同一個或相鄰 cell 有人蓋或拆東西），舊的 `IsoRoom` 被清空（`def = null`），`updateSquares` 又跳過排隊中的 chunk；接著 `IsoLightSwitch.chunkLoaded` 丟例外，client 被斷線送回主選單。 | chunk 有格子指向被清空的房間時，先對這個 chunk 補跑遊戲自己的 `updateSquares` 步驟（原版漏掉的重綁），否則照原版。 | [#102213](https://theindiestone.com/forums/topic/102213/) |
@@ -229,6 +228,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | timed action 執行者驗證（W78，[2cm](docs/patches.md#2cm)）與動作封包的玩家歸屬（[2aj](docs/patches.md#2aj)） | 42.22.2 | — |
 | chunk 卸載存檔還在寫就被重新載入（W60 之二，[2bx](docs/patches.md#2bx)） | 42.22.2 | — |
 | `PacketsCache` log 噪音（[1](docs/patches.md#1)） | 42.22.2（只在開發模式印） | — |
+| 自建房間 XL 樹例外（[2bl](docs/patches.md#2bl)） | 42.22.2 | [#101887](https://theindiestone.com/forums/topic/101887/) |
 
 ## 修補原理
 
@@ -272,17 +272,17 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
 3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），再輸入 `Y` 確認。
 
-安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本：會比對 `projectzomboid.jar` 與每個寫入檔案的 SHA-256，不碰不屬於自己的檔案，中斷的安裝也能復原。**每次遊戲更新前都要先執行 `Uninstall-Patches.bat`（選 `A`）**，所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。忘了先移除、遊戲更新後開不起來時，關閉遊戲再執行 `Uninstall-Patches.bat`（選 `A`）即可；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得，直接安裝新版或移除都會清乾淨。
+安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與 agent jar 的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-javaagent:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後重新執行 `Install-Patches.bat` 即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而 jar 不在時，遊戲起不來；要移除請執行 `Uninstall-Patches.bat`（選 `A`），所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接執行新版 `Install-Patches.bat`，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
 
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、XL 樹房間修正、自建房斷線修正、車輛動畫加速、開車瞬移修正（三項）、地上血跡加速（32GB 以上 RAM） |
+| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速（32GB 以上 RAM） |
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與其他版本互斥 |
-| `client-fixes-compat` | 只含 XL 樹房間修正與車輛修正，給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
+| `client-fixes-compat` | 只含車輛修正（車輛動畫加速、開車瞬移三項、車被推到地板下），給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 
-**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）也會把 `.class` 檔放進遊戲資料夾。它已經替換本包要修補的 class 時，安裝器會以 code 7 停止、不改任何檔案，因為同一個 class 只能載入一份。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。那個卸載器照路徑刪檔，之前已經裝過本包的話，之後要再執行一次本安裝器。用 PZ_Optimization 時，安裝或移除前先關掉它的「Warm-start cache (Java AOT)」選項：這個選項開著時，遊戲從它的快取載入 class，不讀遊戲資料夾，安裝器會拒絕。這個選項下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉。裝好後可以再打開；下次安裝、更新或移除本包前再關掉。
+**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）會把 `.class` 檔放進遊戲資料夾。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新（推測：沒有實測 PZ_Optimization 本身）。
 
 也可以用 `build-client.ps1` 自行建置。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 

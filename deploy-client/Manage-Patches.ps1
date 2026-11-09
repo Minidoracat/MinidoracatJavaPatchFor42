@@ -3,19 +3,23 @@
     Manage-Patches.ps1 — Minidoracat client patch 模組化安裝／卸載器（Windows PowerShell 5.1）
 
     設計要點（契約：deploy-client 安裝包契約）
-      * 讀 manifest.json（Main 產生，schemaVersion=1）決定有哪些模組與檔案。
-      * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json，這是 runtime 與 installer 的同一份真相。
+      * 讀 manifest.json（build-client.ps1 產生，schemaVersion=2）：一個 agent jar（所有模組）＋模組清單。
+      * 42.22 起 projectzomboid.jar 簽章，手術後的 class 不能再以 loose 檔放在遊戲資料夾（SecurityException）。
+        安裝＝把 agent jar 放到 <遊戲根>\.mdc-patches\，並在 ProjectZomboid64.json 頂層 vmArgs 放一條
+        -javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<選的模組>；卸載＝拿掉那一條與檔案。
+        只動自己那一條：其他 vmArgs、windows 區段與使用者的修改照原文保留；寫入前重新 parse 驗證。
+      * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json（schemaVersion=2），runtime 與 installer 的同一份真相。
+        0.2.x 的 schemaVersion=1（loose class 清單）讀得懂：升級或移除時在同一筆交易刪掉那些 loose class。
       * install 是「加裝」：保留已安裝的其它模組；同 exclusiveGroup 的新變體才會替換舊變體。
       * uninstall 只移除所選；仍被保留模組依賴的模組（例如 core）自動保留。
-      * 所有影像經暫存檔驗 SHA 後原子替換；交易先備份→journal→動檔→state→已完成終態。
+      * 所有影像經暫存檔驗 SHA 後原子替換；交易先備份→journal→寫→刪→state→已完成終態。
         復原只接受交易前／後影像；未知現況保留。終態落地前不刪備份，清理中斷可重入。
       * status／開選單一律唯讀，只會提醒有未完成交易；復原只發生在 install／uninstall，
         而且順序固定：拿遊戲目錄鎖 → 確認遊戲沒在跑 → 復原 → 才重新讀 state 規劃。
-      * 僅操作遊戲根內 loose .class 與固定管理資料；jar／exe／存檔／遊戲設定不改。
-        SHA 用於辨識損毀或過期內容，不是簽章；同權限者同時偽造 metadata 與檔案不在防護範圍。
-        未記錄的外來 class 拒裝；既有模組可重新安裝修復，卸載拒刪內容已變動的檔案。
-        沒有 state.json 時，整組指紋吻合的舊版包可直接卸載；認不出的殘檔才拒絕並指回舊版 uninstaller。
-      * 啟動設定的 classpath 沒把 . 排在 jar 前面（如 PZ_Optimization AOT 快取）時拒動檔案；同 class 的外來 X.class／X$*.class 也算衝突。
+      * 只碰 .mdc-patches\ 底下的 agent jar／state、ProjectZomboid64.json 的自己那一條，以及要清掉的自家舊版 loose class；
+        遊戲 jar／exe／存檔不改。SHA 用於辨識損毀或過期內容，不是簽章；同權限者同時偽造 metadata 與檔案不在防護範圍。
+      * 啟動設定讀不到、格式不符、classpath 上 projectzomboid.jar 前面還有別的 jar（如 PZ_Optimization AOT 快取）時拒裝；
+        別人的 loose class 蓋掉本包要換的 class 時拒裝，其餘別人的 loose class 只警告（42.22 起它們本身就會讓遊戲丟 SecurityException）。
       * 持鎖期間遊戲 exe 不能啟動（系統顯示檔案使用中）；外部 Java 啟動仍由行程檢查擋下。
 
     不需要 Python／JDK／任何第三方 MOD。
@@ -55,7 +59,7 @@ $EXIT_GAMEDIR = 3   # 找不到／不合法的遊戲目錄
 $EXIT_RUNNING = 4   # 遊戲或其 JVM 使用中（含行程檢查失敗＝fail-closed）
 $EXIT_JAR = 5       # 遊戲版本（projectzomboid.jar SHA256）不符
 $EXIT_PACKAGE = 6   # 安裝包本身有問題（manifest／payload 缺檔或指紋不符）
-$EXIT_CONFLICT = 7  # 外來 loose 檔衝突／無法辨識的舊版 patch／路徑不安全／遊戲不從資料夾載入 class
+$EXIT_CONFLICT = 7  # 外來 loose 檔衝突／無法辨識的舊版 patch／路徑不安全／啟動設定讀不到或格式不符
 $EXIT_TAMPERED = 8  # 自家已安裝檔案被變造，拒絕刪除
 $EXIT_ROLLEDBACK = 9      # 交易失敗，已回復到動作前狀態
 $EXIT_ROLLBACKFAILED = 10 # 交易失敗且回復也失敗，需要人工處理
@@ -66,6 +70,9 @@ $STATE_DIRNAME = '.mdc-patches'
 $STATE_REL = '.mdc-patches/state.json'
 $JOURNAL_REL = '.mdc-patches/journal.json'
 $BACKUP_REL = '.mdc-patches/backup'
+# 與 MdcPatchRuntime.AGENT_REL 相同；-javaagent 的路徑相對遊戲資料夾（遊戲以它為工作目錄，-Djava.library.path=win64/;. 也靠這點）
+$AGENT_REL = '.mdc-patches/MinidoracatClientPatches.jar'
+$LAUNCHER_REL = 'ProjectZomboid64.json'
 
 # ---------------------------------------------------------------- 輸出
 function Write-Head([string]$m) { Write-Host ''; Write-Host $m -ForegroundColor Cyan }
@@ -139,7 +146,12 @@ function Publish-File([string]$path, [byte[]]$bytes, [string]$SourcePath, [strin
         } finally { $stream.Dispose() }
         if ($ExpectedSha -and (Get-Sha256 $tmp) -ne $ExpectedSha) { throw (L "發布前指紋不符：$path" "Checksum mismatch before writing: $path") }
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            [System.IO.File]::Replace($tmp, $path, [NullString]::Value)
+            # 防毒或索引服務會短暫開著剛寫過的檔（實測 ProjectZomboid64.json 偶發 "Unable to remove the file to be replaced"）；
+            # 有限次重試，仍失敗就照常拋出，由交易回復
+            for ($attempt = 1; ; $attempt++) {
+                try { [System.IO.File]::Replace($tmp, $path, [NullString]::Value); break }
+                catch { if ($attempt -ge 5) { throw }; Start-Sleep -Milliseconds 200 }
+            }
         } else {
             [System.IO.File]::Move($tmp, $path)
         }
@@ -193,12 +205,18 @@ function Assert-SafeRelBase([string]$rel, [string]$origin) {
     }
 }
 
+# 舊版（0.2.x state、v3.0 legacy 包）的 loose class 路徑：只允許 .class，擋掉借舊紀錄刪 jar／exe／設定檔的可能
 function Assert-SafeRelPath([string]$rel, [string]$origin) {
     Assert-SafeRelBase $rel $origin
     if ($rel -notmatch '\.class$') {
-        # 只允許 loose class：從根本上擋掉改 jar／啟動 JSON／其它 agent 檔的可能
         Fail $EXIT_CONFLICT (L "$origin 只允許 .class 檔，拒絕處理：$rel" "$origin only allows .class files; refused: $rel")
     }
+}
+
+# 交易能碰的目標：舊版 loose class，或固定的 state／agent jar／啟動設定三個檔
+function Assert-TransactionPath([string]$rel, [string]$origin) {
+    if ($rel -ceq $STATE_REL -or $rel -ceq $AGENT_REL -or $rel -ceq $LAUNCHER_REL) { return }
+    Assert-SafeRelPath $rel $origin
 }
 
 function Get-FullTargetPath([string]$gameRoot, [string]$rel) {
@@ -325,6 +343,15 @@ function Assert-GameNotRunning([string]$gameRoot) {
         }
         foreach ($p in $javaProcs) {
             $meta = $info[[int]$p.Id]
+            # 正在啟動或結束的短命 java（建置工具、IDE）在那一瞬間查不到執行檔與命令列：
+            # 隔 300 ms 重查最多三次，行程已經結束就略過；仍查不到才 fail-closed
+            for ($retry = 0; $retry -lt 3 -and ($null -eq $meta -or ([string]::IsNullOrWhiteSpace($meta.Cmd) -and [string]::IsNullOrWhiteSpace($meta.Exe))); $retry++) {
+                Start-Sleep -Milliseconds 300
+                if ($null -eq (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)) { $meta = 'gone'; break }
+                $w = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$p.Id)" -ErrorAction SilentlyContinue
+                if ($w) { $meta = @{ Cmd = [string]$w.CommandLine; Exe = [string]$w.ExecutablePath } }
+            }
+            if ($meta -is [string]) { continue }
             if ($null -eq $meta -or ([string]::IsNullOrWhiteSpace($meta.Cmd) -and [string]::IsNullOrWhiteSpace($meta.Exe))) {
                 Fail $EXIT_RUNNING (L ("讀不到 $($p.ProcessName) (PID $($p.Id)) 的執行檔／命令列，無法確認它不是 Project Zomboid" +
                     "（fail-closed）。請關閉所有 java 行程，或用系統管理員身分再執行一次。") ("Cannot read the program path or command line of $($p.ProcessName) (PID $($p.Id)), so cannot confirm it is not Project Zomboid" +
@@ -362,34 +389,207 @@ function Exit-GameRootLock($lock) {
     if ($lock) { $lock.Dispose() }
 }
 
-# ---------------------------------------------------------------- 啟動設定（只讀不改）
-# 遊戲只在 classpath 把「.」排在 projectzomboid.jar 前面時才載入資料夾裡的 loose class。
-# PZ_Optimization 的 AOT 快取會把它改成只讀自己的 jar，那時裝或卸都不會生效。
-function Assert-LauncherLoadsLooseClasses([string]$gameRoot, [switch]$WarnOnly) {
-    $path = Join-Path $gameRoot 'ProjectZomboid64.json'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }  # 沒有它遊戲本來就開不起來
-    $cp = $null
+# ---------------------------------------------------------------- 啟動設定（ProjectZomboid64.json）
+# 讀：ConvertFrom-Json 驗證格式。寫：只替換頂層 "vmArgs" 陣列那一段文字（其餘位元組照原檔），再 parse 一次確認
+# 除了自己那一條以外全部相同。遊戲啟動器讀這個檔組 JVM 參數（Steam 更新會把它換回原版）。
+function Test-OurAgentArg([string]$arg) {
+    if (-not $arg.StartsWith('-javaagent:', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $path = $arg.Substring('-javaagent:'.Length)
+    $eq = $path.IndexOf('=')
+    if ($eq -ge 0) { $path = $path.Substring(0, $eq) }
+    $path = $path.Trim('"').Replace('\', '/')
+    return ($path -ieq $AGENT_REL -or $path.EndsWith('/' + $AGENT_REL, [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Get-AgentArg([string[]]$moduleIds) { return "-javaagent:$AGENT_REL=modules=$(@($moduleIds) -join ',')" }
+
+# 頂層物件裡 "<key>": [ ... ] 的 [ 與 ] 位置；找不到或不是陣列回 $null
+function Find-TopLevelArray([string]$text, [string]$key) {
+    $n = $text.Length
+    $depth = 0
+    $i = 0
+    while ($i -lt $n) {
+        $c = $text[$i]
+        if ($c -eq '"') {
+            $start = $i
+            $i++
+            while ($i -lt $n -and $text[$i] -ne '"') { if ($text[$i] -eq '\') { $i++ }; $i++ }
+            $raw = $text.Substring($start, [Math]::Min($i, $n - 1) - $start + 1)
+            $i++
+            if ($depth -ne 1 -or $raw -cne "`"$key`"") { continue }
+            $j = $i
+            while ($j -lt $n -and [char]::IsWhiteSpace($text[$j])) { $j++ }
+            if ($j -ge $n -or $text[$j] -ne ':') { continue }
+            $j++
+            while ($j -lt $n -and [char]::IsWhiteSpace($text[$j])) { $j++ }
+            if ($j -ge $n -or $text[$j] -ne '[') { return $null }
+            $open = $j
+            $d = 0
+            while ($j -lt $n) {
+                $ch = $text[$j]
+                if ($ch -eq '"') {
+                    $j++
+                    while ($j -lt $n -and $text[$j] -ne '"') { if ($text[$j] -eq '\') { $j++ }; $j++ }
+                } elseif ($ch -eq '[' -or $ch -eq '{') { $d++ }
+                elseif ($ch -eq ']' -or $ch -eq '}') { $d--; if ($d -eq 0) { return @{ Open = $open; Close = $j } } }
+                $j++
+            }
+            return $null
+        }
+        if ($c -eq '{' -or $c -eq '[') { $depth++ } elseif ($c -eq '}' -or $c -eq ']') { $depth-- }
+        $i++
+    }
+    return $null
+}
+
+function ConvertTo-JsonStringLiteral([string]$s) {
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    foreach ($ch in $s.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -eq 0x22) { [void]$sb.Append('\"') }
+        elseif ($code -eq 0x5C) { [void]$sb.Append('\\') }
+        elseif ($code -lt 0x20) { [void]$sb.Append(('\u{0:x4}' -f $code)) }
+        else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+function Get-JsonArrayOfStrings($value) {
+    if ($value -isnot [array]) { return $null }
+    foreach ($v in $value) { if ($v -isnot [string]) { return $null } }
+    return ,@($value)
+}
+
+# 回傳 @{ Problem; Missing; Editable; Pzopt; Text; Bom; Span; VmArgs; Ours; OtherAgents }
+# Problem 非空＝不能依它安裝；Editable＝頂層 vmArgs 找得到、可以安全改寫（卸載只需要這個）
+function Read-Launcher([string]$gameRoot) {
+    $r = @{ Problem = $null; Missing = $false; Editable = $false; Pzopt = $false; Text = $null; Bom = $false; Span = $null; VmArgs = @(); Ours = @(); OtherAgents = @() }
+    Assert-NoReparsePoint $gameRoot $LAUNCHER_REL
+    $path = Get-FullTargetPath $gameRoot $LAUNCHER_REL
+    $restore = L '請用 Steam 還原它（Project Zomboid → 內容 → 已安裝的檔案 → 驗證遊戲檔案的完整性）後再執行一次。' 'Restore it with Steam (Project Zomboid > Properties > Installed Files > Verify integrity of game files), then run this again.'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $r.Missing = $true
+        $r.Problem = (L '遊戲資料夾裡沒有 ProjectZomboid64.json（遊戲的啟動設定），無法加上修補的啟動參數。' 'ProjectZomboid64.json (the game''s launch settings) is missing from the game folder, so the patch launch option cannot be added. ') + $restore
+        return $r
+    }
     try {
-        $cp = @(ConvertTo-Array (Get-Prop (Read-JsonFile $path) 'classpath') | ForEach-Object { [string]$_ })
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $r.Bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        $skip = if ($r.Bom) { 3 } else { 0 }
+        $r.Text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes, $skip, $bytes.Length - $skip)
+        $json = $r.Text | ConvertFrom-Json
     } catch {
-        $err = $_.Exception.Message
-        $problem = L "ProjectZomboid64.json 無法解析，無法確認遊戲會載入資料夾裡的 class：$err" "ProjectZomboid64.json cannot be read, so it cannot be confirmed that the game loads class files from the folder: $err"
+        $r.Problem = (L "ProjectZomboid64.json 無法解析：$($_.Exception.Message)。" "ProjectZomboid64.json cannot be read: $($_.Exception.Message). ") + $restore
+        return $r
     }
-    if ($null -ne $cp) {
-        $dot = -1; $jar = -1
-        for ($i = $cp.Count - 1; $i -ge 0; $i--) {
-            if ($cp[$i] -eq '.') { $dot = $i }
-            if ($cp[$i] -eq 'projectzomboid.jar') { $jar = $i }
-        }
-        if ($dot -ge 0 -and ($jar -lt 0 -or $dot -lt $jar)) { return }
+    $cp = $null; $vm = $null
+    if ($json -is [System.Management.Automation.PSCustomObject]) {
+        # 直接取屬性值：經函式 return 的陣列會被展開，單一元素就不再是陣列
+        $cp = Get-JsonArrayOfStrings $json.PSObject.Properties['classpath'].Value
+        $vm = Get-JsonArrayOfStrings $json.PSObject.Properties['vmArgs'].Value
+        $r.Span = Find-TopLevelArray $r.Text 'vmArgs'
+    }
+    if ($null -eq $cp -or $null -eq $vm -or $null -eq $r.Span) {
+        $r.Problem = (L 'ProjectZomboid64.json 的格式和原版不同（找不到 classpath 與 vmArgs 字串陣列），不知道怎麼安全地加上啟動參數。' 'ProjectZomboid64.json does not look like the game''s own file (no classpath and vmArgs string arrays), so the launch option cannot be added safely. ') + $restore
+        return $r
+    }
+    $r.Editable = $true
+    $r.VmArgs = @($vm)
+    $r.Ours = @($vm | Where-Object { Test-OurAgentArg $_ })
+    $all = @($vm)
+    $win = Get-Prop $json 'windows'
+    if ($win -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($p in $win.PSObject.Properties) { $all += @(ConvertTo-Array (Get-Prop $p.Value 'vmArgs')) }
+    }
+    $r.OtherAgents = @($all | Where-Object { $_ -is [string] -and $_ -match '^-(javaagent|agentlib|agentpath):' -and -not (Test-OurAgentArg $_) })
+    # agent 以 classpath 上第一個 projectzomboid.jar 比對建置基準；它前面只能是遊戲資料夾（.），
+    # 前面另有 jar（PZ_Optimization AOT 快取的 pzopt/aot/pzopt.jar）時，那裡面的 class 會先載入、換不到。
+    $jarAt = -1
+    for ($i = 0; $i -lt $cp.Count; $i++) { if ($cp[$i] -ieq 'projectzomboid.jar') { $jarAt = $i; break } }
+    $before = @(if ($jarAt -gt 0) { $cp[0..($jarAt - 1)] | Where-Object { $_ -ne '.' } })
+    if ($jarAt -lt 0 -or $before.Count -gt 0) {
         if (@($cp -match 'pzopt').Count -gt 0) {
-            $problem = L 'PZ_Optimization 的 AOT 快取（Warm-start cache）開著：遊戲改從 pzopt/aot/pzopt.jar 載入 class，不讀遊戲資料夾裡的檔案，所以現在安裝或移除修補都不會生效（它重建快取時，Windows 不讓它覆寫使用中的 jar）。請開遊戲，在選項的 PZ Optimization 分頁關掉「Warm-start cache (Java AOT)」後關閉遊戲；再開一次遊戲，等到主選單後關閉（這個選項下次啟動才把啟動設定改回來），然後再執行本安裝器。也可以在遊戲資料夾的 pzopt.properties 加一行 aotCache=false，開遊戲到主選單後關閉，再執行本安裝器。' 'PZ_Optimization''s AOT cache (warm-start cache) is on: the game loads classes from pzopt/aot/pzopt.jar instead of the game folder, so installing or removing patches now would not take effect (when it rebuilds the cache, Windows does not let it replace the jar the game is using). Start the game, turn off "Warm-start cache (Java AOT)" in the PZ Optimization options and close the game. Then start the game once more, wait for the main menu and close it (the option switches the launcher back at the next start), and run this installer again. Or add the line aotCache=false to pzopt.properties in the game folder, start the game to the main menu, close it, and run this installer again.'
+            $r.Pzopt = $true
+            $r.Problem = L 'PZ_Optimization 的 AOT 快取（Warm-start cache）開著：遊戲先從 pzopt/aot/pzopt.jar 載入 class，本包要換的 class 若在裡面就換不到。請開遊戲，在選項的 PZ Optimization 分頁關掉「Warm-start cache (Java AOT)」後關閉遊戲；再開一次遊戲，等到主選單後關閉（這個選項下次啟動才把啟動設定改回來），然後再執行本安裝器。也可以在遊戲資料夾的 pzopt.properties 加一行 aotCache=false，開遊戲到主選單後關閉，再執行本安裝器。' 'PZ_Optimization''s AOT cache (warm-start cache) is on: the game loads classes from pzopt/aot/pzopt.jar first, so classes this package patches cannot be replaced if they are in there. Start the game, turn off "Warm-start cache (Java AOT)" in the PZ Optimization options and close the game. Then start the game once more, wait for the main menu and close it (the option changes the launch settings at the next start), then run this installer again. Or add the line aotCache=false to pzopt.properties in the game folder, start the game to the main menu, close it, and run this installer again.'
         } else {
-            $now = ConvertTo-Json -InputObject $cp -Compress
-            $problem = L "ProjectZomboid64.json 的 classpath 沒有把遊戲資料夾（.）排在 projectzomboid.jar 前面（目前：$now），遊戲不會載入資料夾裡的 class，現在安裝或移除修補都不會生效。請把它還原（Steam：Project Zomboid → 內容 → 已安裝的檔案 → 驗證遊戲檔案的完整性）後再執行一次。" "ProjectZomboid64.json does not list the game folder (.) before projectzomboid.jar on its classpath (now: $now), so the game does not load class files from the folder and installing or removing patches now would not take effect. Restore it (Steam: Project Zomboid > Properties > Installed Files > Verify integrity of game files), then run this again."
+            $now = ConvertTo-Json -InputObject @($cp) -Compress
+            $r.Problem = (L "ProjectZomboid64.json 的 classpath 不是遊戲原本的形狀（目前：$now；原版是 [`".`",`"projectzomboid.jar`"]），修補無法確認遊戲版本。" "The classpath in ProjectZomboid64.json is not the game's own (now: $now; the game's is [`".`",`"projectzomboid.jar`"]), so the patches cannot check the game version. ") + $restore
         }
     }
-    if ($WarnOnly) { Write-Warn2 $problem } else { Fail $EXIT_CONFLICT $problem }
+    return $r
+}
+
+# 頂層 vmArgs 換成「拿掉自己的 -javaagent、需要時在最後補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes
+function New-LauncherBytes($launcher, [string]$newArg) {
+    $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
+    $desired = @(if ($newArg) { @($kept) + $newArg } else { $kept })
+    if (($desired -join "`n") -ceq (@($launcher.VmArgs) -join "`n") -and $desired.Count -eq @($launcher.VmArgs).Count) { return $null }
+    $text = $launcher.Text
+    $open = $launcher.Span.Open
+    $close = $launcher.Span.Close
+    $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lineStart = $text.LastIndexOf("`n", $close) + 1
+    $closeIndent = $text.Substring($lineStart, $close - $lineStart)
+    if ($closeIndent.Trim().Length -gt 0) { $closeIndent = '' }
+    # 元素縮排沿用原陣列第一個元素那一行；空陣列或寫在同一行時用「收尾縮排＋一個 tab」
+    $itemIndent = $closeIndent + "`t"
+    $m = [regex]::Match($text.Substring($open + 1, $close - $open - 1), '\n([ \t]*)\S')
+    if ($m.Success) { $itemIndent = $m.Groups[1].Value }
+    $arrayText = if ($desired.Count -eq 0) { '[]' } else {
+        '[' + $nl + (($desired | ForEach-Object { $itemIndent + (ConvertTo-JsonStringLiteral $_) }) -join (',' + $nl)) + $nl + $closeIndent + ']'
+    }
+    $newText = $text.Substring(0, $open) + $arrayText + $text.Substring($close + 1)
+    # 驗證：新檔 parse 得起來、vmArgs 正好是預期、其餘內容與原檔相同
+    $ok = $false
+    try {
+        $after = $newText | ConvertFrom-Json
+        $before = $text | ConvertFrom-Json
+        $before.vmArgs = @($desired)
+        $ok = (@($after.vmArgs) -join "`n") -ceq ($desired -join "`n") -and @($after.vmArgs).Count -eq $desired.Count -and
+            (ConvertTo-Json -InputObject $after -Depth 32 -Compress) -ceq (ConvertTo-Json -InputObject $before -Depth 32 -Compress)
+    } catch { $ok = $false }
+    if (-not $ok) {
+        Fail $EXIT_CONFLICT (L 'ProjectZomboid64.json 改寫後的驗證不通過（只該變動本包那一條啟動參數），沒有寫入。請用 Steam 驗證遊戲檔案的完整性還原它後再試。' 'The rewritten ProjectZomboid64.json did not pass the check (only this package''s launch option may change), so nothing was written. Restore it with Steam (Verify integrity of game files) and try again.')
+    }
+    $body = (New-Object System.Text.UTF8Encoding($false)).GetBytes($newText)
+    if (-not $launcher.Bom) { return ,$body }
+    return ,([byte[]](@(0xEF, 0xBB, 0xBF) + $body))
+}
+
+# ---------------------------------------------------------------- 遊戲資料夾裡的 loose class
+# 42.22 起官方 jar 簽章：jar 裡有的 package，資料夾裡只要有一個 loose class，載入時就丟 SecurityException（遊戲 JRE 實測）。
+function Get-JarPackages([string]$jarPath) {
+    $set = @{}
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($jarPath)
+        try {
+            foreach ($e in $zip.Entries) {
+                $n = $e.FullName
+                $slash = $n.LastIndexOf('/')
+                if ($slash -gt 0 -and $n.EndsWith('.class') -and -not $n.StartsWith('META-INF/')) { $set[$n.Substring(0, $slash)] = $true }
+            }
+        } finally { $zip.Dispose() }
+    } catch { }
+    return $set
+}
+
+# jar 裡有的頂層 package 目錄底下所有 .class（遊戲根相對、正斜線）
+function Get-LooseClasses([string]$gameRoot, $jarPackages) {
+    $rootFull = [System.IO.Path]::GetFullPath($gameRoot).TrimEnd('\')
+    $tops = @{}
+    foreach ($p in $jarPackages.Keys) { $tops[$p.Split('/')[0]] = $true }
+    $found = @()
+    foreach ($t in $tops.Keys) {
+        $dir = Join-Path $rootFull $t
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.class' -Force -ErrorAction SilentlyContinue)) {
+            $found += $f.FullName.Substring($rootFull.Length + 1).Replace('\', '/')
+        }
+    }
+    return @($found | Sort-Object)
 }
 
 # ---------------------------------------------------------------- 安裝包
@@ -415,36 +615,29 @@ function Resolve-PackageDir([string]$explicit, [string]$scriptDir) {
 function Read-Manifest([string]$packageDir) {
     $path = Join-Path $packageDir 'manifest.json'
     try { $m = Read-JsonFile $path } catch { Fail $EXIT_PACKAGE (L "manifest.json 無法解析：$($_.Exception.Message)" "manifest.json cannot be read: $($_.Exception.Message)") }
-    if ([int](Get-Prop $m 'schemaVersion' 0) -ne 1) {
-        Fail $EXIT_PACKAGE (L "manifest.json 的 schemaVersion 不是 1（實際：$(Get-Prop $m 'schemaVersion' '(缺)')）——請換用對應版本的安裝器。" "manifest.json schemaVersion is not 1 (found: $(Get-Prop $m 'schemaVersion' '(missing)')). Use the matching installer version.")
+    if ([int](Get-Prop $m 'schemaVersion' 0) -ne 2) {
+        Fail $EXIT_PACKAGE (L "manifest.json 的 schemaVersion 不是 2（實際：$(Get-Prop $m 'schemaVersion' '(缺)')）——請換用對應版本的安裝器。" "manifest.json schemaVersion is not 2 (found: $(Get-Prop $m 'schemaVersion' '(missing)')). Use the matching installer version.")
     }
     if (-not (Get-Prop $m 'jarSha256')) { Fail $EXIT_PACKAGE (L 'manifest.json 缺 jarSha256。' 'manifest.json is missing jarSha256.') }
+    $agent = Get-Prop $m 'agent'
+    $agentSource = [string](Get-Prop $agent 'source')
+    if (-not $agentSource -or [string](Get-Prop $agent 'sha256') -notmatch '^[0-9a-fA-F]{64}$') {
+        Fail $EXIT_PACKAGE (L 'manifest.json 的 agent 缺 source 或 sha256。' 'manifest.json agent is missing source or sha256.')
+    }
+    # source 是複製的來源路徑，不准跳出安裝包資料夾
+    Assert-SafeRelBase $agentSource (L 'manifest.json 的 agent source' 'manifest.json agent source')
     $mods = ConvertTo-Array (Get-Prop $m 'modules')
     if ($mods.Count -eq 0) { Fail $EXIT_PACKAGE (L 'manifest.json 沒有任何 module。' 'manifest.json has no modules.') }
     $seenId = @{}
-    $ownerOf = @{}
     foreach ($mod in $mods) {
-        $id = Get-Prop $mod 'id'
-        if (-not $id) { Fail $EXIT_PACKAGE (L 'manifest.json 有 module 缺 id。' 'manifest.json has a module without an id.') }
+        $id = [string](Get-Prop $mod 'id')
+        # id 會寫進啟動參數（-javaagent:…=modules=<id>,…），只准小寫英數與連字號
+        if ($id -cnotmatch '^[a-z0-9-]+$') { Fail $EXIT_PACKAGE (L "manifest.json 有 module 的 id 缺漏或含不允許的字元：$id" "manifest.json has a module with a missing or invalid id: $id") }
         if ($seenId.ContainsKey($id)) { Fail $EXIT_PACKAGE (L "manifest.json 有重複的 module id：$id" "manifest.json has a duplicate module id: $id") }
         $seenId[$id] = $true
-        $group = Get-Prop $mod 'exclusiveGroup'
-        foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
-            $p = Get-Prop $f 'path'
-            Assert-SafeRelPath $p (L "manifest.json 的 module「$id」" "manifest.json module '$id'")
-            if (-not (Get-Prop $f 'sha256')) { Fail $EXIT_PACKAGE (L "manifest.json 的 $id / $p 缺 sha256。" "manifest.json $id / $p is missing sha256.") }
-            $srcRel = [string](Get-Prop $f 'source')
-            if (-not $srcRel) { Fail $EXIT_PACKAGE (L "manifest.json 的 $id / $p 缺 source。" "manifest.json $id / $p is missing source.") }
-            # source 是 Copy-Item 的來源路徑，跟 path 一樣不准跳出安裝包資料夾
-            Assert-SafeRelBase $srcRel (L "manifest.json 的 module「$id」的 source" "manifest.json module '$id' source")
-            # 同一 path 只能由一個模組擁有；同 exclusiveGroup 的變體不會同時安裝，允許共用 path
-            if ($ownerOf.ContainsKey($p)) {
-                $prev = $ownerOf[$p]
-                if (-not $group -or $prev.Group -ne $group) {
-                    Fail $EXIT_PACKAGE (L "manifest.json 的檔案 $p 同時被 $($prev.Id) 與 $id 擁有（且不同 exclusiveGroup）。" "manifest.json file $p is owned by both $($prev.Id) and $id (in different exclusiveGroups).")
-                }
-            } else {
-                $ownerOf[$p] = @{ Id = $id; Group = $group }
+        foreach ($c in (ConvertTo-Array (Get-Prop $mod 'patchedClasses'))) {
+            if ([string]$c -notmatch '^[A-Za-z0-9_$]+(/[A-Za-z0-9_$]+)+$') {
+                Fail $EXIT_PACKAGE (L "manifest.json 的 module「$id」有不合法的 class 名稱：$c" "manifest.json module '$id' has an invalid class name: $c")
             }
         }
     }
@@ -471,7 +664,7 @@ $script:ModuleNamesEn = @{
     'profiler'              = 'DevProfiler (for mod developers)'
     'client-fixes-standard' = 'Client fixes - standard (32 GB RAM or more)'
     'client-fixes-lowmem'   = 'Client fixes - low memory (less than 32 GB RAM)'
-    'client-fixes-compat'   = 'Client fixes - compatible (vehicle and tree fixes only)'
+    'client-fixes-compat'   = 'Client fixes - compatible (vehicle fixes only)'
 }
 
 function Get-ModuleName($mod, [string]$id, $manifest = $null) {
@@ -493,45 +686,50 @@ function Get-ModuleLabel($manifest, [string]$id) {
     return $id
 }
 
-function Assert-PayloadIntact($manifest, [string]$packageDir, [string[]]$moduleIds) {
-    foreach ($id in $moduleIds) {
-        $mod = Get-Module $manifest $id
-        foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
-            $sourceRel = Get-Prop $f 'source'
-            Assert-NoReparsePoint $packageDir $sourceRel
-            $src = Get-FullTargetPath $packageDir $sourceRel
-            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
-                Fail $EXIT_PACKAGE (L "安裝包缺檔：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。" "Package file missing: $(Get-Prop $f 'source') (module $id). Extract the whole zip again.")
-            }
-            $actual = Get-Sha256 $src
-            if ($actual -ne (Get-Prop $f 'sha256').ToLowerInvariant()) {
-                Fail $EXIT_PACKAGE (L "安裝包檔案損毀：$(Get-Prop $f 'source')（模組 $id）——請重新完整解壓縮 zip。" "Package file is damaged: $(Get-Prop $f 'source') (module $id). Extract the whole zip again.")
-            }
-        }
+function Assert-PayloadIntact($manifest, [string]$packageDir) {
+    $agent = Get-Prop $manifest 'agent'
+    $sourceRel = Get-Prop $agent 'source'
+    Assert-NoReparsePoint $packageDir $sourceRel
+    $src = Get-FullTargetPath $packageDir $sourceRel
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+        Fail $EXIT_PACKAGE (L "安裝包缺檔：$sourceRel——請重新完整解壓縮 zip。" "Package file missing: $sourceRel. Extract the whole zip again.")
     }
+    if ((Get-Sha256 $src) -ne (Get-Prop $agent 'sha256').ToLowerInvariant()) {
+        Fail $EXIT_PACKAGE (L "安裝包檔案損毀：$sourceRel——請重新完整解壓縮 zip。" "Package file is damaged: $sourceRel. Extract the whole zip again.")
+    }
+    return $src
 }
 
 # ---------------------------------------------------------------- 安裝狀態
+# schemaVersion 2：agent jar（path／sha256）＋模組（id／name／version／requires）。
+# schemaVersion 1：0.2.x 的 loose class 安裝（每個模組列出自己的 .class）；讀得懂，升級或移除時整組刪掉。
 function Read-State([string]$gameRoot) {
     $path = Get-FullTargetPath $gameRoot $STATE_REL
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try { $s = Read-JsonFile $path } catch {
         Fail $EXIT_INTERNAL (L "$STATE_REL 無法解析（$($_.Exception.Message)）——請手動檢查 $path。" "$STATE_REL cannot be read ($($_.Exception.Message)). Please check $path manually.")
     }
-    if ([int](Get-Prop $s 'schemaVersion' 0) -ne 1) {
-        Fail $EXIT_INTERNAL (L "$STATE_REL 的 schemaVersion 不是 1，這個安裝器不認得，請用對應版本處理。" "$STATE_REL schemaVersion is not 1, which this installer does not understand. Use the matching installer version.")
+    $schema = [int](Get-Prop $s 'schemaVersion' 0)
+    if ($schema -ne 1 -and $schema -ne 2) {
+        Fail $EXIT_INTERNAL (L "$STATE_REL 的 schemaVersion 是 $schema，這個安裝器不認得，請用對應版本處理。" "$STATE_REL schemaVersion is $schema, which this installer does not understand. Use the matching installer version.")
+    }
+    if ($schema -eq 2 -and [string](Get-Prop (Get-Prop $s 'agent') 'path') -cne $AGENT_REL) {
+        Fail $EXIT_CONFLICT (L "$STATE_REL 記錄的 agent 路徑不是 $AGENT_REL，拒絕依它動檔案。" "$STATE_REL records an agent path other than $AGENT_REL; no files will be changed based on it.")
     }
     return $s
 }
+
+function Test-LegacyState($state) { return ($state -and [int](Get-Prop $state 'schemaVersion' 0) -eq 1) }
 
 function Get-StateModuleIds($state) {
     if (-not $state) { return @() }
     return @(ConvertTo-Array (Get-Prop $state 'modules') | ForEach-Object { Get-Prop $_ 'id' })
 }
 
-function Get-StateOwnedFiles($state) {
-    # path -> @{ Sha; ModuleId }
+# 0.2.x（schemaVersion 1）登記的 loose class：path -> @{ Sha; ModuleId }；schemaVersion 2 沒有
+function Get-StateLooseFiles($state) {
     $map = @{}
+    if (-not (Test-LegacyState $state)) { return $map }
     foreach ($m in (ConvertTo-Array (Get-Prop $state 'modules'))) {
         foreach ($f in (ConvertTo-Array (Get-Prop $m 'files'))) {
             $map[(Get-Prop $f 'path')] = @{ Sha = (Get-Prop $f 'sha256').ToLowerInvariant(); ModuleId = (Get-Prop $m 'id') }
@@ -540,13 +738,28 @@ function Get-StateOwnedFiles($state) {
     return $map
 }
 
-function New-StateObject([string]$jarSha, [string]$packageVersion, $moduleEntries) {
+function New-StateObject([string]$jarSha, [string]$packageVersion, [string]$agentSha, $moduleEntries) {
     return [ordered]@{
-        schemaVersion  = 1
+        schemaVersion  = 2
         jarSha256      = $jarSha
         packageVersion = $packageVersion
+        agent          = [ordered]@{ path = $AGENT_REL; sha256 = $agentSha }
         modules        = @($moduleEntries)
     }
+}
+
+# 舊版 loose class 的刪除清單：內容等於紀錄的才刪，不等的列為變造（不刪）
+function Get-LooseDeletes([string]$gameRoot, $looseFiles) {
+    $deletes = @(); $tampered = @()
+    foreach ($p in @($looseFiles.Keys | Sort-Object)) {
+        Assert-SafeRelPath $p 'state.json'
+        Assert-NoReparsePoint $gameRoot $p
+        $full = Get-FullTargetPath $gameRoot $p
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
+        if ((Get-Sha256 $full) -ne $looseFiles[$p].Sha) { $tampered += $p; continue }
+        $deletes += $p
+    }
+    return @{ Deletes = $deletes; Tampered = $tampered }
 }
 
 # ---------------------------------------------------------------- 舊版包辨識
@@ -618,8 +831,8 @@ function Assert-JournalSafe([string]$gameRoot, $journal) {
     $seen = @{}
     foreach ($e in $entries) {
         $rel = [string](Get-Prop $e 'path' '')
-        # 只准碰自家 .class 與那一個固定的 state.json
-        if ($rel -ne $STATE_REL) { Assert-SafeRelPath $rel (L "$JOURNAL_REL 的 entries" "$JOURNAL_REL entries") }
+        # 只准碰舊版 loose class 與固定的 state／agent jar／啟動設定
+        Assert-TransactionPath $rel (L "$JOURNAL_REL 的 entries" "$JOURNAL_REL entries")
         Assert-NoReparsePoint $gameRoot $rel
         if ($seen.ContainsKey($rel)) { Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的目標重複：$rel" "$JOURNAL_REL lists the same target twice: $rel") }
         $seen[$rel] = $true
@@ -814,10 +1027,11 @@ function Invoke-Recover([string]$gameRoot) {
 
 <#
   執行一筆交易。
-    Writes  : @( @{ Path=<rel>; Source=<payload 完整路徑>; Sha=<期望 sha> } )
+    Writes  : @( @{ Path=<rel>; Source=<來源完整路徑> 或 Bytes=<byte[]>; Sha=<期望 sha> } )（依序寫）
     Deletes : @( <rel> )
     NewState: state.json 物件；$null 代表刪除 state.json（全部卸載）
-  順序：備份 → journal(pending) → 刪 → 寫 → state.json → journal(committed) → 清備份
+  順序：備份 → journal(pending) → 寫 → 刪 → state.json → journal(committed) → 清備份
+  先寫後刪：卸載時先把啟動設定改好才刪 agent jar——反過來中斷時，啟動設定指著不存在的 jar，JVM 起不來。
 #>
 function Invoke-PatchTransaction {
     param(
@@ -900,17 +1114,18 @@ function Invoke-PatchTransaction {
 
     # --- 變更階段
     try {
-        foreach ($rel in $Deletes) {
-            $full = Get-FullTargetPath $GameRoot $rel
-            if (Test-Path -LiteralPath $full -PathType Leaf) { Remove-Item -LiteralPath $full -Force }
-        }
         foreach ($relDir in $sortedDirs) {
             $fullDir = [System.IO.Path]::GetFullPath((Join-Path $GameRoot ($relDir -replace '/', '\')))
             if (-not (Test-Path -LiteralPath $fullDir)) { New-Item -ItemType Directory -Path $fullDir -Force | Out-Null }
         }
         foreach ($w in $Writes) {
             $full = Get-FullTargetPath $GameRoot $w.Path
-            Publish-File -path $full -SourcePath $w.Source -ExpectedSha $w.Sha
+            if ($w.Bytes) { Publish-File -path $full -bytes $w.Bytes -ExpectedSha $w.Sha }
+            else { Publish-File -path $full -SourcePath $w.Source -ExpectedSha $w.Sha }
+        }
+        foreach ($rel in $Deletes) {
+            $full = Get-FullTargetPath $GameRoot $rel
+            if (Test-Path -LiteralPath $full -PathType Leaf) { Remove-Item -LiteralPath $full -Force }
         }
         # metadata 最後提交：在這之前中斷都算未安裝
         $statePath = Get-FullTargetPath $GameRoot $STATE_REL
@@ -1002,133 +1217,112 @@ function Resolve-InstallModules($manifest, [string[]]$installed, [string[]]$requ
     return @{ Modules = $ordered; Replaced = $replaced }
 }
 
-function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$targetIds, $state, $legacy) {
-    $owned = Get-StateOwnedFiles $state
-    $final = [ordered]@{}
+# 選定模組換掉的原版 class（內部名稱，不分大小寫）
+function Get-PatchedClassSet($manifest, [string[]]$targetIds) {
+    $set = @{}
     foreach ($id in $targetIds) {
-        $mod = Get-Module $manifest $id
-        foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
-            $p = Get-Prop $f 'path'
-            if ($final.Contains($p)) {
-                Fail $EXIT_PACKAGE (L "選定的模組中有兩個都擁有 $p（$($final[$p].ModuleId) 與 $id），無法安裝。" "Two chosen modules both own $p ($($final[$p].ModuleId) and $id); cannot install.")
-            }
-            $final[$p] = @{
-                Sha      = (Get-Prop $f 'sha256').ToLowerInvariant()
-                Source   = (Get-FullTargetPath $packageDir (Get-Prop $f 'source'))
-                ModuleId = $id
-            }
+        foreach ($c in (ConvertTo-Array (Get-Prop (Get-Module $manifest $id) 'patchedClasses'))) { $set[[string]$c] = $true }
+    }
+    return $set
+}
+
+# $launcher 為 $null 時不規劃啟動設定（只算衝突的唯讀試算用）
+function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$targetIds, $state, $legacy, $launcher, $jarPackages) {
+    $writes = @(); $conflicts = @(); $repairs = @(); $warnings = @()
+
+    # agent jar（.mdc-patches 是本包專用資料夾，內容不對就換掉；與紀錄不符時提示是修復）
+    $agent = Get-Prop $manifest 'agent'
+    $agentSha = (Get-Prop $agent 'sha256').ToLowerInvariant()
+    Assert-NoReparsePoint $gameRoot $AGENT_REL
+    $agentFull = Get-FullTargetPath $gameRoot $AGENT_REL
+    if (Test-Path -LiteralPath $agentFull -PathType Container) {
+        $conflicts += @{ Path = $AGENT_REL; Text = (L "$AGENT_REL 位置上是一個資料夾，無法安裝。" "$AGENT_REL is a folder, so it cannot be installed.") }
+    } else {
+        $cur = $null
+        if (Test-Path -LiteralPath $agentFull -PathType Leaf) { $cur = Get-Sha256 $agentFull }
+        if ($cur -ne $agentSha) {
+            $recorded = ''
+            if ($state -and -not (Test-LegacyState $state)) { $recorded = ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant() }
+            if ($cur -and $recorded -and $cur -ne $recorded) { $repairs += $AGENT_REL }
+            $writes += @{ Path = $AGENT_REL; Source = (Get-FullTargetPath $packageDir (Get-Prop $agent 'source')); Sha = $agentSha }
         }
     }
 
-    $writes = @()
-    $conflicts = @()
-    $repairs = @()
-    foreach ($p in $final.Keys) {
-        Assert-SafeRelPath $p 'manifest.json'
+    # 啟動設定：自己那一條換成這次的模組
+    if ($launcher) {
+        $bytes = New-LauncherBytes $launcher (Get-AgentArg $targetIds)
+        if ($bytes) { $writes += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
+    }
+
+    # 0.2.x 的 loose class 與整組吻合的 v3.0 舊版包：42.22 起留在資料夾會讓遊戲丟 SecurityException，同一筆交易刪掉
+    $loose = Get-StateLooseFiles $state
+    $lr = Get-LooseDeletes $gameRoot $loose
+    $deletes = @($lr.Deletes)
+    $tampered = @($lr.Tampered)
+    foreach ($p in @($legacy.AdoptedPaths.Keys | Sort-Object)) {
+        if ($loose.ContainsKey($p)) { continue }
+        Assert-SafeRelPath $p 'legacyPackages'
         Assert-NoReparsePoint $gameRoot $p
-        $full = Get-FullTargetPath $gameRoot $p
-        if (Test-Path -LiteralPath $full -PathType Container) {
-            $conflicts += @{ Path = $p; Text = (L "$p 位置上是一個資料夾，無法安裝。" "$p is a folder, so it cannot be installed.") }
-            continue
-        }
-        if (Test-Path -LiteralPath $full -PathType Leaf) {
-            $cur = Get-Sha256 $full
-            if ($cur -eq $final[$p].Sha) { continue }  # 內容已經正確，不需要寫
-            if ($owned.ContainsKey($p)) {
-                if ($owned[$p].Sha -ne $cur) { $repairs += $p }
-            } elseif ($legacy.AdoptedPaths.ContainsKey($p)) {
-                # 已精確辨識的舊版包，允許接管
-            } else {
-                $conflicts += @{ Path = $p; Text = (L "$p 已存在且不是本安裝器管理的檔案（可能是其它 patch 或手動放置）。" "$p already exists and is not managed by this installer (it may be from another patch or placed by hand).") }
-                continue
-            }
-        }
-        $writes += @{ Path = $p; Source = $final[$p].Source; Sha = $final[$p].Sha }
-    }
-
-    # 認不出的舊版包：已知路徑上還留著它自己的檔案（未被接管、不是這次要寫的、也不屬於目前的安裝）時，
-    # 已知路徑上的陌生內容一律當成它的殘檔擋下（見下方）。
-    $legacyUnknown = @($legacy.EvidencePaths.Keys | Where-Object {
-            -not ($legacy.AdoptedPaths.ContainsKey($_) -or $owned.ContainsKey($_) -or $final.Contains($_)) })
-
-    # 同一個 class 的外來檔（X.class／X$*.class）：原版的內部類別都在 jar 裡，資料夾裡不是我們的就是別人的。
-    # 混著載入（例如只刪了外層 X.class，留下別的 MOD 的 X$1.class）遊戲會在進服或載入時直接關閉。
-    $family = @{}
-    foreach ($p in $final.Keys) {
-        $slash = $p.LastIndexOf('/')
-        $prefix = $p.Substring(0, $slash + 1)
-        $outerName = ($p.Substring($slash + 1) -replace '\.class$', '').Split('$')[0]
-        $outer = $prefix + $outerName
-        $dirFull = Split-Path -Parent (Get-FullTargetPath $gameRoot $p)
-        if (-not (Test-Path -LiteralPath $dirFull -PathType Container)) { continue }
-        foreach ($item in @(Get-ChildItem -LiteralPath $dirFull -Filter '*.class' -File -Force)) {
-            $n = $item.Name
-            $sameClass = ($n -eq "$outerName.class") -or
-                ($n.StartsWith("$outerName`$", [System.StringComparison]::OrdinalIgnoreCase) -and $n.EndsWith('.class', [System.StringComparison]::OrdinalIgnoreCase))
-            if (-not $sameClass) { continue }
-            $f = $prefix + $n
-            # 認不出的舊版包路徑下面另有專屬衝突訊息，不重複列
-            if ($final.Contains($f) -or $owned.ContainsKey($f) -or $legacy.AdoptedPaths.ContainsKey($f) -or
-                ($legacyUnknown.Count -gt 0 -and $legacy.KnownPaths.ContainsKey($f)) -or $family.ContainsKey($f)) { continue }
-            $family[$f] = $true
-            $conflicts += @{ Path = $f; Text = (L "$f 不是本安裝器裝的檔案，和本安裝包的 $p 屬於同一個 class（$outer）；兩者混在一起時，遊戲會在進服或載入時直接關閉。" "$f was not installed by this installer and belongs to the same class ($outer) as this package's $p; mixed together, the game closes while joining a server or loading.") }
-        }
-    }
-
-    # 需要清掉的：不再屬於選定模組的自家檔案 ＋ 被接管的舊版包殘檔
-    $deleteCandidates = New-Object System.Collections.Generic.List[string]
-    foreach ($p in $owned.Keys) { if (-not $final.Contains($p) -and -not $deleteCandidates.Contains($p)) { [void]$deleteCandidates.Add($p) } }
-    foreach ($p in $legacy.AdoptedPaths.Keys) { if (-not $final.Contains($p) -and -not $deleteCandidates.Contains($p)) { [void]$deleteCandidates.Add($p) } }
-
-    $deletes = @()
-    $tampered = @()
-    foreach ($p in $deleteCandidates) {
-        Assert-SafeRelPath $p 'state.json'
-        Assert-NoReparsePoint $gameRoot $p
-        $full = Get-FullTargetPath $gameRoot $p
-        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
-        $cur = Get-Sha256 $full
-        $expected = $null
-        if ($owned.ContainsKey($p)) { $expected = $owned[$p].Sha }
-        if ($legacy.AdoptedPaths.ContainsKey($p)) { $expected = $cur }  # legacy 已逐檔驗過指紋
-        if ($expected -and $cur -ne $expected) { $tampered += $p; continue }
-        $deletes += $p
+        if (Test-Path -LiteralPath (Get-FullTargetPath $gameRoot $p) -PathType Leaf) { $deletes += $p }   # 已逐檔驗過指紋
     }
 
     # 認不出的舊版 patch：還有它自己的檔案在場時，它已知路徑上的陌生內容一律擋下
+    $legacyUnknown = @($legacy.EvidencePaths.Keys | Where-Object { -not ($legacy.AdoptedPaths.ContainsKey($_) -or $loose.ContainsKey($_)) })
     if ($legacyUnknown.Count -gt 0) {
         foreach ($p in $legacy.KnownPaths.Keys) {
-            if ($legacy.AdoptedPaths.ContainsKey($p) -or $owned.ContainsKey($p) -or $final.Contains($p)) { continue }
-            $full = Get-FullTargetPath $gameRoot $p
-            if (Test-Path -LiteralPath $full -PathType Leaf) {
+            if ($legacy.AdoptedPaths.ContainsKey($p) -or $loose.ContainsKey($p)) { continue }
+            if (Test-Path -LiteralPath (Get-FullTargetPath $gameRoot $p) -PathType Leaf) {
                 $conflicts += @{ Path = $p; Text = (L "$p 是舊版 patch 的檔案但整組指紋對不上（版本不明），不敢動它。" "$p belongs to an old patch version, but the full set does not match any known version; it will not be touched.") }
             }
         }
     }
 
+    # 別人的 loose class：蓋掉本包要換的 class（X.class／X$*.class）＝衝突（遊戲先載入資料夾那一份，agent 換不到）；
+    # 其餘在 jar 裡有的 package ＝警告（42.22 起它們自己就讓遊戲丟 SecurityException）
+    $patched = Get-PatchedClassSet $manifest $targetIds
+    foreach ($p in @(Get-LooseClasses $gameRoot $jarPackages)) {
+        if ($loose.ContainsKey($p) -or $legacy.AdoptedPaths.ContainsKey($p)) { continue }
+        if ($legacyUnknown.Count -gt 0 -and $legacy.KnownPaths.ContainsKey($p)) { continue }
+        $cls = $p -replace '\.class$', ''
+        $outer = $cls.Split('$')[0]
+        if ($patched.ContainsKey($outer)) {
+            $conflicts += @{ Path = $p; Text = (L "$p 不是本安裝器裝的檔案，它蓋掉本包要修補的 class（$outer）：遊戲會先載入資料夾裡這一份，修補就換不到。" "$p was not installed by this installer and shadows a class this package patches ($outer): the game loads the copy in the folder first, so the patch cannot be applied.") }
+        } else {
+            $slash = $cls.LastIndexOf('/')
+            if ($slash -gt 0 -and $jarPackages.ContainsKey($cls.Substring(0, $slash))) { $warnings += $p }
+        }
+    }
+
     return @{
-        Final     = $final
         Writes    = $writes
         Deletes   = $deletes
         Conflicts = $conflicts
         Tampered  = $tampered
         Repairs   = $repairs
+        Warnings  = $warnings
     }
+}
+
+function Write-ForeignLooseWarning([string[]]$paths) {
+    if (@($paths).Count -eq 0) { return }
+    Write-Warn2 ((L "遊戲資料夾裡有 $(@($paths).Count) 個不是本安裝器裝的 class 檔（例如 $(@($paths)[0])）。42.22 起遊戲 jar 有簽章，這類檔案會讓遊戲在載入它們時丟 SecurityException（不管有沒有裝本包）；請用它所屬 MOD 自己的卸載器移除。" "The game folder has $(@($paths).Count) class file(s) this installer did not install (for example $(@($paths)[0])). Since 42.22 the game jar is signed, and such files make the game throw a SecurityException when it loads them (with or without this package); remove them with the uninstaller of the mod they came from."))
+}
+
+function Write-OtherAgentsNote([string[]]$agents) {
+    if (@($agents).Count -eq 0) { return }
+    Write-Info ((L '  啟動設定裡另有其他 Java agent（本包不動它們）：' '  The launch settings also load other Java agents (this package leaves them alone): ') + (@($agents) -join ' '))
+    Write-Info (L '  它們若也改本包修補的 class，先改的生效；本包遇到已被改過的 class 就不換，console 印 [mdc-agent] NOT APPLIED。' '  If one of them changes a class this package patches, whichever runs first wins; this package skips a class that was already changed and prints [mdc-agent] NOT APPLIED in the console.')
 }
 
 function New-StateModuleEntries($manifest, [string[]]$targetIds) {
     $entries = @()
     foreach ($id in $targetIds) {
         $mod = Get-Module $manifest $id
-        $files = @()
-        foreach ($f in (ConvertTo-Array (Get-Prop $mod 'files'))) {
-            $files += [ordered]@{ path = (Get-Prop $f 'path'); sha256 = (Get-Prop $f 'sha256').ToLowerInvariant() }
-        }
         $entries += [ordered]@{
-            id      = $id
-            name    = (Get-Prop $mod 'name' $id)
-            version = (Get-Prop $mod 'version' '')
-            files   = @($files)
+            id       = $id
+            name     = (Get-Prop $mod 'name' $id)
+            version  = (Get-Prop $mod 'version' '')
+            requires = @(ConvertTo-Array (Get-Prop $mod 'requires'))
         }
     }
     return $entries
@@ -1147,13 +1341,13 @@ function Get-InstalledModules($manifest, $state, $legacy) {
 }
 
 # 唯讀試算：請求裡的完整版客戶端修復換成相容版（client-fixes-compat）後，這個目錄就沒有衝突時回 $true。
-function Test-CompatFits($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$installed, [string[]]$requested, $state, $legacy) {
+function Test-CompatFits($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$installed, [string[]]$requested, $state, $legacy, $jarPackages) {
     $compat = 'client-fixes-compat'
     if (-not (Get-Module $manifest $compat)) { return $false }
     if (@($requested | Where-Object { $_ -like 'client-fixes-*' -and $_ -ne $compat }).Count -eq 0) { return $false }
     $swapped = @($requested | ForEach-Object { if ($_ -like 'client-fixes-*') { $compat } else { $_ } })
     $ids = @((Resolve-InstallModules $manifest $installed $swapped).Modules)
-    return (@((Get-InstallPlan $manifest $packageDir $gameRoot $ids $state $legacy).Conflicts).Count -eq 0)
+    return (@((Get-InstallPlan $manifest $packageDir $gameRoot $ids $state $legacy $null $jarPackages).Conflicts).Count -eq 0)
 }
 
 # 選單用（不復原交易、不動檔案，算不出來就當沒事）：請求會撞到的衝突，而且換成相容版就裝得上時才回傳。
@@ -1161,10 +1355,11 @@ function Get-CompatAdvice($manifest, [string]$packageDir, [string]$gameRoot, [st
     try {
         $state = Read-State $gameRoot
         $legacy = Find-LegacyPackages $manifest $gameRoot
+        $jarPackages = Get-JarPackages (Join-Path $gameRoot 'projectzomboid.jar')
         $installed = @(Get-InstalledModules $manifest $state $legacy)
         $ids = @((Resolve-InstallModules $manifest $installed $requested).Modules)
-        $conflicts = @((Get-InstallPlan $manifest $packageDir $gameRoot $ids $state $legacy).Conflicts)
-        if ($conflicts.Count -gt 0 -and (Test-CompatFits $manifest $packageDir $gameRoot $installed $requested $state $legacy)) { return $conflicts }
+        $conflicts = @((Get-InstallPlan $manifest $packageDir $gameRoot $ids $state $legacy $null $jarPackages).Conflicts)
+        if ($conflicts.Count -gt 0 -and (Test-CompatFits $manifest $packageDir $gameRoot $installed $requested $state $legacy $jarPackages)) { return $conflicts }
     } catch { $script:FailCode = $null }
     return @()
 }
@@ -1206,7 +1401,8 @@ function Invoke-Install {
     try {
         Assert-GameNotRunning $GameRoot
         Resume-PendingTransaction $GameRoot
-        Assert-LauncherLoadsLooseClasses $GameRoot
+        $launcher = Read-Launcher $GameRoot
+        if ($launcher.Problem) { Fail $EXIT_CONFLICT $launcher.Problem }
 
         $jarPath = Join-Path $GameRoot 'projectzomboid.jar'
         if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
@@ -1239,9 +1435,10 @@ function Invoke-Install {
 
         $resolved = Resolve-InstallModules $Manifest $installed $Requested
         $targetIds = @($resolved.Modules)
-        Assert-PayloadIntact $Manifest $PackageDir $targetIds
+        $null = Assert-PayloadIntact $Manifest $PackageDir
+        $jarPackages = Get-JarPackages $jarPath
 
-        $plan = Get-InstallPlan $Manifest $PackageDir $GameRoot $targetIds $state $legacy
+        $plan = Get-InstallPlan $Manifest $PackageDir $GameRoot $targetIds $state $legacy $launcher $jarPackages
 
         $sep = L '、' ', '
         Write-Head (L '安裝計畫' 'Install plan')
@@ -1254,15 +1451,21 @@ function Invoke-Install {
         if ($legacy.Packages.Count -gt 0) {
             Write-Info ((L '  接管舊版包：' '  Taking over old package: ') + (($legacy.Packages | ForEach-Object { Get-Prop $_ 'id' }) -join $sep))
         }
+        if (Test-LegacyState $state) {
+            Write-Info (L "  移除舊版 $(Get-Prop $state 'packageVersion' '0.2.x') 放在遊戲資料夾的 loose class（42.22 起會讓遊戲丟 SecurityException）" "  Removing the loose class files of old version $(Get-Prop $state 'packageVersion' '0.2.x') from the game folder (since 42.22 they make the game throw a SecurityException)")
+        }
+        Write-Info (L "  修補檔：$AGENT_REL；啟動參數：$(Get-AgentArg $targetIds)" "  Patch file: $AGENT_REL; launch option: $(Get-AgentArg $targetIds)")
         Write-Info (L "  寫入 $($plan.Writes.Count) 個檔案、移除 $($plan.Deletes.Count) 個檔案" "  Writing $($plan.Writes.Count) file(s), removing $($plan.Deletes.Count) file(s)")
         foreach ($r in $plan.Repairs) { Write-Warn2 (L "自家檔案 $r 內容與紀錄不符，將重新寫入修復。" "Installed file $r does not match the record; it will be rewritten to repair it.") }
+        Write-ForeignLooseWarning $plan.Warnings
+        Write-OtherAgentsNote $launcher.OtherAgents
 
         if ($plan.Conflicts.Count -gt 0) {
             Write-Head (L '偵測到衝突，已中止（沒有任何檔案被更動）' 'Conflict found; stopped (no files were changed)')
             foreach ($c in $plan.Conflicts) { Write-Bad $c.Text }
             $why = L '遊戲資料夾裡有不是本安裝器裝的 class 檔，通常來自另一個替換遊戲 class 的 MOD（例如 PZ_Optimization）。不要只刪除上面列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉。' 'The game folder has class files this installer did not install, usually from another mod that replaces game classes (for example PZ_Optimization). Do not delete just the files listed above: that mod''s other files still need them, and the game closes when you join a server. '
-            if (Test-CompatFits $Manifest $PackageDir $GameRoot $installed $Requested $state $legacy) {
-                Fail $EXIT_CONFLICT ($why + (L '要和它一起用，請改裝相容版（只含車輛與樹的修補，不碰這些檔案）：在安裝選單選相容版，或用 -Modules client-fixes-compat。要完整版，請先用那個 MOD 自己的卸載器把它完整移除。若是舊版 Minidoracat patch，請用舊版的 uninstall.bat 移除。' 'To use both, install the compatible version instead (vehicle and tree fixes only; it does not touch these files): choose it in the install menu, or use -Modules client-fixes-compat. For the full version, first remove that mod completely with its own uninstaller. If they are from an old Minidoracat patch, remove them with that version''s uninstall.bat.'))
+            if (Test-CompatFits $Manifest $PackageDir $GameRoot $installed $Requested $state $legacy $jarPackages) {
+                Fail $EXIT_CONFLICT ($why + (L '要和它一起用，請改裝相容版（只含車輛的修補，不換這些 class）：在安裝選單選相容版，或用 -Modules client-fixes-compat。要完整版，請先用那個 MOD 自己的卸載器把它完整移除。若是舊版 Minidoracat patch，請用舊版的 uninstall.bat 移除。' 'To use both, install the compatible version instead (vehicle fixes only; it does not replace these classes): choose it in the install menu, or use -Modules client-fixes-compat. For the full version, first remove that mod completely with its own uninstaller. If they are from an old Minidoracat patch, remove them with that version''s uninstall.bat.'))
             }
             Fail $EXIT_CONFLICT ($why + (L '請先用那個 MOD 自己的卸載器把它完整移除後再安裝，或保留它、不裝本包。若是舊版 Minidoracat patch，請用舊版的 uninstall.bat 移除。' 'Remove that mod completely with its own uninstaller, then install again; or keep it and do not install this package. If they are from an old Minidoracat patch, remove them with that version''s uninstall.bat.'))
         }
@@ -1275,7 +1478,8 @@ function Invoke-Install {
         # 「不需要變更」必須連 state.json 都已經是最終內容才算數。只比對 class 檔的話，
         # 接管內容剛好相同的舊版包、或紀錄裡的指紋／版本過期，都會被當成完工收工，
         # 留下沒有安裝紀錄的遊戲目錄——之後卸載會把它當成無主舊版 patch 而拒絕處理。
-        $newState = New-StateObject $jarSha (Get-Prop $Manifest 'packageVersion' '') (New-StateModuleEntries $Manifest $targetIds)
+        $agentSha = (Get-Prop (Get-Prop $Manifest 'agent') 'sha256').ToLowerInvariant()
+        $newState = New-StateObject $jarSha (Get-Prop $Manifest 'packageVersion' '') $agentSha (New-StateModuleEntries $Manifest $targetIds)
         $statePath = Get-FullTargetPath $GameRoot $STATE_REL
         $curStateJson = ''
         if (Test-Path -LiteralPath $statePath -PathType Leaf) { $curStateJson = [System.IO.File]::ReadAllText($statePath) }
@@ -1291,7 +1495,7 @@ function Invoke-Install {
         }
 
         Invoke-PatchTransaction -GameRoot $GameRoot -Writes $plan.Writes -Deletes $plan.Deletes -NewState $newState
-        Write-Good (L "完成：已安裝 $($targetIds.Count) 個模組。直接啟動遊戲即可。" "Done: $($targetIds.Count) module(s) installed. You can start the game now.")
+        Write-Good (L "完成：已安裝 $($targetIds.Count) 個模組。直接啟動遊戲即可（從 Steam 或 ProjectZomboid64.exe 啟動；ProjectZomboid64.bat 不讀啟動設定，不會載入修補）。" "Done: $($targetIds.Count) module(s) installed. You can start the game now (from Steam or ProjectZomboid64.exe; ProjectZomboid64.bat does not read the launch settings and does not load the patches).")
     } finally {
         Exit-GameRootLock $lock
     }
@@ -1345,7 +1549,7 @@ function Invoke-Uninstall {
                 Write-Info (L '目前沒有偵測到本安裝器管理的模組，沒有東西需要卸載。' 'No modules managed by this installer were found; nothing to remove.')
                 return
             }
-            Assert-LauncherLoadsLooseClasses $GameRoot
+            # loose class 刪了就生效，不必看啟動設定
             # 舊版包沒有模組可挑，只能整組移除
             if (-not $RemoveAll -and -not $Interactive) {
                 Fail $EXIT_USAGE (L '偵測到舊版包，只能整組移除：請用 -All。' 'An old package was found; it can only be removed as a whole. Use -All.')
@@ -1366,6 +1570,15 @@ function Invoke-Uninstall {
         }
 
         $installed = @(Get-StateModuleIds $state)
+        $legacyState = Test-LegacyState $state
+        if ($legacyState -and -not $RemoveAll) {
+            # 0.2.x 的 loose class 在 42.22 留下任何一部分都會讓遊戲壞掉，只能整組移除
+            if (-not $Interactive) {
+                Fail $EXIT_USAGE (L '偵測到舊版（0.2.x）loose class 安裝，只能整組移除：請用 -All。' 'An old (0.2.x) loose-class install was found; it can only be removed as a whole. Use -All.')
+            }
+            Write-Warn2 (L '偵測到舊版（0.2.x）loose class 安裝，只能整組移除。' 'An old (0.2.x) loose-class install was found; it can only be removed as a whole.')
+            $RemoveAll = $true
+        }
         if ($RemoveAll) {
             $Requested = @($installed)
         } elseif (@($Requested).Count -eq 0) {
@@ -1408,26 +1621,36 @@ function Invoke-Uninstall {
             Write-Warn2 (L "模組 $r 仍被其它保留的模組需要，因此保留不移除。" "Module $r is still needed by other modules being kept, so it stays installed.")
         }
 
-        $keepPaths = @{}
-        foreach ($id in $keep) {
-            foreach ($f in (ConvertTo-Array (Get-Prop $stateModules[$id] 'files'))) { $keepPaths[(Get-Prop $f 'path')] = $true }
-        }
-
-        $owned = Get-StateOwnedFiles $state
+        $writes = @()
         $deletes = @()
         $tampered = @()
-        $missing = @()
-        foreach ($p in $owned.Keys) {
-            if ($keepPaths.ContainsKey($p)) { continue }
-            Assert-SafeRelPath $p 'state.json'
-            Assert-NoReparsePoint $GameRoot $p
-            $full = Get-FullTargetPath $GameRoot $p
-            if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { $missing += $p; continue }
-            if ((Get-Sha256 $full) -ne $owned[$p].Sha) { $tampered += $p; continue }
-            $deletes += $p
+        if ($legacyState) {
+            $lr = Get-LooseDeletes $GameRoot (Get-StateLooseFiles $state)
+            $deletes = @($lr.Deletes)
+            $tampered = @($lr.Tampered)
+        } else {
+            # 啟動設定：全部移除就拿掉自己那一條；保留部分模組時只在那一條還在時改成剩下的模組（被 Steam 換回原版就不再補回）
+            $launcher = Read-Launcher $GameRoot
+            if ($launcher.Editable) {
+                $arg = $null
+                if ($keep.Count -gt 0 -and $launcher.Ours.Count -gt 0) { $arg = Get-AgentArg @($installed | Where-Object { $keep.Contains($_) }) }
+                if ($keep.Count -eq 0 -or $launcher.Ours.Count -gt 0) {
+                    $bytes = New-LauncherBytes $launcher $arg
+                    if ($bytes) { $writes += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
+                }
+            } elseif (-not $launcher.Missing) {
+                # 讀不懂就不能確定它有沒有指著 agent jar；刪了 jar 而設定還指著它，JVM 會起不來
+                Fail $EXIT_CONFLICT $launcher.Problem
+            }
+            if ($keep.Count -eq 0) {
+                Assert-NoReparsePoint $GameRoot $AGENT_REL
+                $agentFull = Get-FullTargetPath $GameRoot $AGENT_REL
+                if (Test-Path -LiteralPath $agentFull -PathType Leaf) {
+                    if ((Get-Sha256 $agentFull) -ne ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant()) { $tampered += $AGENT_REL }
+                    else { $deletes += $AGENT_REL }
+                }
+            }
         }
-
-        Assert-LauncherLoadsLooseClasses $GameRoot
 
         $sep = L '、' ', '
         Write-Head (L '卸載計畫' 'Removal plan')
@@ -1435,8 +1658,7 @@ function Invoke-Uninstall {
         $removing = @($installed | Where-Object { -not $keep.Contains($_) })
         Write-Info ((L '  移除模組：' '  Removing modules: ') + (($removing | ForEach-Object { "$($_)" }) -join $sep))
         if ($keep.Count -gt 0) { Write-Info ((L '  保留模組：' '  Keeping modules: ') + ($keep -join $sep)) }
-        Write-Info (L "  刪除 $($deletes.Count) 個檔案" "  Deleting $($deletes.Count) file(s)")
-        foreach ($m in $missing) { Write-Warn2 (L "$m 已經不在遊戲目錄（可能被手動刪除），略過。" "$m is no longer in the game folder (maybe deleted by hand); skipped.") }
+        Write-Info (L "  刪除 $($deletes.Count) 個檔案$(if ($writes.Count -gt 0) { '，改寫 ProjectZomboid64.json 的本包啟動參數' })" "  Deleting $($deletes.Count) file(s)$(if ($writes.Count -gt 0) { ', updating this package''s launch option in ProjectZomboid64.json' })")
 
         if ($tampered.Count -gt 0) {
             Write-Head (L '自家檔案被變造，已中止（沒有任何檔案被更動）' 'Installed files were modified; stopped (no files were changed)')
@@ -1455,9 +1677,9 @@ function Invoke-Uninstall {
             foreach ($id in $installed) {
                 if ($keep.Contains($id)) { $entries += $stateModules[$id] }
             }
-            $newState = New-StateObject (Get-Prop $state 'jarSha256' '') (Get-Prop $state 'packageVersion' '') $entries
+            $newState = New-StateObject (Get-Prop $state 'jarSha256' '') (Get-Prop $state 'packageVersion' '') ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')) $entries
         }
-        Invoke-PatchTransaction -GameRoot $GameRoot -Writes @() -Deletes $deletes -NewState $newState
+        Invoke-PatchTransaction -GameRoot $GameRoot -Writes $writes -Deletes $deletes -NewState $newState
         if ($keep.Count -gt 0) {
             Write-Good (L "完成：已移除 $($removing.Count) 個模組，保留 $($keep.Count) 個。" "Done: removed $($removing.Count) module(s), kept $($keep.Count).")
         } else {
@@ -1478,7 +1700,8 @@ function Invoke-Status {
         # status 是唯讀的：只報告，不復原（復原要動檔案，得先確認遊戲已關閉）
         Write-Warn2 (L '偵測到未完成的安裝／卸載交易。status 不會修改任何檔案；請關閉遊戲後執行安裝或卸載，屆時會自動先復原。' 'An unfinished install/uninstall was detected. Status does not change any files; close the game and run install or uninstall, which will restore it automatically first.')
     }
-    Assert-LauncherLoadsLooseClasses $GameRoot -WarnOnly
+    $launcher = Read-Launcher $GameRoot
+    if ($launcher.Problem) { Write-Warn2 $launcher.Problem }
 
     $jarPath = Join-Path $GameRoot 'projectzomboid.jar'
     $jarSha = $null
@@ -1490,29 +1713,49 @@ function Invoke-Status {
     }
 
     $state = Read-State $GameRoot
-    if (-not $state -or (Get-StateModuleIds $state).Count -eq 0) {
+    $ids = @(Get-StateModuleIds $state)
+    if ($ids.Count -eq 0) {
         Write-Info (L '  安裝狀態：未安裝任何模組' '  Install status: no modules installed')
+    } elseif (Test-LegacyState $state) {
+        Write-Info (L "  安裝包版本：$(Get-Prop $state 'packageVersion' '(未標示)')（舊版 loose class 安裝）" "  Package version: $(Get-Prop $state 'packageVersion' '(not specified)') (old loose-class install)")
+        foreach ($m in (ConvertTo-Array (Get-Prop $state 'modules'))) { Write-Info "    [$(L '舊版' 'Old')] $(Get-ModuleName $m (Get-Prop $m 'id') $Manifest) ($(Get-Prop $m 'id')) $(Get-Prop $m 'version' '')" }
+        Write-Warn2 (L '這是 0.2.x 的舊版安裝（class 檔直接放在遊戲資料夾）。42.22 起遊戲 jar 有簽章，這些檔案會讓遊戲丟 SecurityException 而無法遊玩：請用新版安裝包重新安裝（會自動移除舊檔），或全部移除。' 'This is an old 0.2.x install (class files placed directly in the game folder). Since 42.22 the game jar is signed and these files make the game throw a SecurityException, so it cannot be played: install again with a new package (the old files are removed automatically), or remove everything.')
     } else {
         Write-Info (L "  安裝包版本：$(Get-Prop $state 'packageVersion' '(未標示)')" "  Package version: $(Get-Prop $state 'packageVersion' '(not specified)')")
-        if ($jarSha -and (Get-Prop $state 'jarSha256') -and (Get-Prop $state 'jarSha256').ToLowerInvariant() -ne $jarSha) {
-            Write-Warn2 (L '既有安裝對應的遊戲版本與目前的 jar 不同（遊戲可能更新過），請重新安裝。' 'The existing install was made for a different game version (the game may have updated). Please install again.')
-        }
+        $agentFull = Get-FullTargetPath $GameRoot $AGENT_REL
+        $agentOk = (Test-Path -LiteralPath $agentFull -PathType Leaf) -and
+            (Get-Sha256 $agentFull) -eq ([string](Get-Prop (Get-Prop $state 'agent') 'sha256')).ToLowerInvariant()
+        $jarOk = -not $jarSha -or ([string](Get-Prop $state 'jarSha256')).ToLowerInvariant() -eq $jarSha
+        $expected = Get-AgentArg $ids
+        $argOk = @($launcher.Ours).Count -eq 1 -and @($launcher.Ours)[0] -ceq $expected
+        $mark = if ($agentOk -and $jarOk -and $argOk) { L '正常' 'OK' } elseif (-not $agentOk) { L '異常（修補檔缺少或被改過）' 'PROBLEM (patch file missing or modified)' } else { L '沒有啟用' 'not active' }
         foreach ($m in (ConvertTo-Array (Get-Prop $state 'modules'))) {
-            $bad = 0; $gone = 0; $total = 0
-            foreach ($f in (ConvertTo-Array (Get-Prop $m 'files'))) {
-                $total++
-                $full = Get-FullTargetPath $GameRoot (Get-Prop $f 'path')
-                if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { $gone++; continue }
-                if ((Get-Sha256 $full) -ne (Get-Prop $f 'sha256').ToLowerInvariant()) { $bad++ }
-            }
-            $mark = if ($gone -eq 0 -and $bad -eq 0) { L '正常' 'OK' } else { L "異常（缺 $gone、變造 $bad）" "PROBLEM ($gone missing, $bad modified)" }
-            $ver = Get-Prop $m 'version' ''
-            Write-Info (L "    [已安裝] $(Get-Prop $m 'name' (Get-Prop $m 'id')) ($(Get-Prop $m 'id')) $ver — $total 個檔案，$mark" "    [Installed] $(Get-ModuleName $m (Get-Prop $m 'id') $Manifest) ($(Get-Prop $m 'id')) $ver - $total file(s), $mark")
+            Write-Info (L "    [已安裝] $(Get-Prop $m 'name' (Get-Prop $m 'id')) ($(Get-Prop $m 'id')) $(Get-Prop $m 'version' '') — $mark" "    [Installed] $(Get-ModuleName $m (Get-Prop $m 'id') $Manifest) ($(Get-Prop $m 'id')) $(Get-Prop $m 'version' '') - $mark")
+        }
+        if (-not $agentOk) {
+            Write-Warn2 (L "$AGENT_REL 缺少或內容與安裝紀錄不符。啟動設定還指著它時遊戲會起不來；請重新安裝，或全部移除。" "$AGENT_REL is missing or does not match the install record. While the launch settings still point to it the game will not start; install again, or remove everything.")
+        }
+        if (-not $jarOk) {
+            Write-Warn2 (L '遊戲已經更新（projectzomboid.jar 與安裝時不同）：修補比對到不同的 jar 就不啟用、照原版跑。遊戲更新後要重新安裝對應新版的修補包。' 'The game has been updated (projectzomboid.jar differs from install time): the patches do not switch on for a different jar, so the game runs unpatched. After a game update, install the package for the new version.')
+        }
+        if (@($launcher.Ours).Count -eq 0 -and $launcher.Editable) {
+            Write-Warn2 (L '已安裝但沒有啟用：ProjectZomboid64.json 裡沒有本包的啟動參數（通常是遊戲更新把它換回原版）。遊戲更新後要重新安裝對應新版的修補包；版本沒變的話，重新安裝一次就會補回去。' 'Installed but not active: ProjectZomboid64.json does not have this package''s launch option (usually because a game update put the original file back). After a game update, install the package for the new version; if the version did not change, installing again puts the option back.')
+        } elseif (-not $argOk -and $launcher.Editable) {
+            Write-Warn2 ((L '啟動參數與安裝紀錄不符，請重新安裝一次。目前：' 'The launch option does not match the install record; install again. Now: ') + (@($launcher.Ours) -join ' '))
+        } elseif ($argOk -and $agentOk -and $jarOk) {
+            Write-Info (L "  啟用狀態：已啟用（$expected）" "  Active: yes ($expected)")
         }
     }
+    $jarPackages = if ($jarSha) { Get-JarPackages $jarPath } else { @{} }
+    $loose = Get-StateLooseFiles $state
+    Write-ForeignLooseWarning @(Get-LooseClasses $GameRoot $jarPackages | Where-Object {
+            $c = $_ -replace '\.class$', ''; $s = $c.LastIndexOf('/')
+            -not $loose.ContainsKey($_) -and $s -gt 0 -and $jarPackages.ContainsKey($c.Substring(0, $s)) })
+    Write-OtherAgentsNote $launcher.OtherAgents
 
     if ($Manifest) {
-        $installed = @(Get-StateModuleIds $state)
+        # 0.2.x 的舊版安裝不是這個包裝的，清單裡不標成已安裝
+        $installed = if ($state -and -not (Test-LegacyState $state)) { @(Get-StateModuleIds $state) } else { @() }
         Write-Info (L "  安裝包可提供：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）" "  This package offers: $(Get-Prop $Manifest 'packageVersion' '(not specified)') (game $(Get-Prop $Manifest 'gameVersion' '?'))")
         foreach ($m in (ConvertTo-Array (Get-Prop $Manifest 'modules'))) {
             $id = Get-Prop $m 'id'
@@ -1552,7 +1795,7 @@ function Select-InstallModules($Manifest, [string]$PackageDir, [string]$GameRoot
 
     Write-Head (L '要安裝什麼？' 'What do you want to install?')
     $opts = @('0')
-    if ($variants.Count -gt 0) { Write-Info (L '  [1] 修復隱形、自建房間看不到東西（一般玩家選這個）' '  [1] Client fixes: invisible entities, objects vanishing in player-built rooms (choose this)'); $opts += '1' }
+    if ($variants.Count -gt 0) { Write-Info (L '  [1] 客戶端修復：隱形、自建房斷線、開車瞬移等（一般玩家選這個）' '  [1] Client fixes: invisible entities, player-built room disconnects, vehicle teleports and more (choose this)'); $opts += '1' }
     if ($hasProfiler) { Write-Info (L '  [2] 開發者工具 DevProfiler（一般玩家不用裝）' '  [2] DevProfiler developer tool (not needed for players)'); $opts += '2' }
     if ($hasProfiler -and $variants.Count -gt 0) { Write-Info (L '  [3] 兩個都裝（開發者用）' '  [3] Both (developers)'); $opts += '3' }
     Write-Info (L '  [0] 返回' '  [0] Back')
@@ -1571,7 +1814,7 @@ function Select-InstallModules($Manifest, [string]$PackageDir, [string]$GameRoot
         $i = 0
         foreach ($v in $variants) {
             $i++
-            $text = if ($v -eq 'client-fixes-standard') { L '標準版（電腦記憶體 32GB 以上）' 'Standard (32 GB RAM or more)' } elseif ($v -eq 'client-fixes-lowmem') { L '省記憶體版（電腦記憶體 32GB 以下）' 'Low-memory (less than 32 GB RAM)' } elseif ($v -eq 'client-fixes-compat') { L '相容版：只含車輛與樹的修補（遊戲資料夾裡已有其他 MOD 替換的遊戲 class 時選這個，例如 PZ_Optimization）' 'Compatible: vehicle and tree fixes only (choose this if another mod, such as PZ_Optimization, already replaces game classes in the game folder)' } else { Get-ModuleLabel $Manifest $v }
+            $text = if ($v -eq 'client-fixes-standard') { L '標準版（電腦記憶體 32GB 以上）' 'Standard (32 GB RAM or more)' } elseif ($v -eq 'client-fixes-lowmem') { L '省記憶體版（電腦記憶體 32GB 以下）' 'Low-memory (less than 32 GB RAM)' } elseif ($v -eq 'client-fixes-compat') { L '相容版：只含車輛的修補（遊戲資料夾裡已有其他 MOD 替換的遊戲 class 時選這個，例如 PZ_Optimization）' 'Compatible: vehicle fixes only (choose this if another mod, such as PZ_Optimization, already replaces game classes in the game folder)' } else { Get-ModuleLabel $Manifest $v }
             Write-Info "  [$i] $text"
             $vopts += "$i"
             if ($v -eq 'client-fixes-compat') { $compatPick = "$i" }

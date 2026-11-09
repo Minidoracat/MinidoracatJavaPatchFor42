@@ -434,41 +434,57 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.21.0-0.2.11.zip`) and never touches the server manifest; the
-client classpath `[".", "projectzomboid.jar"]` is unchanged and loose classes override.
+(currently `MinidoracatClientPatches-42.22.2-0.3.0.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
+of this document): the package holds a single `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`,
+one set of patched classes and helpers per module). The installer puts it at `.mdc-patches/MinidoracatClientPatches.jar`
+and appends one `-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<modules>` entry to the top-level
+`vmArgs` of `ProjectZomboid64.json`; the official jar and the classpath stay untouched. The relative path works because
+the vanilla json's own `-Djava.library.path=win64/;.` already relies on the game folder being the working directory.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
-`client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after jar/payload SHA and ownership checks;
-`Uninstall-Patches.bat` removes per module and refuses unknown or modified classes. Old TexPipeline
-v3.0 packages (the 42.20.3 and 42.20.4 builds, `deploy-client/legacy-packages.json`) are identified
-by their full set of file fingerprints only, not by the current jar: if one is left behind after a game
-update, installing replaces it and uninstalling removes it as a whole (since 0.2.4; earlier versions
-tied the match to the old jar, so a game update made it unrecognizable and players had to find the old
-`uninstall.bat`). Unrecognized leftovers are still refused. Steam file
-verification does not remove loose classes: uninstall before a game update, **never while the JVM is
-running**. Binaries are for local use by legal game owners only and are not committed or redistributed.
+`client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after jar/agent SHA checks;
+`Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the entry and the
+agent jar. Only our entry changes: the installer replaces just the text span of the top-level `vmArgs` array and
+re-parses the result, every other byte (BOM and line endings included) is kept, and uninstalling restores the file
+byte for byte. Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
+transaction writes before it deletes and can be rolled back from the state backup, so the json never points at a
+deleted jar: with the agent jar missing the JVM does not start at all (`Error opening zip file or JAR manifest
+missing`, tested on the game's Zulu 25 JRE). A Steam update or file verification restores the vanilla json; status
+then reports "installed but not active". When a game update replaces the jar, the agent sees the SHA mismatch,
+disarms and runs vanilla, so since 0.3.0 there is no need to uninstall before an update. `ProjectZomboid64.bat` and
+`ShowConsole.bat` call `jre64\bin\java.exe` directly and never read the json, so launching through them loads no
+patches. Upgrading from 0.2.x (state `schemaVersion` 1, loose classes) deletes the old loose classes in the same
+transaction (only when every file's SHA matches, otherwise exit 8); on 42.22 they would throw `SecurityException`
+anyway, and a 0.2.x install can only be removed as a whole. Old TexPipeline v3.0 packages (the 42.20.3 and 42.20.4
+builds, `deploy-client/legacy-packages.json`) are identified by their full set of file fingerprints only, not by the
+current jar: installing removes a leftover one in the same transaction and uninstalling removes it as a whole (since
+0.2.4). Unrecognized leftovers are still refused. Never install or uninstall while the JVM is running. Binaries are
+for local use by legal game owners only and are not committed or redistributed.
 
-**Coexisting with other mods that replace game classes (client package 0.2.10)**: PZ_Optimization
-(Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,
+**Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
+PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,
 `WorldStreamer`, `IsoChunk`, `RoomDef` and `FBORenderCutaways` (the version subscribed locally on 2026-10-29 also
-replaces `FBORenderCell`), and only one copy of a class can load. A third
-mutually exclusive variant, `client-fixes-compat` (`PatchConfig.clientCompat()`; the Patcher/LoadCheck/SmokeCheck
-mode is `client-compat`), carries only the IsoTree, BaseVehicle and VehiclePacket surgery (XL tree room fix, W54,
-W61–W63, W65). Its ClassPatches are taken from `client(false)`, so the surgery is byte-identical to the full
-variants. The texture, streaming, W55, W57 and W84 patches are not in it, and because W68 must lock every call site,
-IsoBuilding, DataRoot and MetaGridPacket are left out too. The installer adds three checks. (1) When a full variant
-conflicts with someone else's classes in the game folder and the compatible one does not, the interactive menu
-recommends the compatible variant and the code 7 message points to it, telling the player not to delete just the
-listed files. The player in [issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) deleted
-only the outer classes; PZ_Optimization's leftover `AnimationPlayer$L_*` classes hold per-instance scratch fields
-that the vanilla (and our) `AnimationPlayer` still reads with `getstatic`, so the first character animation threw
-`IncompatibleClassChangeError`, the main thread ended and the game closed. (2) A class about to be written whose
-class family (`X.class` or `X$*.class`) already has files in the game folder that are not ours is refused with
-code 7. (3) `ProjectZomboid64.json` is read, never written: if its classpath does not list `.` before
-`projectzomboid.jar`, install and uninstall are refused with instructions. PZ_Optimization's AOT cache (on by
-default) replaces the classpath with `pzopt/aot/pzopt.jar` and packs every loose class into it; when it later
-rebuilds that jar, Windows refuses to replace the jar in use (`AccessDeniedException`), so our installs and
-uninstalls would not take effect. When `MdcPatchRuntime` is loaded from someone else's jar, it walks up to the
-folder that holds `projectzomboid.jar` to read the install record, so it no longer reports `compatible=false`.
+replaces `FBORenderCell`), and only one copy of a class can load. A third mutually exclusive variant,
+`client-fixes-compat` (`PatchConfig.clientCompat()`; the Patcher/LoadCheck/SmokeCheck mode is `client-compat`),
+carries only the BaseVehicle and VehiclePacket surgery (W54, W61–W63, W65; the XL tree room fix was retired on
+42.22.2, see [§2bl](#2bl)). Its ClassPatches are taken from `client(false)`, so the surgery is byte-identical to the
+full variants. The texture, streaming, W55, W57 and W84 patches are not in it, and because W68 must lock every call
+site, IsoBuilding, DataRoot and MetaGridPacket are left out too. The agent only transforms classes loaded from the
+official jar: when someone else's class family files (`X.class` or `X$*.class`) in the game folder shadow a class we
+patch, that surgery would not apply, so the installer refuses with code 7. When a full variant conflicts and the
+compatible one does not, the interactive menu recommends the compatible variant and the code 7 message points to it,
+telling the player not to delete just the listed files. The player in
+[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) deleted only the outer classes;
+PZ_Optimization's leftover `AnimationPlayer$L_*` classes hold per-instance scratch fields that the vanilla (and our)
+`AnimationPlayer` still reads with `getstatic`, so the first character animation threw
+`IncompatibleClassChangeError`, the main thread ended and the game closed. Other foreign loose classes inside the
+official jar's packages only get a warning: from 42.22 on they throw `SecurityException` by themselves (tested on
+Zulu 25). The classpath in `ProjectZomboid64.json` may only have `.` before `projectzomboid.jar`: PZ_Optimization's
+AOT cache (on by default) replaces the classpath with `pzopt/aot/pzopt.jar` and packs the loose classes into it, so
+install is refused with instructions for turning it off; uninstall only needs an editable `vmArgs` to drop our entry.
+`MdcPatchRuntime` only accepts state `schemaVersion` 2: the agent jar path and SHA, the jar the helpers came from, and
+the installed module set must match the `modules=` reported by `MdcAgent.status()`, otherwise it reports
+`compatible=false`.
 
 Four of the paths the old v3.0 packages registered are vanilla classes (`TextureIDAssetManager`, `ImageData`,
 `TextureID`, `WorldStreamer`), and PZ_Optimization replaces them too. Files at those paths count as an
@@ -567,6 +583,10 @@ That chain **logs**; ours (loader threads sleeping on the watermark gate) **logs
 - Neither → new analysis; do not treat "TIS says it's fixed" as grounds to retire these patches.
 
 ---
+
+### 2026-11-10 — 42.22.2 re-validation
+
+`TextureIDAssetManager`, `ImageData` and `TextureID` methods are instruction-for-instruction identical between 42.21.0 and 42.22.2 (ClassDiff). Neither the threshold nor the leaks were fixed, so both patches stay as they are; hit counts are unchanged, and since 0.3.0 they load through the agent.
 
 <a id="2k"></a>
 ## 2k. Performance wave 1: vehicle line-of-sight prefilter + VehicleManager 512→256 (server)
@@ -709,6 +729,10 @@ Hypotheses under test: (a) while `requestingLargeArea`, the `sendRequests` head 
 - Tests: `sendGate` labeling, plus a case running `readAndDecide` against the game jar's real `WorldStreamer.instance` (21 entries in `pendingRequests1`, 31 s without receives must print `STALL … pending1=21 sendGate=closed`); a mutant that reflects any removed field turns it red.
 
 **Reading update**: `STALL … sendGate=closed` → the client stopped sending new requests because of the in-flight cap; with `pending1` stuck ≥21 and frozen parts = in-flight requests never complete (server did not answer or the reply was lost). The `largeArea=true` rule above applies to 42.20.x only.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+Only `WorldStreamer.compareSquares` changed; the four methods this patch touches are unchanged (ClassDiff) and hit counts match. Kept as is.
 
 <a id="2p"></a>
 ## 2p. Chunk supply batching (W4-1 v2, server, default observe) + request timeout 8 s→15 s (W4-2, client; retired: target method removed in 42.20.3)
@@ -2848,6 +2872,8 @@ fallback[notServer untrusted null coords] audits auditMisses observeMismatches d
 <a id="2bl"></a>
 ## 2bl. Player-built room XL-tree exception (client, 42.21.0; client patch package 0.2.2)
 
+> **Retired (2026-11-10, fixed upstream in 42.22.2)**: in 42.22.2, offsets 0–18 of `IsoTree.isPlayerInsideARoom` are `aload_1; invokevirtual isInARoom; ifeq 17; aload_1; getSquare; getRoom; ifnonnull 19; iconst_0; ireturn`, and `IsoGameCharacter.isInARoom` returns `square != null && square.isInARoom()`, value-for-value the same null check `TreeRoomGuard` added. The IsoTree surgery in `PatchConfig.client()`, `TreeRoomGuard`, its behavior test and the SmokeCheck/LoadCheck checks are removed, and `client-fixes-compat` now carries only the vehicle fixes. To revive: `git checkout 2dd015f -- patcher/game-client/zombie/mdc/TreeRoomGuard.java patcher/tests-client/zombie/mdc/TreeRoomGuardBehaviorTest.java patcher/src/PatchConfig.java patcher/src/SmokeCheck.java patcher/src/LoadCheck.java build-client.ps1`, then re-verify against the new jar.
+
 **Symptom** (reported 2026-09-29 by Player-I and Player-J; same as official reports
 [101887](https://theindiestone.com/forums/topic/101887-42210-entering-player-built-rooms-adjoining-pre-built-structures-causes-exceptions-visibility-glitches/)
 and [101955](https://theindiestone.com/forums/topic/101955-bugged-house-when-building-under-watchtower-b42/)): inside an enclosed player-built room adjoining
@@ -3312,6 +3338,10 @@ frame; `postupdate` 3.45 ms, of which `updateAnimationPlayer` 2.62 and `ModelInf
 **Residual**: inputs the signature cannot see (a track object whose bone mask is changed in place, edited clip data, debug options) can leave the old pose on
 screen for up to 256 skips until the audit catches it and the gate turns off for the session.
 
+### 2026-11-10 — 42.22.2 re-validation
+
+`AnimationPlayer` is unchanged and the `Update` site is still at javap offset 44. `BaseVehicle.update` gained two blocks (towing reattach via `isWaitingToReattachTowingPartner`/`shouldAbandonReattachingTowingPartner`, and an `isPhysicsActive`/`constraintChangedTime` block); neither touches this patch's sites. Kept as is.
+
 <a id="2bs"></a>
 ## 2bs. `isBoneReparented` fast path (W55, client, default on; client package 0.2.5)
 
@@ -3335,6 +3365,10 @@ zombies, animals, vehicles, the mechanics 3D view). If the field cannot be found
 - `BoneReparentFastPathBehaviorTest` (on and off per variant): with no re-parenting, with re-parenting, and after a pool round trip, the helper agrees with
   vanilla for every bone; the SHA-256 digest of `modelTransforms` over 60 frames of real animation (including a re-parented player) must be the same in the on
   and off runs, compared by `build-client.ps1`. Bare-JVM micro-benchmark (report only): with an empty list vanilla takes about 90–100 ns per call.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+`AnimationPlayer` is unchanged and the `isBoneReparented` site is still at offset 115. Kept as is; the W55 digest comparison still matches on the 42.22.2 test jar.
 
 <a id="2bt"></a>
 ## 2bt. Catch-up waits for the animal zone (W56, server, default on)
@@ -3522,6 +3556,10 @@ thread (a different moment, not reported).
   run was closed before the world loaded and is not counted.
 
 **Retirement**: once TIS fixes it, the SmokeCheck reasons turn red; then remove this patch from `PatchConfig.client()` and delete the helper and its test.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+The only change in `IsoChunk.loadInMainThread` is the `getObjects` return type (`PZArrayList` to `List`); the `IsoLightSwitch.chunkLoaded` call moved from offset 1863 to 1895 with the same instructions. `RoomDef.getIsoRoom` and `IsoChunk.getRoom` are unchanged. The null roomDef path is not fixed upstream, so the patch stays as is.
 
 <a id="2bv"></a>
 ## 2bv. SyncIsoObject flood probe (W58, server, observe only)
@@ -3844,6 +3882,10 @@ repairs the stale reference. If the decision throws, vanilla runs (logged once).
 **Retirement**: when TIS fixes it (checks the chunk before clamping, or unlinks vehicles when a chunk unloads), the SmokeCheck reasons to exist turn red;
 then remove this patch from `PatchConfig.client()` and delete the helper and its test.
 
+### 2026-11-10 — 42.22.2 re-validation
+
+The two new blocks in `BaseVehicle.update` (see §2br) only shift the sites: `setWorldTransform` moved from javap offset 1776 to 1821 and the current-chunk tracking from 1818 to 1863. Instructions and hit counts are unchanged; kept as is.
+
 <a id="2bz"></a>
 ## 2bz. A vehicle left on an unloaded chunk: two paths (W62, W63, client, default on; client package 0.2.7)
 
@@ -3926,6 +3968,10 @@ line (one vehicle on one unloaded chunk counts once; at most 20 of each per star
 **Retirement**: when TIS fixes it (moves the vehicle to a loaded chunk on unload, stops returning early in `update()` for a vehicle with a local
 passenger, or stops `doRemove` from moving the driver of a locally simulated vehicle), the SmokeCheck reasons to exist turn red; then remove the
 matching redirect from `PatchConfig.client()` and delete the helper and its test.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+W62: the first `contains` in `BaseVehicle.update` is still at offset 57; the other three moved from 206/1869/1920 to 206/1914/1965 because of the §2br additions, with the same hit count. W63: `VehiclePacket` is unchanged and `setPosition` is still at 75. Both kept as is.
 
 <a id="2ca"></a>
 ## 2ca. A vehicle pushed under the floor (W64 server, default on; W65 client, default on, client package 0.2.7 and later)
@@ -4056,6 +4102,10 @@ on that square, left as is` (no floor: vanilla; prefixed with `flipped (up <u>),
 
 **Retirement**: when TIS clamps the height the server receives to the level, or puts a vehicle that fell under the floor back on it in `update()`, the
 SmokeCheck reasons to exist turn red; then remove the matching surgery from `PatchConfig` and delete the helpers and tests.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+W65: the `updateTransform` site moved from javap offset 1951 to 1996 (the §2br additions); instructions and hit count are unchanged. Kept as is.
 
 <a id="2cb"></a>
 ## 2cb. Livestock zone sync fixes (W66, server, default on)
@@ -4363,6 +4413,10 @@ most 20 lines per start; in vanilla, these are the moments when both threads tou
 
 **Retirement**: once TIS fixes it (the SmokeCheck reasons to exist turn red), remove this patch from `PatchConfig.client()` and delete the helper
 and its test.
+
+### 2026-11-10 — 42.22.2 re-validation
+
+`MetaGridPacket` and `DataRoot` are unchanged; `IsoBuilding.CreateFrom`, `RoomDef.getIsoRoom`, `IsoChunk.getRoom` and both constructors, and `FBORenderCutaways.CalculateBuildingsToCollapse` are instruction-for-instruction identical; `IsoChunk.loadInMainThread` only differs in the `getObjects` return type. The SmokeCheck "waiting JDK calls match the audited list (3947 methods)" still passes on 42.22.2. Kept as is.
 
 <a id="2ce"></a>
 ## 2ce. Entity ID collision on removal (W69, server, default on)
@@ -5475,6 +5529,10 @@ Console (one first-effective line, one beat every 5 minutes, one line on disable
 **Retirement**: remove the patch when TIS makes the neighbour calls read only the splats near the shared edge (or uses a spatial index); when the SHA of either overload turns red, re-check the margin proof before deciding.
 
 ---
+
+### 2026-11-10 — 42.22.2 re-validation
+
+`FBORenderCell.renderOneLevel_Blood` (six arguments) is instruction-for-instruction identical, the SmokeCheck SHA pin passes, and the W84 digest comparison still matches on the 42.22.2 test jar. Kept as is.
 
 <a id="2ct"></a>
 ## 2ct. Only vehicles near animals go into native pathfinding (W85, server, default observe)

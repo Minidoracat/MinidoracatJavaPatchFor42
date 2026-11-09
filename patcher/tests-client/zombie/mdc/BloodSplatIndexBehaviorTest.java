@@ -97,10 +97,10 @@ public final class BloodSplatIndexBehaviorTest {
     public static void main(String[] args) throws Exception {
         String mode = args.length > 0 ? args[0] : "on";
         RandStandard.INSTANCE.init();
-        IsoWorld.instance = TreeRoomGuardBehaviorTest.alloc(IsoWorld.class);
-        sentinel = TreeRoomGuardBehaviorTest.alloc(IsoGridSquare.class);
+        IsoWorld.instance = TestObjects.alloc(IsoWorld.class);
+        sentinel = TestObjects.alloc(IsoGridSquare.class);
         for (int t = 0; t < IsoFloorBloodSplat.FLOOR_BLOOD_TYPES.length; t++) {
-            IsoSprite sprite = TreeRoomGuardBehaviorTest.alloc(IsoSprite.class);
+            IsoSprite sprite = TestObjects.alloc(IsoSprite.class);
             IsoFloorBloodSplat.spriteMap.put(IsoFloorBloodSplat.FLOOR_BLOOD_TYPES[t], sprite);
             SPRITE_TYPE.put(sprite, t);
         }
@@ -442,7 +442,7 @@ public final class BloodSplatIndexBehaviorTest {
 
         World(long seed) throws Exception {
             random = new Random(seed);
-            IsoCell cell = TreeRoomGuardBehaviorTest.alloc(IsoCell.class);
+            IsoCell cell = TestObjects.alloc(IsoCell.class);
             for (int[] base : new int[][]{{10, 20}, {2395, 1700}}) {
                 for (int dx = 0; dx < 4; dx++) {
                     for (int dy = 0; dy < 4; dy++) {
