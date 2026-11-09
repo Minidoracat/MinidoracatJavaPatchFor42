@@ -674,9 +674,10 @@ public final class PatchConfig {
         // W51：伺服器查不到 client 指定的動物時記一行（純觀測；docs/patches.md 2bo）。共用 table decoder 的
         // type 17（IsoAnimal）唯一 AnimalID.parse 1:1 改道，解析結果與例外照原版；其餘方法逐指令不變
         // （W10-D2 的猜測改道不得回來，SmokeCheck 釘）。kill switch -Dmdc.animalIdMiss=0。
+        // 42.22：原版把 load(…B) 改成帶巢狀深度的 load(…BI)（舊方法刪除），type 17 語境逐指令相同，跟著改錨點。
         Patcher.ClassPatch netTable = new Patcher.ClassPatch("zombie/network/PZNetKahluaTableImpl");
         Patcher.MethodOps netTableLoad = netTable.method("load",
-                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;B)Ljava/lang/Object;");
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;BI)Ljava/lang/Object;");
         netTableLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "zombie/network/fields/character/AnimalID", "parse",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
@@ -705,9 +706,13 @@ public final class PatchConfig {
                 "(Lzombie/characters/IsoPlayer;)V", taProbe, "stopPlayerActions"));
         patches.add(ntaPkt);
 
-        // 動作封包 owner 檢查＋W10-C Request 上下文＋WorldSound 觀測：在授權、解析、一致性與反作弊檢查之後、
-        // 原版派送之前。Action 封包的 wire PlayerID 必須屬於本連線玩家，否則不派送（-Dmdc.actionOwnerCheck=0 回原版）。
+        // W10-C Request 上下文＋WorldSound 觀測的派送 bridge：在授權、解析、一致性與反作弊檢查之後、原版派送之前。
         // INVOKEINTERFACE(5 bytes)→INVOKESTATIC(3 bytes)，淨堆疊不變，ASM 依 Label 重定位 frames。
+        // 退役（2026-11-10，42.22.2 官方已修）：動作封包 owner 檢查（-Dmdc.actionOwnerCheck）——ConnectionPlayer.parse 在伺服器
+        // 只以 connection.getPlayerAt(index) 解析並把 id 改成該玩家的 onlineID，解析不到時 isConsistent 為 false、不派送；
+        // W78 執行者檢查（-Dmdc.actionExecutorCheck，docs/patches.md 2cm）——processServer 的 Request 分支自己比
+        // action.rawget("character") == player.getPlayer()（nil 也拒）。復活：git checkout 3f79700 -- patcher/src/PatchConfig.java
+        // patcher/game/zombie/core/MdcTimedActionProbe.java patcher/tests/timed-action-probe（SmokeCheck／build.ps1 對應段一併取回）。
         Patcher.ClassPatch packetDispatch = new Patcher.ClassPatch("zombie/network/PacketTypes$PacketType");
         Patcher.MethodOps dispatch = packetDispatch.method("onServerPacket",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;)V");
@@ -717,12 +722,11 @@ public final class PatchConfig {
                 taProbe, "processServer"));
         dispatch.expectedHits = 1;
         patches.add(packetDispatch);
-        // W78（docs/patches.md 2cm）也在上面這個派送 bridge 裡（MdcTimedActionProbe.checkExecutor），不另加手術。
 
         // ---- W76 建造類別白名單＋W77 建造距離（docs/patches.md 2cl）----
         // 頭部 beginParse(this) 綁定本次 parse，唯一 LuaCaller.protectedCall（javap offset 221，建造物件建構子；之後 getFirst()==null
         // 時 item=null）改道 MdcBuildActionGuard：類別不是 ISBuildingObject 子類或位置離 owner 太遠時不呼叫建構子、回 nil，
-        // 原版 processServer 回 Reject。helper 放 zombie.core 才讀得到 Action.playerId。
+        // 原版 processServer 回 Reject。helper 放 zombie.core 才讀得到 Action.player（42.22 起是 ConnectionPlayer，伺服器只從送出的連線解析）。
         // kill switch -Dmdc.buildTypeCheck=0|off（W76）、-Dmdc.buildRangeCheck=0|off（W77）。
         String buildGuard = "zombie/core/MdcBuildActionGuard";
         Patcher.ClassPatch buildAction = new Patcher.ClassPatch("zombie/core/BuildAction");

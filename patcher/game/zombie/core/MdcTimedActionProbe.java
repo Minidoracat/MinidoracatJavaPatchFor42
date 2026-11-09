@@ -15,7 +15,7 @@ import zombie.network.packets.sound.MdcWorldSoundProbe;
 import zombie.network.packets.sound.WorldSoundPacket;
 
 /**
- * W10-C 靜默打斷觀測（B）＋動作封包身分檢查（docs/patches.md 2aj）。放在 {@code zombie.core}
+ * W10-C 靜默打斷觀測（B）＋派送 bridge（docs/patches.md 2aj）。放在 {@code zombie.core}
  * 是因為 {@link Action} 是 package-private class、欄位 protected——同 package 才能零反射直讀；
  * 唯一的反射是 {@code ActionManager.actions}（private static），class init 時一次快取，找不到即外逃＝fail-fast。
  *
@@ -24,20 +24,11 @@ import zombie.network.packets.sound.WorldSoundPacket;
  * 不送任何封包——Accept 中的舊動作在 client 等不到 Done／Reject。三態 {@code -Dmdc.timedActionProbe}：
  * {@code 0|off}（純直通）／{@code 1|enforce}（打斷時以同一物件補送 Reject）／{@code 2|observe}（預設；未知值落回 observe）。
  *
- * <p><b>動作封包身分檢查</b>：42.21 原版以 wire 上的 {@code PlayerID}（onlineID）＋ action id 查詢與取消動作，
- * 但 {@code PlayerID.isConsistent} 只驗「解析得到玩家」，不驗 onlineID 屬於送封包的連線；
- * {@code playerIndex=-1} 時 server 還會以 {@code IDToPlayerMap} 直接解析成其他連線的玩家。
- * {@link #processServer} 在授權、解析、一致性與反作弊檢查之後、原版派送之前，要求所有 {@link Action}
- * 封包（GeneralAction／NetTimedAction／BuildAction／FishingAction，任何 state）的 owner 物件
- * 屬於本連線、且 wire onlineID 等於 owner 的 onlineID；不符即不派送並計 {@code unknownRefused}。
- * 其餘一律交回原版 {@code processServer}（取消、Reject 後續、Fishing 事件都照原版）。
- * {@code -Dmdc.actionOwnerCheck=0|off} 回原版直通；與 MODE 獨立（MODE_OFF 時照樣檢查，只是不記錄）。
- *
- * <p><b>W78 執行者檢查</b>（docs/patches.md 2cm）：owner 檢查通過後，NetTimedAction Request 重建出的動作表
- * {@code character}（{@code ISBaseTimedAction.new(self, character)} 設的執行者）不是 nil 也不是 owner 本人時，
- * 把 {@code action} 設成 null 交回原版 {@code processServer} 的 Reject 分支（客戶端收到 Reject）。
- * 其他 IsoPlayer 參數（替別人包紮的病人）不看。
- * {@code -Dmdc.actionExecutorCheck=0|off} 關閉；記錄同樣受 MODE_OFF 抑制。
+ * <p><b>派送 bridge</b>（{@link #processServer}）：NetTimedAction 封包派送期間綁定為 W10-C 的 Request 上下文
+ * （以它的 id 區分「同 id 重送」與「新動作打斷」）；{@code WorldSoundPacket} 交給 §2at 觀測器；其餘原樣交回原版。
+ * 42.22.2 對版退役了這裡的動作封包 owner 檢查與 W78 執行者檢查：原版 {@code ConnectionPlayer.parse} 在伺服器只從送出的連線
+ * 解析玩家（解析不到就 {@code isConsistent} 為 false、不派送），{@code NetTimedActionPacket.processServer} 自己比
+ * {@code action.character == player}。
  *
  * <p>例外紀律：簿記 catch RuntimeException（anomalies++，不擋 vanilla）；vanilla 委派原樣上拋；
  * LinkageError 外逃 fail-fast。
@@ -50,13 +41,7 @@ public final class MdcTimedActionProbe {
     static final int MODE_OBSERVE = 2;
 
     static final int MODE = parseMode();
-    /** 動作封包 owner 必須屬於送封包的連線；{@code -Dmdc.actionOwnerCheck=0|off} 才回原版直通。 */
-    static final boolean OWNER_CHECK = parseFlag("mdc.actionOwnerCheck");
-    /** W78：NetTimedAction 的 {@code character} 必須是 owner；{@code -Dmdc.actionExecutorCheck=0|off} 關閉。 */
-    static final boolean EXECUTOR_CHECK = parseFlag("mdc.actionExecutorCheck");
 
-    private static final long WINDOW_NS = 10_000_000_000L;
-    private static final int WINDOW_CAP = 20;
     private static final long BEAT_NS = 300_000_000_000L;
 
     /** ActionManager.actions（private static final ConcurrentLinkedQueue<Action>）——class init 一次快取。 */
@@ -71,15 +56,7 @@ public final class MdcTimedActionProbe {
     private static long sameIdResend;
     private static long rejectsSent;
     private static long rejectsSkippedNoConn;
-    /** owner 不屬於本連線或 wire onlineID 不符而拒絕派送的動作封包數。 */
-    private static long unknownRefused;
-    /** W78：{@code character} 不是 owner 而改走原版 Reject 的 NetTimedAction Request 數。 */
-    private static long executorRefused;
-    private static long logged;
-    private static long suppressed;
     private static long anomalies;
-    private static long windowStartNs;
-    private static int windowCount;
     private static long lastBeatNs;
     private static boolean bannerShown;
 
@@ -152,132 +129,38 @@ public final class MdcTimedActionProbe {
         }
     }
 
-    // ---- 派送 bridge（PacketTypes$PacketType.onServerPacket 內唯一 processServer 改道）----
-
-    /**
-     * vanilla 在授權、{@code parseServer}、{@code isConsistent} 與 anticheat 全部通過之後才呼到這個
-     * callsite，所以 {@code connection} 就是這個封包已認證的來源。{@link Action} 封包先驗 owner，
-     * 不符即不派送；通過或非 Action 封包原樣交回原版（WorldSound 另經觀測器，原方法恰執行一次）。
-     * NetTimedAction 封包派送期間綁定為 W10-C 的 Request 上下文，try/finally 恢復先前值（可重入）。
-     */
-    public static void processServer(INetworkPacket packet, PacketTypes.PacketType packetType,
-            UdpConnection connection) {
-        if (packet instanceof Action action) {
-            if (OWNER_CHECK && !ownedByConnection(action, connection)) {
-                refuseUntrusted(action, connection);
-                return;
-            }
-            if (packet instanceof NetTimedActionPacket request) {
-                if (EXECUTOR_CHECK && request.state == Transaction.TransactionState.Request && request.action != null) {
-                    checkExecutor(request, connection);
-                }
-                NetTimedActionPacket previous = CURRENT_REQUEST.get();
-                CURRENT_REQUEST.set(request);
-                try {
-                    packet.processServer(packetType, connection);
-                } finally {
-                    if (previous == null) CURRENT_REQUEST.remove();
-                    else CURRENT_REQUEST.set(previous);
-                }
-                return;
-            }
-            packet.processServer(packetType, connection);
-            return;
-        }
-        if (packet instanceof WorldSoundPacket sound) {
-            MdcWorldSoundProbe.processServer(sound, packetType, connection);
-        } else {
-            packet.processServer(packetType, connection);
-        }
-    }
-
-    /**
-     * owner 物件必須以 identity 屬於本連線的 {@code players}，且 wire onlineID 等於 owner 的 onlineID。
-     * 原版以 wire onlineID 為查詢／取消鍵，只認物件或只認數字都不夠。
-     */
-    private static boolean ownedByConnection(Action action, UdpConnection connection) {
-        if (connection == null || connection.players == null) return false;
-        IsoPlayer owner = action.player.getPlayer();
-        if (owner == null || action.player.getId() != owner.getOnlineID()) return false;
-        for (IsoPlayer player : connection.players) {
-            if (player == owner) return true;
-        }
-        return false;
-    }
-
     /** 42.22 原版 {@code ActionManager.isActionOf} 的同一判斷：動作的玩家與 {@code player} 的 onlineID 相同。 */
     private static boolean sameOnlineId(Action action, IsoPlayer player) {
         IsoPlayer actionPlayer = action.player.getPlayer();
         return actionPlayer != null && player != null && actionPlayer.getOnlineID() == player.getOnlineID();
     }
 
+    // ---- 派送 bridge（PacketTypes$PacketType.onServerPacket 內唯一 processServer 改道）----
+
     /**
-     * W78：Request 重建出的動作表 {@code character} 不是 nil 也不是 owner 物件時，{@code action} 設成 null，
-     * 原版 {@code processServer} 走 Reject 分支（同 parse 失敗）。原版客戶端以 {@code character} 本人送出動作，
-     * 合法請求恆相等。檢查自身拋例外時照原版（anomalies++）。
+     * vanilla 在授權、{@code parseServer}、{@code isConsistent} 與 anticheat 全部通過之後才呼到這個 callsite。
+     * NetTimedAction 封包派送期間綁定為 W10-C 的 Request 上下文，try/finally 恢復先前值（可重入）；
+     * WorldSound 另經觀測器；原方法恰執行一次。
      */
-    private static void checkExecutor(NetTimedActionPacket request, UdpConnection connection) {
-        Object character;
-        try {
-            character = request.action.rawget("character");
-        } catch (RuntimeException e) {
-            anomalies++;
-            return;
-        }
-        if (character == null || character == request.player.getPlayer()) {
-            return;
-        }
-        request.action = null;
-        if (MODE == MODE_OFF) {
-            return;
-        }
-        executorRefused++;
-        try {
-            if (!bannerShown) {
-                showBanner();
+    public static void processServer(INetworkPacket packet, PacketTypes.PacketType packetType,
+            UdpConnection connection) {
+        if (packet instanceof NetTimedActionPacket request) {
+            NetTimedActionPacket previous = CURRENT_REQUEST.get();
+            CURRENT_REQUEST.set(request);
+            try {
+                packet.processServer(packetType, connection);
+            } finally {
+                if (previous == null) CURRENT_REQUEST.remove();
+                else CURRENT_REQUEST.set(previous);
             }
-            if (!allowLine()) return;
-            DebugLog.log(TAG + " executorMismatch#" + executorRefused
-                    + " id=" + request.id
-                    + " type=" + safeName(request.type)
-                    + " owner=" + playerName(request)
-                    + " character=" + describe(character)
-                    + " connectionPlayers=" + connectionPlayers(connection)
-                    + " action=rejected suppressed=" + suppressed + ".");
-        } catch (RuntimeException e) {
-            anomalies++;
+        } else if (packet instanceof WorldSoundPacket sound) {
+            MdcWorldSoundProbe.processServer(sound, packetType, connection);
+        } else {
+            packet.processServer(packetType, connection);
         }
     }
 
-    private static String describe(Object character) {
-        return character instanceof IsoPlayer p ? p.getOnlineID() + ":" + safeName(p.getUsername())
-                : safeName(character.getClass().getSimpleName());
-    }
-
-    private static void refuseUntrusted(Action action, UdpConnection connection) {
-        if (MODE == MODE_OFF) {
-            return;
-        }
-        unknownRefused++;
-        try {
-            if (!bannerShown) {
-                showBanner();
-            }
-            if (!allowLine()) return;
-            DebugLog.log(TAG + " untrustedAction#" + unknownRefused
-                    + " id=" + action.id + " state=" + action.state
-                    + " wireOnlineId=" + action.player.getId()
-                    + " owner=" + playerName(action)
-                    + " connection=" + (connection == null ? "none" : connection.getConnectedGUID())
-                    + " connectionPlayers=" + connectionPlayers(connection)
-                    + " type=" + safeName(typeOf(action))
-                    + " action=refused suppressed=" + suppressed + ".");
-        } catch (RuntimeException e) {
-            anomalies++;
-        }
-    }
-
-    /** 多人共用連線時列出所有可能 owner，不把其中一人冒充確定的發送者。 */
+    /** 多人共用連線時列出所有可能 owner，不把其中一人冒充確定的發送者（其他刀的 log 共用）。 */
     public static String connectionPlayers(UdpConnection connection) {
         if (connection == null || connection.players == null) return "?";
         StringBuilder names = new StringBuilder();
@@ -287,10 +170,6 @@ public final class MdcTimedActionProbe {
             names.append(player.getOnlineID()).append(':').append(safeName(player.getUsername()));
         }
         return names.length() == 0 ? "?" : names.toString();
-    }
-
-    private static String typeOf(Action action) {
-        return action instanceof NetTimedAction nta ? nta.type : action.getClass().getSimpleName();
     }
 
     // ---- 內部 ----
@@ -316,15 +195,6 @@ public final class MdcTimedActionProbe {
         }
     }
 
-    private static String playerName(Action action) {
-        try {
-            IsoPlayer p = action.player.getPlayer();
-            return p == null ? "?" : p.getOnlineID() + ":" + safeName(p.getUsername());
-        } catch (RuntimeException e) {
-            return "?";
-        }
-    }
-
     /** 共用 log 欄位淨化：控制字元、空白與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
     public static String safeName(String name) {
         if (name == null || name.isEmpty()) {
@@ -342,28 +212,10 @@ public final class MdcTimedActionProbe {
         return s.toString();
     }
 
-    private static boolean allowLine() {
-        long now = System.nanoTime();
-        if (windowStartNs == 0L || now - windowStartNs >= WINDOW_NS) {
-            windowStartNs = now;
-            windowCount = 0;
-        }
-        if (windowCount >= WINDOW_CAP) {
-            suppressed++;
-            return false;
-        }
-        windowCount++;
-        logged++;
-        return true;
-    }
-
     private static void showBanner() {
         bannerShown = true;
-        DebugLog.log(TAG + " 首次生效 mode=" + MODE + " ownerCheck=" + (OWNER_CHECK ? "on" : "off")
-                + " executorCheck=" + (EXECUTOR_CHECK ? "on" : "off")
-                + "（-Dmdc.timedActionProbe=0|off/1|enforce(打斷時補送 Reject)/2|observe 預設；"
-                + "-Dmdc.actionOwnerCheck=0|off 關閉動作封包 owner 檢查；-Dmdc.actionExecutorCheck=0|off 關閉 W78；"
-                + "觀測 interrupted/untrustedAction/executorMismatch）.");
+        DebugLog.log(TAG + " 首次生效 mode=" + MODE
+                + "（-Dmdc.timedActionProbe=0|off/1|enforce(打斷時補送 Reject)/2|observe 預設；觀測 interrupted）.");
     }
 
     /** heartbeat：每 256 次 stopPlayerActions 檢查一次時鐘、300s 一行。 */
@@ -380,22 +232,10 @@ public final class MdcTimedActionProbe {
             DebugLog.log(TAG + " beat interruptCalls=" + interruptCalls + " interruptedAccepted=" + interruptedAccepted
                     + " sameIdResend=" + sameIdResend + " rejectsSent=" + rejectsSent
                     + " rejectsSkippedNoConn=" + rejectsSkippedNoConn
-                    + " unknownRefused=" + unknownRefused + " executorRefused=" + executorRefused
-                    + " logged=" + logged + " suppressed=" + suppressed
-                    + " anomalies=" + anomalies + " mode=" + MODE + " ownerCheck=" + (OWNER_CHECK ? "on" : "off")
-                    + " executorCheck=" + (EXECUTOR_CHECK ? "on" : "off") + ".");
+                    + " anomalies=" + anomalies + " mode=" + MODE + ".");
         } catch (RuntimeException e) {
             anomalies++;
         }
-    }
-
-    private static boolean parseFlag(String name) {
-        String raw = System.getProperty(name);
-        if (raw == null) {
-            return true;
-        }
-        String v = raw.trim();
-        return !("0".equals(v) || "off".equalsIgnoreCase(v));
     }
 
     private static int parseMode() {
@@ -437,14 +277,6 @@ public final class MdcTimedActionProbe {
 
     static long rejectsSkippedNoConnForTest() {
         return rejectsSkippedNoConn;
-    }
-
-    static long unknownRefusedForTest() {
-        return unknownRefused;
-    }
-
-    static long executorRefusedForTest() {
-        return executorRefused;
     }
 
     static long anomaliesForTest() {

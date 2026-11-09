@@ -291,7 +291,7 @@ java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
 
 Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸＋W51 動物 ID 紀錄（四組態，獨立 JVM）..."
-# 出貨、Lua 保險絲關閉、參數守衛關閉、動物 ID 紀錄關閉；每組皆自驗旗標。缺 component 的封包走 42.21 原版 processServer 驗 Reject bytes。
+# 出貨、Lua 保險絲關閉、參數守衛關閉、動物 ID 紀錄關閉；每組皆自驗旗標。缺 component 的封包走原版 processServer 驗 Reject bytes。
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest
 Assert-Ok "NetTimedActionGuardTest（both，出貨組態）"
 java "-Dmdc.netTimedActionGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.NetTimedActionGuardTest guard-off
@@ -526,19 +526,15 @@ Assert-Ok "ProcessItemsGuardTest（processItemsGuard=0，原版重現）"
 java "-Dmdc.processItemsDefer=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.ProcessItemsGuardTest nodefer
 Assert-Ok "ProcessItemsGuardTest（processItemsDefer=0，W41 回原版直接寫）"
 
-Write-Host "[9s/10] W10-C 打斷觀測＋動作封包 owner 檢查＋W78 執行者檢查回歸（獨立 JVM）..."
-# 觀測模式不控制 owner／執行者檢查；涵蓋真 wire 偽造取消／Request、合法取消交回原版（含 Fishing 後續事件）與上下文收尾；
-# W78：character＝owner、替別人包紮、nil、非 Request 照原版，character 是別人或不是玩家時 action=null 交回原版 Reject。
+Write-Host "[9s/10] W10-C 打斷觀測＋派送 bridge 回歸，並釘 owner 檢查／W78 退役依據（42.22.2 原版，獨立 JVM）..."
+# 三種觀測模式；涵蓋打斷計數、同 id 重送、enforce 無連線跳過、上下文收尾；四種動作封包以真 write→parse 驗原版只從送出連線解析玩家
+# （index -1／他人 onlineID／空 slot 都不一致、不派送），合法取消交回原版（含 Fishing 後續事件）；character 不是送出者時原版自己回 Reject。
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe
 Assert-Ok "MdcTimedActionProbeTest（observe，預設出貨模式）"
 java "-Dmdc.timedActionProbe=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest enforce
 Assert-Ok "MdcTimedActionProbeTest（enforce，補送 Reject 路徑）"
 java "-Dmdc.timedActionProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest off
-Assert-Ok "MdcTimedActionProbeTest（觀測 off，owner 檢查仍有效）"
-java "-Dmdc.actionOwnerCheck=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe owner-off
-Assert-Ok "MdcTimedActionProbeTest（actionOwnerCheck=0，原版信任邊界負對照）"
-java "-Dmdc.actionExecutorCheck=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcTimedActionProbeTest observe executor-off
-Assert-Ok "MdcTimedActionProbeTest（actionExecutorCheck=0，W78 原版負對照）"
+Assert-Ok "MdcTimedActionProbeTest（觀測 off）"
 
 Write-Host "[9t/10] 序列化物件池執行緒隔離（W25）行為驗證＋kill switch（獨立 JVM；走 dist 內手術後的真 BitHeader/ByteBlock）..."
 # on＝預設出貨（round trip 逐位元、同執行緒 LIFO 回收同實例、4 執行緒零跨執行緒共用、全域池零寫入、

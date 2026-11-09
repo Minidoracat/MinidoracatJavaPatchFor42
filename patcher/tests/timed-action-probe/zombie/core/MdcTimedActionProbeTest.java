@@ -2,6 +2,7 @@ package zombie.core;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 
@@ -19,18 +20,18 @@ import zombie.network.packets.INetworkPacket;
 import zombie.network.packets.NetTimedActionPacket;
 
 /**
- * W10-C（B）＋動作封包身分檢查 MdcTimedActionProbe 行為驗證（獨立 JVM；MODE／OWNER_CHECK 是 static final，
+ * W10-C（B）與派送 bridge 的 MdcTimedActionProbe 行為驗證（獨立 JVM；MODE 是 static final，
  * 各組態由 build.ps1 分開驅動並以 argv 自驗）。放在 zombie.core 以直讀 Action 的 protected 欄位。
  *
  * <p>覆蓋：(B) 打斷偵測（Accept 才算／同 id 重送分流／enforce 補送在無連線時安全跳過）、bridge 的 Request
- * 上下文綁定／nested／例外清除、四種 Action 封包的 owner 檢查（真 wire：他人 onlineID 以 index -1 解析成他人，
- * 或以本連線 index 帶他人 onlineID）、合法取消與 Fishing Reject 後續事件照原版執行、同機多人、過期 owner、
- * 空連線。{@code -Dmdc.actionOwnerCheck=0} 另驗原版真的會讓偽造封包取消／改寫他人動作。
+ * 上下文綁定／nested／例外清除。另以真 write→parse 與原版 processServer 釘住 42.22.2 對版退役 owner 檢查與 W78 的依據：
+ * 伺服器只從送出連線的 slot 解析玩家（index -1、他人 onlineID、空 slot 都解析不到、isConsistent 為 false），
+ * 合法取消只動自己的同 id 動作；NetTimedAction Request 的 {@code character} 不是送出者（含 nil）時原版自己回 Reject。
  */
 public final class MdcTimedActionProbeTest {
 
     private static int failed;
-    /** DebugLog 初始化後會把 System.out 換成自己的 log stream（W78 擷取 log 時一起被收走）：結果行寫到原本的 stdout。 */
+    /** DebugLog 初始化後會把 System.out 換成自己的 log stream：結果行寫到原本的 stdout。 */
     private static final java.io.PrintStream OUT = System.out;
 
     public static void main(String[] args) throws Exception {
@@ -45,32 +46,18 @@ public final class MdcTimedActionProbeTest {
             default -> MdcTimedActionProbe.MODE_OBSERVE;
         };
         expect("property 與測試模式一致（" + want + "）", MdcTimedActionProbe.MODE == wantMode);
-        java.util.List<String> argv = java.util.Arrays.asList(args);
-        boolean wantOwnerCheck = !argv.contains("owner-off");
-        expect("actionOwnerCheck 與 argv 一致（" + (wantOwnerCheck ? "on" : "off") + "）",
-                MdcTimedActionProbe.OWNER_CHECK == wantOwnerCheck);
-        boolean wantExecutorCheck = !argv.contains("executor-off");
-        expect("actionExecutorCheck 與 argv 一致（" + (wantExecutorCheck ? "on" : "off") + "）",
-                MdcTimedActionProbe.EXECUTOR_CHECK == wantExecutorCheck);
 
         testInterrupt(wantMode);
         testDispatchBinding();
         testSafeName();
-        testForgedCancel(wantMode);
-        testLegitCancelRunsVanilla();
-        testForgedRequest();
-        if (MdcTimedActionProbe.OWNER_CHECK) {
-            testConnectionMembership(wantMode);
-        }
-        testExecutor(wantMode);
+        testVanillaIdentity();
+        testVanillaExecutor();
 
         if (failed != 0) {
             OUT.println("timed-action-probe FAIL " + failed + " 項");
             System.exit(1);
         }
-        OUT.println("timed-action-probe OK mode=" + MdcTimedActionProbe.MODE
-                + " ownerCheck=" + (MdcTimedActionProbe.OWNER_CHECK ? "on" : "off")
-                + " executorCheck=" + (MdcTimedActionProbe.EXECUTOR_CHECK ? "on" : "off"));
+        OUT.println("timed-action-probe OK mode=" + MdcTimedActionProbe.MODE);
     }
 
     private static byte nextId = 10;
@@ -220,12 +207,12 @@ public final class MdcTimedActionProbeTest {
     }
 
     /**
-     * 偽造取消：bob 的連線送出帶 alice onlineID 的 Reject（真 write→parse）。四種 Action 封包：
-     * GeneralAction 以 setReject(id, alice) 產生（index 為本連線 slot 0，server 解析成 bob，但 wire onlineID 是 alice 的）；
-     * 其餘以 index -1 送出（server 以 IDToPlayerMap 解析成 alice 本人）。檢查開著時整包不派送；
-     * 關著時原版以 (alice onlineID, id) 為鍵取消 alice 的動作——原版信任邊界的負對照。
+     * owner 檢查退役依據（42.22.2 原版）：bob 的連線送出 Reject，wire 上是玩家 index（真 write→parse，四種 Action 封包）。
+     * index 0＝bob 自己的 slot：解析成 bob、id 改成 bob 的 onlineID，經 bridge 交給原版只取消 bob 的同 id 動作
+     * （Fishing 的 Lua 事件資料屬於 bob）。index -1（42.21 會以 IDToPlayerMap 解析成別人）、alice 的 onlineID、
+     * bob 連線上的空 slot：都解析不到玩家、isConsistent 為 false，原版 onServerPacket 不派送，alice 的動作不動。
      */
-    private static void testForgedCancel(int mode) throws Exception {
+    private static void testVanillaIdentity() throws Exception {
         Collection<Object> queue = queue();
         IsoPlayer alice = player((short) 5, "alice");
         IsoPlayer bob = player((short) 7, "bob");
@@ -235,41 +222,45 @@ public final class MdcTimedActionProbeTest {
         try {
             for (Class<?> kind : new Class<?>[]{GeneralActionPacket.class, NetTimedActionPacket.class,
                     BuildActionPacket.class, EventCapturingFishingPacket.class}) {
-                queue.clear();
-                NetTimedActionPacket victim = own(newAction(30_000L), alice);
-                victim.id = 66;
-                victim.state = Transaction.TransactionState.Accept;
-                victim.endTime = zombie.GameTime.getServerTimeMills() + 30_000L;
-                NetTimedActionPacket mine = own(newAction(30_000L), bob);
-                mine.id = victim.id;
-                mine.state = Transaction.TransactionState.Accept;
-                mine.endTime = victim.endTime;
-                queue.add(victim);
-                queue.add(mine);
+                for (short index : new short[]{0, -1, 5, 1}) {
+                    queue.clear();
+                    NetTimedActionPacket other = own(newAction(30_000L), alice);
+                    other.id = 77;
+                    other.state = Transaction.TransactionState.Accept;
+                    other.endTime = zombie.GameTime.getServerTimeMills() + 30_000L;
+                    NetTimedActionPacket mine = own(newAction(30_000L), bob);
+                    mine.id = other.id;
+                    mine.state = Transaction.TransactionState.Accept;
+                    mine.endTime = other.endTime;
+                    queue.add(other);
+                    queue.add(mine);
 
-                Action packet = decoded(kind, alice, victim.id, bobConn);
-                boolean viaSlot = packet instanceof GeneralActionPacket;
-                expect(kind.getSimpleName() + "：真 wire 帶 alice 的 onlineID，解析出的 owner 為 "
-                        + (viaSlot ? "本連線 slot 0（bob）" : "alice"),
-                        packet.playerId.getID() == alice.getOnlineID()
-                        && packet.playerId.getPlayer() == (viaSlot ? bob : alice));
-                long refused0 = MdcTimedActionProbe.unknownRefusedForTest();
-                MdcTimedActionProbe.processServer((INetworkPacket) packet, null, bobConn);
-                ActionManager.update();
-                if (MdcTimedActionProbe.OWNER_CHECK) {
-                    expect(kind.getSimpleName() + "：偽造取消不派送，alice 與 bob 的同 id 動作都原封不動",
-                            queue.size() == 2 && queue.contains(victim) && queue.contains(mine)
-                            && victim.state == Transaction.TransactionState.Accept);
-                    expect(kind.getSimpleName() + "：拒絕計數（MODE_OFF 不記）",
-                            MdcTimedActionProbe.unknownRefusedForTest()
-                                    == refused0 + (mode == MdcTimedActionProbe.MODE_OFF ? 0 : 1));
-                    if (packet instanceof EventCapturingFishingPacket fishing) {
-                        expect("偽造 Fishing Reject＋bobber flag 不為 alice 產生 Lua 更新事件資料",
-                                fishing.eventPlayer == null);
+                    Action packet = decoded(kind, alice, index, mine.id, bobConn);
+                    String what = kind.getSimpleName() + " index=" + index;
+                    if (index == 0) {
+                        expect(what + "：解析成本連線 slot 0 的 bob、id 改成 bob 的 onlineID",
+                                packet.isConsistent(bobConn) && packet.player.getPlayer() == bob
+                                && packet.player.getId() == bob.getOnlineID());
+                    } else {
+                        expect(what + "：解析不到玩家、isConsistent=false（原版 onServerPacket 不派送）",
+                                packet.player.getPlayer() == null && !packet.isConsistent(bobConn));
                     }
-                } else {
-                    expect(kind.getSimpleName() + "：owner-off 負對照＝原版以 alice 的 onlineID 取消 alice 的動作",
-                            !queue.contains(victim) && queue.contains(mine));
+                    if (packet.isConsistent(bobConn)) {   // 同原版 onServerPacket：一致才派送
+                        MdcTimedActionProbe.processServer((INetworkPacket) packet, null, bobConn);
+                    }
+                    if (index == 0) {
+                        expect(what + "：交回原版只移除 bob 自己的同 id 動作",
+                                queue.size() == 1 && queue.contains(other) && !queue.contains(mine)
+                                && other.state == Transaction.TransactionState.Accept);
+                        if (packet instanceof EventCapturingFishingPacket fishing) {
+                            expect("Fishing Reject＋bobber flag 的原版後續照常執行（事件資料屬於 bob）",
+                                    fishing.eventPlayer == bob);
+                        }
+                    } else {
+                        expect(what + "：雙方同 id 動作原封不動",
+                                queue.size() == 2 && queue.contains(other) && queue.contains(mine)
+                                && other.state == Transaction.TransactionState.Accept);
+                    }
                 }
             }
         } finally {
@@ -277,232 +268,55 @@ public final class MdcTimedActionProbeTest {
             zombie.network.GameServer.IDToPlayerMap.remove((short) 5);
             zombie.network.GameServer.IDToPlayerMap.remove((short) 7);
         }
-        expect("偽造取消路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
+        expect("身分路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
     }
 
     /**
-     * 合法取消：bob 自己的 Reject 交回原版——只移除 bob 的同 id 動作（42.21 原版已以 owner 分鍵），
-     * Fishing Reject 後續的 Lua 事件資料照原版為 bob 產生（bridge 不再自行 stop 後早退）。
+     * W78 退役依據（42.22.2 原版）：NetTimedAction Request 重建出的動作表 {@code character} 不是送出者（別的玩家、
+     * 不是玩家、nil）時，原版 processServer 自己走 Reject 分支：恰送出 1 包 Reject、不呼叫 stopPlayerActions、
+     * 不登錄動作。經 bridge 派送（Request 上下文照綁），只換掉 RakNet 送出端。
      */
-    private static void testLegitCancelRunsVanilla() throws Exception {
+    private static void testVanillaExecutor() throws Exception {
         Collection<Object> queue = queue();
-        IsoPlayer alice = player((short) 5, "alice");
-        IsoPlayer bob = player((short) 7, "bob");
-        UdpConnection bobConn = conn(bob);
-        zombie.network.GameServer.IDToPlayerMap.put((short) 5, alice);
-        zombie.network.GameServer.IDToPlayerMap.put((short) 7, bob);
-        try {
-            for (Class<?> kind : new Class<?>[]{GeneralActionPacket.class, NetTimedActionPacket.class,
-                    BuildActionPacket.class, EventCapturingFishingPacket.class}) {
-                queue.clear();
-                NetTimedActionPacket other = own(newAction(30_000L), alice);
-                other.id = 77;
-                other.state = Transaction.TransactionState.Accept;
-                other.endTime = zombie.GameTime.getServerTimeMills() + 30_000L;
-                NetTimedActionPacket mine = own(newAction(30_000L), bob);
-                mine.id = other.id;
-                mine.state = Transaction.TransactionState.Accept;
-                mine.endTime = other.endTime;
-                queue.add(other);
-                queue.add(mine);
-
-                Action packet = decoded(kind, bob, mine.id, bobConn);
-                long refused0 = MdcTimedActionProbe.unknownRefusedForTest();
-                MdcTimedActionProbe.processServer((INetworkPacket) packet, null, bobConn);
-                expect(kind.getSimpleName() + "：合法取消交回原版，只移除 bob 自己的同 id 動作，零拒絕",
-                        queue.size() == 1 && queue.contains(other) && !queue.contains(mine)
-                        && other.state == Transaction.TransactionState.Accept
-                        && MdcTimedActionProbe.unknownRefusedForTest() == refused0);
-                if (packet instanceof EventCapturingFishingPacket fishing) {
-                    expect("Fishing Reject＋bobber flag 的原版後續照常執行（事件資料屬於 bob）",
-                            fishing.eventPlayer == bob);
-                }
-            }
-        } finally {
-            queue.clear();
-            zombie.network.GameServer.IDToPlayerMap.remove((short) 5);
-            zombie.network.GameServer.IDToPlayerMap.remove((short) 7);
-        }
-        expect("合法取消路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
-    }
-
-    /**
-     * 偽造 Request：bob 的連線送出 alice onlineID 的 NetTimedAction Request（action=null 走原版 initial Reject）。
-     * 原版 getAction 以 (alice onlineID, id) 找到 alice 的動作並 copyFrom／setState(Reject) 改寫它；
-     * 檢查開著時在派送前拒絕。
-     */
-    private static void testForgedRequest() throws Exception {
-        Collection<Object> queue = queue();
-        IsoPlayer alice = player((short) 5, "alice");
-        IsoPlayer bob = player((short) 7, "bob");
-        UdpConnection bobConn = conn(bob);
-        zombie.network.GameServer.IDToPlayerMap.put((short) 5, alice);
-        try {
-            for (byte playerIndex : new byte[]{0, -1}) {
-                queue.clear();
-                NetTimedActionPacket victim = own(newAction(30_000L), alice);
-                victim.id = 67;
-                victim.state = Transaction.TransactionState.Accept;
-                queue.add(victim);
-                NetTimedActionPacket request = new NetTimedActionPacket();
-                request.id = victim.id;
-                request.state = Transaction.TransactionState.Request;
-                ByteBuffer header = ByteBuffer.allocate(3).putShort(alice.getOnlineID()).put(playerIndex).flip();
-                request.playerId.parse(new ByteBufferReader(header), bobConn);
-                expect("Request header index=" + playerIndex + "：真 decoder 解析本連線或其他連線 owner",
-                        request.playerId.getID() == alice.getOnlineID()
-                        && request.playerId.getPlayer() == (playerIndex == 0 ? bob : alice));
-                boolean escaped = false;
-                try {
-                    MdcTimedActionProbe.processServer(request, null, bobConn);
-                } catch (RuntimeException e) {
-                    escaped = true;   // owner-off：原版改寫 victim 後在測試連線的 startPacket 失敗
-                }
-                if (MdcTimedActionProbe.OWNER_CHECK) {
-                    expect("不可信 Request index=" + playerIndex + " 在 getAction/copyFrom 前拒絕，旁人動作不變",
-                            !escaped && queue.size() == 1 && queue.contains(victim)
-                            && victim.state == Transaction.TransactionState.Accept
-                            && victim.playerId.getPlayer() == alice && victim.action != null);
-                } else {
-                    expect("owner-off 負對照 index=" + playerIndex + "：原版把 alice 的動作改成 Reject",
-                            victim.state == Transaction.TransactionState.Reject);
-                }
-            }
-        } finally {
-            queue.clear();
-            zombie.network.GameServer.IDToPlayerMap.remove((short) 5);
-        }
-    }
-
-    /** 同機多人、過期 owner、wire onlineID 不符、空連線與缺連線：只認連線上實際的 owner 物件。 */
-    private static void testConnectionMembership(int mode) throws Exception {
-        IsoPlayer host = player((short) 4, "host");
-        IsoPlayer couch = player((short) 5, "couch");
-        UdpConnection splitConn = conn(host, couch);
-
-        InterruptRequest couchReq = own(new InterruptRequest(), couch);
-        couchReq.recordOnly = true;
-        MdcTimedActionProbe.processServer(couchReq, null, splitConn);
-        expect("同機多人：index 1 的實際 owner 也算本連線（派送）", couchReq.dispatched);
-
-        long refused0 = MdcTimedActionProbe.unknownRefusedForTest();
-        InterruptRequest stale = own(new InterruptRequest(), player((short) 5, "couch-old-object"));
-        stale.recordOnly = true;
-        MdcTimedActionProbe.processServer(stale, null, splitConn);
-        expect("過期 owner 物件與新玩家同 onlineID：不得跨實例認領（不派送）", !stale.dispatched);
-
-        InterruptRequest mismatched = own(new InterruptRequest(), couch);
-        mismatched.recordOnly = true;
-        mismatched.playerId.setID((short) 4);   // owner 物件屬本連線，但 wire onlineID 是 host 的
-        MdcTimedActionProbe.processServer(mismatched, null, splitConn);
-        expect("owner 屬本連線但 wire onlineID 是同機另一人：不派送（原版會以 host 的 id 為鍵）", !mismatched.dispatched);
-
-        InterruptRequest noPlayers = own(new InterruptRequest(), couch);
-        noPlayers.recordOnly = true;
-        MdcTimedActionProbe.processServer(noPlayers, null, conn());
-        UdpConnection nullArray = alloc(UdpConnection.class);
-        MdcTimedActionProbe.processServer(noPlayers, null, nullArray);
-        MdcTimedActionProbe.processServer(noPlayers, null, null);
-        expect("空連線／players 陣列 null／缺連線：一律不派送、零例外", !noPlayers.dispatched);
-        if (mode != MdcTimedActionProbe.MODE_OFF) {
-            expect("計數：過期 owner、onlineID 不符與三種空連線各 +1",
-                    MdcTimedActionProbe.unknownRefusedForTest() == refused0 + 5);
-        } else {
-            expect("off：拒絕照做但零計數", MdcTimedActionProbe.unknownRefusedForTest() == refused0);
-        }
-        expect("身分檢查路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
-    }
-
-    /**
-     * W78：Request 重建出的動作表 {@code character} 必須是 owner。合法（自己、替別人包紮時病人在別的參數、nil、
-     * 非 Request 狀態）照原版派送且動作表不動；{@code character} 是別的玩家或不是玩家時，派送前把 action 設成 null
-     * （原版 processServer 因此回 Reject，見 NetTimedActionGuardTest 的 Reject bytes），記 executorMismatch。
-     */
-    private static void testExecutor(int mode) throws Exception {
-        java.io.ByteArrayOutputStream log = new java.io.ByteArrayOutputStream();
-        zombie.debug.DebugType.General.setLogSeverity(zombie.debug.LogSeverity.All);
-        zombie.debug.DebugLog.getInstance().setStdOut(log);
+        queue.clear();
         IsoPlayer bob = player((short) 7, "bob");
         IsoPlayer alice = player((short) 5, "alice");
-        UdpConnection bobConn = conn(bob);
-        long refused0 = MdcTimedActionProbe.executorRefusedForTest();
-
-        expectExecutor(true, "character＝owner（一般動作）", bobConn, bob, request(bob, bob, null));
-        expectExecutor(true, "替別人包紮：character＝owner、病人是別的參數", bobConn, bob, request(bob, bob, alice));
-        expectExecutor(true, "character 是 nil（無從判斷，照原版）", bobConn, bob, request(bob, null, null));
-        RecordingRequest accepted = request(bob, alice, null);
-        accepted.state = Transaction.TransactionState.Accept;
-        expectExecutor(true, "非 Request 狀態不檢查", bobConn, bob, accepted);
-
-        boolean check = MdcTimedActionProbe.EXECUTOR_CHECK;
-        expectExecutor(!check, "character 指向別的在線玩家", bobConn, bob, request(bob, alice, null));
-        expectExecutor(!check, "character 不是玩家", bobConn, bob, request(bob, "notAPlayer", null));
-        long refused = MdcTimedActionProbe.executorRefusedForTest() - refused0;
-        boolean logged = log.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
-                "executorMismatch#" + (refused0 + 1) + " id=");
-        if (!check) {
-            expect("executor-off：零計數、零 log", refused == 0 && !logged);
-        } else if (mode == MdcTimedActionProbe.MODE_OFF) {
-            expect("MODE_OFF：照樣拒絕但零計數、零 log（同 owner 檢查）", refused == 0 && !logged);
-        } else {
-            expect("W78 計數恰 +2 且寫 executorMismatch log（帶 type、owner、character）", refused == 2 && logged
-                    && log.toString(java.nio.charset.StandardCharsets.UTF_8).contains(
-                            " type=ISTestAction owner=7:bob character=5:alice connectionPlayers=7:bob action=rejected"));
+        Object[] characters = {alice, "notAPlayer", null};
+        for (Object character : characters) {
+            CaptureConnection connection = captureConnection(bob);
+            NetTimedActionPacket request = own(new NetTimedActionPacket(), bob);
+            request.id = nextId++;
+            request.state = Transaction.TransactionState.Request;
+            request.type = "ISTestAction";
+            request.action = new KahluaTableImpl(new HashMap<>());
+            request.action.rawset("character", character);
+            long calls0 = MdcTimedActionProbe.interruptCallsForTest();
+            MdcTimedActionProbe.processServer(request, PacketTypes.PacketType.NetTimedAction, connection);
+            byte[] wire = connection.packets.size() == 1 ? connection.packets.get(0) : new byte[0];
+            ByteBufferReader received = new ByteBufferReader(ByteBuffer.wrap(wire));
+            boolean reject = wire.length == 3 + 4
+                    && received.getByte() == (byte) 134
+                    && received.getShort() == PacketTypes.PacketType.NetTimedAction.getId()
+                    && received.getByte() == request.id
+                    && received.getEnum(Transaction.TransactionState.class) == Transaction.TransactionState.Reject
+                    && received.getShort() == bob.getOnlineID();
+            String what = character instanceof IsoPlayer ? "別的玩家" : character == null ? "nil" : "不是玩家";
+            expect("W78 退役依據：character 是" + what + " → 原版恰送 1 包 Reject、不打斷舊動作、不登錄",
+                    reject && MdcTimedActionProbe.interruptCallsForTest() == calls0 && queue.isEmpty());
         }
-        expect("W78 路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
-    }
-
-    private static void expectExecutor(boolean keep, String what, UdpConnection connection, IsoPlayer owner,
-            RecordingRequest r) {
-        se.krka.kahlua.vm.KahluaTable table = r.action;
-        MdcTimedActionProbe.processServer(r, null, connection);
-        if (keep) {
-            expect("W78 照原版：" + what + "（派送、動作表不動）", r.dispatched && r.actionAtDispatch == table);
-        } else {
-            expect("W78 拒絕：" + what + "（仍交給原版派送，但 action=null → 原版回 Reject）",
-                    r.dispatched && r.actionAtDispatch == null);
-        }
-    }
-
-    /** 伺服器 parse 完的 Request：owner 標頭＋重建出的動作表（character／otherPlayer 是 actionArgs 解析出的物件）。 */
-    private static RecordingRequest request(IsoPlayer owner, Object character, IsoPlayer otherPlayer) throws Exception {
-        RecordingRequest r = own(new RecordingRequest(), owner);
-        r.id = nextId++;
-        r.state = Transaction.TransactionState.Request;
-        r.type = "ISTestAction";
-        r.action = new KahluaTableImpl(new HashMap<>());
-        r.action.rawset("character", character);
-        r.action.rawset("otherPlayer", otherPlayer);
-        return r;
-    }
-
-    /** 只記錄派送當下的動作表（W78 在派送前改它）。 */
-    private static final class RecordingRequest extends NetTimedActionPacket {
-        boolean dispatched;
-        se.krka.kahlua.vm.KahluaTable actionAtDispatch;
-
-        @Override
-        public void processServer(PacketTypes.PacketType type, UdpConnection connection) {
-            this.dispatched = true;
-            this.actionAtDispatch = this.action;
-        }
+        expect("W78 退役依據路徑零 anomalies", MdcTimedActionProbe.anomaliesForTest() == 0);
     }
 
     // ---- fixture ----
 
-    /** client 端建出 owner 的 Reject 封包，走真 write，再以 server 端同型別真 parse 解回。 */
-    private static Action decoded(Class<?> kind, IsoPlayer owner, byte id, UdpConnection connection) throws Exception {
-        Action client;
-        if (kind == GeneralActionPacket.class) {
-            GeneralActionPacket cancel = new GeneralActionPacket();
-            cancel.setReject(id, owner);   // 原版 client 取消：PlayerID.set(owner)＝本地 slot index
-            client = cancel;
-        } else {
-            client = own((Action) kind.getDeclaredConstructor().newInstance(), owner);
-            client.id = id;
-            client.state = Transaction.TransactionState.Reject;
-            if (client instanceof FishingAction fishing) fishing.contentFlag = FishingAction.flagUpdateBobberParameters;
-        }
+    /** client 端建出 owner 的 Reject 封包、wire 上的玩家欄位寫 {@code index}，走真 write，再以 server 端同型別真 parse 解回。 */
+    private static Action decoded(Class<?> kind, IsoPlayer owner, short index, byte id, UdpConnection connection)
+            throws Exception {
+        Action client = own((Action) kind.getDeclaredConstructor().newInstance(), owner);
+        client.player.setId(index);
+        client.id = id;
+        client.state = Transaction.TransactionState.Reject;
+        if (client instanceof FishingAction fishing) fishing.contentFlag = FishingAction.flagUpdateBobberParameters;
         ByteBuffer wire = ByteBuffer.allocate(128);
         ((INetworkPacket) client).write(new ByteBufferWriter(wire));
         wire.flip();
@@ -511,12 +325,10 @@ public final class MdcTimedActionProbeTest {
         return packet;
     }
 
-    /** 讓動作的 owner 是真的 IsoPlayer（onlineID ＋ player 參照；playerIndex 維持預設 -1）。 */
-    private static <T extends Action> T own(T action, IsoPlayer player) throws Exception {
-        action.playerId.setID(player.getOnlineID());
-        Field f = findField(action.playerId.getClass(), "player");
-        f.setAccessible(true);
-        f.set(action.playerId, player);
+    /** 讓動作的 owner 是真的 IsoPlayer（伺服器形態：player 參照＋onlineID）。 */
+    private static <T extends Action> T own(T action, IsoPlayer player) {
+        action.player.setPlayer(player);
+        action.player.setId(player.getOnlineID());
         return action;
     }
 
@@ -559,6 +371,45 @@ public final class MdcTimedActionProbeTest {
         return (T) unsafe.allocateInstance(type);
     }
 
+    /** 只替換 RakNet 送出端的真連線：封包內容仍由原版 processServer／PacketType 寫出。 */
+    private static final class CaptureConnection extends UdpConnection {
+        ByteBuffer buffer;
+        ByteBufferWriter writer;
+        ArrayList<byte[]> packets;
+
+        /** 永不執行：實例一律以 Unsafe 配置，只為了讓子類別能通過編譯。 */
+        private CaptureConnection() {
+            super(null, 0L, 0);
+        }
+
+        @Override
+        public ByteBufferWriter startPacket() {
+            this.writer.clear();
+            return this.writer;
+        }
+
+        @Override
+        public void endPacket(int priority, int reliability, byte ordering) {
+            byte[] wire = new byte[this.buffer.position()];
+            this.buffer.position(0);
+            this.buffer.get(wire);
+            this.buffer.clear();
+            this.packets.add(wire);
+        }
+    }
+
+    private static CaptureConnection captureConnection(IsoPlayer... players) throws Exception {
+        CaptureConnection c = alloc(CaptureConnection.class);
+        c.buffer = ByteBuffer.allocate(4096);
+        c.writer = new ByteBufferWriter(c.buffer);
+        c.packets = new ArrayList<>();
+        c.players = new IsoPlayer[4];
+        for (int i = 0; i < players.length; i++) {
+            c.players[i] = players[i];
+        }
+        return c;
+    }
+
     /**
      * 隔離 Request 後續的 Lua start/send：預設只跑 W10-C 的 stopPlayerActions 改道（真原版停止流程）；
      * recordOnly 時只記錄派送與綁定中的 Request。
@@ -579,7 +430,7 @@ public final class MdcTimedActionProbeTest {
             }
             this.seenAfterNested = MdcTimedActionProbe.boundRequestForTest();
             if (!this.recordOnly) {
-                MdcTimedActionProbe.stopPlayerActions(playerId);
+                MdcTimedActionProbe.stopPlayerActions(player.getPlayer());
             }
         }
     }
