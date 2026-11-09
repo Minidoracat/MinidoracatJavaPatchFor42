@@ -2935,6 +2935,8 @@ IsoAnimal.updateStatsAway → AnimalData.hourGrow`，全是原版路徑。
 
 42.22.2 的 `AnimalManagerMain.fromWorker` 拿掉 `updateStatsAway`，改成「不在 `IngameState.loading` 且所在畜牧區是 `DesignationZoneAnimal`」就設 `fromMeta=true`、等畜牧區 `doMeta` 補（javap offset 417–439），chunk 路徑原版不再補算。`doMeta` 兩個改道（offset 47、106）照舊；chunk 路徑改成兩刀同形改道：`fromWorker` 唯一的 `getAdvancedAnimator()`（offset 468）→ `AnimalAwayProbe.fromWorkerAnimator` 記下動物，緊接的 `OnAnimDataChanged(false)`（offset 472）→ `fromWorkerAnimDataChanged` 先照原版呼叫再 `chunkCatchUp`，位置與 42.21 的 `updateStatsAway` 相同（`setGroup` 之後、`objectList`／AIM 登記之前）。`chunkCatchUp` 只在 W49 開啟時對有自身時鐘、不是野生的動物補，其餘照 42.22 原版留給 doMeta；原版這裡沒有補算，所以補算例外只計 `chunkFailures`（心跳新欄位）並記一行，不外拋。`hourLastSeen` 的存在理由改釘在 `DesignationZone.checkStreamed`。SmokeCheck 改釘 `doMeta` 恰 2 個、`fromWorker` 零個 `updateStatsAway`、原版 fromMeta→getAdvancedAnimator→OnAnimDataChanged 的順序與兩刀同形；`AnimalAwayProbeTest` 改呼 `chunkCatchUp`，另驗掛點回傳原 animator、原版例外照拋且不補算。
 
+`AnimalFromWorkerTest` 以反射呼叫真 `fromWorker` 跑一整批（畜牧區外、之後就緒與一直沒載入的畜牧區、格子未載入的一群；世界、格子、畜牧區、ActionContext／AdvancedAnimator、AnimalInstanceManager 用真 class，動物只換掉位置設定、`addToWorld` 與 `updateStatsAway`），驗每隻都完成 addToWorld、setGroup、OnAnimDataChanged 與 objectList／AnimalInstanceManager 登記；有自身時鐘、非野生的恰補一次，且在 OnAnimDataChanged 之後、objectList 登記之前；畜牧區內的延後，期間 doMeta 略過，排空時就緒或逾時各恰補一次；補算例外不外拋、同批後面的照常登記與補算。手術版跑 on、`animalCatchUpDefer=0`、`animalOwnClock=0`（走回原版行為）三組，另以不放 dist 的 classpath 跑 42.22.2 原版負對照（不補算、畜牧區內只設 `fromMeta`）。
+
 <a id="2av"></a>
 ## 2av. 分娩品種守衛（W33，server，預設 on）
 

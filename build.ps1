@@ -488,6 +488,15 @@ java "-Dmdc.troughZoneRegister=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.
 Assert-Ok "AnimalCatchUpDeferTest（troughZoneRegister=0，槽進世界照原版不登記）"
 java "-Dmdc.animalCatchUpDeferMs=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalCatchUpDeferTest deferms0
 Assert-Ok "AnimalCatchUpDeferTest（animalCatchUpDeferMs=0，正式入口 zoneUpdate 排空）"
+# W32／W49／W56 chunk 路徑整合：反射呼叫真 AnimalManagerMain.fromWorker（手術版在 dist\java；vanilla 的 classpath 不放 dist\java，跑測試 jar 的原版）。
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalFromWorkerTest on
+Assert-Ok "AnimalFromWorkerTest（on，出貨組態：整批登記、自身時鐘恰補一次、畜牧區內延後到排空）"
+java -Xverify:all "-Dmdc.animalCatchUpDefer=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalFromWorkerTest nodefer
+Assert-Ok "AnimalFromWorkerTest（animalCatchUpDefer=0，畜牧區內當場補）"
+java -Xverify:all "-Dmdc.animalOwnClock=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalFromWorkerTest noown
+Assert-Ok "AnimalFromWorkerTest（animalOwnClock=0 kill switch，手術版走回 42.22.2 原版行為）"
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.AnimalFromWorkerTest vanilla
+Assert-Ok "AnimalFromWorkerTest（vanilla，42.22.2 原版負對照：不補算、只設 fromMeta）"
 
 Write-Host "[9r3/10] 分娩品種守衛（W33）行為驗證＋kill switch（獨立 JVM）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.BabyBreedGuardTest
