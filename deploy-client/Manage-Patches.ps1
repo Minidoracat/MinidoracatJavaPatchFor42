@@ -3,7 +3,7 @@
     Manage-Patches.ps1 — Minidoracat client patch 模組化安裝／卸載器（Windows PowerShell 5.1）
 
     設計要點（契約：deploy-client 安裝包契約）
-      * 讀 manifest.json（build-client.ps1 產生，schemaVersion=2）：一個 agent jar（所有模組）＋模組清單。
+      * 讀 manifest.json（build-client.ps1 產生，schemaVersion=2）：一個 agent jar（所有模組）＋agent 載入器＋模組清單。
       * 42.22 起 projectzomboid.jar 簽章，手術後的 class 不能再以 loose 檔放在遊戲資料夾（SecurityException）。
         安裝＝把 agent jar 與 agent 載入器（mdc-agent-loader.dll）放到 <遊戲根>\.mdc-patches\，並在 ProjectZomboid64.json 頂層 vmArgs 放一條
         -agentpath:.mdc-patches/mdc-agent-loader.dll=.mdc-patches/MinidoracatClientPatches.jar=modules=<選的模組>；卸載＝拿掉那一條與檔案。
@@ -397,14 +397,18 @@ function Exit-GameRootLock($lock) {
 # ---------------------------------------------------------------- 啟動設定（ProjectZomboid64.json）
 # 讀：ConvertFrom-Json 驗證格式。寫：只替換頂層 "vmArgs" 陣列那一段文字（其餘位元組照原檔），再 parse 一次確認
 # 除了自己那一條以外全部相同。遊戲啟動器讀這個檔組 JVM 參數（Steam 更新會把它換回原版）。
-# 本包那一條：-agentpath:<agent 載入器>=<agent jar>=modules=<模組>
+# 本包那一條：-agentpath:<agent 載入器>=<agent jar>=modules=<模組>。直接以 -javaagent: 指向本包 agent jar 的也算
+# （手動加的，或沒發布過的早期建置寫的）：留著它，同一個 agent 會被載入兩次。
 function Test-OurAgentArg([string]$arg) {
-    if (-not $arg.StartsWith('-agentpath:', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    $path = $arg.Substring('-agentpath:'.Length)
-    $eq = $path.IndexOf('=')
-    if ($eq -ge 0) { $path = $path.Substring(0, $eq) }
-    $path = $path.Trim('"').Replace('\', '/')
-    return ($path -ieq $LOADER_REL -or $path.EndsWith('/' + $LOADER_REL, [System.StringComparison]::OrdinalIgnoreCase))
+    foreach ($form in @(@('-agentpath:', $LOADER_REL), @('-javaagent:', $AGENT_REL))) {
+        if (-not $arg.StartsWith($form[0], [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $path = $arg.Substring($form[0].Length)
+        $eq = $path.IndexOf('=')
+        if ($eq -ge 0) { $path = $path.Substring(0, $eq) }
+        $path = $path.Trim('"').Replace('\', '/')
+        if ($path -ieq $form[1] -or $path.EndsWith('/' + $form[1], [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
 }
 
 function Get-AgentArg([string[]]$moduleIds) { return "-agentpath:$LOADER_REL=$AGENT_REL=modules=$(@($moduleIds) -join ',')" }
@@ -528,9 +532,10 @@ function Read-Launcher([string]$gameRoot) {
 }
 
 # 頂層 vmArgs 換成「拿掉自己那一條、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
-# 排最前面：JVM 照命令列順序跑各 agent 的 premain，本包的先跑，別的 agent 就來不及在本包檢查之前載入要換的 class
-# （那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：在本包之前就被改過的 class 本包不換
-# （NOT APPLIED）；在本包之後才改的（排在後面的 retransformation capable agent、native agent）本包看不到。
+# 排最前面：JVM 照啟動參數的順序載入各 agent、跑 premain（環境變數 JAVA_TOOL_OPTIONS 裡的更早），本包先跑，別的 agent
+# 就來不及在本包檢查之前載入要換的 class（那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：
+# retransformation incapable 的 agent（不論順序）與排在本包之前的 capable agent 改過的 class 本包不換（NOT APPLIED）；
+# 排在之後的 capable agent（Java 或 native）改的是修補版，本包看不到。
 function New-LauncherBytes($launcher, [string]$newArg) {
     $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
     $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })
@@ -853,7 +858,7 @@ function Assert-JournalSafe([string]$gameRoot, $journal) {
     $seen = @{}
     foreach ($e in $entries) {
         $rel = [string](Get-Prop $e 'path' '')
-        # 只准碰舊版 loose class 與固定的 state／agent jar／啟動設定
+        # 只准碰舊版 loose class 與固定的 state／agent jar／agent 載入器／啟動設定
         Assert-TransactionPath $rel (L "$JOURNAL_REL 的 entries" "$JOURNAL_REL entries")
         Assert-NoReparsePoint $gameRoot $rel
         if ($seen.ContainsKey($rel)) { Fail $EXIT_CONFLICT (L "$JOURNAL_REL 的目標重複：$rel" "$JOURNAL_REL lists the same target twice: $rel") }
@@ -1584,8 +1589,9 @@ function Invoke-Uninstall {
                     $bytes = New-LauncherBytes $launcher $null
                     if ($bytes) { $orphanWrites += @{ Path = $LAUNCHER_REL; Bytes = $bytes; Sha = (Get-BytesSha256 $bytes) } }
                 }
-            } elseif (-not $launcher.Missing -and ($null -eq $launcher.Text -or $launcher.Text.IndexOf([System.IO.Path]::GetFileNameWithoutExtension($AGENT_REL), [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-                # 讀不出來，或讀得出文字、裡面提到本包的 jar 卻解析不了：不能確定啟動參數清掉了沒，不回報「沒有東西需要卸載」
+            } elseif (-not $launcher.Missing -and ($null -eq $launcher.Text -or @($PACKAGE_FILES.Values | Where-Object {
+                        $launcher.Text.IndexOf([System.IO.Path]::GetFileNameWithoutExtension($_), [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0)) {
+                # 讀不出來，或讀得出文字、裡面提到本包的 jar 或載入器卻解析不了：不能確定啟動參數清掉了沒，不回報「沒有東西需要卸載」
                 Fail $EXIT_CONFLICT $launcher.Problem
             }
             if ($legacy.Packages.Count -eq 0) {

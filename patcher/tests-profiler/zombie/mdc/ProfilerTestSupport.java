@@ -87,8 +87,9 @@ final class ProfilerTestSupport {
         await(() -> !"saving".equals(snapshot().get("state")), "capture writer completion");
     }
     static JSONObject metadata(Path directory) throws Exception { return new JSONObject(Files.readString(directory.resolve("metadata.json"))); }
+    // 期限只用來擋卡死，不是效能斷言：機器很忙時匯出超過 10 秒（建置機 CPU 100% 時實際發生過兩次）
     static void await(BooleanSupplier predicate, String what) throws Exception {
-        long end = System.nanoTime() + 10_000_000_000L;
+        long end = System.nanoTime() + 120_000_000_000L;
         while (!predicate.getAsBoolean() && System.nanoTime() < end) Thread.sleep(20);
         require(predicate.getAsBoolean(), "timeout waiting for " + what);
     }

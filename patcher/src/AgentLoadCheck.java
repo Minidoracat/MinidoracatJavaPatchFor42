@@ -93,30 +93,41 @@ public final class AgentLoadCheck {
             throw new AssertionError("換上的 class 應為 " + expectedApplied + "、不符 0，實得：" + after);
         }
 
-        // -Dmdc.check.retransform=1（另帶 PreloadAgent）：別的 agent 對全部已換上的 class 做一次真的 retransform，
-        // 每一個都要再拿到同一份修補（JVM 交來的是原始 bytes），不能被當成「被改過」而掉回原版
+        // -Dmdc.check.retransform=1（另帶排在後面的 PreloadAgent）：別的 agent 對全部已換上的 class 做一次真的 retransform。
+        // JVM 交給本 agent 的是原始 bytes，每一個都要再交出同一份修補：由 PreloadAgent 的觀測 transformer 讀回這次要換上的
+        // bytes 的 SHA，逐個比對 manifest 的手術後 SHA（沒被 retransform 到、或掉回原版，都對不上）
         boolean retransform = System.getProperty("mdc.check.retransform") != null;
         if (retransform) {
             List<Class<?>> patchedClasses = new java.util.ArrayList<>();
+            java.util.Map<String, String> patchedSha = new java.util.HashMap<>();
             for (String line : lines) {
                 String[] f = line.split("\t");
                 if (!line.isBlank() && !f[1].equals("-")) {
-                    patchedClasses.add(Class.forName(f[0].substring(0, f[0].length() - ".class".length()).replace('/', '.'), false, app));
+                    String internal = f[0].substring(0, f[0].length() - ".class".length());
+                    patchedClasses.add(Class.forName(internal.replace('/', '.'), false, app));
+                    patchedSha.put(internal, f[2]);
                 }
             }
-            Class.forName("PreloadAgent", true, app).getMethod("retransform", Class[].class)
-                    .invoke(null, (Object) patchedClasses.toArray(new Class<?>[0]));
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, String> seen = (java.util.Map<String, String>) Class.forName("PreloadAgent", true, app)
+                    .getMethod("retransform", Class[].class).invoke(null, (Object) patchedClasses.toArray(new Class<?>[0]));
+            for (var e : patchedSha.entrySet()) {
+                if (!e.getValue().equals(seen.get(e.getKey()))) {
+                    throw new AssertionError(e.getKey() + "：retransform 之後要換上的不是修補版（期望 " + e.getValue()
+                            + "，觀測到 " + seen.get(e.getKey()) + "）");
+                }
+            }
             for (Class<?> c : patchedClasses) {
                 c.getDeclaredMethods();   // retransform 之後仍連結得起來
             }
             after = (String) status.invoke(null);
             applied = Integer.parseInt(after.replaceAll(".*applied=(\\d+).*", "$1"));
             mismatched = Integer.parseInt(after.replaceAll(".*mismatched=(\\d+).*", "$1"));
-            if (!expect.equals("armed") || applied != patchedCount || mismatched != 0) {
+            if (!expect.equals("armed") || patchedClasses.isEmpty() || applied != patchedCount || mismatched != 0) {
                 throw new AssertionError("retransform " + patchedClasses.size() + " 個 class 之後應仍是 applied=" + patchedCount
                         + "、不符 0，實得：" + after);
             }
-            System.out.println("retransform " + patchedClasses.size() + " 個已換上的 class：每一個都再拿到同一份修補");
+            System.out.println("retransform " + patchedClasses.size() + " 個已換上的 class：觀測到每一個這次換上的都是修補版（SHA 相符）");
         }
 
         if (expect.equals("armed") && !retransform) {   // retransform 情境多帶一個測試 agent，agents 不是 1

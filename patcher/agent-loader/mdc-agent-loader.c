@@ -1,7 +1,9 @@
 /*
  * Windows client only. Loaded with -agentpath; it loads the JRE's own Java agent support (instrument.dll) and
  * passes the call through unchanged, so "-agentpath:<this dll>=<agent jar>=<options>" does what
- * "-javaagent:<agent jar>=<options>" would do.
+ * "-javaagent:<agent jar>=<options>" would do. One difference: for -javaagent the JVM also adds
+ * --add-modules java.instrument. A game started from the class path has that module as a default root module,
+ * so nothing is missing unless someone limits the modules.
  *
  * Why: the game launcher (ProjectZomboid64.exe) loads jvm.dll directly. For -javaagent the JVM loads
  * jre64\bin\instrument.dll, which imports java.dll and jli.dll from the same folder. That folder is not on the
@@ -9,7 +11,8 @@
  * library instrument on the library path, with error: Can't find dependent libraries" and the game does not start.
  * Loading the two DLLs by full path first makes the imports resolve to the same modules the JVM uses later.
  *
- * A failure before instrument.dll is called only prints a line and returns 0: the game starts unpatched.
+ * A failure before instrument.dll is called (also a launch option without an agent jar) only prints a line to
+ * standard output, where the agent prints its own messages, and returns 0: the game starts unpatched.
  * A result from instrument.dll itself is returned as is.
  *
  * Built without the C runtime (kernel32 only), so this DLL has no dependent libraries of its own.
@@ -30,7 +33,7 @@ BOOL WINAPI DllMainCRTStartup(HINSTANCE instance, DWORD reason, LPVOID reserved)
 }
 
 static int disarmed(const char *why) {
-    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    HANDLE err = GetStdHandle(STD_OUTPUT_HANDLE);
     const char *head = "[mdc-agent] DISARMED: agent loader: ";
     const char *tail = " -- running VANILLA Java\n";
     DWORD n;
@@ -61,6 +64,10 @@ __declspec(dllexport) int Agent_OnLoad(void *vm, char *options, void *reserved) 
     HMODULE instrument;
     agent_on_load on_load;
 
+    /* -agentpath:<dll> without "=<agent jar>" gives NULL; instrument.dll would read it without a check */
+    if (options == NULL || options[0] == 0) {
+        return disarmed("the launch option has no agent jar after '='");
+    }
     if (len == 0 || len >= CAP) {
         return disarmed("cannot locate jvm.dll");
     }

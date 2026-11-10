@@ -42,16 +42,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 還原不完整才結束 JVM（exit 78），不帶著半套修補開服。
  *
  * <p>和別的 agent 並存（同改一個 class 的組合不支援，下面只說明各種情況下看得到什麼）：本 agent 的 transformer 是
- * retransformation capable（還原要用），在 premain 裡註冊。JVM 對每個 class 先跑所有 incapable 的 transformer，
- * 它們改過的 class 到本 agent 手上已不是建置基準，那一個不換（{@code NOT APPLIED}）。capable 的 Java transformer 照
- * 註冊順序跑，也就是 {@code -javaagent} 的順序：排在本 agent 之前的若改了 bytes，同樣 {@code NOT APPLIED}；排在之後的，
- * 以及所有 capable 的 native agent，是在修補版上再改，本 agent 看不到、不會印任何訊息。所以沒有 {@code NOT APPLIED}
- * 不代表沒有別的 agent 動過這些 class。本 agent 排在最前面時 premain 也最先跑，別的 agent 來不及在檢查之前載入要換的 class。
+ * retransformation capable（還原要用）。JVM 對每個 class 先跑所有 incapable 的 agent（Java 或 native，不論順序），
+ * 它們改過的 class 到本 agent 手上已不是建置基準，那一個不換（{@code NOT APPLIED}）。capable 的 agent（Java 或 native）
+ * 照建立的先後跑，一般就是啟動參數裡 agent 選項的順序（環境變數 {@code JAVA_TOOL_OPTIONS} 裡的排在啟動參數前面）：
+ * 排在本 agent 之前的若改了 bytes，同樣 {@code NOT APPLIED}；排在之後的是在修補版上再改，本 agent 看不到、不會印任何
+ * 訊息。所以沒有 {@code NOT APPLIED} 不代表沒有別的 agent 動過這些 class。本 agent 排在最前面時 premain 也最先跑，
+ * 別的 agent 來不及在檢查之前載入要換的 class。
  *
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
  *
  * <p>client 包的 agent jar 有多個模組（index 有 {@code module} 行；同一個 class 在三個 client-fixes 變體各有一份），
- * 由 {@code -javaagent:<jar>=modules=<id>,<id>} 選：沒選、選了不存在的、同一組選兩個、缺依賴，一律不啟用。多模組的
+ * 由 agent 參數 {@code modules=<id>,<id>} 選（{@code -javaagent:<jar>=modules=…}；client 包經載入器，寫成
+ * {@code -agentpath:<載入器>=<jar>=modules=…}）：沒選、選了不存在的、同一組選兩個、缺依賴，一律不啟用。多模組的
  * helper 全部以 Lookup 定義（我方 package {@code zombie.mdc} 以本 class 為錨），jar 裡沒有一般 entry 的 helper，
  * 沒選的模組就一個 class 都不會出現。伺服器的 jar 沒有 {@code module} 行，參數不用給。
  */
@@ -451,7 +453,7 @@ public final class MdcAgent {
                 }
             }
             if (list == null || list.isBlank()) {
-                return "no modules selected (-javaagent:<jar>=modules=<id>,...; available: "
+                return "no modules selected (the agent options need modules=<id>,...; available: "
                         + String.join(",", modules.keySet()) + ")";
             }
             Map<String, String> groups = new HashMap<>();

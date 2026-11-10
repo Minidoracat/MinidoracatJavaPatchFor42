@@ -1159,11 +1159,11 @@ try {
 
     Start-Case '63. 自己的參數重複或寫成絕對路徑：安裝後只剩一條'
     Reset-GameDir
-    $dupJson = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"$($ARG_PREFIX)core`",`n`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"-agentpath:C:\\Games\\PZ\\.mdc-patches\\mdc-agent-loader.dll=C:\\Games\\PZ\\.mdc-patches\\MinidoracatClientPatches.jar=modules=core`"`n")
+    $dupJson = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"$($ARG_PREFIX)core`",`n`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"-agentpath:C:\\Games\\PZ\\.mdc-patches\\mdc-agent-loader.dll=C:\\Games\\PZ\\.mdc-patches\\MinidoracatClientPatches.jar=modules=core`",`n`t`t`"-javaagent:$AGENT_REL=modules=core`"`n")
     Write-TextFile (GameFile $LAUNCHER_REL) $dupJson
     $r = Invoke-Install @('profiler') $PkgV1
     Check ($r.Code -eq 0 -and (Test-ArgModules 'core,profiler')) '只剩一條正確的參數'
-    Check (@(Get-TopVmArgs | Where-Object { $_ -like '*MinidoracatClientPatches*' }).Count -eq 1) '舊的兩條都拿掉了'
+    Check (@(Get-TopVmArgs | Where-Object { $_ -like '*MinidoracatClientPatches*' }).Count -eq 1) '舊的三條都拿掉了（含直接以 -javaagent 指向本包 jar 的寫法）'
 
     Start-Case '64. 帶 BOM、CRLF 的啟動設定：保留 BOM 與換行'
     Reset-GameDir
@@ -1234,6 +1234,9 @@ try {
     Write-TextFile (GameFile $LAUNCHER_REL) '{ not json at all'
     $r = Invoke-UninstallAll
     Check ($r.Code -eq 0 -and $r.Out -match '沒有東西需要卸載') '啟動設定解析不了但沒提到本包：照舊回報沒東西要卸載'
+    Write-TextFile (GameFile $LAUNCHER_REL) '{ "vmArgs": ["-agentpath:.mdc-patches/mdc-agent-loader.dll=other.jar" not json'
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 7 -and $r.Out -notmatch '沒有東西需要卸載') '啟動設定解析不了、只提到本包的載入器：結束代碼 7'
     [System.IO.File]::WriteAllBytes((GameFile $LAUNCHER_REL), [byte[]](0x7B, 0xFF, 0xFE, 0x7D))
     $badSha = Get-GameBytesSha $LAUNCHER_REL
     $r = Invoke-UninstallAll

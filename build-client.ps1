@@ -334,6 +334,11 @@ $probed = Invoke-LauncherProbe "-agentpath:.mdc-patches/$LOADER_NAME=.mdc-patche
 if ($probed.Code -eq 0 -or $probed.Text -notmatch 'JAR manifest missing') {
     throw "agent jar 不存在時應由 instrument.dll 報錯（exit=$($probed.Code)）：$($probed.Text)"
 }
+# 啟動參數少了「=<agent jar>」：JVM 交來的 options 是 NULL，載入器要自己擋下（instrument.dll 會直接讀它而當掉）
+$probed = Invoke-LauncherProbe "-agentpath:.mdc-patches/$LOADER_NAME"
+if ($probed.Code -ne 0 -or $probed.Text -notmatch 'DISARMED: agent loader: the launch option has no agent jar') {
+    throw "啟動參數沒有 agent jar 時載入器應印 DISARMED 並照原版啟動（exit=$($probed.Code)）：$($probed.Text)"
+}
 
 Write-Host '[7/8] 產生管理器套件與 manifest'
 $pkg = Join-Path $DIST 'pkg'

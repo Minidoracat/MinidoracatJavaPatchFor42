@@ -52,17 +52,19 @@ other helpers live in our own packages (e.g. `zombie.mdc`) and load from the age
   printed: the patch set is then incomplete, so fix the cause and restart.
 - **Running next to other Java agents**: changing the same class as another agent is not supported; this only
   describes what is visible in each case. This agent's transformer is retransformation capable (the restore needs
-  that) and is registered in premain. For every class the JVM first runs all incapable transformers: a class they
+  that). For every class the JVM first runs all incapable agents (Java or native, in any position): a class they
   changed reaches this agent with bytes that are not the build base and is left alone (`NOT APPLIED`). Capable
-  Java transformers run in registration order, which is the order of the `-javaagent` options: one listed before
-  this agent that changes the bytes also gives `NOT APPLIED`; one listed after it, and every capable native
-  agent, changes the patched version, which this agent cannot see and does not report. So the absence of
-  `NOT APPLIED` does not prove that no other agent touched these classes. When another agent later retransforms a
-  class this agent replaced and the bytes handed to this agent are still the original ones, it gets the same
-  patched bytes again; when they are not (a transformer listed earlier changed them, or someone redefined the
-  class with other content), this agent does not overwrite them and prints `NOT APPLIED`. Listed first, this
-  agent's premain also runs first, so no other agent can load a class to patch before the check. The production
-  server has no other agents; this mainly matters for the client package.
+  agents (Java or native) run in the order they were created, which normally is the order of the agent options in
+  the launch arguments (agents in the `JAVA_TOOL_OPTIONS` environment variable come before the launch arguments):
+  one listed before this agent that changes the bytes also gives `NOT APPLIED`; one listed after it changes the
+  patched version, which this agent cannot see and does not report (the build checks this with a second agent
+  listed after this one: it receives the patched bytes). So the absence of `NOT APPLIED` does not prove that no
+  other agent touched these classes. When another agent later retransforms a class this agent replaced and the
+  bytes handed to this agent are still the original ones, it gets the same patched bytes again; when they are not
+  (an agent listed earlier changed them, or someone redefined the class with other content), this agent does not
+  overwrite them and prints `NOT APPLIED`. Listed first, this agent's premain also runs first, so no other agent
+  can load a class to patch before the check. The production server has no other agents; this mainly matters for
+  the client package.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.
@@ -474,8 +476,15 @@ Starting through `java.exe` does not have this problem, which is why `AgentLoadC
 (`patcher/agent-loader/mdc-agent-loader.c`, linked against `kernel32` only) loads those two DLLs by full path and
 passes `Agent_OnLoad` on to `instrument.dll` unchanged. `build-client.ps1` runs `launcher-probe`, which creates a
 JVM the way the launcher does (no `java.exe`, `PATH` reduced to the Windows folders), and asserts that `-javaagent`
-fails (the vanilla premise) and that the loader gives `ARMED`. Linux is not affected (`libinstrument.so` has RPATH
-`$ORIGIN`; creating a JVM the same way on the production server loads it), so the server keeps `-javaagent`.
+fails (the vanilla premise) and that the loader gives `ARMED`. It asserts two more things: with the agent jar
+missing, `instrument.dll` reports the error and the JVM does not start; with a launch option that has no
+`=<agent jar>`, the loader prints `DISARMED` and the game starts vanilla (the JVM then passes NULL, which
+`instrument.dll` reads without a check). Linux is not affected (`libinstrument.so` has RPATH `$ORIGIN`; creating a
+JVM the same way on the production server loads it), so the server keeps `-javaagent`. Known limit: the
+`-agentpath:` value is a relative path, so Windows looks for it in the DLL search order (first the game folder,
+where `ProjectZomboid64.exe` is). When the loader is missing from the game folder, Windows continues with the same
+relative path under `System32`, `Windows`, the working directory and every `PATH` folder (tested). Using this needs
+write access to one of those folders; the path stays relative so that moving the game folder needs no reinstall.
 `Install-Patches.bat` installs selected modules (`core`, `profiler`, and mutually exclusive
 `client-fixes-standard`/`client-fixes-lowmem`/`client-fixes-compat`) after SHA checks of the jar, the agent jar and
 the loader; `Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the
