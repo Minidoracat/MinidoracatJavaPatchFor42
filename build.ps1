@@ -321,6 +321,9 @@ Assert-Ok "ChunkSaveIsolationTest（chunkSaveIsolation=0 kill switch）"
 Write-Host "[9f/10] LogFilter 抑噪名單行為鎖（equals 紀律／門檻不收名／反作弊放行）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.LogFilterNoiseTest
 Assert-Ok "LogFilterNoiseTest"
+# 抑噪 #11：真的 ConnectionPlayer.parse，手術後那份對照 jar 內原版（不印改計數／原版印原文）。隔離 loader 借 ZombieReuseOwnerTest 的，所以要 ASM
+java -Xverify:all -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.PlayerIndexNoiseTest "$TJ"
+Assert-Ok "PlayerIndexNoiseTest"
 
 Write-Host "[9g/10] W10／W10-D 真封包與解析拒絕回歸＋W51 動物 ID 紀錄（四組態，獨立 JVM）..."
 # 出貨、Lua 保險絲關閉、參數守衛關閉、動物 ID 紀錄關閉；每組皆自驗旗標。缺 component 的封包走原版 processServer 驗 Reject bytes。

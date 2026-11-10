@@ -8,7 +8,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 - **Server patches**: a Java agent swaps official classes for patched versions as the dedicated server
   starts (the official jar and its signature stay untouched). They address main-loop freezes and livelocks,
   lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed actions and log
-  noise. 81 patched classes, 245 patch sites and 99 helper classes on 42.22.2.
+  noise. 82 patched classes, 246 patch sites and 99 helper classes on 42.22.2.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two disconnects while
   chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate), loaded as a Java agent without changing game files. Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
@@ -177,7 +177,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 
 | Patch | What goes wrong in vanilla | What the patch does | TIS |
 |---|---|---|---|
-| Log-noise suppression ([1](docs/patches.en.md#1), [2v](docs/patches.en.md#2v), [2bf](docs/patches.en.md#2bf)) | Known warnings flood the console (for example `Invalid SpriteConfig object!` for base-game objects); `Send Toxic Building`, triggered by a mod, was 45.5% of all lines. | Drops only exact known messages; anticheat and unknown warnings still print. Packets are never touched. | [#100917](https://theindiestone.com/forums/topic/100917/) (partly fixed in 42.21.0) |
+| Log-noise suppression ([1](docs/patches.en.md#1), [2v](docs/patches.en.md#2v), [2bf](docs/patches.en.md#2bf)) | Known warnings flood the console (for example `Invalid SpriteConfig object!` for base-game objects); `Send Toxic Building`, triggered by a mod, was 45.5% of all lines. 42.22 clients send an extra `Equip` packet for non-player characters and the server prints `wrong player connection index` for each one, 16.6% of all console lines with 35 players online. | Drops only exact known messages; anticheat and unknown warnings still print. Packets are never touched. `wrong player connection index` is counted instead of printed, and a heartbeat reports the total. | [#100917](https://theindiestone.com/forums/topic/100917/) (partly fixed in 42.21.0); `wrong player connection index`: draft |
 
 ### Observability
 

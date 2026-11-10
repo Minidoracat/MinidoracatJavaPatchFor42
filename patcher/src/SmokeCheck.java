@@ -488,6 +488,22 @@ public final class SmokeCheck {
                 && countExactCalls(inconsistent, Opcodes.INVOKEVIRTUAL, "zombie/debug/DebugType", "warn",
                         "(Ljava/lang/String;[Ljava/lang/Object;)V") == 0);
 
+        // 抑噪 #11：ConnectionPlayer.parse 只把那一個 error(format, args) 改道，其餘指令與 frames 照原版（含緊接的 return）；
+        // 原版方法內恰一個這種 error，format 常數就是抑噪 #11 的字串。set 的 error(Object) 不動。
+        String n11Cls = "zombie/network/fields/character/ConnectionPlayer";
+        String n11Desc = "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String n11Vanilla = methodText(methodFromJar(jar, n11Cls, "parse", n11Desc));
+        String n11Error = "INVOKEVIRTUAL zombie/debug/DebugType.error (Ljava/lang/String;[Ljava/lang/Object;)V";
+        failed += check("抑噪#11 vanilla 前提：parse 恰一個 error(format, args)，format 是 wrong player connection index (%d)",
+                n11Vanilla.split(java.util.regex.Pattern.quote(n11Error), -1).length == 2
+                && n11Vanilla.contains("LDC \"wrong player connection index (%d)\""));
+        failed += check("抑噪#11 同形改道到 LogFilter.errorFmt，其餘指令與 frames 保留；set 不動",
+                n11Vanilla.replace(n11Error,
+                        "INVOKESTATIC zombie/mdc/LogFilter.errorFmt (Lzombie/debug/DebugType;Ljava/lang/String;[Ljava/lang/Object;)V")
+                        .equals(methodText(method(distJava, n11Cls, "parse", n11Desc)))
+                && methodText(methodFromJar(jar, n11Cls, "set", "(Lzombie/characters/IsoPlayer;)V"))
+                        .equals(methodText(method(distJava, n11Cls, "set", "(Lzombie/characters/IsoPlayer;)V"))));
+
         // 退役（2026-09-02）：登入／join 卡頓量測的全部結構斷言（LoginPacket 三個 DB
         // wrapper、CreatePlayerPacket 四個重活、REJOIN_TOTAL／REJOIN_LOAD_CHARACTER）。
         // 歸因任務已完成、正式服 REJOIN_TOTAL 常態 5–13ms，量測刀隨斷言一併移除。

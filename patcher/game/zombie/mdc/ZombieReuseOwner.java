@@ -22,7 +22,8 @@ import zombie.popman.NetworkZombieManager;
  * X 與新擁有者的清單裡，或在 X 的清單裡出現兩次。出生時沒有擁有者，{@code updateAuth} 照原版規則指派並加進對方的清單。
  *
  * <p>心跳（首次呼叫一行、之後每 30 分鐘一行）：{@code reused} 回收次數、{@code stale} 回收時還帶擁有者的次數（on 時已清掉）、
- * {@code nzMissing} 抑噪 #5 的累計（{@link LogFilter#moveZombieMissCount()}，與本刀開關無關）。
+ * {@code nzMissing} 抑噪 #5 的累計（{@link LogFilter#moveZombieMissCount()}）、{@code badPlayerIdx} 抑噪 #11 的累計
+ * （{@link LogFilter#wrongPlayerIndexCount()}），後兩個與本刀開關無關。
  *
  * <p>kill switch {@code -Dmdc.zombieReuseOwner=0|off}：不清擁有者（照樣計數與心跳），需重啟。
  */
@@ -77,7 +78,8 @@ public final class ZombieReuseOwner {
         announced = true;
         try {
             DebugLog.log(TAG + head + "mode=" + (ENABLED ? "on" : "off") + " reused=" + reused + " stale=" + stale
-                    + " nzMissing=" + LogFilter.moveZombieMissCount() + " anomalies=" + anomalies);
+                    + " nzMissing=" + LogFilter.moveZombieMissCount() + " badPlayerIdx=" + LogFilter.wrongPlayerIndexCount()
+                    + " anomalies=" + anomalies);
         } catch (RuntimeException | LinkageError ignored) {
             anomalies++;
         }

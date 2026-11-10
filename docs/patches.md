@@ -35,7 +35,7 @@
 ---
 
 <a id="1"></a>
-## 1. 抑噪類（現役 7 項：表列 #2–#5、#7、#8＋§2bf 的 #10；#1、#9 已於 42.21.0 退役，#6 於 42.22.2 退役）——為什麼值得做
+## 1. 抑噪類（現役 8 項：表列 #2–#5、#7、#8、#11＋§2bf 的 #10；#1、#9 已於 42.21.0 退役，#6 於 42.22.2 退役）——為什麼值得做
 
 正式伺服器 78 張地圖＋多人環境下，console.txt 每分鐘被數十到數百行無意義警告刷屏：(a) 真正的錯誤被噪音淹沒（EchoCreek、OOM 事件的診斷都因此變難）；(b) log I/O 與檔案膨脹是實際開銷；(c) DebugLog 寫檔在高頻呼叫路徑上有同步成本。
 
@@ -50,6 +50,7 @@
 | 7 | INetworkPacket.logInconsistentPacket | format 常數 `The packet %s is not consistent: %s`（equals） | 載具類封包 desync 常態訊息 | **`sync` 自我修復照跑（重要）**；反作弊 `The packet %s is not valid` 留在 `onServerPacket`，**完全不經我方程式碼** |
 | 8 | GameServer.sendToxicBuilding | `Send Toxic Building at [ ... , ... Toxic: ... ]`（前綴 startsWith） | MOD PSR（Plysken Solar Revolution）週期呼叫 `IsoBuilding.setToxic` 導致建築隨機刷新毒氣狀態，MP 廣播給全部玩家 | **只攔 log，不動廣播封包**；client 端自會標記室內有 generator 的建築、不通知 server |
 | 9 | ~~IsoObject.syncIsoObject~~（**42.21.0 退役**） | `ERROR: IsoThumpable not found on square x,y,z`（`System.out.println`，訊息 invokedynamic 組成 → 前綴 startsWith；2026-09-02） | B42 建造流程在 IsoThumpable 加進 square 前就呼叫 `setHealth` → server 端 `sync()` → `getObjectIndex()==-1` 必印一行；正式服 8/30–9/2 四天 11,567 行（≈120/h ≫ 門檻 4/h） | 42.21 官方把 `IsoThumpable.setHealth` 改為 `server && getObjectIndex() != -1` 才 sync，噪音源頭消失；剩下的 not-found 是低頻破損訊號，回歸原版照常印 |
+| 11 | ConnectionPlayer.parse | format 常數 `wrong player connection index (%d)`（equals；**不印、改計數**，累計在 W80 心跳的 `badPlayerIdx`） | 42.22 的客戶端替非玩家角色送 `Equip` 封包（新增的 `IsoGameCharacter.tryPerformDropHeldItem` 不檢查是不是玩家，殭屍爬窗會走到），封包裡的玩家編號是上一包留下的、別的玩家的 onlineID，伺服器當成連線內索引（0–3）拒收。原版缺陷，[回報草稿](report/2026-11-10-equip-packet-stale-player-id-tis.md)。正式服 2026-11-10：42.21.0 的 14 個場次 0 行；42.22.2 原版 5 個場次 34,684 行，逐行核對的一場 1,430 行每行的下一行都是 `The packet Equip is not consistent`；35 人在線 88 分鐘 5,290 行（約 3,600/h ≫ 門檻 4/h，佔 console 16.6%，單一分鐘最多 662 行） | **封包照原版判定不一致、不派送**（緊接的 `return` 與 `Player.isConsistent` 不動）。代價：其他封包的索引不合時也只計數，不再逐行印 |
 
 > **42.20 變更**：`ActionStateContainer.tryInsertChildState` 的抑噪已移除——TIS 自己把那兩個
 > `DebugType.warn` 降級為 `trace`（全 class warn 8→6、trace 1→3），噪音源由官方修掉。第 7 項的 consistency log 也從 `PacketTypes$PacketType.onServerPacket` 搬到
@@ -60,6 +61,8 @@
 > `PRINTLN_PREFIX`／`println`／`suppressesPrintln` 一併刪除。其餘 7 項（＋§2bf 的 #10）審計確認觸發程式碼與頻率前提仍成立。復活：`git checkout 8d2bee8 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java`。
 
 > **42.22.2 變更（2026-11-10）**：第 6 項退役——42.22.2 的 `PacketsCache.<init>` 把 `No packet handler for type:`（與新加的 `No packet validation for type:`）包進 `if (Core.IS_DEV)`，全 jar 沒有任何 `putstatic Core.IS_DEV`，專用伺服器恆為 false＝原版就不印（這個方法多出的第二個 `warn(Object)` 讓命中數 2 != 1）；改道與 `LogFilter.OBJ_PREFIX` 一併刪除，`LogFilterNoiseTest` 改成斷言舊前綴放行。其餘改道點核對：`ItemPickInfo.GetPickInfo` 9 個 `DebugLog.log`、`LootRespawn.respawnInChunk` 的 `getZone`／`getContainerCount`、`IsoChunk.removeFromWorld` 的車輛卸載 log 前後指令不變（三個方法的差異都只有 `IsoGridSquare.getObjects()` 回傳型別從 `PZArrayList` 改成 `List`）；`SkinningBoneHierarchy`、`SpriteConfig.initObjectInfo`、`INetworkPacket.logInconsistentPacket`、`NetworkZombieManager.moveZombie`、`GameServer.sendToxicBuilding` 逐指令相同。復活：`git checkout 3f79700 -- patcher/src/PatchConfig.java patcher/game/zombie/mdc/LogFilter.java patcher/tests/log-filter`。
+
+> **42.22.2 新增（2026-11-10）**：第 11 項。`ConnectionPlayer.parse` 是 42.22 新增的類別，伺服器分支在 `isInvalidIndex` 成立時印 `DebugType.Multiplayer.error("wrong player connection index (%d)", id)` 然後 return（javap offset 45–71，方法內唯一一個 `error(String, Object[])`）；改道到 `LogFilter.errorFmt`，format 等於這個常數時不印、計數加一，其他 format 原樣轉發。這行是 ERROR 等級，照「寧漏不誤」本來不該攔；攔它是因為量（上表）遠超入列門檻，而且第 7 項已經擋掉緊接的 `The packet Equip is not consistent`，留下的這行看不出是哪種封包。累計由 W80 心跳的 `badPlayerIdx` 帶出（[2co](#2co)），突然變多或官方修掉後歸零都看得到。沒有 kill switch；要恢復原文就拿掉 `PatchConfig` 的 `connPlayer` 那一段。驗證：SmokeCheck 釘原版 `parse` 恰一個這種 `error`、format 常數相符，手術後除了這個呼叫其餘指令與 frames 相同，`set` 不動；`PlayerIndexNoiseTest` 跑真的 `ConnectionPlayer.parse`：索引 12 的封包原版（jar 內那份，隔離 loader）印一行原文，手術後不印、計數加一，兩邊 `isConsistent` 都是 false；索引 0–3 不計；其他 format 照常印。退場：官方不再替非玩家角色送 `Equip`（心跳 `badPlayerIdx` 長期為 0）時撤掉。
 
 代價（誠實揭露）：這些訊息從 log 消失。若日後要診斷「正是這些訊息描述的問題」，先 `uninstall.sh` 還原再觀察。每份 spec 的 `verification` 段都寫了正反向驗證法。
 
@@ -4728,16 +4731,16 @@ console（拒絕時每 10 秒最多 20 行）：
 
 **切點**：選進池時清，不選出池時清：出池在 `createZombieOutsideWorld` 的重用分支，是一長串逐欄位重設，沒有單一呼叫可同形改道；進池的 `resetForReuse` 就是原版「重用前重設」的地方。不改 `moveZombie` 的已死分支：擁有者要把死亡同步到倒地，提早清可能影響死亡動畫（推論）。為什麼還要 `recheck`：X 的清單在進池前通常已經沒有牠（`NetworkZombiePacker.postupdate` 每一輪對已進入遊戲的連線拿掉 onlineId −1 的殭屍），但死亡在網路封包處理時發生、同一輪接著同步存檔讓主迴圈停超過 5 秒時，同一輪的 `VirtualZombieManager.update` 就把牠回收，人口管理還可能在 `postupdate` 之前把牠拿去生成、配新 onlineId，X 的清單就一直留著牠。只清欄位的話，`updateAuth` 改歸 Y 時牠同時在 X 與 Y 的清單（兩個客戶端都拿到模擬權），歸回 X 時在 X 的清單出現兩次；擁有者欄位還在時，原版在這種時序下欄位與清單是一致的。`recheck` 讓欄位與 X 的清單在進池當下就一致。沒處理的同類情況（原版本來就這樣，本刀沒有更糟）：封包死亡時已經倒地（`realState == OnGround`）的，已死分支先清了欄位、X 的清單還留著，進池時已沒有舊擁有者可以 `recheck`；`recheck(X)` 也不碰別的連線的清單（例如 `clearTargetAuth` 改歸時留下的）。
 
-**抑噪 #5 改計數**：這行仍不印，`LogFilter.log` 每遇到一次計數，本刀心跳帶出累計 `nzMissing`（與本刀開關無關）。上線後比對每小時的 `nzMissing` 與上面那輪的 1,353 行／97 分鐘，看剩下多少是其他來源。
+**抑噪 #5 改計數**：這行仍不印，`LogFilter.log` 每遇到一次計數，本刀心跳帶出累計 `nzMissing`（與本刀開關無關）。上線後比對每小時的 `nzMissing` 與上面那輪的 1,353 行／97 分鐘，看剩下多少是其他來源。[抑噪 #11](#1) 的累計 `badPlayerIdx` 也由同一行心跳帶出，與本刀無關。
 
 console（第一次回收一行首次生效，之後每 30 分鐘一行，數值為開服以來累計）：
 
 ```text
-[MinidoracatJavaPatch][ZombieReuseOwner] 首次生效（-Dmdc.zombieReuseOwner=0|off 不清擁有者）mode=on reused=<n> stale=<n> nzMissing=<n> anomalies=<n>
-[MinidoracatJavaPatch][ZombieReuseOwner] beat mode=on reused=<n> stale=<n> nzMissing=<n> anomalies=<n>
+[MinidoracatJavaPatch][ZombieReuseOwner] 首次生效（-Dmdc.zombieReuseOwner=0|off 不清擁有者）mode=on reused=<n> stale=<n> nzMissing=<n> badPlayerIdx=<n> anomalies=<n>
+[MinidoracatJavaPatch][ZombieReuseOwner] beat mode=on reused=<n> stale=<n> nzMissing=<n> badPlayerIdx=<n> anomalies=<n>
 ```
 
-`reused`＝進回收池的次數；`stale`＝其中還帶擁有者的次數（on 時都已清掉，off 時照原版留著）；`nzMissing`＝抑噪 #5 的累計。
+`reused`＝進回收池的次數；`stale`＝其中還帶擁有者的次數（on 時都已清掉，off 時照原版留著）；`nzMissing`＝抑噪 #5 的累計；`badPlayerIdx`＝抑噪 #11 的累計。
 
 **驗收**：上線後心跳 `stale` 隨殭屍死亡增加、`anomalies=0`；`nzMissing` 每小時明顯低於上面那輪；玩家不再回報「打不到、看不到的殭屍」。
 

@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.22.2**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 81 個 patched class、245 個命中點、99 個 helper class。
+- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 82 個 patched class、246 個命中點、99 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
@@ -161,7 +161,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 | 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
 |---|---|---|---|
-| log 噪音過濾（[1](docs/patches.md#1)、[2v](docs/patches.md#2v)、[2bf](docs/patches.md#2bf)） | 已知警告洗版（例如原版物件的 `Invalid SpriteConfig object!`）；由 mod 觸發的 `Send Toxic Building` 佔全部 console 行數的 45.5%。 | 只攔完全相符的已知訊息，反作弊與未知警告照常輸出；封包完全不動。 | [#100917](https://theindiestone.com/forums/topic/100917/)（42.21.0 已部分修掉） |
+| log 噪音過濾（[1](docs/patches.md#1)、[2v](docs/patches.md#2v)、[2bf](docs/patches.md#2bf)） | 已知警告洗版（例如原版物件的 `Invalid SpriteConfig object!`）；由 mod 觸發的 `Send Toxic Building` 佔全部 console 行數的 45.5%。42.22 的客戶端替非玩家角色多送 `Equip` 封包，伺服器每包印一行 `wrong player connection index`，35 人在線時佔 console 行數的 16.6%。 | 只攔完全相符的已知訊息，反作弊與未知警告照常輸出；封包完全不動。`wrong player connection index` 不印、改計數，由心跳帶出累計。 | [#100917](https://theindiestone.com/forums/topic/100917/)（42.21.0 已部分修掉）；`wrong player connection index`：草稿 |
 
 ### 觀測
 

@@ -100,6 +100,8 @@ public final class ZombieReuseOwnerTest {
         for (int i = 0; i < 3; i++) {
             LogFilter.log(LogFilter.MOVE_ZOMBIE_MISS);
         }
+        LogFilter.errorFmt(null, LogFilter.WRONG_PLAYER_INDEX, null);
+        LogFilter.errorFmt(null, LogFilter.WRONG_PLAYER_INDEX, null);
         UdpConnection x = alloc(UdpConnection.class);
         IsoPlayer p = alloc(IsoPlayer.class);
         // X 的擁有清單（真的 NetworkZombieManager，兩個 Runner 共用同一份）
@@ -177,8 +179,9 @@ public final class ZombieReuseOwnerTest {
                 reused == 4 && stale == 3);
         expect("零 anomalies", (long) accessor(helper, "anomaliesForTest") == 0);
         String first = log.toString(StandardCharsets.UTF_8).lines().filter(l -> l.contains(TAG)).findFirst().orElse("");
-        expect("首次生效行帶模式、累計與抑噪 #5 的 nzMissing（" + first.trim() + "）",
-                first.contains("首次生效") && first.contains("mode=" + (wantOn ? "on" : "off") + " reused=1 stale=1 nzMissing=3 anomalies=0"));
+        expect("首次生效行帶模式、累計與抑噪 #5 的 nzMissing、抑噪 #11 的 badPlayerIdx（" + first.trim() + "）",
+                first.contains("首次生效") && first.contains("mode=" + (wantOn ? "on" : "off")
+                        + " reused=1 stale=1 nzMissing=3 badPlayerIdx=2 anomalies=0"));
 
         if (failed > 0) {
             OUT.println("zombie-reuse-owner FAIL " + failed + " 項");

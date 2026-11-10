@@ -78,6 +78,16 @@ public final class PatchConfig {
         pktM.expectedHits = 1;
         patches.add(pkt);
 
+        // 抑噪 #11：ConnectionPlayer.parse 的 `wrong player connection index (%d)` 不印、改計數（LogFilter.wrongPlayerIndexCount，
+        // W80 心跳的 badPlayerIdx）。42.22 的客戶端替非玩家角色送 Equip、帶上一包留下的 onlineID；只改道這一個 error，
+        // 後面的 return 與 Player.isConsistent 照原版，封包一樣不派送。
+        Patcher.ClassPatch connPlayer = new Patcher.ClassPatch("zombie/network/fields/character/ConnectionPlayer");
+        Patcher.MethodOps connPlayerM = connPlayer.method("parse",
+                "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V");
+        connPlayerM.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, DT, "error", WARN_FMT, "errorFmt"));
+        connPlayerM.expectedHits = 1;
+        patches.add(connPlayer);
+
         // 退役（2026-09-28）：SafehouseClaimPacket room/building 綁定修復（2026-07-29 起停用，觸發條件
         // 隨自訂地圖移除而消失），LogFilter 的 getBuilding/canBeSafehouse helper 一併刪除；
         // 復活：git checkout 8d2bee8 -- patcher/game/zombie/mdc/LogFilter.java（並重新驗證座標）

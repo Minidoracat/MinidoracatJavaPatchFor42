@@ -181,6 +181,7 @@ public final class LoadCheck {
             // （Class.forName 不會解析 INVOKESTATIC 的符號參照；缺了只會在執行期 NoSuchMethodError）
             Class<?> dt = Class.forName("zombie.debug.DebugType", false, cl);
             lf.getDeclaredMethod("warnFmt", dt, String.class, Object[].class);
+            lf.getDeclaredMethod("errorFmt", dt, String.class, Object[].class);
             lf.getDeclaredMethod("warnObj", dt, Object.class);
             lf.getDeclaredMethod("log", String.class);
             Class<?> square = Class.forName("zombie.iso.IsoGridSquare", false, cl);

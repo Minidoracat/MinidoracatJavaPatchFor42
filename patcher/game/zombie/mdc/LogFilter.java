@@ -86,6 +86,14 @@ public final class LogFilter {
     static final String MOVE_ZOMBIE_MISS = "moveZombie: There are no zombies in nz.zombies.";
     private static final AtomicLong MOVE_ZOMBIE_MISSES = new AtomicLong();
 
+    /**
+     * 抑噪 #11：{@code ConnectionPlayer.parse} 在伺服器收到玩家索引不在 0–3 的封包。原文不印、改計數，W80 心跳帶出累計
+     * {@code badPlayerIdx}。42.22 的客戶端替非玩家角色送 Equip 封包、帶著上一包留下的 onlineID（原版缺陷，
+     * docs/report/2026-11-10-equip-packet-stale-player-id-tis.md）；封包照原版判定不一致、不派送。
+     */
+    static final String WRONG_PLAYER_INDEX = "wrong player connection index (%d)";
+    private static final AtomicLong WRONG_PLAYER_INDEXES = new AtomicLong();
+
     /** DebugLog.log(String) 呼叫點。 */
     private static final String[] LOG_EXACT = {
         MOVE_ZOMBIE_MISS,                                                                // NetworkZombieManager（計數）
@@ -112,6 +120,20 @@ public final class LogFilter {
             }
         }
         type.warn(format, args);
+    }
+
+    /** error(String format, Object[]) 呼叫點（ConnectionPlayer.parse）——只認抑噪 #11 的完整 format 常數，其餘轉發。 */
+    public static void errorFmt(DebugType type, String format, Object[] args) {
+        if (WRONG_PLAYER_INDEX.equals(format)) {
+            WRONG_PLAYER_INDEXES.incrementAndGet();
+            return;
+        }
+        type.error(format, args);
+    }
+
+    /** 抑噪 #11 開服以來的累計（W80 心跳讀）。 */
+    public static long wrongPlayerIndexCount() {
+        return WRONG_PLAYER_INDEXES.get();
     }
 
     /**
