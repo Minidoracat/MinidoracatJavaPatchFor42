@@ -1913,11 +1913,10 @@ function Select-InstallModules($Manifest, [string]$PackageDir, [string]$GameRoot
 
 function Select-UninstallModules([string[]]$installed) {
     Write-Head (L '要移除哪些修補？' 'Which patches do you want to remove?')
-    Write-Info (L '  遊戲要更新前，輸入 A 按 Enter 全部移除即可。' '  Before a game update, just type A and press Enter to remove everything.')
     $names = @{ 'core' = (L '核心元件' 'Core components'); 'client-fixes-standard' = (L '客戶端修復（標準版）' 'Client fixes (standard)'); 'client-fixes-lowmem' = (L '客戶端修復（省記憶體版）' 'Client fixes (low-memory)'); 'client-fixes-compat' = (L '客戶端修復（相容版）' 'Client fixes (compatible)'); 'profiler' = (L '開發者工具 DevProfiler' 'DevProfiler developer tool') }
     $i = 0
     foreach ($id in $installed) { $i++; $label = if ($names.ContainsKey($id)) { $names[$id] } else { $id }; Write-Info "  [$i] $label" }
-    Write-Info (L '  [A] 全部移除（遊戲更新前選這個）' '  [A] Remove everything (do this before a game update)')
+    Write-Info (L '  [A] 全部移除' '  [A] Remove everything')
     Write-Info (L '  [0] 返回' '  [0] Back')
     while ($true) {
         $ans = (Read-Host (L '請輸入 A 或編號後按 Enter' 'Type A or a number and press Enter')).Trim()
@@ -1946,7 +1945,7 @@ function Invoke-Menu {
         }
         Write-Info (L '  [1] 安裝或更新修補' '  [1] Install or update patches')
         Write-Info (L '  [2] 移除部分修補' '  [2] Remove some patches')
-        Write-Info (L '  [3] 全部移除（遊戲要更新前選這個）' '  [3] Remove everything (do this before a game update)')
+        Write-Info (L '  [3] 全部移除' '  [3] Remove everything')
         Write-Info (L '  [4] 查看目前安裝狀態' '  [4] Show installation status')
         Write-Info (L '  [L] English' '  [L] 中文')
         Write-Info (L '  [0] 離開' '  [0] Exit')

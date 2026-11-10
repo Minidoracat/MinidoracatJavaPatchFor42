@@ -111,7 +111,7 @@ public final class MdcProfiler {
 
     public static Map<String, Object> stop() {
         Capture capture = active;
-        if (capture != null) finish(capture, "stop", null);
+        if (capture != null) finish(capture, "stop", null, ownOpen(capture));
         Capture resultCapture = capture == null ? last : capture;
         Map<String, Object> result = head(resultCapture);
         result.put("ok", true);
@@ -393,7 +393,23 @@ public final class MdcProfiler {
         // 一次只允許一份 recording 或 saving；佇列至多有該份 deadline 與匯出。
     }
 
-    private static void finish(Capture capture, String reason, String error) {
+    /**
+     * stop 一定是從某個 Lua callback 裡呼叫的（按鈕、指令、事件），包住這次呼叫的入口必然還沒返回：
+     * 那不是資料缺口，不算 unfinished；這幾次呼叫本身也不進統計。別條執行緒上還沒返回的入口照算。
+     */
+    private static long ownOpen(Capture capture) {
+        ThreadState state = LOCAL.get();
+        long open = 0;
+        for (int i = 0; i < state.depth; i++) {
+            Frame frame = state.frames[i];
+            if (frame.capture == capture && frame.source != null) open++;
+        }
+        return open;
+    }
+
+    private static void finish(Capture capture, String reason, String error) { finish(capture, reason, error, 0); }
+
+    private static void finish(Capture capture, String reason, String error, long excused) {
         synchronized (LIFECYCLE) {
             synchronized (capture.lock) {
                 if (capture.closed) return;
@@ -402,7 +418,7 @@ public final class MdcProfiler {
                 capture.endUtc = Instant.now().toString();
                 capture.stopReason = reason;
                 if (error != null && capture.error == null) capture.error = error;
-                capture.unfinished = capture.openSelected;
+                capture.unfinished = capture.openSelected - excused;
                 capture.dropped += capture.unfinished;
                 capture.state = "saving";
                 if (active == capture) active = null;

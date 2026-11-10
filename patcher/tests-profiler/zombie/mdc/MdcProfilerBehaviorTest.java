@@ -26,6 +26,7 @@ public final class MdcProfilerBehaviorTest {
             threadsAndNamedTokens();
             deadlineWithoutPolling();
             stopDuringCallbackIsIncomplete();
+            stopFromItsOwnCallbackIsComplete();
             oldCaptureCannotConsumeNewSamples();
             require(!Boolean.TRUE.equals(MdcProfiler.start(Double.NaN, "").get("ok")), "NaN duration accepted");
             require(!Boolean.TRUE.equals(MdcProfiler.start(301, "").get("ok")), "unbounded duration accepted");
@@ -242,6 +243,21 @@ public final class MdcProfilerBehaviorTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         start(1, "Probe");
         Path directory = output();
+        Thread blocked = blockedCallback(template, entered, release, failure);
+        try {
+            require(entered.await(5, java.util.concurrent.TimeUnit.SECONDS), "blocked callback did not start");
+            await(() -> Files.isRegularFile(directory.resolve("metadata.json")), "deadline while callback blocked");
+            await(() -> !"saving".equals(snapshot().get("state")), "blocked callback writer completion");
+            var meta = metadata(directory);
+            require(!meta.getBoolean("complete") && meta.getLong("dropped") > 0 && meta.getLong("unfinished") > 0,
+                    "in-flight callback was silently exported as complete");
+            requireDeadlineOnTime(meta);
+        } finally { release.countDown(); blocked.join(); }
+        if (failure.get() != null) throw new AssertionError(failure.get());
+    }
+
+    private static Thread blockedCallback(LuaClosure template, CountDownLatch entered, CountDownLatch release,
+                                          AtomicReference<Throwable> failure) {
         Thread blocked = new Thread(() -> {
             try {
                 LuaContext local = new LuaContext();
@@ -254,14 +270,40 @@ public final class MdcProfilerBehaviorTest {
             } catch (Throwable t) { failure.set(t); }
         });
         blocked.start();
+        return blocked;
+    }
+
+    /** 手動停止一定是從某個 Lua callback 裡呼叫的：包住這次 stop 的入口不算缺口；別條執行緒上還沒返回的照算。 */
+    private static void stopFromItsOwnCallbackIsComplete() throws Exception {
+        LuaContext lua = context();
+        lua.env.rawset("stopNow", (JavaFunction) (frame, count) -> { MdcProfiler.stop(); return 0; });
+        LuaClosure finished = lua.compile("/mods/Probe/42/media/lua/client/finished.lua", "return 1");
+        LuaClosure stopper = lua.compile("/mods/Probe/42/media/lua/client/stopper.lua", "stopNow(); return true");
+        start(30, "Probe");
+        Path alone = output();
+        lua.call(finished);
+        lua.call(stopper);
+        await(() -> !"saving".equals(snapshot().get("state")), "stop-from-callback writer completion");
+        var meta = metadata(alone);
+        require("stop".equals(meta.getString("stopReason")) && meta.getBoolean("complete")
+                && meta.getLong("dropped") == 0 && meta.getLong("unfinished") == 0,
+                "stopping from inside a callback marked the capture incomplete: " + meta);
+        require(rows().size() == 1 && number(row("finished.lua"), "calls") == 1,
+                "the call cut short by stop was exported as a finished call: " + rows());
+
+        LuaClosure template = lua.compile("/mods/Probe/42/media/lua/client/blocked.lua", "block(); return true");
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        start(30, "Probe");
+        Path shared = output();
+        Thread blocked = blockedCallback(template, entered, release, failure);
         try {
             require(entered.await(5, java.util.concurrent.TimeUnit.SECONDS), "blocked callback did not start");
-            await(() -> Files.isRegularFile(directory.resolve("metadata.json")), "deadline while callback blocked");
-            await(() -> !"saving".equals(snapshot().get("state")), "blocked callback writer completion");
-            var meta = metadata(directory);
-            require(!meta.getBoolean("complete") && meta.getLong("dropped") > 0 && meta.getLong("unfinished") > 0,
-                    "in-flight callback was silently exported as complete");
-            requireDeadlineOnTime(meta);
+            lua.call(stopper);
+            await(() -> !"saving".equals(snapshot().get("state")), "stop with another thread in flight");
+            var other = metadata(shared);
+            require(!other.getBoolean("complete") && other.getLong("unfinished") == 1 && other.getLong("dropped") == 1,
+                    "stop excused a callback still running on another thread: " + other);
         } finally { release.countDown(); blocked.join(); }
         if (failure.get() != null) throw new AssertionError(failure.get());
     }
