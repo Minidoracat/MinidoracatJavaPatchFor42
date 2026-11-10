@@ -6088,9 +6088,14 @@ Console:
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 
-1. **Boot health**: (a) the console shows `[mdc-javagate] AGENT ARMED` and `[mdc-agent] ARMED: N patched classes`, where N equals the `patched`
-   count in this build's `dist/agent-manifest.txt`. `AGENT DISARMED` or `[mdc-agent] DISARMED` means the whole set is off and the server runs
-   vanilla (the reason is on the same line). `[mdc-agent] NOT APPLIED <class>` means that class was not replaced and the set is incomplete: fix
+1. **Boot health**: (a) the server process's standard output (with LinuxGSM: `log/console/<name>-console.log`; these two lines are not in
+   `Zomboid/server-console.txt`) shows `[mdc-javagate] AGENT ARMED` and `[mdc-agent] ARMED: N patched classes`, where N equals the `patched`
+   count in this build's `dist/agent-manifest.txt`; `server-console.txt` has the version banner `server patch <commit> … jar=<sha>`.
+   `AGENT DISARMED` or `[mdc-agent] DISARMED` means the whole set is off and the server runs vanilla (the reason is on the same line).
+   **Exception**: every start first prints one `[mdc-agent] DISARMED: projectzomboid.jar not found on java.class.path`. It comes from the
+   small JVM the game launcher runs to locate `libjvm.so` (`java -classpath pzexe.jar … zombie.pzexe`, which inherits `JAVA_TOOL_OPTIONS`
+   too), not from the game; go by the line after the second `Picked up JAVA_TOOL_OPTIONS` (seen on the production server, 2026-11-10).
+   `[mdc-agent] NOT APPLIED <class>` means that class was not replaced and the set is incomplete: fix
    the cause and restart. `[mdc-agent] FATAL` (the JVM ends with exit 78) means defining the helpers failed and the restore failed too: run
    `uninstall.sh` or add `-Dmdc.agent=off` before starting again. (b) The version line ends in `agents=1` (the official `IntegrityReport`
    result; the jar still reports original). (c) No `VerifyError` / `ClassFormatError` / `NoSuchMethodError` / `SecurityException`; if present,
