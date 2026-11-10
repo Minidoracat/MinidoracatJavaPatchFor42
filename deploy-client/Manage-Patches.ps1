@@ -534,8 +534,8 @@ function Read-Launcher([string]$gameRoot) {
 # 頂層 vmArgs 換成「拿掉自己那一條、需要時在最前面補一條 $newArg」；沒有變動回 $null，否則回新的檔案 bytes。
 # 排最前面：JVM 照啟動參數的順序載入各 agent、跑 premain（環境變數 JAVA_TOOL_OPTIONS 裡的更早），本包先跑，別的 agent
 # 就來不及在本包檢查之前載入要換的 class（那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：
-# retransformation incapable 的 agent（不論順序）與排在本包之前的 capable agent 改過的 class 本包不換（NOT APPLIED）；
-# 排在之後的 capable agent（Java 或 native）改的是修補版，本包看不到。
+# retransformation incapable 的 transformer（不論它的 agent 排在哪裡）與排在本包之前的 capable transformer 改過的 class
+# 本包不換（NOT APPLIED）；排在之後的 capable transformer（Java 或 native agent 的）改的是修補版，本包看不到。
 function New-LauncherBytes($launcher, [string]$newArg) {
     $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
     $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })

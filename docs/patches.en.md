@@ -51,20 +51,22 @@ other helpers live in our own packages (e.g. `zombie.mdc`) and load from the age
   base (for example because another agent changed it first) is left alone and `[mdc-agent] NOT APPLIED` is
   printed: the patch set is then incomplete, so fix the cause and restart.
 - **Running next to other Java agents**: changing the same class as another agent is not supported; this only
-  describes what is visible in each case. This agent's transformer is retransformation capable (the restore needs
-  that). For every class the JVM first runs all incapable agents (Java or native, in any position): a class they
-  changed reaches this agent with bytes that are not the build base and is left alone (`NOT APPLIED`). Capable
-  agents (Java or native) run in the order they were created, which normally is the order of the agent options in
-  the launch arguments (agents in the `JAVA_TOOL_OPTIONS` environment variable come before the launch arguments):
-  one listed before this agent that changes the bytes also gives `NOT APPLIED`; one listed after it changes the
-  patched version, which this agent cannot see and does not report (the build checks this with a second agent
-  listed after this one: it receives the patched bytes). So the absence of `NOT APPLIED` does not prove that no
-  other agent touched these classes. When another agent later retransforms a class this agent replaced and the
-  bytes handed to this agent are still the original ones, it gets the same patched bytes again; when they are not
-  (an agent listed earlier changed them, or someone redefined the class with other content), this agent does not
-  overwrite them and prints `NOT APPLIED`. Listed first, this agent's premain also runs first, so no other agent
-  can load a class to patch before the check. The production server has no other agents; this mainly matters for
-  the client package.
+  describes what is visible in each case. The JVM sorts transformers, not agents: retransformation incapable ones
+  (a Java agent that calls `addTransformer` without `canRetransform`, or a native agent without
+  `can_retransform_classes`) and capable ones; this agent's transformer is capable (the restore needs that). For
+  every class the JVM first runs all incapable transformers, wherever their agents are listed: a class they changed
+  reaches this agent with bytes that are not the build base and is left alone (`NOT APPLIED`). Capable transformers
+  run in the order their agents were created, which normally is the order of the agent options in the launch
+  arguments (the same for Java and native agents; agents in the `JAVA_TOOL_OPTIONS` environment variable come
+  before the launch arguments): one listed before this agent that changes the bytes also gives `NOT APPLIED`; one
+  listed after it changes the patched version, which this agent cannot see and does not report (the build checks
+  this on a retransform with a second agent listed after this one: it receives the patched bytes). So the absence
+  of `NOT APPLIED` does not prove that no other agent touched these classes. When another agent later retransforms
+  a class this agent replaced and the bytes handed to this agent are still the original ones, it gets the same
+  patched bytes again; when they are not (a transformer listed earlier changed them, or someone redefined the class
+  with other content), this agent does not overwrite them and prints `NOT APPLIED`. Listed first, this agent's
+  premain also runs first, so no other agent can load a class to patch before the check. The production server has
+  no other agents; this mainly matters for the client package.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.

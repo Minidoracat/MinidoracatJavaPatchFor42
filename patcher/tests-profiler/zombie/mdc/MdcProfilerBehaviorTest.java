@@ -230,7 +230,9 @@ public final class MdcProfilerBehaviorTest {
         await(() -> Files.isRegularFile(directory.resolve("metadata.json")), "autonomous deadline export");
         await(() -> !"saving".equals(snapshot().get("state")), "deadline writer completion");
         require(!MdcProfiler.isRecording(), "deadline left recording active");
-        require("timeout".equals(metadata(directory).getString("stopReason")), "deadline did not finish independently");
+        var meta = metadata(directory);
+        require("timeout".equals(meta.getString("stopReason")), "deadline did not finish independently");
+        requireDeadlineOnTime(meta);
     }
 
     private static void stopDuringCallbackIsIncomplete() throws Exception {
@@ -259,8 +261,15 @@ public final class MdcProfilerBehaviorTest {
             var meta = metadata(directory);
             require(!meta.getBoolean("complete") && meta.getLong("dropped") > 0 && meta.getLong("unfinished") > 0,
                     "in-flight callback was silently exported as complete");
+            requireDeadlineOnTime(meta);
         } finally { release.countDown(); blocked.join(); }
         if (failure.get() != null) throw new AssertionError(failure.get());
+    }
+
+    // await 的期限只擋卡死（機器忙時要等很久）；期限有沒有準時觸發另外看 metadata：停止那一刻算的長度不該比要求的多太多
+    private static void requireDeadlineOnTime(org.json.JSONObject meta) {
+        require(meta.getDouble("durationSeconds") <= meta.getDouble("requestedSeconds") + 30,
+                "deadline fired far too late: " + meta.getDouble("durationSeconds") + "s for " + meta.getDouble("requestedSeconds") + "s");
     }
 
     private static void oldCaptureCannotConsumeNewSamples() throws Exception {
