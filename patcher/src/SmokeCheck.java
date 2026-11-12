@@ -4696,7 +4696,7 @@ public final class SmokeCheck {
         return failed;
     }
 
-    /** W100 沒有模型名稱的武器類物品讓 itemHasModel NPE（ItemModelRenderer；相容版只含車輛修補，不裝）。 */
+    /** W100／W101 沒有模型名稱的武器類物品（ItemModelRenderer、ModelManager；相容版只含車輛修補，不裝）。 */
     static int itemModelNullChecks(Path distJava, Path jar) throws Exception {
         int failed = 0;
         String rendererCls = "zombie/core/skinnedmodel/model/ItemModelRenderer";
@@ -4752,7 +4752,66 @@ public final class SmokeCheck {
             }
         }
         failed += check("W100 負對照：ItemModelRenderer 其他方法未改動", otherChanged == 0);
+
+        // ---- W101 沒有模型名稱的武器拿在手上（docs/patches.md 2di）----
+        String mmCls = "zombie/core/skinnedmodel/ModelManager";
+        String slotDesc = "Lzombie/core/skinnedmodel/ModelManager$ModelSlot;";
+        String equippedDesc = "(Lzombie/characters/IsoGameCharacter;" + slotDesc + "Lzombie/inventory/InventoryItem;"
+                + "Ljava/lang/String;Lzombie/scripting/objects/ItemReplacement;Z)Lzombie/core/skinnedmodel/model/ModelInstance;";
+        String castDesc = "(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;";
+        MethodNode vEquipped = methodFromJar(jar, mmCls, "addEquippedModelInstance", equippedDesc);
+        // 存在理由：武器分支把 getStaticModel() 存起來就交給 addStatic，中間沒有任何檢查；addStaticForcedTex 第一個呼叫是
+        // getItemName，getItemName 第一個呼叫是對名稱的 String.indexOf。TIS 在任一處補上檢查時轉紅＝重估撤刀。
+        boolean straightToAddStatic = false;
+        for (AbstractInsnNode in : vEquipped.instructions) {
+            if (in instanceof MethodInsnNode call && call.name.equals("getStaticModel")
+                    && call.owner.equals("zombie/inventory/types/HandWeapon")) {
+                AbstractInsnNode next = call.getNext();
+                while (next != null && !(next instanceof MethodInsnNode) && !(next instanceof JumpInsnNode)) {
+                    next = next.getNext();
+                }
+                straightToAddStatic = next instanceof MethodInsnNode use && use.name.equals("addStatic");
+                break;
+            }
+        }
+        failed += check("W101 vanilla 前提：addEquippedModelInstance 把武器的 getStaticModel() 不經檢查交給 addStatic，"
+                        + "addStaticForcedTex 先呼叫 getItemName，getItemName 先對名稱呼叫 String.indexOf",
+                straightToAddStatic
+                && firstCall(methodFromJar(jar, mmCls, "addStaticForcedTex", "(" + slotDesc
+                        + "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lzombie/core/skinnedmodel/model/ModelInstance;"))
+                        .equals("zombie/scripting/ScriptManager.getItemName")
+                && firstCall(methodFromJar(jar, "zombie/scripting/ScriptManager", "getItemName",
+                        "(Ljava/lang/String;)Ljava/lang/String;")).equals("java/lang/String.indexOf"));
+        MethodNode pEquipped = method(distJava, mmCls, "addEquippedModelInstance", equippedDesc);
+        failed += check("W101 addEquippedModelInstance 唯一的 Type.tryCastTo 同形改道 ItemModelNullGuard，其餘指令與 frames 保留",
+                countExactCalls(vEquipped, Opcodes.INVOKESTATIC, "zombie/util/Type", "tryCastTo", castDesc) == 1
+                && countExactCalls(pEquipped, Opcodes.INVOKESTATIC, "zombie/util/Type", "tryCastTo", castDesc) == 0
+                && methodText(vEquipped).replace("INVOKESTATIC zombie/util/Type.tryCastTo " + castDesc,
+                        "INVOKESTATIC " + guardCls + ".tryCastTo " + castDesc).equals(methodText(pEquipped)));
+        int mmChanged = 0;
+        ClassNode vManager = classNodeFromJar(jar, mmCls);
+        for (MethodNode m : classNode(distJava, mmCls).methods) {
+            if (m.name.equals("addEquippedModelInstance")) {
+                continue;
+            }
+            MethodNode v = vManager.methods.stream().filter(x -> x.name.equals(m.name) && x.desc.equals(m.desc))
+                    .findFirst().orElseThrow();
+            if (!methodText(v).equals(methodText(m))) {
+                mmChanged++;
+            }
+        }
+        failed += check("W101 負對照：ModelManager 其他方法未改動", mmChanged == 0);
         return failed;
+    }
+
+    /** 方法內第一個方法呼叫的 owner.name（沒有就空字串）。 */
+    static String firstCall(MethodNode method) {
+        for (AbstractInsnNode in : method.instructions) {
+            if (in instanceof MethodInsnNode call) {
+                return call.owner + "." + call.name;
+            }
+        }
+        return "";
     }
 
     /** W57 自建房 chunk 載入斷線（IsoChunk；PZ_Optimization 也換這個 class，相容版不裝）。 */

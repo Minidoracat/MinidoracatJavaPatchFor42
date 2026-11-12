@@ -5530,7 +5530,7 @@ ERROR: General > FBORenderCell.renderInternal> Exception thrown
 **kill switch**：`-Dmdc.itemModelNullGuard=off`（或 `0`）照原版，需重啟。第一次擋下時在 console.txt 記一行 `[MinidoracatJavaPatch][ItemModelNullGuard] an item without a model name is in view; drawing its icon instead of throwing`，之後不再記。
 
 **不處理**：
-- 把這種物品拿在手上：`ModelManager.addEquippedModelInstance` 把 `getStaticModel()` 的 null 交給 `addStatic`，在 `ScriptManager.getItemName(null)` 就 NPE（另一條路徑，不經過 `itemHasModel`）。實機（原版，單人）：拿在主手 8 秒 1959 筆例外，每幀一筆，由 `GameWindow.frameStep` 接住。要另外一刀，這一刀不改。
+- 把這種物品拿在手上：`ModelManager.addEquippedModelInstance` 把 `getStaticModel()` 的 null 交給 `addStatic`，在 `ScriptManager.getItemName(null)` 就 NPE（另一條路徑，不經過 `itemHasModel`）。由 W101（[2di](#2di)）處理。
 - 掛在身上（背上、腰上）：`ModelManager` 與 `AttachedModelNames` 先用 `StringUtils.isNullOrWhitespace` 檢查名稱，原版就不會出錯。實機：掛在背上 8 秒 0 筆。
 - 伺服器端不擋這種物品落地：屬於物品來源的管控，不在這一刀。
 - `client-fixes-compat`：相容版只含車輛修補，不含 W100。
@@ -5542,6 +5542,46 @@ ERROR: General > FBORenderCell.renderInternal> Exception thrown
 - `ItemModelNullGuardBehaviorTest`（standard、lowmem 各跑 on、off）：沒有 WorldStaticModel、StaticModel、WeaponSprite 的 `HandWeapon` 交給手術後的 `itemHasModel`，on 回 false、不丟例外；off（kill switch 實跑＝原版負對照）丟出自 `ScriptBucketCollection.getScript` 的 NPE。有名稱的武器兩個模式都照原版查表。
 
 **退場**：官方在 `itemHasModel`、`getModelScript` 或 `getScript` 任一處補上 null 檢查，或把 `FISH_DEV_ITEM` 這類沒有模型的武器腳本拿掉並保證不會再有，SmokeCheck 的存在理由轉紅時撤刀。
+
+---
+
+<a id="2di"></a>
+## 2di. 沒有模型的武器類物品拿在手上每幀丟例外（W101，client，預設 on；client 包 0.3.2）
+
+**症狀**（W100 的原版實機對照，單人）：把 `Base.FISH_DEV_ITEM`（[2dh](#2dh) 那種沒有模型名稱的武器類物品）拿在主手，8 秒 1959 筆例外，每幀一筆：
+
+```text
+ERROR: General > GameWindow.frameStep> Exception thrown
+	java.lang.NullPointerException: Cannot invoke "String.indexOf(int)" because "name" is null at ScriptManager.getItemName(…)
+		zombie.core.skinnedmodel.ModelManager.addStaticForcedTex(…)
+		zombie.core.skinnedmodel.ModelManager.addStatic(…)
+		zombie.core.skinnedmodel.ModelManager.addEquippedModelInstance(…)
+		zombie.core.skinnedmodel.ModelManager.DoCharacterModelEquipped(…)
+		zombie.core.skinnedmodel.ModelManager.ResetCharacterEquippedHands(…)
+		zombie.core.skinnedmodel.ModelManager.update(…)
+		zombie.gameStates.IngameState.updateInternal(…)
+```
+
+例外由 `GameWindow.frameStep` 接住，所以那一幀 `ModelManager.update` 之後的遊戲更新都沒有執行；角色還留在待重設手持模型的清單裡，下一幀再來一次。
+
+**根因**（javap 對 42.22.2 jar `3c4a7c5f`）：`ModelManager.addEquippedModelInstance` 開頭 `Type.tryCastTo(item, HandWeapon.class)`（offset 4）成立、物品沒有 ClothingItem 時，把 `weapon.getStaticModel()` 存起來就交給 `addStatic(slot, name, bone)`（offset 33–44），中間沒有檢查。`addStatic` 轉給 `addStaticForcedTex`，它的第一個指令是 `ScriptManager.getItemName(name)`，`getItemName` 一進來就 `name.indexOf('.')`，null 就 NPE。同一個方法的非武器分支每條路都先用 `StringUtils.isNullOrWhitespace(item.getStaticModel())` 檢查。
+
+**手術**：`addEquippedModelInstance` 內唯一的 `invokestatic Type.tryCastTo` 1:1 改道 `ItemModelNullGuard.tryCastTo(Object, Class)`（和 W100 同一個 helper）：照原版轉型，結果是 `getStaticModel()` 為 null 的 `HandWeapon` 時回 null，其餘回原值。武器變數是 null，原版就走非武器分支；那裡沒有模型名稱的物品回 null，也就是手上不掛模型（和沒有模型的非武器物品相同）。新 ClassPatch `ModelManager`，1 個命中點；堆疊形狀與指令長度不變，frames 保留。
+
+**kill switch**：`-Dmdc.heldModelNullGuard=off`（或 `0`）照原版，需重啟。第一次擋下時在 console.txt 記一行 `[MinidoracatJavaPatch][ItemModelNullGuard] a held weapon has no model name; no hand model for it instead of throwing every frame`，之後不再記。
+
+**不處理**：
+- 名稱是空字串或空白的武器：原版不會 NPE（`getItemName("")` 正常回傳），照原版。
+- 別的玩家拿著這種物品時，自己的客戶端會不會也每幀丟例外：沒有實機驗證。`ModelManager.update` 對每個要重設手持模型的角色都走同一段，W101 改的是那一段，所以不分是誰拿著。
+- `client-fixes-compat`：相容版只含車輛修補，不含 W101。
+
+**守門與驗證**：
+- Patcher：`ModelManager.addEquippedModelInstance` 1 個命中點。
+- SmokeCheck（standard、lowmem）：存在理由——原版把武器的 `getStaticModel()` 不經檢查交給 `addStatic`，`addStaticForcedTex` 的第一個呼叫是 `getItemName`，`getItemName` 的第一個呼叫是對名稱的 `String.indexOf`（官方在任一處補上檢查就轉紅，重估撤刀）；手術後 `addEquippedModelInstance` 的文字只有一個改道不同；`ModelManager` 其他方法不變。
+- LoadCheck：helper 的簽名。
+- `ItemModelNullGuardBehaviorTest`（standard、lowmem 各跑 on、off）：沒有模型名稱的 `HandWeapon` 交給手術後的 `addEquippedModelInstance`，on 回 null、不丟例外；off（kill switch 實跑＝原版負對照）丟出自 `ScriptManager.getItemName` 的 NPE。有名稱的武器、不是武器的物件、null 都回原版 `Type.tryCastTo` 的結果。
+
+**退場**：官方在 `addEquippedModelInstance`、`addStaticForcedTex` 或 `getItemName` 補上 null 檢查，SmokeCheck 的存在理由轉紅時撤刀。
 
 ---
 

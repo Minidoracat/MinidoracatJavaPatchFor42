@@ -1961,7 +1961,21 @@ public final class PatchConfig {
         hasModel.expectedHits = 2;
         patches.add(itemModel);
 
-        // ---- W57 自建房 chunk 載入斷線（docs/patches.md 2bu）----
+        // ---- W101 沒有模型名稱的武器拿在手上每幀 NPE（docs/patches.md 2di）----
+        // addEquippedModelInstance 開頭 Type.tryCastTo(item, HandWeapon.class)（javap offset 4，方法內唯一）成立時，把
+        // weapon.getStaticModel() 直接交給 addStatic → addStaticForcedTex，第一個指令 ScriptManager.getItemName(null) 就 NPE；
+        // 例外一路丟到 GameWindow.frameStep，角色留在待重設清單裡，下一幀再來。1:1 改道 ItemModelNullGuard.tryCastTo：
+        // 沒有模型名稱的武器回 null，原版走非武器分支（那裡每條路都先檢查名稱），其餘回原值。
+        Patcher.ClassPatch modelManager = new Patcher.ClassPatch("zombie/core/skinnedmodel/ModelManager");
+        Patcher.MethodOps equipped = modelManager.method("addEquippedModelInstance",
+                "(Lzombie/characters/IsoGameCharacter;Lzombie/core/skinnedmodel/ModelManager$ModelSlot;Lzombie/inventory/InventoryItem;"
+                        + "Ljava/lang/String;Lzombie/scripting/objects/ItemReplacement;Z)Lzombie/core/skinnedmodel/model/ModelInstance;");
+        equipped.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC,
+                "zombie/util/Type", "tryCastTo", "(Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;",
+                "zombie/mdc/ItemModelNullGuard", "tryCastTo"));
+        equipped.expectedHits = 1;
+        patches.add(modelManager);
+
         // 格子在 World Streamer 執行緒反序列化時就綁上 IsoRoom；主執行緒接手前若 clientProcessBuildings 重建了
         // 這一帶的自建建築，舊 IsoRoom 被 clear()（def=null），updateSquares 又只重綁 ChunkMap 裡的 chunk，
         // loadInMainThread 的 IsoLightSwitch.chunkLoaded（javap offset 1863）讀 def.objects 即 NPE → 斷線。

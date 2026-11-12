@@ -230,8 +230,8 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-
             & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
             Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
         }
-        # W100：on 與 off 各跑一次（off＝kill switch 實跑，沒有模型名稱的武器照原版丟 NPE＝原版負對照）
-        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.itemModelNullGuard=off')))) {
+        # W100／W101：on 與 off 各跑一次（off＝兩個 kill switch 實跑，沒有模型名稱的武器照原版丟 NPE＝原版負對照）
+        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.itemModelNullGuard=off', '-Dmdc.heldModelNullGuard=off')))) {
             $jvmArgs = @($run[1])
             & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.ItemModelNullGuardBehaviorTest $run[0]
             Assert-Ok "ItemModelNullGuardBehaviorTest $($run[0]) $id"
