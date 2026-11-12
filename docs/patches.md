@@ -5540,6 +5540,7 @@ ERROR: General > FBORenderCell.renderInternal> Exception thrown
 - SmokeCheck（standard、lowmem）：存在理由——原版 `itemHasModel` 把 `getStaticModel()` 的回傳值直接交給 `getModelScript`，`getScript` 不檢查 null 就對名稱呼叫 `contains`（官方在任一處補上檢查就轉紅，重估撤刀）；手術後 `itemHasModel` 的文字只有兩個改道不同；`ItemModelRenderer` 其他方法不變。
 - LoadCheck：helper 的簽名。
 - `ItemModelNullGuardBehaviorTest`（standard、lowmem 各跑 on、off）：沒有 WorldStaticModel、StaticModel、WeaponSprite 的 `HandWeapon` 交給手術後的 `itemHasModel`，on 回 false、不丟例外；off（kill switch 實跑＝原版負對照）丟出自 `ScriptBucketCollection.getScript` 的 NPE。有名稱的武器兩個模式都照原版查表。
+- 實機 E2E（單人，情境 `item-model-null-sp`，client 包 0.3.2 `dd8bd3c`；地上 30 秒、主手 14 秒）：原版 `jp-fdi-van-1113b` 地上那段 7295 筆例外、每幀一筆，畫面上同一帶的圍籬、樹籬和地上物品都沒畫出來（例外中斷了那一次重畫剩下的部分）；修補版 `jp-fdi-on-1113b` 0 筆，console 一行 `[ItemModelNullGuard] an item without a model name is in view`，那件物品畫成圖示，對照的斧頭與周圍物件照常；kill switch `jp-fdi-off-1113b`（兩個旗標都 off）7303 筆，和原版相同。三輪對照的斧頭那段都是 0 筆。
 
 **退場**：官方在 `itemHasModel`、`getModelScript` 或 `getScript` 任一處補上 null 檢查，或把 `FISH_DEV_ITEM` 這類沒有模型的武器腳本拿掉並保證不會再有，SmokeCheck 的存在理由轉紅時撤刀。
 
@@ -5580,6 +5581,7 @@ ERROR: General > GameWindow.frameStep> Exception thrown
 - SmokeCheck（standard、lowmem）：存在理由——原版把武器的 `getStaticModel()` 不經檢查交給 `addStatic`，`addStaticForcedTex` 的第一個呼叫是 `getItemName`，`getItemName` 的第一個呼叫是對名稱的 `String.indexOf`（官方在任一處補上檢查就轉紅，重估撤刀）；手術後 `addEquippedModelInstance` 的文字只有一個改道不同；`ModelManager` 其他方法不變。
 - LoadCheck：helper 的簽名。
 - `ItemModelNullGuardBehaviorTest`（standard、lowmem 各跑 on、off）：沒有模型名稱的 `HandWeapon` 交給手術後的 `addEquippedModelInstance`，on 回 null、不丟例外；off（kill switch 實跑＝原版負對照）丟出自 `ScriptManager.getItemName` 的 NPE。有名稱的武器、不是武器的物件、null 都回原版 `Type.tryCastTo` 的結果。
+- 實機 E2E（同上三輪）：拿在主手 14 秒，原版 3427 筆、kill switch 3432 筆，每幀一筆；修補版 0 筆，console 一行 `[ItemModelNullGuard] a held weapon has no model name`，手上不掛模型。掛到背上三輪都是 0 筆。只測了自己拿著。
 
 **退場**：官方在 `addEquippedModelInstance`、`addStaticForcedTex` 或 `getItemName` 補上 null 檢查，SmokeCheck 的存在理由轉紅時撤刀。
 
