@@ -5449,6 +5449,56 @@ console：
 
 ---
 
+<a id="2dg"></a>
+## 2dg. 沒人開的車被客戶端搬動的觀測（W99，server，預設 observe）
+
+**起因**（2026-11-12 正式服）：一個帳號在別人的據點裡搬動了 40 台車，其中幾台有綁車保護，最遠 145 格。伺服器沒有他坐進這些車的紀錄，綁車 MOD 也沒有記到他坐在受保護的車上。伺服器端查得到的只有每小時車輛資料庫快照的座標差。
+
+**原版缺陷**：車輛物理同步的伺服器端驗證有缺口，沒坐在車上的人可能把車搬走。缺口細節不在公開文件描述。
+
+**修補**（只寫 log、不擋）：`VehiclePhysicsPacket.processServer` 頭部 headCall（slots 0、2）記下封包與送出的連線；原版通過檢查之後的第一個呼叫、全方法唯一的 `BaseVehicle.setClientForce` 同形改道（這時車的位置還是舊的），helper 原樣呼叫一次原版，再比對封包的新位置。`VehicleCollidePacket.processServer` 頭部 W46 的 helper（[2bi](#2bi)）先把封包轉給同一個 helper。新 ClassPatch `VehiclePhysicsPacket`（兩個子類別不覆寫 `processServer`），helper `zombie.network.packets.vehicle.MdcUnseatedVehicleWatch`。伺服器自己搬的車（MOD 在伺服器設位置、W64 抬回地面）不經過這裡，不會記。
+
+**記什麼**：沒有駕駛的車被客戶端回報的位置搬動時，同一台車短時間內的搬動累計起來算（分段搬也算總距離；有人坐上駕駛座或被拖走就重新起算）。`kind` 分四種：
+
+| kind | 意思 | 記不記 |
+|---|---|---|
+| `towed` | 被同一位玩家開的車拖著，或拖著那台車 | 只計數 |
+| `pushed` | 那位玩家正在開旁邊的另一台車（撞開路邊的車） | 累計達門檻、收段時記 `moved` |
+| `unseated` | 那位玩家沒在開車，或開的車不在旁邊 | 累計達門檻當場記 `moving`，收段記 `moved` |
+| `noPlayer` | 找不到那位玩家 | 同上 |
+
+另外，不符合原版客戶端送出條件的碰撞授權申請記一行 `collide-request`，帶玩家的歸還記 `release-to-player`。每一行帶：車（sqlId／vid、車型）、起訖座標、距離、秒數、包數、帳號與 SteamID、授權、那位玩家當時坐在哪、玩家離車多遠、授權怎麼來的（`grant=`）。分段搬時中途換過帳號的，另外記 `earlierUsers=`。帳號的控制字元、引號與逗號換成 `?`。
+
+console：
+
+```text
+[MinidoracatJavaPatch][UnseatedVehicleWatch] 首次生效（-Dmdc.unseatedVehicleWatch=0|off 照原版）minTiles=5.0 accepted=<n> …
+[MinidoracatJavaPatch][UnseatedVehicleWatch] moving kind=unseated vehicle=<sqlId>/<vid> <車型> from=<x>,<y> to=<x>,<y> dist=<格> secs=<秒> packets=<n> user="<帳號>" steamid=<SteamID> auth=<授權> pid=<onlineID> seat=<none|driving …|seat<n> …> playerDist=<開始>/<結束> grant=<collide(…)|release(…)|other> [earlierUsers="<帳號>,…"]
+[MinidoracatJavaPatch][UnseatedVehicleWatch] moved kind=<pushed|unseated|noPlayer> …（欄位同上，起訖是整段累計）
+[MinidoracatJavaPatch][UnseatedVehicleWatch] collide-request suspect=<原因> user="<帳號>" steamid=<SteamID> pid=<onlineID> vehicle=<sqlId>/<vid> <車型> at=<x>,<y> auth=<授權> requester=<…>
+[MinidoracatJavaPatch][UnseatedVehicleWatch] release-to-player user="<帳號>" steamid=<SteamID> pid=<onlineID> own=<yes|no> vehicle=<sqlId>/<vid> <車型> at=<x>,<y> auth=<授權> driver=<none|other>
+[MinidoracatJavaPatch][UnseatedVehicleWatch] beat accepted=<n> episodes=<n> towed=<n> pushed=<n> unseated=<n> noPlayer=<n> moving=<n> logged=<n> requests=<n> suspect=<n> releaseToPlayer=<n> open=<n> userCapped=<n> anomalies=<n>
+```
+
+AutoDrive／Tesla 的召喚是合法的車外授權，會記成 `kind=unseated seat=none grant=other`，要對照召喚 MOD 自己的 log 判斷。心跳每 10 分鐘最多一行；明細行每類（搬動、申請）每次啟動最多 2000 行、每個帳號每類最多 100 行，超過只計數（心跳的 `userCapped`；帳號到頂時印一行通知）。
+
+**行數估計**：正式服 11-05～11-12 每一輪 `cmd.txt` 的 `vehicle.crash`（客戶端算到的撞擊，含撞牆、撞殭屍）是 1–420 次。`pushed` 只會是其中推開別台車 5 格以上的那幾次，一輪最多幾十行（推論，上線後看心跳的 `pushed` 與 `logged`）；`unseated` 正常只有 MOD 召喚，一天個位數；申請類的行正常玩家應該是 0（推論）。
+
+**限制**：只記、不擋，車照樣被搬走。只看得到授權在誰手上，看不到他用什麼方法拿到授權。拖車只計數。車上有人坐駕駛座時整段不看。全服都沒有車輛物理包與碰撞申請時，收段會晚（`moving` 不受影響）。
+
+**開關**：`-Dmdc.unseatedVehicleWatch=0|off` 照原版（不計數、不記行）；`-Dmdc.unseatedVehicleWatchTiles`（預設 5 格）。都要重啟。觀測的例外只計 `anomalies`，原版 `setClientForce` 在 try 外恰呼叫一次；Error 照常外拋。
+
+**守門與驗證**：
+- SmokeCheck：上游指紋——helper 判讀依據的五個原版方法本體 SHA 鎖（`UNSEATED_VEHICLE_LOCKED`，各配負對照）；`processServer` 唯一的 `setClientForce` 在 `hasAuthorization` 與時間檢查之後、`setX` 之前。手術形狀：頭部 `aload_0／aload_2→begin`、`setClientForce` 改道恰 1、原呼叫 0、真指令恰 +3。helper 契約：helper 的 `setClientForce` 恰呼叫原版一次；W46 helper 第一個呼叫是 `onCollide`，恰一次；每個 `DebugLog.log` 都在 try 內、handler 恰為 `RuntimeException`＋`LinkageError`。
+- `MdcUnseatedVehicleWatchTest`（`build.ps1` [9zzl/10]，observe、off、logthrow 三個 JVM）：改道點原樣呼叫原版，沒經過 `begin` 或對不上車只計 anomalies；搬 20 格在 5 格那一包記一次 `moving`、收段記 `moved kind=unseated`；可疑申請經 dist 手術後的真 `VehicleCollidePacket.processServer` 記一行（同一個帳號 5 秒內只記一次），之後由同一位玩家授權的搬動記 `grant=collide`；駕駛撞開旁邊的車 2 格只計數、推 8 格記 `kind=pushed`（沒有 `moving`）；開的車在 100 格外時算 `unseated`；拖車只計數，拆掉拖車、下了車就換成 `unseated` 一段；分段搬（每段 4 格、停 6 秒或 61 秒）累計記 `moving` 與總距離 16 格、記 `earlierUsers`（帳號互為子字串也照記）；拖曳前的起點、同一個 vid 換了車都不延續；一般歸還之後別的來源給的授權記 `grant=other`；申請與歸還對拖車夥伴一起生效；帳號的換行與引號換成 `?`，額度用帳號原文分開計；一個帳號每類最多 100 行（到頂印通知），申請額度用完不影響搬動，之後別的帳號照記；off 不計數、不記行；logthrow：日誌鏈拋例外時原版照常完成，拋 `OutOfMemoryError` 時照常外拋。
+- 實機 E2E（9950X3D，情境 `unseated-move-mp`，jar `04e09198`）：`uvm-w99-obs-1112e` 沒坐在車上的客戶端把伺服器上的車搬了 20.0 格，伺服器 console 在 5.0 格那一包記 `moving kind=unseated … seat=none … grant=other`，收段記 `moved … dist=20.0 secs=6.2 packets=38`；`uvm-w99-seat-1112g` 搬 20.2 格，另記 `release-to-player`；`uvm-w99-off-1112e`（`-Dmdc.unseatedVehicleWatch=off`）沒有任何 W99 行；原版對照 `uvm-van-1112b` 搬 18.2 格、沒有 W99 行。
+
+**部署**：還沒部署。manifest 新增 `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class`（含 `$Episode`、`$Origin`、`$Request`）與 patched class `VehiclePhysicsPacket`，`MdcVehicleCollideResync.class` 換新。
+
+**退場**：SmokeCheck 的上游指紋（五個 SHA 鎖；其中兩個和 W89 重複）變紅時重估：官方改了授權交接或收位置的方式，可能已經修好。
+
+---
+
 <a id="3"></a>
 ## 3. 部署後驗證清單
 

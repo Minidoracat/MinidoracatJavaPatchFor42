@@ -6088,6 +6088,56 @@ Console:
 
 ---
 
+<a id="2dg"></a>
+## 2dg. Watching unoccupied vehicles moved by a client (W99, server, default observe)
+
+**Cause** (production server, 2026-11-12): one account moved 40 vehicles inside another player's base, a few of them protected by a vehicle-ownership mod, up to 145 tiles. The server has no record of that account entering those vehicles, and the ownership mod did not record them in a protected vehicle. The only server-side trace was the coordinate difference between hourly vehicle-database snapshots.
+
+**Vanilla defect**: server-side validation of vehicle physics sync has a gap that can let someone who is not in a vehicle move it. The details are not described in public documents.
+
+**Patch** (log only, no blocking): a headCall at the head of `VehiclePhysicsPacket.processServer` (slots 0, 2) records the packet and the sending connection. The first call after vanilla's checks pass, the method's only `BaseVehicle.setClientForce`, gets a same-shape redirect (the vehicle still has its old position at this point); the helper calls vanilla once unchanged, then compares the packet's new position. The W46 helper at the head of `VehicleCollidePacket.processServer` ([2bi](#2bi)) first forwards the packet to the same helper. New ClassPatch `VehiclePhysicsPacket` (its two subclasses do not override `processServer`); helper `zombie.network.packets.vehicle.MdcUnseatedVehicleWatch`. Vehicles the server moves itself (a mod setting a position on the server, W64 lifting a vehicle back to the ground) do not pass through here and are not logged.
+
+**What it logs**: when a vehicle with no driver is moved by a client-reported position, moves of the same vehicle within a short time are accumulated (moving it in short hops counts the total distance; the origin resets when someone takes the driver seat or the vehicle is towed). `kind` has four values:
+
+| kind | Meaning | Logged? |
+|---|---|---|
+| `towed` | towed by, or towing, a vehicle driven by the same player | counted only |
+| `pushed` | that player is driving another vehicle right next to it (bumping a parked vehicle) | `moved` at close when the total reaches the threshold |
+| `unseated` | that player is not driving, or the vehicle they drive is not nearby | `moving` as soon as the total reaches the threshold, `moved` at close |
+| `noPlayer` | the player cannot be found | same as above |
+
+In addition, a collide authorization request that does not match what the vanilla client sends logs one `collide-request` line, and a release that names a player logs `release-to-player`. Each line carries: the vehicle (sqlId/vid, script), start and end coordinates, distance, seconds, packet count, account and SteamID, authorization, where that player was sitting, how far the player was from the vehicle, and where the authorization came from (`grant=`). When the account changed between hops, `earlierUsers=` is added. Control characters, quotes and commas in account names are replaced with `?`.
+
+console:
+
+```text
+[MinidoracatJavaPatch][UnseatedVehicleWatch] 首次生效（-Dmdc.unseatedVehicleWatch=0|off 照原版）minTiles=5.0 accepted=<n> …
+[MinidoracatJavaPatch][UnseatedVehicleWatch] moving kind=unseated vehicle=<sqlId>/<vid> <script> from=<x>,<y> to=<x>,<y> dist=<tiles> secs=<s> packets=<n> user="<account>" steamid=<SteamID> auth=<authorization> pid=<onlineID> seat=<none|driving …|seat<n> …> playerDist=<start>/<end> grant=<collide(…)|release(…)|other> [earlierUsers="<account>,…"]
+[MinidoracatJavaPatch][UnseatedVehicleWatch] moved kind=<pushed|unseated|noPlayer> … (same fields; start and end cover the accumulated total)
+[MinidoracatJavaPatch][UnseatedVehicleWatch] collide-request suspect=<reason> user="<account>" steamid=<SteamID> pid=<onlineID> vehicle=<sqlId>/<vid> <script> at=<x>,<y> auth=<authorization> requester=<…>
+[MinidoracatJavaPatch][UnseatedVehicleWatch] release-to-player user="<account>" steamid=<SteamID> pid=<onlineID> own=<yes|no> vehicle=<sqlId>/<vid> <script> at=<x>,<y> auth=<authorization> driver=<none|other>
+[MinidoracatJavaPatch][UnseatedVehicleWatch] beat accepted=<n> episodes=<n> towed=<n> pushed=<n> unseated=<n> noPlayer=<n> moving=<n> logged=<n> requests=<n> suspect=<n> releaseToPlayer=<n> open=<n> userCapped=<n> anomalies=<n>
+```
+
+AutoDrive / Tesla summoning is a legitimate out-of-vehicle authorization; it is logged as `kind=unseated seat=none grant=other` and has to be checked against the summoning mod's own log. At most one heartbeat line every 10 minutes; detail lines are capped at 2000 per category (moves, requests) per server start and 100 per account per category, after which they are only counted (`userCapped` in the heartbeat; one notice line when an account hits the cap).
+
+**Expected volume**: on the production server, `vehicle.crash` in each round's `cmd.txt` (impacts the client computed, including walls and zombies) ran 1–420 per round from 11-05 to 11-12. `pushed` is only the subset that pushed another vehicle 5 tiles or more, at most a few dozen lines per round (inference; check `pushed` and `logged` in the heartbeat after going live). `unseated` should normally be only mod summoning, single digits per day; request lines should be 0 for normal players (inference).
+
+**Limits**: log only; the vehicle is still moved. It sees who holds the authorization, not how they obtained it. Towing is only counted. A move is not watched while someone is in the driver seat. When the whole server sends no vehicle physics packets or collide requests, closing a move is delayed (`moving` is not affected).
+
+**Switches**: `-Dmdc.unseatedVehicleWatch=0|off` behaves like vanilla (no counting, no lines); `-Dmdc.unseatedVehicleWatchTiles` (default 5 tiles). Both need a restart. Observation exceptions only increment `anomalies`; vanilla `setClientForce` is called exactly once outside the try; Errors propagate as usual.
+
+**Gates and verification**:
+- SmokeCheck: upstream fingerprint — body SHA locks on the five vanilla methods the helper's judgement depends on (`UNSEATED_VEHICLE_LOCKED`, each with a negative control); the only `setClientForce` in `processServer` sits after `hasAuthorization` and the timestamp check and before `setX`. Surgery shape: head `aload_0/aload_2→begin`, exactly 1 `setClientForce` redirect, 0 original calls, exactly +3 real instructions. Helper contract: the helper's `setClientForce` calls vanilla exactly once; the W46 helper's first call is `onCollide`, exactly once; every `DebugLog.log` is inside a try whose handlers are exactly `RuntimeException` + `LinkageError`.
+- `MdcUnseatedVehicleWatchTest` (`build.ps1` [9zzl/10], three JVMs: observe, off, logthrow): the redirect calls vanilla unchanged, and a call without `begin` or with a mismatched vehicle only counts anomalies; moving 20 tiles logs one `moving` at the 5-tile packet and `moved kind=unseated` at close; a suspicious request through the real dist-patched `VehicleCollidePacket.processServer` logs one line (once per account per 5 seconds), and a following move authorized to the same player logs `grant=collide`; a driver bumping a nearby vehicle 2 tiles is only counted, pushing 8 tiles logs `kind=pushed` (no `moving`); a driven vehicle 100 tiles away counts as `unseated`; towing is only counted, and after unhitching and leaving the vehicle the next stretch is `unseated`; hopping (4 tiles per hop, 6- or 61-second pauses) accumulates into `moving` and a 16-tile total with `earlierUsers` (also when account names are substrings of each other); the origin is not carried over past towing or to another vehicle reusing the vid; after a plain release, authorization from another source logs `grant=other`; requests and releases apply to the tow partner too; newlines and quotes in account names become `?` and caps are keyed by the raw account name; one account gets at most 100 lines per category (with a notice at the cap), an exhausted request cap does not affect moves, and other accounts still log afterwards; off counts nothing and logs nothing; logthrow: when the log chain throws, vanilla still completes, and an `OutOfMemoryError` propagates as usual.
+- Live E2E (9950X3D, scenario `unseated-move-mp`, jar `04e09198`): in `uvm-w99-obs-1112e` a client not sitting in the vehicle moved a server vehicle 20.0 tiles; the server console logged `moving kind=unseated … seat=none … grant=other` at the 5.0-tile packet and `moved … dist=20.0 secs=6.2 packets=38` at close; `uvm-w99-seat-1112g` moved it 20.2 tiles and also logged `release-to-player`; `uvm-w99-off-1112e` (`-Dmdc.unseatedVehicleWatch=off`) logged no W99 lines; the vanilla control `uvm-van-1112b` moved it 18.2 tiles with no W99 lines.
+
+**Deployment**: not deployed yet. The manifest gains `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class` (with `$Episode`, `$Origin`, `$Request`) and the patched class `VehiclePhysicsPacket`; `MdcVehicleCollideResync.class` is replaced.
+
+**Retirement**: re-evaluate when the SmokeCheck upstream fingerprint (five SHA locks, two shared with W89) turns red: the official game changed how authorization is handed over or how positions are accepted, and may have fixed it.
+
+---
+
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 

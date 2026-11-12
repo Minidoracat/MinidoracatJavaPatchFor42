@@ -51,6 +51,7 @@ public final class MdcVehicleCollideResync {
 
     /** {@code VehicleCollidePacket.processServer} 頭部 headCall（slots 0, 2）。 */
     public static void onProcessServer(VehicleCollidePacket packet, UdpConnection connection) {
+        MdcUnseatedVehicleWatch.onCollide(packet, connection);   // W99 觀測（自己 catch、有自己的開關）
         if (!ENABLED || packet.isCollide) {
             return;
         }

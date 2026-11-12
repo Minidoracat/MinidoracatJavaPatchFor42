@@ -3149,6 +3149,38 @@ public final class SmokeCheck {
                 && countExactCalls(gVcr, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehicleManager", "getVehicleState",
                         "(Lzombie/core/raknet/UdpConnection;Lzombie/vehicles/BaseVehicle;)L" + svsCls + ";") == 0);
 
+        // W99：沒人開的車被客戶端搬動的觀測（docs/patches.md 2dg）。上游指紋（官方改了就紅＝重估）：helper 判讀依據的五個原版方法
+        // 本體 SHA 鎖（VehiclePhysicsPacket.processServer、hasAuthorization 與 W89 的 IDLE_VEHICLE_LOCKED 重複，紅了兩刀都要重估）；
+        // 另釘唯一的 setClientForce 在 hasAuthorization 與時間檢查之後、setX 之前（helper 靠它讀舊位置）。
+        String uvwCls = "zombie/network/packets/vehicle/MdcUnseatedVehicleWatch";
+        String vppCls = "zombie/network/packets/vehicle/VehiclePhysicsPacket";
+        failed += shaLocks(jar, "W99", UNSEATED_VEHICLE_LOCKED);
+        MethodNode vVpProcess = methodFromJar(jar, vppCls, "processServer", vcpDesc);
+        String vVpText = methodText(vVpProcess);
+        int iAuth = vVpText.indexOf("zombie/vehicles/BaseVehicle.hasAuthorization");
+        int iTime = vVpText.indexOf("zombie/GameTime.getServerTimeMills");
+        int iForce = vVpText.indexOf("zombie/vehicles/BaseVehicle.setClientForce");
+        int iSetX = vVpText.indexOf("zombie/vehicles/BaseVehicle.setX");
+        failed += check("W99 上游指紋：processServer 唯一的 setClientForce 在授權與時間檢查之後、setX 之前",
+                countExactCalls(vVpProcess, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "setClientForce", "(F)V") == 1
+                && countCalls(vVpProcess, "zombie/vehicles/BaseVehicle", "setX") == 1
+                && iAuth >= 0 && iTime > iAuth && iForce > iTime && iSetX > iForce);
+        MethodNode pVpProcess = method(distJava, vppCls, "processServer", vcpDesc);
+        failed += check("W99 手術後：processServer 頭部 aload_0／aload_2→begin、setClientForce 改道恰 1、真指令恰 +3",
+                headCallSlotsOk(pVpProcess, uvwCls, "begin", "(L" + vppCls + ";Lzombie/core/raknet/UdpConnection;)V", 0, 2)
+                && countExactCalls(pVpProcess, Opcodes.INVOKESTATIC, uvwCls, "setClientForce", "(Lzombie/vehicles/BaseVehicle;F)V") == 1
+                && countExactCalls(pVpProcess, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "setClientForce", "(F)V") == 0
+                && realInsnCount(pVpProcess) == realInsnCount(vVpProcess) + 3);
+        MethodNode gUvForce = method(distJava, uvwCls, "setClientForce", "(Lzombie/vehicles/BaseVehicle;F)V");
+        failed += check("W99 helper 契約：setClientForce 恰呼叫原版一次；W46 helper 第一個呼叫是 onCollide 恰一次",
+                countExactCalls(gUvForce, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "setClientForce", "(F)V") == 1
+                && countExactCalls(gVcr, Opcodes.INVOKESTATIC, uvwCls, "onCollide", vcrDesc) == 1
+                && methodText(gVcr).indexOf(uvwCls + ".onCollide") >= 0
+                && methodText(gVcr).indexOf(uvwCls + ".onCollide") < methodText(gVcr).indexOf(vcrCls + ".ENABLED"));
+        String uvwLog = logHandlerViolations(classNode(distJava, uvwCls));
+        failed += check("W99 helper 契約：每個 DebugLog.log 都在 try 內、handler 恰為 RuntimeException＋LinkageError，沒有 Throwable／Error／catch-all" + uvwLog,
+                uvwLog.isEmpty());
+
         // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。存在理由（TIS 修好即紅＝撤刀）：
         // VehiclePhysicsPacket.processServer 把客戶端回報的高度直接寫進 setZ／jniTransform，不夾樓層；
         // 原版只有 BaseVehicle.load 以 PZMath.clamp 把存檔高度夾回樓層；伺服器授權交回 Server 都經 setNetPlayerAuthorization；
@@ -9347,6 +9379,21 @@ public final class SmokeCheck {
         }
         return bad.toString();
     }
+
+    /** W99：helper 判讀依據的原版方法（授權交接、送出條件、收申請）。 */
+    static final String[][] UNSEATED_VEHICLE_LOCKED = {
+            {"zombie/network/packets/vehicle/VehicleCollidePacket", "processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V", "66f6feb3abb4ebebebb7db9d800f0f1b94d45aa02745d0f5f113cfe42b1cb7fd"},
+            {"zombie/vehicles/BaseVehicle", "authorizationServerCollide", "(SZ)V",
+                    "9dd8ec63c2e7698fbad4d3b33af1517747fda3f45d2da270425479eb7eae833d"},
+            {"zombie/core/physics/WorldSimulation", "updateInternal", "()V",
+                    "548ecf4742eb7f63594ae66996bc2e47dd591ffbe8549c5cae34691ee9c64b12"},
+            {"zombie/network/packets/vehicle/VehiclePhysicsPacket", "processServer",
+                    "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V",
+                    "b2f68fa0b6c2917d164b67d7c7f2d6f7eda8e6d845a0281ffb5781590f8eb67f"},
+            {"zombie/vehicles/BaseVehicle", "hasAuthorization", "(Lzombie/core/raknet/UdpConnection;)Z",
+                    "a44e5e352cf853f5bcf3a60c6e2bca4a1c0b1167fac864de59ba46adcae85587"},
+    };
 
     /** W97：helper 照抄原版 authClient 的 bannedip 查詢、沿用 LoginPacket 對封鎖結果的處理、Relay 判斷同 BanSystem。 */
     static final String[][] STEAM_IP_BAN_LOCKED = {

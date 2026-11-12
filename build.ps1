@@ -175,6 +175,10 @@ $helperEntries = @(
     'zombie/mdc/TeleportWatch.class',
     'zombie/mdc/TeleportWatch$State.class',
     'zombie/network/MdcSteamIpBan.class',
+    'zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class',
+    'zombie/network/packets/vehicle/MdcUnseatedVehicleWatch$Episode.class',
+    'zombie/network/packets/vehicle/MdcUnseatedVehicleWatch$Origin.class',
+    'zombie/network/packets/vehicle/MdcUnseatedVehicleWatch$Request.class',
     'zombie/mdc/PatchInfo.class'
 )
 $manifestLines = foreach ($entry in $helperEntries) {
@@ -987,6 +991,15 @@ java -Xverify:all -cp $sibCp zombie.network.MdcSteamIpBanTest on
 Assert-Ok "MdcSteamIpBanTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.steamIpBan=off" -cp $sibCp zombie.network.MdcSteamIpBanTest off
 Assert-Ok "MdcSteamIpBanTest（off，kill switch）"
+
+Write-Host "[9zzl/10] 沒人開的車被客戶端搬動的觀測（W99）：改道點原樣呼叫原版 setClientForce、沒經過 begin 或對不上車只計 anomalies；搬 20 格記 moving 與 moved kind=unseated；經真 VehicleCollidePacket.processServer（W46 helper 轉來）的可疑申請記一行（每個帳號 5 秒一行）、之後由同一位玩家授權的搬動記 grant=collide；pushed 只算開的車在旁邊；拖車只計數；分段搬累計起點（vid 換車、拖走不延續）；拖車夥伴；歸還讓舊申請作廢；帳號清洗；每帳號每類額度；off 照原版；日誌拋例外照原版完成"
+$uvwCp = "$R\work\out;$R\dist\java;$TJ"
+java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest observe
+Assert-Ok "MdcUnseatedVehicleWatchTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.unseatedVehicleWatch=off" -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest off
+Assert-Ok "MdcUnseatedVehicleWatchTest（off，kill switch）"
+java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest logthrow
+Assert-Ok "MdcUnseatedVehicleWatchTest（logthrow observe，日誌拋例外照原版完成、Error 照常外拋）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark

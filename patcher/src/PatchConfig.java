@@ -1746,6 +1746,24 @@ public final class PatchConfig {
                 "resetSpeedLimiter", "()V", tpWatch, "resetSpeedLimiter"));
         sendTeleport.expectedHits = 1;
 
+        // ---- W99 沒人開的車被客戶端搬動的觀測（docs/patches.md 2dg）----
+        // 車輛物理同步的伺服器端驗證有缺口（細節不在公開檔描述）。VehiclePhysicsPacket.processServer 頭部 aload_0／aload_2→begin 記下封包與連線；
+        // 通過授權與時間檢查後第一個呼叫、全方法唯一的 invokevirtual BaseVehicle.setClientForce(F)V（javap offset 56，在 setX 之前）
+        // 同形改道 MdcUnseatedVehicleWatch.setClientForce：先讀舊位置、原樣呼叫一次原版，沒有駕駛的車累計搬動超過門檻就記一行。
+        // VehicleCollide 申請由 W46 的 helper 轉給同一個 helper 記下（沒有新手術）。VehiclePhysicsPacket 原本沒有 ClassPatch
+        // （Reliable／Unreliable 兩個子類別不覆寫 processServer）。只寫 log、不擋。-Dmdc.unseatedVehicleWatch=observe（預設）／0|off；
+        // -Dmdc.unseatedVehicleWatchTiles（預設 5 格）。
+        String uvWatch = "zombie/network/packets/vehicle/MdcUnseatedVehicleWatch";
+        Patcher.ClassPatch vehPhysics = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehiclePhysicsPacket");
+        Patcher.MethodOps vehPhysicsProcess = vehPhysics.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        vehPhysicsProcess.headCall = new Patcher.HeadCall(uvWatch, "begin",
+                "(Lzombie/network/packets/vehicle/VehiclePhysicsPacket;Lzombie/core/raknet/UdpConnection;)V", new int[]{0, 2});
+        vehPhysicsProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                "setClientForce", "(F)V", uvWatch, "setClientForce"));
+        vehPhysicsProcess.expectedHits = 2;   // headCall 1＋setClientForce 1
+        patches.add(vehPhysics);
+
         return patches;
     }
 
