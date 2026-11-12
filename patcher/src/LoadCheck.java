@@ -171,6 +171,13 @@ public final class LoadCheck {
                         }
                     }
                     System.out.println("blood splat index OK BloodSplatIndex 七個手術簽名一致");
+                    var nullGuard = Class.forName("zombie.mdc.ItemModelNullGuard", false, cl).getDeclaredMethod("getModelScript",
+                            Class.forName("zombie.scripting.ScriptManager", false, cl), String.class);
+                    if (nullGuard.getReturnType() != Class.forName("zombie.scripting.objects.ModelScript", false, cl)
+                            || (nullGuard.getModifiers() & psf) != psf) {
+                        throw new NoSuchMethodException("ItemModelNullGuard.getModelScript signature");
+                    }
+                    System.out.println("item model null guard OK ItemModelNullGuard.getModelScript(ScriptManager,String) 簽名一致");
                 }
                 System.out.println("全部 " + lines.size() + " 個 class 連結驗證通過");
                 return;

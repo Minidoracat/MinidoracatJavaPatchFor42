@@ -1949,6 +1949,18 @@ public final class PatchConfig {
         boneLoop.expectedHits = 1;
         patches.add(animPlayer);
 
+        // ---- W100 沒有模型名稱的武器類物品讓畫地上物品的程式 NPE（docs/patches.md 2dh）----
+        // itemHasModel 對沒有 WorldStaticModel 的 HandWeapon 查 getModelScript(item.getStaticModel())（javap offset 130），
+        // StaticModel 與 WeaponSprite 都沒設時名稱是 null，ScriptBucketCollection.getScript 對它呼叫 contains 就 NPE。
+        // 方法內兩個 getModelScript（offset 23 的名稱已先過 isNullOrEmpty）1:1 改道 ItemModelNullGuard：名稱是 null 回 null，其餘照原版。
+        Patcher.ClassPatch itemModel = new Patcher.ClassPatch("zombie/core/skinnedmodel/model/ItemModelRenderer");
+        Patcher.MethodOps hasModel = itemModel.method("itemHasModel", "(Lzombie/inventory/InventoryItem;)Z");
+        hasModel.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/scripting/ScriptManager", "getModelScript", "(Ljava/lang/String;)Lzombie/scripting/objects/ModelScript;",
+                "zombie/mdc/ItemModelNullGuard", "getModelScript"));
+        hasModel.expectedHits = 2;
+        patches.add(itemModel);
+
         // ---- W57 自建房 chunk 載入斷線（docs/patches.md 2bu）----
         // 格子在 World Streamer 執行緒反序列化時就綁上 IsoRoom；主執行緒接手前若 clientProcessBuildings 重建了
         // 這一帶的自建建築，舊 IsoRoom 被 clear()（def=null），updateSquares 又只重綁 ChunkMap 裡的 chunk，

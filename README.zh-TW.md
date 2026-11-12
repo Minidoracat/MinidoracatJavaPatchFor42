@@ -6,7 +6,7 @@
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 83 個 patched class、248 個命中點、103 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡），以 Java agent 載入、不改遊戲檔案，從
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡；地上一件沒有模型的物品讓客戶端不停跳錯誤），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -184,6 +184,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。翻覆的車要低於地板一層以上才處理，先扶正（保留車頭方向，0.2.8 起）。 | 未回報 |
 | W68 房間表被兩條執行緒同時寫（[2cd](docs/patches.md#2cd)） | 42.21.0（42.20.4 也有）：World Streamer 執行緒載入 chunk 時，經 `IsoMetaGrid.getRoomByID` 往 `IsoMetaCell.isoRooms`、`isoBuildings`（一般 `HashMap`）補房間。附近有人蓋或拆東西時，主執行緒重建自建建築，在 `recalculateBuildingAndRoomIDs` 複製、清空、重填同樣兩張表。兩邊沒有任何同步：複製出來的清單有 `null`（`NPE: "isoRoom" is null`）或多一筆（`ArrayIndexOutOfBoundsException`），client 被斷線送回主選單。 | 用同一把公平鎖包住 jar 內每一個 `getRoomByID` 呼叫與重建，兩邊不再同時碰這兩張表；原版方法照常執行。 | [#101035](https://theindiestone.com/forums/topic/101035/) |
 | W84 鄰居 chunk 的血跡逐筆掃描（[2cs](docs/patches.md#2cs)） | 每重畫一個 chunk 的一層，`FBORenderCell.renderOneLevel` 先畫自己的血跡，再對 8 個鄰居各呼叫一次 `renderOneLevel_Blood`：鄰居整份 `floorBloodSplats`（最多 1000 筆）與 `floorBloodSplatsFade` 逐筆掃過，只留下離交界 1 格內的。屍潮後每個 chunk 都有上千筆；正式服約 48 人、屍潮打完後，不開 `-debug` 的 client 這個方法佔主執行緒 4.6–9.4%。 | 兩份清單換成同一實作、只多記結構變動並帶「靠哪一邊」的索引；鄰居呼叫只走那一邊的候選，原版的判斷照樣逐筆再做，留下的血跡、順序、顏色與淡出都與原版相同。每 256 次抽 1 次照原版整份掃描比對，不一致就本次停用。 | 未回報 |
+| W100 沒有模型的武器類物品每次重畫都丟例外（[2dh](docs/patches.md#2dh)） | `ItemModelRenderer.itemHasModel` 對武器直接查 `getModelScript(item.getStaticModel())`，不檢查名稱。沒有 `WorldStaticModel`、`StaticModel`、`WeaponSprite` 的武器類物品（原版留下的開發用物品 `Base.FISH_DEV_ITEM`）名稱是 null，`ScriptBucketCollection.getScript` 丟 `NullPointerException`。地上只要有一件，視野內有它的每位玩家每次重畫都丟一次，錯誤數字一直跳（玩家 log 83 秒 401 筆）。 | 名稱是 null 時當成「沒有模型」，照原版對其他沒有模型的物品的做法改畫圖示；其餘照原版。 | 未回報 |
 
 ### Native 防護（Linux dedicated server）
 
@@ -278,7 +279,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速（32GB 以上 RAM） |
+| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速、沒有模型的地上物品修正（32GB 以上 RAM） |
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與其他版本互斥 |
 | `client-fixes-compat` | 只含車輛修正（車輛動畫加速、開車瞬移三項、車被推到地板下），給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |

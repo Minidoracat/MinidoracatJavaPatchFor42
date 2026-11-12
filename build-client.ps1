@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.1'
+$PACKAGE_VERSION = '0.3.2'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -91,10 +91,10 @@ Write-Host '[3/8] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.8($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.8-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.9($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.9-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
     # 相容版：只裝 PZ_Optimization 這類 MOD 不替換的 class（PatchConfig.clientCompat），helper 只帶這幾刀用到的
-    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛修補）'; nameEn='Client fixes - compatible (vehicle fixes only)'; version="v3.8-compat($sourceRef)"; requires=@('core'); group='client-fixes';
+    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛修補）'; nameEn='Client fixes - compatible (vehicle fixes only)'; version="v3.9-compat($sourceRef)"; requires=@('core'); group='client-fixes';
        helpers=@('zombie/mdc/PatchInfo.class', 'zombie/mdc/VehicleAnimGate.class', 'zombie/mdc/VehicleAnimGate$PoseState.class',
                  'zombie/mdc/VehicleClampGuard.class', 'zombie/mdc/VehicleOrphanGuard.class', 'zombie/vehicles/MdcVehicleSinkGuard.class') }
 )
@@ -170,7 +170,7 @@ if (Test-Path "$R\patcher\tests-client-common") {
 Assert-Ok 'javac client behavior tests'
 foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-compat')) {
     $cp = "$OUT;$DIST\checks\$id;$TJ"
-    # 相容版只有車輛的修補；貼圖、串流、W55、W57、W68、W84 的 class 不在它的 view 裡，只在完整版測
+    # 相容版只有車輛的修補；貼圖、串流、W55、W57、W68、W84、W100 的 class 不在它的 view 裡，只在完整版測
     $full = $id -ne 'client-fixes-compat'
     $simpleTests = if ($full) { @('zombie.mdc.TexturePipelineGuardBehaviorTest', 'zombie.core.textures.MinidoracatTextureLeakGuardBehaviorTest', 'zombie.mdc.ChunkStreamObserverBehaviorTest') } else { @() }
     foreach ($test in $simpleTests) {
@@ -229,6 +229,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-
             $jvmArgs = @($run[1])
             & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.MetaGridLockBehaviorTest $run[0]
             Assert-Ok "MetaGridLockBehaviorTest $($run[0]) $id"
+        }
+        # W100：on 與 off 各跑一次（off＝kill switch 實跑，沒有模型名稱的武器照原版丟 NPE＝原版負對照）
+        foreach ($run in @(@('on', @()), @('off', @('-Dmdc.itemModelNullGuard=off')))) {
+            $jvmArgs = @($run[1])
+            & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.ItemModelNullGuardBehaviorTest $run[0]
+            Assert-Ok "ItemModelNullGuardBehaviorTest $($run[0]) $id"
         }
         # W84：on、verify、off 各跑一次（手術後的 FBORenderCell 與 jar 原版在同一組替身下逐筆比對；off＝kill switch 實跑），
         # 三次的 blood-digest 必須相同（原版跑在包過與沒包過的清單上結果一樣）

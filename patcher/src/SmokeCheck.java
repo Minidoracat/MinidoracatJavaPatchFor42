@@ -4359,6 +4359,7 @@ public final class SmokeCheck {
         if (!compat) {
             failed += boneReparentChecks(distJava, jar);
             failed += staleRoomChecks(distJava, jar);
+            failed += itemModelNullChecks(distJava, jar);
         }
         String chunkCls = "zombie/iso/IsoChunk";
 
@@ -4692,6 +4693,65 @@ public final class SmokeCheck {
                         .equals(methodText(pBoneLoop)));
         failed += check("W55 負對照：isBoneReparented 本體未改動",
                 methodText(method(distJava, apCls, "isBoneReparented", "(I)Z")).equals(methodText(vReparented)));
+        return failed;
+    }
+
+    /** W100 沒有模型名稱的武器類物品讓 itemHasModel NPE（ItemModelRenderer；相容版只含車輛修補，不裝）。 */
+    static int itemModelNullChecks(Path distJava, Path jar) throws Exception {
+        int failed = 0;
+        String rendererCls = "zombie/core/skinnedmodel/model/ItemModelRenderer";
+        String managerCls = "zombie/scripting/ScriptManager";
+        String guardCls = "zombie/mdc/ItemModelNullGuard";
+        String hasModelDesc = "(Lzombie/inventory/InventoryItem;)Z";
+        String modelScriptDesc = "(Ljava/lang/String;)Lzombie/scripting/objects/ModelScript;";
+        MethodNode vHasModel = methodFromJar(jar, rendererCls, "itemHasModel", hasModelDesc);
+        // 存在理由：武器分支把 getStaticModel() 的回傳值直接交給 getModelScript，getScript 一進來就對名稱呼叫 contains。
+        // TIS 在任一處補上 null 檢查時轉紅＝重估撤刀。
+        boolean unchecked = false;
+        for (AbstractInsnNode in : vHasModel.instructions) {
+            if (in instanceof MethodInsnNode call && call.name.equals("getStaticModel")
+                    && call.getNext() instanceof MethodInsnNode next && next.owner.equals(managerCls)
+                    && next.name.equals("getModelScript")) {
+                unchecked = true;
+            }
+        }
+        AbstractInsnNode firstUse = null;
+        for (AbstractInsnNode in : methodFromJar(jar, "zombie/scripting/ScriptBucketCollection", "getScript",
+                "(Ljava/lang/String;)Lzombie/scripting/objects/BaseScriptObject;").instructions) {
+            if (in.getOpcode() == Opcodes.IFNULL || in.getOpcode() == Opcodes.IFNONNULL
+                    || in instanceof MethodInsnNode) {
+                // 第一個方法呼叫是 scriptType.hasFlag，第二個就是對名稱的 contains
+                if (in instanceof MethodInsnNode call && call.name.equals("hasFlag")) {
+                    continue;
+                }
+                firstUse = in;
+                break;
+            }
+        }
+        failed += check("W100 vanilla 前提：itemHasModel 把 getStaticModel() 直接交給 getModelScript，"
+                        + "getScript 不檢查 null 就對名稱呼叫 String.contains",
+                unchecked
+                && countExactCalls(vHasModel, Opcodes.INVOKEVIRTUAL, managerCls, "getModelScript", modelScriptDesc) == 2
+                && firstUse instanceof MethodInsnNode use && use.owner.equals("java/lang/String") && use.name.equals("contains"));
+        MethodNode pHasModel = method(distJava, rendererCls, "itemHasModel", hasModelDesc);
+        failed += check("W100 itemHasModel 兩個 getModelScript 同形改道 ItemModelNullGuard，其餘指令與 frames 保留",
+                countExactCalls(pHasModel, Opcodes.INVOKEVIRTUAL, managerCls, "getModelScript", modelScriptDesc) == 0
+                && methodText(vHasModel).replace("INVOKEVIRTUAL " + managerCls + ".getModelScript " + modelScriptDesc,
+                        "INVOKESTATIC " + guardCls + ".getModelScript (L" + managerCls + ";Ljava/lang/String;)"
+                                + "Lzombie/scripting/objects/ModelScript;").equals(methodText(pHasModel)));
+        int otherChanged = 0;
+        ClassNode vanilla = classNodeFromJar(jar, rendererCls);
+        for (MethodNode m : classNode(distJava, rendererCls).methods) {
+            if (m.name.equals("itemHasModel")) {
+                continue;
+            }
+            MethodNode v = vanilla.methods.stream().filter(x -> x.name.equals(m.name) && x.desc.equals(m.desc))
+                    .findFirst().orElseThrow();
+            if (!methodText(v).equals(methodText(m))) {
+                otherChanged++;
+            }
+        }
+        failed += check("W100 負對照：ItemModelRenderer 其他方法未改動", otherChanged == 0);
         return failed;
     }
 

@@ -401,7 +401,7 @@ delegate fatal 均不進 sink/sink nonfatal 不改結果/sink fatal precedence),
 (本次連續超標已持續毫秒數)才是持續停擺的證據;patchedStallSamples>0＝4GB
 天花板也被地板追上(重開遊戲歸零,並回饋根治版優先度)。
 
-**與 server 部署完全隔離**：`build-client.ps1` 輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.22.2-0.3.1.zip`（42.21.0 時為 `-42.21.0-0.2.11`），不寫入 server manifest。**0.3.0 起改用 Java agent 載入**（42.22 起官方 jar 簽章，見文件開頭）：包裡是一個 `MinidoracatClientPatches.jar`（`AgentJarBuilder --modules` 建置，每個模組一組手術後的 class 與 helper）和一個 agent 載入器 `mdc-agent-loader.dll`，安裝器把兩個檔放進 `.mdc-patches/`，並在 `ProjectZomboid64.json` 頂層 `vmArgs` 最前面加一條 `-agentpath:.mdc-patches/mdc-agent-loader.dll=.mdc-patches/MinidoracatClientPatches.jar=modules=<模組>`；官方 jar 與 classpath 都不動。相對路徑可用，因為原版 json 的 `-Djava.library.path=win64/;.` 本身就以遊戲資料夾為工作目錄。不能直接寫 `-javaagent`：遊戲啟動器 `ProjectZomboid64.exe` 自己載入 `jvm.dll`，JVM 為 `-javaagent` 載入 `jre64\bin\instrument.dll` 時找不到同資料夾的 `java.dll`／`jli.dll`，遊戲起不來（`Could not find agent library instrument on the library path, with error: Can't find dependent libraries`，9950X3D 實機與本機重現）；經 `java.exe` 啟動沒有這個問題，所以 `AgentLoadCheck` 測不到。載入器（`patcher/agent-loader/mdc-agent-loader.c`，只連 `kernel32`）先以完整路徑載入那兩個 DLL，再把 `Agent_OnLoad` 原樣轉給 `instrument.dll`；`build-client.ps1` 用 `launcher-probe` 照啟動器的方式建 JVM（不經 `java.exe`、`PATH` 只留 Windows 自己的資料夾），釘住「`-javaagent` 起不來（原版前提）、經載入器則 `ARMED`」，另釘兩件事：agent jar 不存在時由 `instrument.dll` 報錯、JVM 不啟動；啟動參數少了 `=<agent jar>` 時載入器印 `DISARMED`、照原版開（JVM 這時交來的參數是 NULL，`instrument.dll` 不檢查就讀）。Linux 沒有這個問題（`libinstrument.so` 的 RPATH 是 `$ORIGIN`，正式服以同樣方式建 JVM 實測載入得了），伺服器照用 `-javaagent`。已知限制：`-agentpath:` 寫的是相對路徑，Windows 照 DLL 搜尋順序找它（先找 `ProjectZomboid64.exe` 所在的遊戲資料夾）；遊戲資料夾裡的載入器不見時，會繼續到 `System32`、`Windows`、工作目錄與 `PATH` 各資料夾底下找同一個相對路徑（實測）。要利用這點得先能寫入那些資料夾；維持相對路徑是因為搬動遊戲資料夾後不必重裝。`Install-Patches.bat` 選裝 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`／`client-fixes-compat`（後三者互斥），驗 jar／agent jar／載入器的 SHA 後才寫入；`Uninstall-Patches.bat` 可只卸載所選模組（改寫那一條參數），全部卸載時拿掉參數與那兩個檔。json 只改自己那一條：只替換頂層 `vmArgs` 陣列的文字範圍、寫完重新解析驗證，其他字元、BOM 與換行原樣保留，卸載後逐位元組回到安裝前；重複的自家參數收成一條（直接以 `-javaagent:` 指向本包 jar 的寫法也算），其他 Java agent 不動、只列出來。交易先寫後刪，中斷可依 state 備份復原，不會留下 json 指向已刪除檔案的狀態：agent jar 或載入器不在時 JVM 直接起不來（jar 不在是 `Error opening zip file or JAR manifest missing`，遊戲 JRE Zulu 25 實測）。Steam 更新或驗證會把 json 換回原版，此時 status 回報「已安裝但沒有啟用」；遊戲更新換了 jar 時 agent 比對 SHA 不符就 DISARMED、照原版執行，所以 0.3.0 起不必搶在更新前卸載。`ProjectZomboid64.bat`／`ShowConsole.bat` 直接呼叫 `jre64\bin\java.exe`、不讀 json，用它們啟動時修補不會載入。從 0.2.x（state `schemaVersion` 1、loose class）升級時，同一筆交易刪掉舊的 loose class（逐檔 SHA 相符才刪，否則 exit 8），42.22 起留著它們本身就會 `SecurityException`；0.2.x 安裝只能整組卸載。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：殘留時安裝會在同一筆交易移除，卸載會整組移除（0.2.4 起）；認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。不可在 JVM 執行中安裝或卸載。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
+**與 server 部署完全隔離**：`build-client.ps1` 輸出 `work/out-client-modular`、`dist-client-modular/pkg` 與 `output/MinidoracatClientPatches-42.22.2-0.3.2.zip`（42.21.0 時為 `-42.21.0-0.2.11`），不寫入 server manifest。**0.3.0 起改用 Java agent 載入**（42.22 起官方 jar 簽章，見文件開頭）：包裡是一個 `MinidoracatClientPatches.jar`（`AgentJarBuilder --modules` 建置，每個模組一組手術後的 class 與 helper）和一個 agent 載入器 `mdc-agent-loader.dll`，安裝器把兩個檔放進 `.mdc-patches/`，並在 `ProjectZomboid64.json` 頂層 `vmArgs` 最前面加一條 `-agentpath:.mdc-patches/mdc-agent-loader.dll=.mdc-patches/MinidoracatClientPatches.jar=modules=<模組>`；官方 jar 與 classpath 都不動。相對路徑可用，因為原版 json 的 `-Djava.library.path=win64/;.` 本身就以遊戲資料夾為工作目錄。不能直接寫 `-javaagent`：遊戲啟動器 `ProjectZomboid64.exe` 自己載入 `jvm.dll`，JVM 為 `-javaagent` 載入 `jre64\bin\instrument.dll` 時找不到同資料夾的 `java.dll`／`jli.dll`，遊戲起不來（`Could not find agent library instrument on the library path, with error: Can't find dependent libraries`，9950X3D 實機與本機重現）；經 `java.exe` 啟動沒有這個問題，所以 `AgentLoadCheck` 測不到。載入器（`patcher/agent-loader/mdc-agent-loader.c`，只連 `kernel32`）先以完整路徑載入那兩個 DLL，再把 `Agent_OnLoad` 原樣轉給 `instrument.dll`；`build-client.ps1` 用 `launcher-probe` 照啟動器的方式建 JVM（不經 `java.exe`、`PATH` 只留 Windows 自己的資料夾），釘住「`-javaagent` 起不來（原版前提）、經載入器則 `ARMED`」，另釘兩件事：agent jar 不存在時由 `instrument.dll` 報錯、JVM 不啟動；啟動參數少了 `=<agent jar>` 時載入器印 `DISARMED`、照原版開（JVM 這時交來的參數是 NULL，`instrument.dll` 不檢查就讀）。Linux 沒有這個問題（`libinstrument.so` 的 RPATH 是 `$ORIGIN`，正式服以同樣方式建 JVM 實測載入得了），伺服器照用 `-javaagent`。已知限制：`-agentpath:` 寫的是相對路徑，Windows 照 DLL 搜尋順序找它（先找 `ProjectZomboid64.exe` 所在的遊戲資料夾）；遊戲資料夾裡的載入器不見時，會繼續到 `System32`、`Windows`、工作目錄與 `PATH` 各資料夾底下找同一個相對路徑（實測）。要利用這點得先能寫入那些資料夾；維持相對路徑是因為搬動遊戲資料夾後不必重裝。`Install-Patches.bat` 選裝 `core`、`profiler`、`client-fixes-standard`／`client-fixes-lowmem`／`client-fixes-compat`（後三者互斥），驗 jar／agent jar／載入器的 SHA 後才寫入；`Uninstall-Patches.bat` 可只卸載所選模組（改寫那一條參數），全部卸載時拿掉參數與那兩個檔。json 只改自己那一條：只替換頂層 `vmArgs` 陣列的文字範圍、寫完重新解析驗證，其他字元、BOM 與換行原樣保留，卸載後逐位元組回到安裝前；重複的自家參數收成一條（直接以 `-javaagent:` 指向本包 jar 的寫法也算），其他 Java agent 不動、只列出來。交易先寫後刪，中斷可依 state 備份復原，不會留下 json 指向已刪除檔案的狀態：agent jar 或載入器不在時 JVM 直接起不來（jar 不在是 `Error opening zip file or JAR manifest missing`，遊戲 JRE Zulu 25 實測）。Steam 更新或驗證會把 json 換回原版，此時 status 回報「已安裝但沒有啟用」；遊戲更新換了 jar 時 agent 比對 SHA 不符就 DISARMED、照原版執行，所以 0.3.0 起不必搶在更新前卸載。`ProjectZomboid64.bat`／`ShowConsole.bat` 直接呼叫 `jre64\bin\java.exe`、不讀 json，用它們啟動時修補不會載入。從 0.2.x（state `schemaVersion` 1、loose class）升級時，同一筆交易刪掉舊的 loose class（逐檔 SHA 相符才刪，否則 exit 8），42.22 起留著它們本身就會 `SecurityException`；0.2.x 安裝只能整組卸載。舊版 TexPipeline v3.0 包（42.20.3／42.20.4 兩版建置，`deploy-client/legacy-packages.json`）只看整組檔案指紋、不看目前的 jar：殘留時安裝會在同一筆交易移除，卸載會整組移除（0.2.4 起）；認不出的殘檔仍拒碰，須先用舊包 `uninstall.bat`。不可在 JVM 執行中安裝或卸載。所有二進位產物只供合法持有遊戲者本機驗證，不入庫、不散布。
 
 **和其他替換遊戲 class 的 MOD 並存（client 包 0.2.10 起；0.3.0 改為 agent）**：PZ_Optimization（Workshop 3805285544）也替換 `AnimationPlayer`、`ImageData`、`TextureID`、`TextureIDAssetManager`、`WorldStreamer`、`IsoChunk`、`RoomDef`、`FBORenderCutaways`（2026-10-29 本機訂閱的版本另換 `FBORenderCell`），同一個 class 只能載入一份。第三個互斥變體 `client-fixes-compat`（`PatchConfig.clientCompat()`，Patcher／LoadCheck／SmokeCheck 的 mode 是 `client-compat`）只含 BaseVehicle、VehiclePacket 兩個 class 的手術（W54、W61–W63、W65；自建房間 XL 樹已在 42.22.2 退役，見 [§2bl](#2bl)），ClassPatch 直接取自 `client(false)`，手術與完整版逐位相同；貼圖、串流、W55、W57、W84 不在內，W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket 也不裝。agent 只換從官方 jar 載入的 class：遊戲資料夾裡別人的 class 家族檔案（`X.class` 或 `X$*.class`）蓋掉本包要修補的 class 時，那個 class 的手術不會生效，安裝器以 code 7 拒絕；完整版衝突、相容版不衝突時，互動選單建議相容版，code 7 訊息也指向它，並要求玩家不要只刪列出的檔案。[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1) 的玩家只刪了外層 class，留下的 PZ_Optimization `AnimationPlayer$L_*` 把暫存欄位改成每個實例一份，原版與本包的 `AnimationPlayer` 仍用 `getstatic` 讀，第一次更新角色動畫就丟 `IncompatibleClassChangeError`，主執行緒結束、遊戲直接關閉。其他落在官方 jar package 裡的外來 loose class 只警告：42.22 起它們本身就會 `SecurityException`（Zulu 25 實測）。`ProjectZomboid64.json` 的 classpath 只准 `.` 排在 `projectzomboid.jar` 前面：PZ_Optimization 的 AOT 快取（預設開）把 classpath 換成 `pzopt/aot/pzopt.jar` 並把 loose class 打包進去，安裝會拒絕並說明怎麼關；卸載只要 `vmArgs` 可編輯就照常拿掉自己那一條。`MdcPatchRuntime` 只認 state `schemaVersion` 2：agent jar 路徑與 SHA、helper 所在的 jar、已安裝模組集合要和 `MdcAgent.status()` 回報的 `modules=` 相同，任一不符就 `compatible=false`。
 
@@ -5496,6 +5496,52 @@ AutoDrive／Tesla 的召喚是合法的車外授權，會記成 `kind=unseated s
 **部署**：還沒部署。manifest 新增 `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class`（含 `$Episode`、`$Origin`、`$Request`）與 patched class `VehiclePhysicsPacket`，`MdcVehicleCollideResync.class` 換新。
 
 **退場**：SmokeCheck 的上游指紋（五個 SHA 鎖；其中兩個和 W89 重複）變紅時重估：官方改了授權交接或收位置的方式，可能已經修好。
+
+---
+
+<a id="2dh"></a>
+## 2dh. 沒有模型的武器類物品讓畫地上物品的程式每次都丟例外（W100，client，預設 on；client 包 0.3.2）
+
+**症狀**（2026-11-12 正式服玩家回報）：走到某個地點附近，畫面右下角的紅色錯誤數字一直跳，離開那一帶就停。玩家的 `console.txt`（42.22.2）83 秒內有 401 筆相同的例外：
+
+```text
+ERROR: General > FBORenderCell.renderInternal> Exception thrown
+	java.lang.NullPointerException: Cannot invoke "String.contains(java.lang.CharSequence)" because "name" is null at ScriptBucketCollection.getScript(…)
+		zombie.scripting.ScriptManager.getModelScript(…)
+		zombie.core.skinnedmodel.model.ItemModelRenderer.itemHasModel(…)
+		zombie.core.skinnedmodel.model.WorldItemModelDrawer.renderMain(…)
+		zombie.iso.objects.IsoWorldInventoryObject.render(…)
+		zombie.iso.fboRenderChunk.FBORenderCell.renderWorldInventoryObject(…)
+```
+
+觸發物是地上的一件 `Base.FISH_DEV_ITEM`：原版留在腳本裡的開發用物品（`media/scripts/generated/items/weapon.txt`），`ItemType = base:weapon`，沒有 `WorldStaticModel`、`StaticModel`、`WeaponSprite`。正常玩法拿不到它；有物品生成權限的人（管理員、除錯模式）或作弊的客戶端丟一件在地上，視野內有它的每一位玩家都會中。
+
+**根因**（javap 對 42.22.2 jar `3c4a7c5f`）：
+- `ItemModelRenderer.itemHasModel(InventoryItem)`：物品沒有 WorldStaticModel、不是衣物、是 `HandWeapon` 時，直接 `ScriptManager.instance.getModelScript(item.getStaticModel())`（offset 123–130），沒有檢查名稱。
+- `HandWeapon.getStaticModel()` 回 `staticModel`，沒有就回 `weaponSprite`；兩個都沒設就是 null。
+- `ScriptManager.getModelScript(String)` 轉給 `ScriptBucketCollection.getScript(String)`，後者一進來就對名稱呼叫 `String.contains`（offset 13–16 或 45–48），null 就 NPE。
+- `itemHasModel` 的呼叫端：`WorldItemModelDrawer.renderMain`（地上物品、`Render3DItem`、電瓶充電器上的電瓶、掉落中的衣物等都經過它）、`FBORenderCell.renderWorldInventoryObject`、`FBORenderItems`、`IsoMolotovCocktail.render`（丟出去的武器）、`ItemModelRenderer.init`。例外由 `FBORenderCell.renderInternal` 之類的外層接住並記錄，所以物品在視野內時每次重畫都丟一次。
+- 同一個方法的另一個 `getModelScript`（offset 23）前面已經過 `StringUtils.isNullOrEmpty`，不會是 null。
+
+**手術**：helper `zombie/mdc/ItemModelNullGuard`。`itemHasModel` 內兩個 `invokevirtual ScriptManager.getModelScript(String)` 1:1 改道 `ItemModelNullGuard.getModelScript(ScriptManager, String)`：名稱是 null 時回 null，其餘原樣呼叫原版。原版的 `itemHasModel` 把 null 的查詢結果當成「沒有模型」回 false，呼叫端照原版既有的路徑改畫物品圖示（和沒有模型的非武器物品相同）。新 ClassPatch `ItemModelRenderer`，2 個命中點；堆疊形狀與指令長度不變，frames 保留。
+
+**為什麼修在 `itemHasModel`**：`getModelScript(null)` 只有這一條路走得到（下面「不處理」的拿在手上那條在更前面就丟例外）。`ScriptManager.getModelScript` 全 jar 有 68 個以上的呼叫點，`ScriptBucketCollection.getScript` 是所有腳本類型共用的查表；改那兩處會讓別的呼叫端拿到它們沒預期的 null，蓋住的範圍卻沒有變大。
+
+**kill switch**：`-Dmdc.itemModelNullGuard=off`（或 `0`）照原版，需重啟。第一次擋下時在 console.txt 記一行 `[MinidoracatJavaPatch][ItemModelNullGuard] an item without a model name is in view; drawing its icon instead of throwing`，之後不再記。
+
+**不處理**：
+- 把這種物品拿在手上：`ModelManager.addEquippedModelInstance` 把 `getStaticModel()` 的 null 交給 `addStatic`，在 `ScriptManager.getItemName(null)` 就 NPE（另一條路徑，不經過 `itemHasModel`）。實機（原版，單人）：拿在主手 8 秒 1959 筆例外，每幀一筆，由 `GameWindow.frameStep` 接住。要另外一刀，這一刀不改。
+- 掛在身上（背上、腰上）：`ModelManager` 與 `AttachedModelNames` 先用 `StringUtils.isNullOrWhitespace` 檢查名稱，原版就不會出錯。實機：掛在背上 8 秒 0 筆。
+- 伺服器端不擋這種物品落地：屬於物品來源的管控，不在這一刀。
+- `client-fixes-compat`：相容版只含車輛修補，不含 W100。
+
+**守門與驗證**：
+- Patcher：`ItemModelRenderer.itemHasModel` 2 個命中點。
+- SmokeCheck（standard、lowmem）：存在理由——原版 `itemHasModel` 把 `getStaticModel()` 的回傳值直接交給 `getModelScript`，`getScript` 不檢查 null 就對名稱呼叫 `contains`（官方在任一處補上檢查就轉紅，重估撤刀）；手術後 `itemHasModel` 的文字只有兩個改道不同；`ItemModelRenderer` 其他方法不變。
+- LoadCheck：helper 的簽名。
+- `ItemModelNullGuardBehaviorTest`（standard、lowmem 各跑 on、off）：沒有 WorldStaticModel、StaticModel、WeaponSprite 的 `HandWeapon` 交給手術後的 `itemHasModel`，on 回 false、不丟例外；off（kill switch 實跑＝原版負對照）丟出自 `ScriptBucketCollection.getScript` 的 NPE。有名稱的武器兩個模式都照原版查表。
+
+**退場**：官方在 `itemHasModel`、`getModelScript` 或 `getScript` 任一處補上 null 檢查，或把 `FISH_DEV_ITEM` 這類沒有模型的武器腳本拿掉並保證不會再有，SmokeCheck 的存在理由轉紅時撤刀。
 
 ---
 
