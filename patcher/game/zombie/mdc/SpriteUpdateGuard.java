@@ -11,7 +11,8 @@ import zombie.iso.IsoGridSquare;
  * W79 {@code UpdateItemSprite} 距離檢查（docs/patches.md 2cn）。
  *
  * <p>伺服器端 {@code UpdateItemSprite} 請求驗證。合法來源是客戶端 {@code IsoObject.transmitUpdatedSprite()}：
- * 搬運動作的 scrap／repair（玩家身旁）與駕駛撞圍籬（{@code BentFences}／{@code BrokenFences}，車旁沿圍籬幾格）。
+ * 搬運動作的 scrap／repair（玩家身旁）、駕駛撞圍籬（{@code BentFences}／{@code BrokenFences}，車旁沿圍籬幾格），
+ * 以及殭屍弄壞圍籬（同兩個類別；載入那一塊的每個客戶端各算一份，離圍籬遠的那幾份會被擋，附近有玩家時採用他那份）。
  * 頭部 {@link #begin} 綁定連線，方法內唯一的 {@code IsoCell.getGridSquare(III)} 改道 {@link #getGridSquare}：
  * 這條連線上沒有任何玩家在水平每軸 ≤ {@link #MAX_RANGE}、樓層差 ≤ {@link #MAX_DZ} 內時回 null，
  * 原版 {@code sq == null} 分支什麼都不做（不改、不轉發）。

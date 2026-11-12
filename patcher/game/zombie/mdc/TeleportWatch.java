@@ -129,6 +129,10 @@ public final class TeleportWatch {
         float ownX;
         float ownY;
         long ownMs;
+        /** 這一次自己的取樣之前那一次（只給判斷行的 {@code walk=} 用）。 */
+        float prevOwnX;
+        float prevOwnY;
+        long prevOwnMs;
         /** 上一次自己的取樣之後有過別條連線送的取樣：下一次自己的取樣改從 own 算速度。 */
         boolean foreignSince;
         /** 還沒配對的起跳：起點、距離、時間（0＝沒有）與那一行的編號（0＝沒印）。 */
@@ -283,6 +287,10 @@ public final class TeleportWatch {
                     dtMs = t1 - st.ownMs;
                     speed = st.ownMs == 0L || dtMs <= 0L ? 0.0F : (float) (Math.hypot(x - fromX, y - fromY) * 1000.0 / dtMs);
                 }
+                // 判斷行的 walk=：這一包之前他自己上一次的步行取樣（上一個取樣是車上取樣時，就是上車前最後一個步行點）
+                st.prevOwnX = st.ownX;
+                st.prevOwnY = st.ownY;
+                st.prevOwnMs = st.ownMs;
                 st.ownX = now1.x;
                 st.ownY = now1.y;
                 st.ownMs = t1;
@@ -472,6 +480,8 @@ public final class TeleportWatch {
                         + " base=" + (st.baselineMs != 0L ? secs(now - st.baselineMs) : "?")
                         + " tp=" + (st.serverTeleportMs != 0L ? secs(now - st.serverTeleportMs) : "-")
                         + " veh=" + (st.vehicleSampleMs != 0L ? secs(now - st.vehicleSampleMs) : "-")
+                        + " walk=" + (st.prevOwnMs != 0L ? fmt(st.prevOwnX, st.prevOwnY) + "/" + secs(now - st.prevOwnMs) : "-")
+                        + " srv=" + fmt(player.getX(), player.getY())
                         + " back=" + back
                         + " gapMs=" + gapMs + " ping=" + conn.getLastPing()
                         + " mode=" + modeName() + " limit=" + LIMIT + " (#" + lines + ")");
@@ -490,6 +500,10 @@ public final class TeleportWatch {
 
     private static String secs(long ms) {
         return ms / 1000L + "s";
+    }
+
+    private static String fmt(float x, float y) {
+        return String.format(Locale.ROOT, "%.1f,%.1f", x, y);
     }
 
     static String modeName() {

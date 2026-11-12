@@ -21,6 +21,7 @@ import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.debug.LogSeverity;
 import zombie.characters.ecs.ECSComponent;
+import zombie.iso.IsoMovingObject;
 import zombie.iso.Vector2;
 import zombie.network.anticheats.AntiCheatSpeed;
 import zombie.network.packets.character.PlayerPacket;
@@ -245,6 +246,26 @@ public final class TeleportWatchTest {
             shiftBaseline(anon, 300_000L);
         }
         step(anon, anonTwin, 12000F, 6000F, 1000, false);
+        // 15. 坐車 1000 格之後，步行封包先回到上車點、下一包才到車旁（正式服 2026-11-10 看到的形狀）：判斷不變（去程不超過車輛上限＝
+        //     exempt(vehicle)、回程照門檻判），兩行多帶 walk=（這一包之前他自己上一次的步行取樣）與 srv=（伺服器上那位玩家的位置，這一包還沒套用）
+        Rig ex = new Rig();
+        Rig exTwin = new Rig();
+        step(ex, exTwin, 7000F, 7000F, -1, false);
+        step(ex, exTwin, 7000F, 7000F, 15000, false);
+        if (on(mode)) {
+            shiftBaseline(ex, 300_000L);
+        }
+        step(ex, exTwin, 7001F, 7000F, 1000, false);
+        ownAgo(ex, 20_000L);
+        field(IsoMovingObject.class, "x").setFloat(ex.player, 7003.5F);
+        field(IsoMovingObject.class, "y").setFloat(ex.player, 8002.5F);
+        // 車上取樣：VehiclePhysicsPacket.resetMovable 直接呼叫原版 set，不經本刀
+        arm(ex.sc, 19000);
+        ex.sc.set(7001F, 8000F, true, null);
+        arm(exTwin.sc, 19000);
+        exTwin.sc.set(7001F, 8000F, true, null);
+        step(ex, exTwin, 7001F, 7000F, 19000, false);
+        step(ex, exTwin, 7001F, 8060F, 1000, false);
 
         String text = log.toString(StandardCharsets.UTF_8);
         int announce = count(text, "[TeleportWatch] 首次生效");
@@ -262,15 +283,15 @@ public final class TeleportWatchTest {
             // would-kick：Player-O 6174.87／591.90、下車後 6000、Player-R 199／613、Player-S 233／594＝7；Player-R 來回 5；同一次重設內進出 (0,0) 2；
             // foreign 之後自己的跳動 2；慢慢走到 (0,0) 再跳開 1
             expect((kick ? "kick：連線沒完全連上時記 would-kick(notConnected)" : "observe：would-kick")
-                            + " 恰 17 行（Player-O 2、下車後 6000 格 1、Player-R 2＋來回 5、Player-S 2、進出 (0,0) 2、foreign 之後 2、走到 (0,0) 再跳開 1）",
-                    (kick ? notConn : wouldKick) == 17 && (kick ? wouldKick : notConn) == 0
+                            + " 恰 18 行（Player-O 2、下車後 6000 格 1、Player-R 2＋來回 5、Player-S 2、進出 (0,0) 2、foreign 之後 2、走到 (0,0) 再跳開 1、坐車後回上車點再跳回 1）",
+                    (kick ? notConn : wouldKick) == 18 && (kick ? wouldKick : notConn) == 0
                             && Pattern.compile(wk + "[^\\n]* from=12401\\.0,9000\\.0 to=0\\.0,0\\.0 [^\\n]* tp=\\ds ").matcher(text).find()
                             && Pattern.compile(wk + "[^\\n]* from=0\\.0,0\\.0 to=12401\\.0,9000\\.0 [^\\n]* tp=\\ds ").matcher(text).find()
                             && Pattern.compile(wk + "steamid=0 speed=\\d+\\.\\d dist=6000\\.0 dtMs=\\d+ from=0\\.0,0\\.0 to=6000\\.0,0\\.0 ").matcher(text).find());
             // exempt(grace)：步驟 3、Player-P、Player-Q、Player-R 74 s、伺服器傳送後、30 秒前登入＝6（進出 (0,0) 不重開寬限期）
             expect("exempt(grace) 恰 6 行（登入後、Player-P、Player-Q、Player-R 74 s、伺服器傳送後、30 秒前登入 login=30s）", grace == 6
                     && Pattern.compile("exempt\\(grace\\) user=\"tw\" [^\\n]* to=8000\\.0,5000\\.0 [^\\n]* login=30s ").matcher(text).find());
-            expect("exempt(vehicle) 恰 1 行（下車那一次 60 格；下車後 6000 格不豁免）", vehicle == 1
+            expect("exempt(vehicle) 恰 2 行（下車那一次 60 格、坐車後回上車點那一包；下車後 6000 格不豁免）", vehicle == 2
                     && Pattern.compile("exempt\\(vehicle\\) [^\\n]* dist=60\\.0 ").matcher(text).find()
                     && Pattern.compile(wk + "[^\\n]* dist=6000\\.0 [^\\n]* veh=1s ").matcher(text).find());
             String action = kick ? "would-kick(notConnected)" : "would-kick";
@@ -286,10 +307,10 @@ public final class TeleportWatchTest {
                             && Pattern.compile(wk + "[^\\n]* dist=6000\\.0 dtMs=\\d+ from=10000\\.0,4000\\.0 to=16000\\.0,4000\\.0 ").matcher(text).find());
             expect("沒經過 begin 的取樣不判", !text.contains("to=12000.0,6000.0"));
             expect("below 恰 2 行（Player-O 149.71、25 格／秒）；20 格／秒以下、有權限的、Player-U 上線那一秒都不記", below == 2
-                    && count(text, "[TeleportWatch] ") == announce + 17 + 6 + 1 + 2 + 2 && !text.contains("to=4865.0,7158.0"));
-            expect("Player-O 6174.87 那行帶欄位：speed／dist／dtMs／from／to／packet／login／spawn／base=363s／tp=-／veh=-／back=-／gapMs／ping",
-                    Pattern.compile(wk + "steamid=0 speed=\\d+\\.\\d dist=6174\\.9 dtMs=10\\d\\d "
-                            + "from=11472\\.0,9950\\.0 to=17646\\.9,9950\\.0 packet=PlayerPacketReliable login=36\\d\\ds spawn=\\d+s base=363s tp=- veh=- back=- gapMs=\\d+ ping=0 "
+                    && count(text, "[TeleportWatch] ") == announce + 18 + 6 + 2 + 2 + 2 && !text.contains("to=4865.0,7158.0"));
+            expect("Player-O 6174.87 那行帶欄位：speed／dist／dtMs／from／to／packet／login／spawn／base=363s／tp=-／veh=-／walk／srv／back=-／gapMs／ping",
+                    Pattern.compile(wk + "steamid=0 speed=\\d+\\.\\d dist=6174\\.9 dtMs=1\\d{3} "
+                            + "from=11472\\.0,9950\\.0 to=17646\\.9,9950\\.0 packet=PlayerPacketReliable login=36\\d\\ds spawn=\\d+s base=363s tp=- veh=- walk=\\d+\\.\\d,9950\\.0/\\d+s srv=0\\.0,0\\.0 back=- gapMs=\\d+ ping=0 "
                             + "mode=" + mode + " limit=150\\.0 \\(#\\d+\\)").matcher(text).find());
             expect("伺服器傳送後那行 tp=0s、下車那行 veh=1s", Pattern.compile("exempt\\(grace\\) [^\\n]* tp=\\ds ").matcher(text).find()
                     && Pattern.compile("exempt\\(vehicle\\) [^\\n]* veh=1s ").matcher(text).find());
@@ -302,9 +323,14 @@ public final class TeleportWatchTest {
                             && Pattern.compile("to=10779\\.0,2022\\.0 [^\\n]* back=- ").matcher(text).find()
                             && Pattern.compile("from=10779\\.0,1958\\.0 to=2000\\.0,5000\\.0 [^\\n]* back=#" + out2 + "/\\d+s ").matcher(text).find()
                             && !text.contains("to=1947.0,4966.0") && count(text, " back=#") == 2);
+            expect("坐車後回上車點那一包：exempt(vehicle)，walk= 是上車前最後一個步行點與距今秒數（約 20 秒前）、srv= 是伺服器上那位玩家的位置（不是封包位置）",
+                    Pattern.compile("exempt\\(vehicle\\) [^\\n]* dist=1000\\.0 dtMs=\\d+ from=7001\\.0,8000\\.0 to=7001\\.0,7000\\.0 [^\\n]* veh=\\d+s "
+                            + "walk=7001\\.0,7000\\.0/[2-5]\\ds srv=7003\\.5,8002\\.5 back=- ").matcher(text).find());
+            expect("再跳回車旁那一包照門檻判：walk= 是上一包（回上車點那一包）",
+                    Pattern.compile(wk + "[^\\n]* dist=1060\\.0 dtMs=\\d+ from=7001\\.0,7000\\.0 to=7001\\.0,8060\\.0 [^\\n]* walk=7001\\.0,7000\\.0/\\d+s srv=7003\\.5,8002\\.5 back=").matcher(text).find());
             long[] c = TeleportWatch.countersForTest();
-            expect("計數：wouldKick 17、kicked 0（連線沒完全連上不踢）、exempt 7、adminSkipped 1、anomalies 1（沒經過 begin）、foreign 2（" + java.util.Arrays.toString(c) + "）",
-                    c[1] == 17 && c[2] == 0 && c[3] == 7 && c[4] == 1 && c[5] == 1 && c[7] == 2);
+            expect("計數：wouldKick 18、kicked 0（連線沒完全連上不踢）、exempt 8、adminSkipped 1、anomalies 1（沒經過 begin）、foreign 2（" + java.util.Arrays.toString(c) + "）",
+                    c[1] == 18 && c[2] == 0 && c[3] == 8 && c[4] == 1 && c[5] == 1 && c[7] == 2);
         } else {
             expect(mode + "：零 [TeleportWatch] 行", count(text, "[TeleportWatch]") == 0);
             if ("off".equals(mode)) {

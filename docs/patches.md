@@ -4688,7 +4688,7 @@ console（與 owner 檢查共用 TimedActionProbe 的時間窗；首次生效與
 
 強化伺服器端的 `UpdateItemSprite` 驗證：送封包的連線上必須有玩家在該物件附近，否則不改、不轉發。缺口細節不在公開文件描述。
 
-**合法來源**：只有客戶端 `IsoObject.transmitUpdatedSprite()` 的客戶端分支會送。呼叫者是 `ISMoveablesAction` 的 scrap／repair（玩家身旁）與 `BentFences.smashFence`／`BrokenFences.destroyFence`（駕駛撞圍籬，車旁、沿圍籬幾格）；其他搬運、拆解的 sprite 更新在伺服器 `complete()` 裡進行。正式服 MOD 沒有在客戶端送這個封包。
+**合法來源**：只有客戶端 `IsoObject.transmitUpdatedSprite()` 的客戶端分支會送。呼叫者是 `ISMoveablesAction` 的 scrap／repair（玩家身旁）與 `BentFences.smashFence`／`BrokenFences.destroyFence`（駕駛撞圍籬，車旁、沿圍籬幾格；殭屍弄壞圍籬時，載入那一塊的每個客戶端也各送一份）；其他搬運、拆解的 sprite 更新在伺服器 `complete()` 裡進行。正式服 MOD 沒有在客戶端送這個封包。
 
 **檢查**：每軸差 ≤ 20 格、樓層差 ≤ 1.5；封包不帶玩家，同機多人時任一位在範圍內就放行。20 格是撞圍籬時駕駛離撞擊點、`smashFence` 沿圍籬改幾格、長拖車與伺服器位置落後的餘量（估計值，沒有實機量）。安全屋沒有加：本服的安全屋權限在家族 Safehouse MOD（Lua），原版 `SafeHouse` 以名字判斷，合法撞圍籬也可能發生在別人的安全屋旁。
 
@@ -4701,6 +4701,8 @@ console（拒絕時每 10 秒最多 20 行）：
 ```
 
 **驗收**：上線後拆物件、修理、開車撞圍籬照常；出現 `refused` 行時看 `at=` 與 `target=` 的距離，正常操作被擋就放寬門檻。
+
+**2026-11-13 殭屍弄壞圍籬**：正式服的 `refused` 行多半是同一幀三格一組、送出者離目標每軸 25–76 格，實機（雙客戶端，9 輪）確認來源是殭屍弄壞圍籬：損壞由客戶端計算，載入那一塊的每個客戶端都會送，遠處那幾份被擋。圍籬 20 格內有玩家時伺服器採用他那份；沒有時伺服器與其他人維持原圖，送出者本機那道壞掉的圍籬要等他重新載入那一塊才變回原圖。服主裁定維持 20 格，不為圍籬另外放行。
 
 **kill switch**：`-Dmdc.spriteUpdateRange=0|off`，需重啟。
 
@@ -5397,18 +5399,18 @@ console（首次生效一行；每次超過 20 的取樣一行；每 10 分鐘�
 
 ```text
 [MinidoracatJavaPatch][TeleportWatch] 首次生效（-Dmdc.teleportWatch=0|off 照原版、1|kick 踢人）mode=observe limit=150.0 graceSec=60 reflect=ok
-[MinidoracatJavaPatch][TeleportWatch] would-kick user="<帳號>" steamid=<SteamID> speed=<格/秒> dist=<格> dtMs=<ms> from=<x>,<y> to=<x>,<y> packet=PlayerPacketReliable login=<s> spawn=<s> base=<s> tp=<s|-> veh=<s|-> back=<#n/s|-> gapMs=<ms> ping=<ms> mode=observe limit=150.0 (#<n>)
+[MinidoracatJavaPatch][TeleportWatch] would-kick user="<帳號>" steamid=<SteamID> speed=<格/秒> dist=<格> dtMs=<ms> from=<x>,<y> to=<x>,<y> packet=PlayerPacketReliable login=<s> spawn=<s> base=<s> tp=<s|-> veh=<s|-> walk=<x>,<y>/<s>|- srv=<x>,<y> back=<#n/s|-> gapMs=<ms> ping=<ms> mode=observe limit=150.0 (#<n>)
 [MinidoracatJavaPatch][TeleportWatch] foreign sender="<送出的帳號>" steamid=<SteamID> player="<被冒用的帳號>" speed=<格/秒> dist=<格> dtMs=<ms> from=<x>,<y> to=<x>,<y> packet=<封包> action=<-|would-kick|kick|would-kick(notConnected)|would-kick(cantBeKicked)> mode=observe limit=150.0 (#<n>)
 [MinidoracatJavaPatch][TeleportWatch] beat samples=<n> wouldKick=<n> kicked=<n> exempt=<n> adminSkipped=<n> foreign=<n> lines=<n> players=<n> anomalies=<n> mode=observe
 ```
 
-欄位：`login` 是距登入（`setFullyConnected`）秒數，`spawn` 是距這個玩家物件第一包步行封包（或第一次伺服器傳送），`base` 是距原版基準點，`tp` 是距最近一次伺服器傳送，`veh` 是距最近一次車上的取樣（下車），`back` 是這一下跳回哪一行的起跳點、相隔幾秒，`gapMs` 是這次取樣期間最大的封包間隔（大＝網路延遲後的追趕）。
+欄位：`login` 是距登入（`setFullyConnected`）秒數，`spawn` 是距這個玩家物件第一包步行封包（或第一次伺服器傳送），`base` 是距原版基準點，`tp` 是距最近一次伺服器傳送，`veh` 是距最近一次車上的取樣（下車），`walk` 是這一包之前他自己上一次步行取樣的位置與距今秒數（上一個取樣在車上時，就是上車前最後一個步行點），`srv` 是判斷當下伺服器上那位玩家的位置（這一包還沒套用；伺服器上還坐在車上時，步行封包在反作弊之前就被原版丟掉，所以有判斷行就表示伺服器已經讓他下車），`back` 是這一下跳回哪一行的起跳點、相隔幾秒，`gapMs` 是這次取樣期間最大的封包間隔（大＝網路延遲後的追趕）。
 
-**判讀**：observe 期間看 `would-kick` 行：都是外掛就可以開 kick；有正常玩家，看 `gapMs`、`base`、`veh` 判斷是哪一種漏網的情況，再調門檻或寬限期。`below` 行是門檻以下的分布，`exempt(grace)` 行是登入後位置修正的大小（同一次重設後出現第二行 would-kick、`base` 很小，就是位置修正跳了兩次）。出現 `foreign` 行就是有連線送別人的步行封包，看 `sender`；正常客戶端不會這樣送。
+**判讀**：observe 期間看 `would-kick` 行：都是外掛就可以開 kick；有正常玩家，看 `gapMs`、`base`、`veh` 判斷是哪一種漏網的情況，再調門檻或寬限期；坐車之後的跳動看 `to` 是不是等於 `walk`（跳回上車前的點）、`srv` 在哪一邊。坐車期間被伺服器傳送過的話，`walk` 可能是傳送前的點，要和 `tp`、`walk` 的秒數一起看。`below` 行是門檻以下的分布，`exempt(grace)` 行是登入後位置修正的大小（同一次重設後出現第二行 would-kick、`base` 很小，就是位置修正跳了兩次）。出現 `foreign` 行就是有連線送別人的步行封包，看 `sender`；正常客戶端不會這樣送。
 
 **守門與驗證**：
 - SmokeCheck：存在理由——全 jar 呼叫 `SpeedChecker.set` 的只有 `PlayerPacket.resetMovable` 與 `VehiclePhysicsPacket.resetMovable`；呼叫 `resetMovable` 的只有 `AntiCheatSpeed.validate`（頭部記下的連線就是送出這包的連線），也沒有人以 `PlayerPacket`／`PlayerPacketReliable`／`PlayerPacketUnreliable` 的具體型別直接呼叫它；對 `NetworkPlayerAI.resetSpeedLimiter` 的呼叫只有 `GameServer.sendTeleport`；寫 `connectionTimestamp` 的只有建構子與 `setFullyConnected`（`login` 的依據）；兩種步行封包都沒覆寫 `resetMovable`。8 個原版方法本體 SHA 鎖（`TELEPORT_WATCH_LOCKED`，各配負對照）：`SpeedChecker.set`／`reset`／`isVehicle`、`NetworkCharacterAI.resetSpeedLimiter`、`AntiCheatSpeed.validate`、`PlayerPacket.resetMovable`、`UdpConnection.setFullyConnected`、`AntiCheat.doKickUser`。手術後 `validate` 只多頭部三條指令、`resetMovable` 與 `sendTeleport` 只差改道，`AntiCheatSpeed`、`PlayerPacket` 其他方法不變。helper 契約：`set` 的三條路徑（off、反射失敗、正常）各呼叫一次原版 `set`、都不在 try 內；`resetSpeedLimiter` 恰一次原版呼叫、不在 try 內；全 class 只有兩處 `doKickUser`（自己的跳動、`foreign` 的送出者）；catch 型別只有上述幾種、每個 `DebugLog.log` 都在 try 內（負對照：把 catch 放寬成 Throwable、拿掉 beat 的 try 都會紅）。
-- `TeleportWatchTest`（`build.ps1` [9zzj/10]，observe、kick、off、vanilla 四個 JVM，自驗 argv 與類別來源）：跑真的 `PlayerPacket.resetMovable` 與 `AntiCheatSpeed.validate`（observe／kick／off 是 dist 手術後，vanilla 是 jar 原版），玩家是配置出來的 `IsoPlayer` 加真的 `NetworkPlayerComponent`／`NetworkPlayerAI`／`SpeedChecker`，每位玩家有自己的配置連線（擁有他、沒完全連上），取樣時間用反射控制。每一包都和直接呼叫原版 `set` 的雙胞胎比位置、是否在車上與速度（改道不改原版結果）。情境：玩家物件剛建立不取樣、基準點、寬限期內 600 格、20 格／秒以下不記、下車那一次 60 格（豁免）與下車後 6000 格（不豁免）、伺服器傳送後的基準點與寬限期、同一次重設內進出 (0,0) 不重開寬限期而且照判、伺服器傳送建立的狀態第一包不算封包間隔、送出的連線有權限只計數、看連線登入時間的寬限期（30 秒前登入 → exempt(grace)）、沒經過 `begin` 不判；另一條連線經真的 `validate` 送這位玩家的封包 → `foreign` 行（帶送出的連線、達門檻 `action=would-kick`），他自己的下一次取樣從他自己的起點算（回原處不記、在別人送的位置旁邊或停在那裡都照判）。判斷順序表、`foreign` 處置函式、寬限期函式（基準點 59／61 秒、登入與伺服器傳送 74／76 秒）、踢人處置函式（沒完全連上、CantBeKickedByAnticheat 都不踢）。回歸表（正式服 7 個帳號，代號 Player-O～U）：Player-O 6174.87、591.90 → would-kick，149.71 → below；Player-P 2808（登入後 27 秒）、Player-Q 563（16 秒）→ exempt(grace)；Player-R 12048 在 74 秒 → exempt(grace)、199／613 秒 → would-kick；Player-S 2974（233／594 秒）→ would-kick；Player-T 856（被車撞）→ exempt(hitVehicle)（判斷函式）。另兩筆照正式服的位移與時間、座標換成假的：Player-R 10-04 在原地與 9,000 多格外的點之間來回（原地 → 遠處 → 遠處 230 格 → 原地附近 61 格 → 走回原地 → 遠處 → 原地，距登入 613 秒）→ 5 行 would-kick，兩次跳回原地各標 `back=` 指回自己的起跳那行，遠處到遠處、走回原地不標；Player-U 上線那一秒的來回（約 4,557 格又跳回）在原版重設後 15 秒內 → 不取樣、不記。kick 對沒完全連上的連線記 `would-kick(notConnected)`、不踢（真的踢人由本機 E2E 的 kick 輪驗）；off 零行、不建狀態。
+- `TeleportWatchTest`（`build.ps1` [9zzj/10]，observe、kick、off、vanilla 四個 JVM，自驗 argv 與類別來源）：跑真的 `PlayerPacket.resetMovable` 與 `AntiCheatSpeed.validate`（observe／kick／off 是 dist 手術後，vanilla 是 jar 原版），玩家是配置出來的 `IsoPlayer` 加真的 `NetworkPlayerComponent`／`NetworkPlayerAI`／`SpeedChecker`，每位玩家有自己的配置連線（擁有他、沒完全連上），取樣時間用反射控制。每一包都和直接呼叫原版 `set` 的雙胞胎比位置、是否在車上與速度（改道不改原版結果）。情境：玩家物件剛建立不取樣、基準點、寬限期內 600 格、20 格／秒以下不記、下車那一次 60 格（豁免）與下車後 6000 格（不豁免）、伺服器傳送後的基準點與寬限期、同一次重設內進出 (0,0) 不重開寬限期而且照判、伺服器傳送建立的狀態第一包不算封包間隔、送出的連線有權限只計數、看連線登入時間的寬限期（30 秒前登入 → exempt(grace)）、沒經過 `begin` 不判；另一條連線經真的 `validate` 送這位玩家的封包 → `foreign` 行（帶送出的連線、達門檻 `action=would-kick`），他自己的下一次取樣從他自己的起點算（回原處不記、在別人送的位置旁邊或停在那裡都照判）。判斷順序表、`foreign` 處置函式、寬限期函式（基準點 59／61 秒、登入與伺服器傳送 74／76 秒）、踢人處置函式（沒完全連上、CantBeKickedByAnticheat 都不踢）。回歸表（正式服 7 個帳號，代號 Player-O～U）：Player-O 6174.87、591.90 → would-kick，149.71 → below；Player-P 2808（登入後 27 秒）、Player-Q 563（16 秒）→ exempt(grace)；Player-R 12048 在 74 秒 → exempt(grace)、199／613 秒 → would-kick；Player-S 2974（233／594 秒）→ would-kick；Player-T 856（被車撞）→ exempt(hitVehicle)（判斷函式）。另兩筆照正式服的位移與時間、座標換成假的：Player-R 10-04 在原地與 9,000 多格外的點之間來回（原地 → 遠處 → 遠處 230 格 → 原地附近 61 格 → 走回原地 → 遠處 → 原地，距登入 613 秒）→ 5 行 would-kick，兩次跳回原地各標 `back=` 指回自己的起跳那行，遠處到遠處、走回原地不標；Player-U 上線那一秒的來回（約 4,557 格又跳回）在原版重設後 15 秒內 → 不取樣、不記。kick 對沒完全連上的連線記 `would-kick(notConnected)`、不踢（真的踢人由本機 E2E 的 kick 輪驗）；off 零行、不建狀態。另有「坐車後步行封包先回上車點、下一包才回車旁」：去程 `exempt(vehicle)`、回程照門檻判，兩行帶 `walk=`（上車前最後一個步行點）與 `srv=`。
 - 實機 E2E（2026-11-07，家族 E2E 情境 `teleport-watch-mp`；本機 42.21.0 專用伺服器以 dist 為 classpath 最前面，ini 照正式服 `AntiCheatSpeed=3`、`AntiCheatNoClip=4`，測試帳號是一般帳號）：玩家上線 20 秒自己 `teleportTo` 往東 300 格、100 秒往南 400 格、約 9 秒後跳回，最後由伺服器 RCON `teleportto` 傳送一次。原版：伺服器照樣接受新位置，每次跳動只有 `Anti-cheat="Speed"` 逐包記好幾行，沒有人被踢（紅燈）。observe：早跳記 `exempt(grace)`、晚跳記 `would-kick`、跳回記 `would-kick back=#2/9s`，RCON 傳送零行。kick：早跳 `exempt(grace)`、晚跳 `kick`，connections log 有 `event="force-disconnect" message="MdcTeleportWatch"`，客戶端顯示原版的被踢畫面。off：零行，原版 log 照記。四種模式在兩台機器（其中一台沒有 GPU，客戶端約 3 FPS）各跑一次，判定相同。
 
 **部署**：manifest 新增 `zombie/mdc/TeleportWatch.class`、`TeleportWatch$State.class`、patched `zombie/network/anticheats/AntiCheatSpeed.class`、`zombie/network/packets/character/PlayerPacket.class`，`GameServer.class` 多一個命中點。
