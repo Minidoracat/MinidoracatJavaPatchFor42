@@ -424,6 +424,14 @@ the game files, which puts back the original ProjectZomboid64.json.
 To remove everything at any time: close the game, double-click Uninstall-Patches.bat in
 this folder (deleted it? download the same zip again), type A and Enter, then Y and Enter.
 
+WINDOWS SMART APP CONTROL
+The patches load through a small DLL (mdc-agent-loader.dll) that is not code-signed. On a
+PC where Windows 11 Smart App Control is enforcing ("On"), Windows blocks that DLL and the
+game does not start at all. The installer checks this and refuses to install there (code
+11); nothing is changed. If Smart App Control became enforcing after you installed (it can
+switch from evaluation by itself) and the game stopped starting, run Uninstall-Patches.bat
+and type A. We do not ask you to change that Windows setting.
+
 UPGRADING FROM 0.2.x
 Versions 0.2.x put class files directly into the game folder. Since 42.22 the game jar
 is signed and the game throws a SecurityException as soon as it loads one of those
@@ -569,6 +577,12 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小�
 或用 Steam 驗證遊戲檔案的完整性（會換回原版的 ProjectZomboid64.json）。
 想全部移除時：關閉遊戲，雙擊這個資料夾裡的 Uninstall-Patches.bat（資料夾刪掉了就重新下載同一個 zip），
 輸入 A 按 Enter，再輸入 Y 按 Enter 確認。
+
+【Windows 智慧型應用程式控制】
+修補是靠一個沒有程式碼簽章的小 DLL（mdc-agent-loader.dll）載入的。Windows 11 的「智慧型應用程式控制」
+在強制模式（「開啟」）的電腦上，Windows 會擋下這個 DLL，遊戲完全開不起來。安裝器會先檢查，
+在這種電腦上不安裝（代碼 11），也不變更任何檔案。安裝之後它才變成強制模式（評估模式會自己轉）、
+遊戲開不起來時，執行 Uninstall-Patches.bat 輸入 A。我們不會要你去改那個 Windows 設定。
 
 【從 0.2.x 升級】
 0.2.x 把 class 檔直接放在遊戲資料夾。42.22 起遊戲 jar 有簽章，遊戲一載入這些檔案就丟 SecurityException。

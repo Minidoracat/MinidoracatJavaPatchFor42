@@ -287,6 +287,8 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）會把 `.class` 檔放進遊戲資料夾。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新（推測：沒有實測 PZ_Optimization 本身）。
 
+**Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
+
 也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
 ## 建議的伺服器設定

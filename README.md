@@ -365,6 +365,8 @@ it). Also, from 42.22 on, a `.class` file in the same package as an official cla
 `SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
 their authors (inference: PZ_Optimization itself was not tested).
 
+**Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, run `Uninstall-Patches.bat` and remove everything. We do not ask you to change that Windows setting.
+
 Build the package yourself with `build-client.ps1` (it also needs MinGW-w64 gcc, for the small agent loader DLL); installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
 (do not run them while a Project Zomboid JVM is running).
