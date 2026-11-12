@@ -465,7 +465,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.1.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.2.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -6137,6 +6137,94 @@ AutoDrive / Tesla summoning is a legitimate out-of-vehicle authorization; it is 
 **Deployment**: not deployed yet. The manifest gains `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class` (with `$Episode`, `$Origin`, `$Request`) and the patched class `VehiclePhysicsPacket`; `MdcVehicleCollideResync.class` is replaced.
 
 **Retirement**: re-evaluate when the SmokeCheck upstream fingerprint (five SHA locks, two shared with W89) turns red: the official game changed how authorization is handed over or how positions are accepted, and may have fixed it.
+
+---
+
+<a id="2dh"></a>
+## 2dh. A weapon item without a model throws on every ground-item redraw (W100, client, default on; client package 0.3.2)
+
+**Symptom** (reported by a player on the production server, 2026-11-12): near one spot the red error counter in the corner of the screen keeps climbing, and it stops when the player walks away. The player's `console.txt` (42.22.2) has 401 identical exceptions in 83 seconds:
+
+```text
+ERROR: General > FBORenderCell.renderInternal> Exception thrown
+	java.lang.NullPointerException: Cannot invoke "String.contains(java.lang.CharSequence)" because "name" is null at ScriptBucketCollection.getScript(…)
+		zombie.scripting.ScriptManager.getModelScript(…)
+		zombie.core.skinnedmodel.model.ItemModelRenderer.itemHasModel(…)
+		zombie.core.skinnedmodel.model.WorldItemModelDrawer.renderMain(…)
+		zombie.iso.objects.IsoWorldInventoryObject.render(…)
+		zombie.iso.fboRenderChunk.FBORenderCell.renderWorldInventoryObject(…)
+```
+
+The trigger was one `Base.FISH_DEV_ITEM` on the ground: a developer item left in the vanilla scripts (`media/scripts/generated/items/weapon.txt`) with `ItemType = base:weapon` and no `WorldStaticModel`, `StaticModel` or `WeaponSprite`. It cannot be obtained in normal play; once someone who can spawn items (an admin, debug mode) or a cheating client drops one, every player who has it in view is affected.
+
+**Root cause** (javap on the 42.22.2 jar `3c4a7c5f`):
+- `ItemModelRenderer.itemHasModel(InventoryItem)`: for an item with no WorldStaticModel that is not clothing and is a `HandWeapon`, it calls `ScriptManager.instance.getModelScript(item.getStaticModel())` (offsets 123–130) without checking the name.
+- `HandWeapon.getStaticModel()` returns `staticModel`, or `weaponSprite` when that is unset; with neither set it returns null.
+- `ScriptManager.getModelScript(String)` forwards to `ScriptBucketCollection.getScript(String)`, which starts by calling `String.contains` on the name (offsets 13–16 or 45–48): null throws.
+- Callers of `itemHasModel`: `WorldItemModelDrawer.renderMain` (ground items, `Render3DItem`, the battery on a battery charger, falling clothing and others go through it), `FBORenderCell.renderWorldInventoryObject`, `FBORenderItems`, `IsoMolotovCocktail.render` (a thrown weapon) and `ItemModelRenderer.init`. An outer layer such as `FBORenderCell.renderInternal` catches and logs the exception, so it is thrown on every redraw while the item is in view.
+- The other `getModelScript` in the same method (offset 23) is already behind `StringUtils.isNullOrEmpty` and never gets null.
+
+**Surgery**: helper `zombie/mdc/ItemModelNullGuard`. The two `invokevirtual ScriptManager.getModelScript(String)` in `itemHasModel` are redirected 1:1 to `ItemModelNullGuard.getModelScript(ScriptManager, String)`: a null name returns null, anything else calls vanilla unchanged. Vanilla `itemHasModel` treats a null lookup as "no model" and returns false, and the callers take their existing path and draw the item's icon (as for a non-weapon item without a model). New ClassPatch `ItemModelRenderer`, 2 patch sites; stack shape and instruction length are unchanged and the frames are kept.
+
+**Why in `itemHasModel`**: this is the only path that reaches `getModelScript(null)` (holding the item, under "Not handled" below, throws earlier). `ScriptManager.getModelScript` has more than 68 call sites in the jar and `ScriptBucketCollection.getScript` is the lookup shared by every script type; patching either would hand other callers a null they do not expect without covering anything more.
+
+**Kill switch**: `-Dmdc.itemModelNullGuard=off` (or `0`) is vanilla; needs a restart. The first time it steps in, console.txt gets one line `[MinidoracatJavaPatch][ItemModelNullGuard] an item without a model name is in view; drawing its icon instead of throwing`; it is not repeated.
+
+**Not handled**:
+- Holding such an item: `ModelManager.addEquippedModelInstance` passes the null from `getStaticModel()` to `addStatic`, which throws in `ScriptManager.getItemName(null)` (a different path that does not go through `itemHasModel`). W101 ([2di](#2di)) handles it.
+- Attaching it to the body (back, belt): `ModelManager` and `AttachedModelNames` check the name with `StringUtils.isNullOrWhitespace` first, so vanilla does not fail. Live: 0 exceptions in 8 seconds with it on the back.
+- The server does not stop such an item from being dropped: that is a question of where items come from, outside this patch.
+- `client-fixes-compat`: the compatible variant only has the vehicle fixes and does not include W100.
+
+**Gates and verification**:
+- Patcher: 2 patch sites in `ItemModelRenderer.itemHasModel`.
+- SmokeCheck (standard, lowmem): reason to exist — vanilla `itemHasModel` passes the result of `getStaticModel()` straight to `getModelScript`, and `getScript` calls `contains` on the name without a null check (it turns red when TIS adds a check in either place: re-evaluate retiring the patch); after surgery the text of `itemHasModel` differs only in the two redirects; the other methods of `ItemModelRenderer` are unchanged.
+- LoadCheck: the helper's signature.
+- `ItemModelNullGuardBehaviorTest` (standard and lowmem, each run on and off): a `HandWeapon` with no WorldStaticModel, StaticModel or WeaponSprite goes through the patched `itemHasModel`: on returns false without throwing; off (the kill switch actually run, which is the vanilla negative control) throws the NPE from `ScriptBucketCollection.getScript`. A weapon with a name is looked up by vanilla in both modes.
+- Live E2E (single player, scenario `item-model-null-sp`, client package 0.3.2 `dd8bd3c`; 30 s on the ground, 14 s in the hand): vanilla `jp-fdi-van-1113b` threw 7295 exceptions in the ground phase, one per frame, and the fence, hedge and ground items in that area were not drawn (the exception cut that redraw short); patched `jp-fdi-on-1113b` threw 0, logged one `[ItemModelNullGuard] an item without a model name is in view` line, drew the item as its icon and drew the control axe and surrounding objects normally; kill switch `jp-fdi-off-1113b` (both flags off) threw 7303, same as vanilla. The control axe phase was 0 in all three rounds.
+
+**Retirement**: when TIS adds a null check in `itemHasModel`, `getModelScript` or `getScript`, or removes weapon scripts without a model such as `FISH_DEV_ITEM` for good; retire when the SmokeCheck reason to exist turns red.
+
+---
+
+<a id="2di"></a>
+## 2di. Holding a weapon item without a model throws every frame (W101, client, default on; client package 0.3.2)
+
+**Symptom** (the vanilla live control for W100, single player): with `Base.FISH_DEV_ITEM` (the weapon item without a model name from [2dh](#2dh)) in the primary hand, 1959 exceptions in 8 seconds, one per frame:
+
+```text
+ERROR: General > GameWindow.frameStep> Exception thrown
+	java.lang.NullPointerException: Cannot invoke "String.indexOf(int)" because "name" is null at ScriptManager.getItemName(…)
+		zombie.core.skinnedmodel.ModelManager.addStaticForcedTex(…)
+		zombie.core.skinnedmodel.ModelManager.addStatic(…)
+		zombie.core.skinnedmodel.ModelManager.addEquippedModelInstance(…)
+		zombie.core.skinnedmodel.ModelManager.DoCharacterModelEquipped(…)
+		zombie.core.skinnedmodel.ModelManager.ResetCharacterEquippedHands(…)
+		zombie.core.skinnedmodel.ModelManager.update(…)
+		zombie.gameStates.IngameState.updateInternal(…)
+```
+
+`GameWindow.frameStep` catches it, so the game update after `ModelManager.update` does not run for that frame; the character stays in the list of hand models to reset and it happens again on the next frame.
+
+**Root cause** (javap on the 42.22.2 jar `3c4a7c5f`): when `Type.tryCastTo(item, HandWeapon.class)` at the start of `ModelManager.addEquippedModelInstance` (offset 4) succeeds and the item has no ClothingItem, the method stores `weapon.getStaticModel()` and passes it to `addStatic(slot, name, bone)` (offsets 33–44) with no check in between. `addStatic` forwards to `addStaticForcedTex`, whose first instruction is `ScriptManager.getItemName(name)`, and `getItemName` starts with `name.indexOf('.')`: null throws. The non-weapon branch of the same method checks `StringUtils.isNullOrWhitespace(item.getStaticModel())` on every path.
+
+**Surgery**: the only `invokestatic Type.tryCastTo` in `addEquippedModelInstance` is redirected 1:1 to `ItemModelNullGuard.tryCastTo(Object, Class)` (the same helper as W100): it casts as vanilla does and returns null when the result is a `HandWeapon` whose `getStaticModel()` is null, otherwise the original value. With a null weapon variable vanilla takes the non-weapon branch, where an item without a model name returns null: no model in the hand (as for a non-weapon item without a model). New ClassPatch `ModelManager`, 1 patch site; stack shape and instruction length are unchanged and the frames are kept.
+
+**Kill switch**: `-Dmdc.heldModelNullGuard=off` (or `0`) is vanilla; needs a restart. The first time it steps in, console.txt gets one line `[MinidoracatJavaPatch][ItemModelNullGuard] a held weapon has no model name; no hand model for it instead of throwing every frame`; it is not repeated.
+
+**Not handled**:
+- A weapon whose name is an empty or blank string: vanilla does not throw (`getItemName("")` returns normally), so it is left to vanilla.
+- Whether your own client also throws every frame when another player holds such an item: not verified live. `ModelManager.update` runs the same code for every character whose hand models are reset, and W101 patches that code, so it does not matter who holds the item.
+- `client-fixes-compat`: the compatible variant only has the vehicle fixes and does not include W101.
+
+**Gates and verification**:
+- Patcher: 1 patch site in `ModelManager.addEquippedModelInstance`.
+- SmokeCheck (standard, lowmem): reason to exist — vanilla passes a weapon's `getStaticModel()` to `addStatic` unchecked, the first call in `addStaticForcedTex` is `getItemName`, and the first call in `getItemName` is `String.indexOf` on the name (it turns red when TIS adds a check in any of them: re-evaluate retiring the patch); after surgery the text of `addEquippedModelInstance` differs only in the one redirect; the other methods of `ModelManager` are unchanged.
+- LoadCheck: the helper's signature.
+- `ItemModelNullGuardBehaviorTest` (standard and lowmem, each run on and off): a `HandWeapon` without a model name goes through the patched `addEquippedModelInstance`: on returns null without throwing; off (the kill switch actually run, which is the vanilla negative control) throws the NPE from `ScriptManager.getItemName`. A weapon with a name, an object that is not a weapon and null all get vanilla's `Type.tryCastTo` result.
+- Live E2E (the same three rounds): 14 s in the primary hand threw 3427 exceptions in vanilla and 3432 with the kill switch, one per frame; the patched round threw 0, logged one `[ItemModelNullGuard] a held weapon has no model name` line and showed no model in the hand. On the back it was 0 in all three rounds. Only the holder's own client was tested.
+
+**Retirement**: when TIS adds a null check in `addEquippedModelInstance`, `addStaticForcedTex` or `getItemName`; retire when the SmokeCheck reason to exist turns red.
 
 ---
 

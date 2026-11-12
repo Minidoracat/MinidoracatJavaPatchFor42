@@ -65,6 +65,7 @@ $EXIT_CONFLICT = 7  # 外來 loose 檔衝突／無法辨識的舊版 patch／路
 $EXIT_TAMPERED = 8  # 自家已安裝檔案被變造，拒絕刪除
 $EXIT_ROLLEDBACK = 9      # 交易失敗，已回復到動作前狀態
 $EXIT_ROLLBACKFAILED = 10 # 交易失敗且回復也失敗，需要人工處理
+$EXIT_APPCONTROL = 11     # Windows 智慧型應用程式控制在強制模式：會擋下未簽章的 agent 載入器，裝了遊戲起不來
 
 $script:FailCode = $null
 
@@ -1425,6 +1426,21 @@ function Get-AllInstallTargets($manifest, [string[]]$installed) {
     return @($targets)
 }
 
+# Windows 11 的智慧型應用程式控制（Smart App Control）：0＝關、1＝強制、2＝評估。強制模式會擋下未簽章的 mdc-agent-loader.dll，
+# -agentpath 載入失敗＝JVM 不啟動，遊戲開不起來（2026-11-13 在一台強制模式的機器實測 0.3.1）。讀不到就當成沒有這個功能。
+# MDC_PATCHES_TEST_SAC 只給安裝器測試模擬狀態用。
+function Get-SmartAppControlState {
+    if ($env:MDC_PATCHES_TEST_SAC) { return [int]$env:MDC_PATCHES_TEST_SAC }
+    try {
+        $value = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -ErrorAction Stop).VerifiedAndReputablePolicyState
+        if ($null -eq $value) { return 0 }
+        return [int]$value
+    } catch { return 0 }
+}
+function Get-AppControlBlockedText {
+    return (L "這台電腦的 Windows「智慧型應用程式控制」在強制模式，會擋下本包的載入器 $LOADER_REL（沒有程式碼簽章），裝了之後遊戲會開不起來。" "Windows Smart App Control is enforcing on this PC. It blocks this package's loader $LOADER_REL (it is not code-signed), so the game would not start after installing.")
+}
+
 function Invoke-Install {
     param($Manifest, [string]$PackageDir, [string]$GameRoot, [string[]]$Requested, [bool]$RequestAll, [bool]$Interactive)
 
@@ -1451,6 +1467,14 @@ function Invoke-Install {
             Fail $EXIT_JAR ((L "遊戲版本不符——本安裝包只適用 $(Get-Prop $Manifest 'gameVersion' '(未標示)')。" "Game version mismatch. This package only works with $(Get-Prop $Manifest 'gameVersion' '(not specified)').") +
                 [Environment]::NewLine + (L "  期望 jar SHA256：$wantJar" "  Expected jar SHA256: $wantJar") +
                 [Environment]::NewLine + (L "  實際 jar SHA256：$jarSha" "  Actual jar SHA256:   $jarSha"))
+        }
+
+        $appControl = Get-SmartAppControlState
+        if ($appControl -eq 1) {
+            Fail $EXIT_APPCONTROL ((Get-AppControlBlockedText) + [Environment]::NewLine +
+                (L '  所以不安裝，沒有變更任何檔案。已經裝過而遊戲開不起來時，請執行 Uninstall-Patches.bat 全部移除。' '  Nothing was installed and no file was changed. If the patches are already installed and the game does not start, run Uninstall-Patches.bat and remove everything.'))
+        } elseif ($appControl -eq 2) {
+            Write-Warn2 (L "這台電腦的 Windows「智慧型應用程式控制」在評估模式。Windows 之後可能自己轉成強制模式，那時會擋下 $LOADER_REL、遊戲開不起來：遇到時請執行 Uninstall-Patches.bat 全部移除。" "Windows Smart App Control is in evaluation mode on this PC. Windows may switch it to enforcing later; it would then block $LOADER_REL and the game would not start. If that happens, run Uninstall-Patches.bat and remove everything.")
         }
 
         # 復原完才讀，state 與 legacy 都必須是「現在」的磁碟狀態
@@ -1815,6 +1839,9 @@ function Invoke-Status {
             Write-Warn2 ((L '啟動參數與安裝紀錄不符，請重新安裝一次。目前：' 'The launch option does not match the install record; install again. Now: ') + (@($launcher.Ours) -join ' '))
         } elseif ($argOk -and $filesOk -and $jarOk) {
             Write-Info (L "  啟用狀態：已啟用（$expected）" "  Active: yes ($expected)")
+        }
+        if (@($launcher.Ours).Count -gt 0 -and (Get-SmartAppControlState) -eq 1) {
+            Write-Warn2 ((Get-AppControlBlockedText) + (L '請執行 Uninstall-Patches.bat 全部移除，遊戲才開得起來。' ' Run Uninstall-Patches.bat and remove everything so the game can start.'))
         }
     }
     $jarPackages = if ($jarSha) { Get-JarPackages $jarPath } else { @{} }

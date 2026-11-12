@@ -1259,6 +1259,26 @@ try {
     Check ($r.Code -eq 7 -and $r.Out.Contains('zombie/mdc/MdcPatchRuntime.class')) '結束代碼 7，訊息指出那個檔'
     Check (Test-GameFileIs 'zombie/mdc/MdcPatchRuntime.class' 'stale-helper') '殘留檔原封不動'
     Check ((Test-JsonIsOriginal) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '什麼都沒寫'
+
+    Start-Case '70. Windows 智慧型應用程式控制在強制模式：拒裝且不寫任何檔案；已裝的 status 提醒移除，卸載照常'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_SAC = '1'
+    try {
+        $r = Invoke-Install @('profiler') $PkgV1
+        Check ($r.Code -eq 11 -and $r.Out.Contains('mdc-agent-loader.dll') -and $r.Out.Contains('Uninstall-Patches.bat')) '結束代碼 11，訊息說明載入器會被擋、已裝的怎麼移除'
+        Check ((Test-JsonIsOriginal) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '什麼都沒寫'
+        $env:MDC_PATCHES_TEST_SAC = '0'
+        $r = Invoke-Install @('profiler') $PkgV1
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'profiler'))) '關閉時照常安裝'
+        $env:MDC_PATCHES_TEST_SAC = '1'
+        $r = Invoke-Status $PkgV1
+        Check ($r.Code -eq 0 -and $r.Out.Contains('Uninstall-Patches.bat')) '裝好之後才變成強制模式：status 提醒全部移除'
+        $r = Invoke-UninstallAll $PkgV1
+        Check ($r.Code -eq 0 -and (Test-JsonIsOriginal) -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '強制模式下照樣卸載得掉'
+        $env:MDC_PATCHES_TEST_SAC = '2'
+        $r = Invoke-Install @('profiler') $PkgV1
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'profiler')) -and $r.Out.Contains('Uninstall-Patches.bat')) '評估模式：照常安裝並警告之後可能被擋'
+    } finally { Remove-Item Env:MDC_PATCHES_TEST_SAC -ErrorAction SilentlyContinue }
 }
 finally {
     Write-Host ''
