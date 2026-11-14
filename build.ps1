@@ -159,6 +159,7 @@ $helperEntries = @(
     'zombie/mdc/ZombieReuseOwner.class',
     'zombie/network/packets/MdcLightSettingsGuard.class',
     'zombie/network/packets/MdcItemModDataGuard.class',
+    'zombie/network/packets/MdcWornItemGuard.class',
     'zombie/mdc/PlayerLosFilter.class',
     'zombie/mdc/PlayerLosFilter$Filter.class',
     'zombie/mdc/PlayerLosFilter$Plain.class',
@@ -1013,6 +1014,18 @@ java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.ItemModDataGuardT
 Assert-Ok "ItemModDataGuardTest（vanilla，jar 原版負對照）"
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest logthrow
 Assert-Ok "ItemModDataGuardTest（logthrow on，日誌拋例外時保護照做、Error 照常外拋）"
+
+Write-Host "[9zzn/10] 穿戴同步驗證（W103）：真 processServer；封包列的穿戴物在伺服器的穿戴欄與背包都找不到時，observe 各記一行、原版照常去建（「Couldn't find item」行的種類與記到的相同＝判斷與原版一致）；enforce 從封包清單拿掉、原版不建、背包裡有的照穿；off 與 jar 原版不記（負對照）；客戶端給的種類字串進 log 前清過；logthrow：日誌拋例外時照做、Error 照常外拋..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest observe
+Assert-Ok "WornItemGuardTest（observe，出貨組態）"
+java -Xverify:all "-Dmdc.wornItemGuard=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest enforce
+Assert-Ok "WornItemGuardTest（enforce）"
+java -Xverify:all "-Dmdc.wornItemGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest off
+Assert-Ok "WornItemGuardTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.WornItemGuardTest vanilla
+Assert-Ok "WornItemGuardTest（vanilla，jar 原版負對照）"
+java -Xverify:all "-Dmdc.wornItemGuard=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest logthrow
+Assert-Ok "WornItemGuardTest（logthrow enforce，日誌拋例外時照做、Error 照常外拋）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark

@@ -6262,6 +6262,35 @@ A `kept` line is not necessarily malicious: a packet sent while the client has n
 
 ---
 
+<a id="2dk"></a>
+## 2dk. Clothing sync check (W103, server, default observe)
+
+Hardens server-side validation of `SyncClothing`: every worn item the packet lists must be found in that player's worn items or inventory on the server. The details of the gap are not described in public documents.
+
+**Check**: each listed item is examined. Clothing already worn at the same location and items whose ID is in the inventory behave as in vanilla; an item found in neither place (an unbacked entry) is logged. `observe` only logs. `enforce` also removes the unbacked entries from the packet's list, and vanilla then runs unchanged: the server does not process those entries, the list forwarded to other clients does not contain them, and the remaining entries are worn as usual. The packet can only address a player of the sending connection (vanilla).
+
+**Surgery**: `MdcWornItemGuard.begin(packet, connection)` at the head of `SyncClothingPacket.processServer` (HeadCall slots 0 and 2; new ClassPatch, 1 hit); no vanilla instruction is changed. If the check itself throws, that packet is processed as in vanilla (in both modes) and one `anomaly` line is logged. An `Error` other than `LinkageError` still propagates. The item type string comes from the client, so it is cut to 64 characters and reduced to letters, digits and `._-:` before it is logged. `SyncClothingPacket` stopped shipping when W20 (b) was retired; this patch ships it again, and only the head of `processServer` differs from vanilla.
+
+Console (`unbacked` and `anomaly` together at most 20 lines per 10 s):
+
+```text
+[MinidoracatJavaPatch][WornItemGuard] 首次生效 mode=observe reflect=ok.
+[MinidoracatJavaPatch][WornItemGuard] unbacked type=<type> id=<id> loc=<location> action=logged|removed connectionPlayers=<…> unbacked=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][WornItemGuard] anomaly reason=<exception class> suppressed=<n> anomalies=<n>.
+```
+
+**Switch**: `-Dmdc.wornItemGuard=observe|enforce|off`, default `observe`, restart required. Watch whether normal play produces `unbacked` lines before turning `enforce` on. `enforce` does not go back and remove clothing that is already worn at the same location (the worn items are rebuilt from the save after a server restart).
+
+**Guards and verification**:
+- SmokeCheck: upstream fingerprint: `processServer` calls `process` exactly once, before forwarding; `process` has exactly one `InventoryItemFactory.CreateItem`, after the inventory `getItemWithID`; the forwarding `write` reads the packet's `items`; SHA lock on vanilla's `process` body (with a negative control); after surgery the head is `aload_0; aload_2; begin`, all other instructions and frames are unchanged and so are the other methods; the helper only catches `RuntimeException`, `LinkageError` and `ReflectiveOperationException`, and every `DebugLog.log` sits in a try that catches the first two (negative controls: widened to `Throwable`, try removed).
+- `WornItemGuardTest` (`build.ps1` [9zzn/10]; five JVMs: observe, enforce, off, vanilla jar, logthrow; argv self-checked): a real `WornItems`, the real `processServer` and the real `process` it calls. One packet with seven entries (clothing in the inventory, clothing already worn, a non-clothing worn item in the inventory, clothing worn at the same location but absent from the inventory, plus three unbacked entries): observe logs three lines and leaves the list alone, and the logged types equal the types vanilla actually tried to create; enforce drops the three entries, vanilla creates nothing, and the backed entries are worn as usual; off and the vanilla jar log nothing and vanilla tries to create three items (negative controls). A type string with spaces and equals signs is logged with `?` in their place; a broken entry logs `anomaly`, does not throw and leaves the list alone. logthrow: with a log stream that throws on every write the check still applies and vanilla runs to the end; when it throws `OutOfMemoryError` instead, the error propagates.
+
+**Deployment**: the manifest gains `zombie/network/packets/MdcWornItemGuard.class` and `zombie/network/packets/SyncClothingPacket.class` (188 → 190 classes: 85 patched classes, 250 patch sites, 105 helpers).
+
+**Retirement**: when TIS validates the items this packet lists on the server, or re-evaluate when the SmokeCheck upstream fingerprint or SHA lock turns red.
+
+---
+
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 

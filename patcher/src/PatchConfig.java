@@ -1053,6 +1053,17 @@ public final class PatchConfig {
         itemFieldsServer.expectedHits = 1;
         patches.add(itemFields);
 
+        // W103：穿戴同步驗證（docs/patches.md 2dk）。SyncClothingPacket.processServer 頭部 begin(packet, connection)（slots 0、2）：
+        // 封包列的穿戴物在伺服器的穿戴欄與背包都找不到時記一行，enforce 另從封包的清單拿掉；原版 process 與轉發照跑。
+        // -Dmdc.wornItemGuard=observe|enforce|off，預設 observe。
+        Patcher.ClassPatch clothingSync = new Patcher.ClassPatch("zombie/network/packets/SyncClothingPacket");
+        Patcher.MethodOps clothingSyncServer = clothingSync.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        clothingSyncServer.headCall = new Patcher.HeadCall("zombie/network/packets/MdcWornItemGuard", "begin",
+                "(Lzombie/network/packets/SyncClothingPacket;Lzombie/core/raknet/UdpConnection;)V", new int[]{0, 2});
+        clothingSyncServer.expectedHits = 1;
+        patches.add(clothingSync);
+
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");
         for (String methodName : new String[]{"updateSeed", "updateFishingData"}) {

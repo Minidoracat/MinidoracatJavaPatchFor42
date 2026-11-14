@@ -2261,13 +2261,13 @@ public final class SmokeCheck {
         // null 時 baseTexture/textureChoice 給 -1，之後 tint 為 null 補 ImmutableColor.white＝本刀 enforce 的行為。
         // 此錨紅＝TIS 又改了這段，重估是否復活 (b)。
         MethodNode vIdCtor = methodFromJar(jar, idCls, "<init>", "(Lzombie/characters/WornItems/WornItem;)V");
-        failed += check("W20 (b) 退役依據：ItemDescription ctor getVisual=1、IFNULL=1、getTint=1、white 補值=1；SyncClothingPacket 兩個 class 不出貨",
+        failed += check("W20 (b) 退役依據：ItemDescription ctor getVisual=1、IFNULL=1、getTint=1、white 補值=1；ItemDescription 不出貨"
+                        + "（SyncClothingPacket 只有 W103 的 processServer 頭部，其餘方法不變由 W103 段驗）",
                 countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, "zombie/inventory/InventoryItem",
                         "getVisual", "()L" + ivCls + ";") == 1
                 && countOpcode(vIdCtor, Opcodes.IFNULL) == 1
                 && countExactCalls(vIdCtor, Opcodes.INVOKEVIRTUAL, ivCls, "getTint", "()L" + w20Ic + ";") == 1
                 && countExactFields(vIdCtor, Opcodes.GETSTATIC, w20Ic, "white", "L" + w20Ic + ";") == 1
-                && !Files.exists(distJava.resolve(scpCls + ".class"))
                 && !Files.exists(distJava.resolve(idCls + ".class")));
         // vanilla 前提 (c)：parse 內 getPlayer 恰 1（42.22 起存進區域變數）、error(Object) 恰 1、getItemVisuals 恰 1
         // （server 本地重建 vs wire count 的比對結構）。
@@ -3990,6 +3990,7 @@ public final class SmokeCheck {
         failed += checkZombieReuseOwner(jar, distJava);
         failed += checkLightSettings(jar, distJava);
         failed += checkItemModDataGuard(jar, distJava);
+        failed += checkWornItemGuard(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
@@ -7534,6 +7535,62 @@ public final class SmokeCheck {
             uAnnounce.tryCatchBlocks.clear();
         }
         failed += check("W102 例外型別鎖負對照：report 的 catch 放寬成 Throwable、announce 的 log 拿掉 try 都會紅",
+                mutable && !teleportHandlerViolations(widened).isEmpty() && !teleportHandlerViolations(unguarded).isEmpty());
+        return failed;
+    }
+
+    /** W103：42.22.2 原版 process 本體（去 debug 的 methodText SHA-256）。begin 判「無對應項」的條件照抄它走到 CreateItem 的條件。 */
+    static final String[][] WORN_ITEM_LOCKED = {
+            {"zombie/network/packets/SyncClothingPacket", "process", "()V",
+                    "b8d1ab94552bdffdd154b5631b0e4828468d56bf7e747383c3059b8d0182d15b"},
+    };
+
+    /**
+     * W103 穿戴同步驗證：存在理由（process 對穿戴欄與背包都沒有的 ID 用封包給的種類建物品並設成封包給的 ID；processServer
+     * 在 process 之後才轉發，轉發的 write 讀同一份清單；變紅＝官方行為變了，先重估撤刀，不改斷言）、頭部 headCall、helper 契約。
+     */
+    static int checkWornItemGuard(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String pkt = "zombie/network/packets/SyncClothingPacket";
+        String guard = "zombie/network/packets/MdcWornItemGuard";
+        String serverDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        String beginDesc = "(L" + pkt + ";Lzombie/core/raknet/UdpConnection;)V";
+        String create = "zombie/inventory/InventoryItemFactory.CreateItem (Ljava/lang/String;)Lzombie/inventory/InventoryItem;";
+        String fromBag = "zombie/inventory/ItemContainer.getItemWithID (I)Lzombie/inventory/InventoryItem;";
+        String vText = methodText(methodFromJar(jar, pkt, "processServer", serverDesc));
+        String pText = methodText(methodFromJar(jar, pkt, "process", "()V"));
+        int callAt = vText.indexOf(pkt + ".process ()V");
+        int createAt = pText.indexOf(create);
+        failed += check("W103 上游指紋：processServer 恰呼叫 process 1 次、在 sendToClients 之前；process 恰 1 處 CreateItem，"
+                        + "在背包 getItemWithID 之後、接著 setID；轉發用的 write 讀封包的 items",
+                callAt >= 0 && callAt == vText.lastIndexOf(pkt + ".process ()V") && callAt < vText.indexOf(pkt + ".sendToClients ")
+                && createAt >= 0 && createAt == pText.lastIndexOf(create)
+                && pText.indexOf(fromBag) >= 0 && pText.indexOf(fromBag) < createAt
+                && pText.indexOf("zombie/inventory/InventoryItem.setID (I)V") > createAt
+                && methodText(methodFromJar(jar, pkt, "write", "(Lzombie/core/network/ByteBufferWriter;)V"))
+                        .contains("GETFIELD " + pkt + ".items : Ljava/util/ArrayList;"));
+        failed += shaLocks(jar, "W103", WORN_ITEM_LOCKED);
+        MethodNode pServer = method(distJava, pkt, "processServer", serverDesc);
+        failed += check("W103 手術後：processServer 頭部 aload_0／aload_2／begin，其餘指令與 frames 不變；SyncClothingPacket 其餘方法不變",
+                headCallSlotsOk(pServer, guard, "begin", beginDesc, 0, 2)
+                && methodText(pServer).equals("    ALOAD 0\n    ALOAD 2\n    INVOKESTATIC " + guard + ".begin " + beginDesc + "\n" + vText)
+                && otherMethodsSame(jar, distJava, pkt, "processServer", serverDesc));
+        ClassNode g = classNode(distJava, guard);
+        String bad = teleportHandlerViolations(g);
+        failed += check("W103 helper 契約：catch 只有 RuntimeException／LinkageError／ReflectiveOperationException（沒有 Throwable、Error、catch-all），"
+                        + "每個 DebugLog.log 都在含 RuntimeException＋LinkageError 的 try 內；begin 只用 Iterator.remove 動封包的清單" + bad,
+                bad.isEmpty() && !declaredMethod(g, "begin", beginDesc).tryCatchBlocks.isEmpty()
+                && methodText(declaredMethod(g, "begin", beginDesc)).contains("java/util/Iterator.remove ()V"));
+        ClassNode widened = classNode(distJava, guard);
+        ClassNode unguarded = classNode(distJava, guard);
+        MethodNode wReport = widened.methods.stream().filter(m -> m.name.equals("report")).findFirst().orElse(null);
+        MethodNode uAnnounce = declaredMethod(unguarded, "announce", "()V");
+        boolean mutable = wReport != null && !wReport.tryCatchBlocks.isEmpty() && uAnnounce != null && !uAnnounce.tryCatchBlocks.isEmpty();
+        if (mutable) {
+            wReport.tryCatchBlocks.get(0).type = "java/lang/Throwable";
+            uAnnounce.tryCatchBlocks.clear();
+        }
+        failed += check("W103 例外型別鎖負對照：report 的 catch 放寬成 Throwable、announce 的 log 拿掉 try 都會紅",
                 mutable && !teleportHandlerViolations(widened).isEmpty() && !teleportHandlerViolations(unguarded).isEmpty());
         return failed;
     }
