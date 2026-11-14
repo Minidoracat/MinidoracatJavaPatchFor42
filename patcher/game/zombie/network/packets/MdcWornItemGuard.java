@@ -2,24 +2,24 @@ package zombie.network.packets;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.Iterator;
 
 import zombie.characters.IsoPlayer;
+import zombie.characters.WornItems.WornItems;
 import zombie.core.MdcTimedActionProbe;
 import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
-import zombie.inventory.types.Clothing;
+import zombie.inventory.ItemContainer;
 import zombie.network.fields.character.Player;
 
 /**
  * W103 穿戴同步的伺服器端驗證（docs/patches.md 2dk）。
  *
- * <p>{@code SyncClothingPacket.processServer} 頭部 {@link #begin} 逐項看封包列的穿戴物：伺服器的穿戴欄與背包裡都沒有這個
- * ID 的那幾項（下稱無對應項）記一行；{@code enforce} 另把它們從封包的清單拿掉，原版就不會處理、也不會轉發。判斷與原版
- * {@code process()} 走到建立物品那一步的條件相同。
+ * <p>{@code SyncClothingPacket.processServer} 頭部 {@link #begin} 逐項看封包列的穿戴物：伺服器那位玩家的背包裡沒有這個 ID
+ * 的那幾項（下稱無對應項）各記一行；{@code enforce} 另把它們從封包的清單拿掉，原版就不會處理、也不會轉發。只看背包、
+ * 不看穿戴欄：原版處理一包的途中會改穿戴欄，背包不會變，事先查到的結果和原版輪到那一項時查到的一樣。
  *
- * <p>開關：{@code -Dmdc.wornItemGuard=observe|enforce|off}，預設 observe（只記），要重啟。判斷途中出例外時這一包照原版
- * 處理（兩種模式都是），記 {@code anomaly} 行。
+ * <p>開關：{@code -Dmdc.wornItemGuard=observe|enforce|off}，預設 observe（只記），要重啟。整包判斷完才動清單；判斷途中出
+ * 例外時清單原封不動、這一包照原版處理（兩種模式都是），記 {@code anomaly} 行。
  */
 public final class MdcWornItemGuard {
     private static final String TAG = "[MinidoracatJavaPatch][WornItemGuard]";
@@ -58,18 +58,31 @@ public final class MdcWornItemGuard {
             IsoPlayer player = ((Player) PLAYER.get(packet)).getPlayer();
             @SuppressWarnings("unchecked")
             ArrayList<SyncClothingPacket.ItemDescription> items = (ArrayList<SyncClothingPacket.ItemDescription>) ITEMS.get(packet);
-            for (Iterator<SyncClothingPacket.ItemDescription> it = items.iterator(); it.hasNext();) {
-                SyncClothingPacket.ItemDescription d = it.next();
-                // 與原版 process() 相同：已經穿在同一個位置的衣物不動；否則從背包找，背包也沒有才會去建
-                boolean worn = player.getWornItems().getItemById(d.itemId) instanceof Clothing c && d.location.equals(c.getBodyLocation());
-                if (worn || player.getInventory().getItemWithID(d.itemId) != null) {
-                    continue;
+            ItemContainer bag = player.getInventory();
+            WornItems wornItems = player.getWornItems();
+            ArrayList<SyncClothingPacket.ItemDescription> found = null;
+            for (SyncClothingPacket.ItemDescription d : items) {
+                if (bag.getItemWithID(d.itemId) == null) {
+                    if (found == null) {
+                        found = new ArrayList<>();
+                    }
+                    found.add(d);
                 }
+            }
+            if (found == null) {
+                return;
+            }
+            boolean[] worn = new boolean[found.size()];
+            for (int i = 0; i < worn.length; i++) {
+                worn[i] = wornItems.getItemById(found.get(i).itemId) != null;
+            }
+            // 判斷到這裡都沒出例外才動清單與計數
+            if (MODE == ENFORCE) {
+                items.removeAll(found);
+            }
+            for (int i = 0; i < worn.length; i++) {
                 unbacked++;
-                if (MODE == ENFORCE) {
-                    it.remove();
-                }
-                report(connection, d);
+                report(connection, found.get(i), worn[i]);
             }
         } catch (RuntimeException | ReflectiveOperationException | LinkageError e) {
             anomalies++;
@@ -90,13 +103,13 @@ public final class MdcWornItemGuard {
         }
     }
 
-    private static void report(UdpConnection connection, SyncClothingPacket.ItemDescription d) {
+    private static void report(UdpConnection connection, SyncClothingPacket.ItemDescription d, boolean worn) {
         try {
             if (!allowLine()) {
                 return;
             }
             DebugLog.log(TAG + " unbacked type=" + clean(d.itemType) + " id=" + d.itemId + " loc=" + clean(String.valueOf(d.location))
-                    + " action=" + (MODE == ENFORCE ? "removed" : "logged")
+                    + " worn=" + (worn ? 1 : 0) + " action=" + (MODE == ENFORCE ? "removed" : "logged")
                     + " connectionPlayers=" + (connection != null ? MdcTimedActionProbe.connectionPlayers(connection) : "?")
                     + " unbacked=" + unbacked + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
         } catch (RuntimeException | LinkageError e) {

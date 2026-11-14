@@ -5626,25 +5626,27 @@ console（`kept`、`dropped` 合計每 10 秒最多 20 行）：
 <a id="2dk"></a>
 ## 2dk. 穿戴同步驗證（W103，server，預設 observe）
 
-強化伺服器端的 `SyncClothing` 驗證：封包列的穿戴物要在伺服器那位玩家的穿戴欄或背包裡找得到。缺口細節不在公開文件描述。
+強化伺服器端的 `SyncClothing` 驗證：封包列的穿戴物要在伺服器那位玩家的背包裡找得到。缺口細節不在公開文件描述。
 
-**檢查**：逐項看封包列的穿戴物。已經穿在同一個位置的衣物、背包裡找得到 ID 的物品都照原版；兩邊都找不到的那幾項（無對應項）記一行。`observe` 只記；`enforce` 另把無對應項從封包的清單拿掉，之後原版流程照跑：伺服器不處理那幾項，轉發給其他客戶端的清單也沒有它們，其餘各項照穿。封包只指得到送出連線自己的玩家（原版）。
+**檢查**：逐項看封包列的穿戴物，背包裡找不到 ID 的那幾項（無對應項）各記一行。`observe` 只記；`enforce` 另把無對應項從封包的清單拿掉，之後原版流程照跑：伺服器不處理那幾項，轉發給其他客戶端的清單也沒有它們，其餘各項照穿。封包只指得到送出連線自己的玩家（原版）。
 
-**手術**：`SyncClothingPacket.processServer` 頭部 `MdcWornItemGuard.begin(packet, connection)`（HeadCall slots 0、2；新 ClassPatch，命中 1），原版指令一條都不改。判斷途中出例外時這一包照原版處理（兩種模式都是），記一行 `anomaly`；`LinkageError` 以外的 `Error` 照常外拋。客戶端給的種類字串進 log 前截成 64 字元、只留英數與 `._-:`。W20 (b) 退役後 `SyncClothingPacket` 原本不出貨，這一刀讓它重新出貨，改的只有 `processServer` 頭部。
+**手術**：`SyncClothingPacket.processServer` 頭部 `MdcWornItemGuard.begin(packet, connection)`（HeadCall slots 0、2；新 ClassPatch，命中 1），原版指令一條都不改。整包判斷完才動清單；判斷途中出例外時清單原封不動、這一包照原版處理（兩種模式都是），記一行 `anomaly`；`LinkageError` 以外的 `Error` 照常外拋。客戶端給的種類字串進 log 前截成 64 字元、只留英數與 `._-:`。W20 (b) 退役後 `SyncClothingPacket` 原本不出貨，這一刀讓它重新出貨，改的只有 `processServer` 頭部。
 
 console（`unbacked`、`anomaly` 合計每 10 秒最多 20 行）：
 
 ```text
 [MinidoracatJavaPatch][WornItemGuard] 首次生效 mode=observe reflect=ok.
-[MinidoracatJavaPatch][WornItemGuard] unbacked type=<種類> id=<id> loc=<位置> action=logged|removed connectionPlayers=<…> unbacked=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][WornItemGuard] unbacked type=<種類> id=<id> loc=<位置> worn=0|1 action=logged|removed connectionPlayers=<…> unbacked=<n> suppressed=<n> anomalies=<n>.
 [MinidoracatJavaPatch][WornItemGuard] anomaly reason=<例外類別> suppressed=<n> anomalies=<n>.
 ```
 
-**開關**：`-Dmdc.wornItemGuard=observe|enforce|off`，預設 `observe`，需重啟。先觀察正常遊玩會不會出現 `unbacked` 行，再決定開不開 `enforce`。`enforce` 不回頭清已經穿在同一個位置的衣物（伺服器重啟後穿戴欄由存檔重建）。
+`worn=1` 表示那個 ID 當下已經在伺服器的穿戴欄。
+
+**開關**：`-Dmdc.wornItemGuard=observe|enforce|off`，預設 `observe`，需重啟。**開 `enforce` 之前先看 observe 的紀錄**：`enforce` 會讓伺服器把背包裡找不到的穿戴物卸下（原版本來就會卸下封包沒列的穿戴物，被拿掉的項目等於沒列）。正常遊玩或 MOD 如果會出現 `unbacked` 行，先弄清楚來源再開。
 
 **守門與驗證**：
-- SmokeCheck：上游指紋——`processServer` 恰呼叫 `process` 1 次、在轉發之前，`process` 恰 1 處 `InventoryItemFactory.CreateItem`、在背包 `getItemWithID` 之後，轉發用的 `write` 讀封包的 `items`；原版 `process` 本體 SHA 鎖（配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
-- `WornItemGuardTest`（`build.ps1` [9zzn/10]，observe、enforce、off、jar 原版、logthrow 五個 JVM，自驗 argv）：真 `WornItems`、走真 `processServer` 與它呼叫的真 `process`。一包七項（背包裡的衣物、已穿的衣物、背包裡不是衣物的穿戴物、已穿在同一位置而背包沒有的衣物，加三項無對應項）：observe 記三行、清單不動，記到的種類與原版實際去建的種類相同；enforce 清單少三項、原版不去建、背包裡有的照穿；off 與 jar 原版不記、原版去建三次（負對照）。種類字串帶空白與等號時 log 裡清成 `?`；清單項目壞掉時記 `anomaly`、不外拋、清單不動。logthrow：日誌串流一寫就拋例外時照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
+- SmokeCheck：上游指紋——`processServer` 恰呼叫 `process` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `items`；原版 `process`、它開頭卸下段用到的兩個方法、`parse` 與 `parseClothing` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照），動封包清單的只有一次 `removeAll`。
+- `WornItemGuardTest`（`build.ps1` [9zzn/10]，observe、enforce、off、jar 原版、logthrow 五個 JVM，自驗 argv）：真 `WornItems`、走真 `processServer` 與它呼叫的真 `process`。一包七項（背包裡的衣物、已穿的衣物、背包裡不是衣物的穿戴物，加四項無對應項，其中兩項已在穿戴欄）：observe 記四行、清單不動，原版處理到的每一項都有記到；enforce 清單少四項、背包裡有的照穿；off 與 jar 原版不記（負對照）。同一包裡前面的項目改變穿戴欄的情況另測一包，結果相同。種類字串帶空白、等號、換行或超過 64 字元時 log 裡清成 `?` 並截短；清單尾端有壞項目時記 `anomaly`、不外拋、清單一項都不動。logthrow：日誌串流一寫就拋例外時照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcWornItemGuard.class` 與 `zombie/network/packets/SyncClothingPacket.class`（188 → 190 個 class：85 個 patched class、250 個命中點、105 個 helper）。
 

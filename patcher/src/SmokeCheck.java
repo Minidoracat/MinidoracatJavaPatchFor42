@@ -2248,7 +2248,6 @@ public final class SmokeCheck {
 
         // ---- W20 衣物同步觀測（(c) SyncVisuals mismatch）----
         String csgCls = "zombie/mdc/ClothingSyncGuard";
-        String scpCls = "zombie/network/packets/SyncClothingPacket";
         String idCls = "zombie/network/packets/SyncClothingPacket$ItemDescription";
         String svpCls = "zombie/network/packets/SyncVisualsPacket";
         String ivCls = "zombie/core/skinnedmodel/visual/ItemVisual";
@@ -7539,15 +7538,27 @@ public final class SmokeCheck {
         return failed;
     }
 
-    /** W103：42.22.2 原版 process 本體（去 debug 的 methodText SHA-256）。begin 判「無對應項」的條件照抄它走到 CreateItem 的條件。 */
+    /**
+     * W103：42.22.2 原版本體（去 debug 的 methodText SHA-256）。begin 靠 process「背包查不到才走後備分支、過程中不動背包」；
+     * enforce 拿掉項目後的結果靠 process 開頭的卸下段（lambda$process$0、isItemsContains）；「伺服器不處理被拿掉的項目」
+     * 另靠 parse 只碰背包裡找得到的 ID。
+     */
     static final String[][] WORN_ITEM_LOCKED = {
             {"zombie/network/packets/SyncClothingPacket", "process", "()V",
                     "b8d1ab94552bdffdd154b5631b0e4828468d56bf7e747383c3059b8d0182d15b"},
+            {"zombie/network/packets/SyncClothingPacket", "lambda$process$0", "(Ljava/util/ArrayList;Lzombie/characters/WornItems/WornItem;)V",
+                    "7f5e17e9c26e5116bd4370ef41d41a8eb3ab8e4ba64fc8fcc8640fd56478168d"},
+            {"zombie/network/packets/SyncClothingPacket", "isItemsContains", "(ILzombie/scripting/objects/ItemBodyLocation;)Z",
+                    "714d0ab82d2dcc1ff557f1bf708be01651d3182b7a13fe27f76ad822d248a7c5"},
+            {"zombie/network/packets/SyncClothingPacket", "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                    "6edd76aef2b1e2e5a44de9c968e94896d18af1224cd28b8696c9ecdbecd86fc9"},
+            {"zombie/network/packets/SyncClothingPacket", "parseClothing", "(Lzombie/core/network/ByteBufferReader;I)V",
+                    "4f56675ad7d39ff2395c449b290a0fd0caf54f0c53aa76d030f4c26ce57ae487"},
     };
 
     /**
-     * W103 穿戴同步驗證：存在理由（process 對穿戴欄與背包都沒有的 ID 用封包給的種類建物品並設成封包給的 ID；processServer
-     * 在 process 之後才轉發，轉發的 write 讀同一份清單；變紅＝官方行為變了，先重估撤刀，不改斷言）、頭部 headCall、helper 契約。
+     * W103 穿戴同步驗證：存在理由（process 的後備分支還在、processServer 在 process 之後才轉發、轉發的 write 讀同一份清單；
+     * 變紅＝官方行為變了，先重估撤刀，不改斷言）、頭部 headCall、helper 契約。
      */
     static int checkWornItemGuard(Path jar, Path distJava) throws Exception {
         int failed = 0;
@@ -7561,8 +7572,8 @@ public final class SmokeCheck {
         String pText = methodText(methodFromJar(jar, pkt, "process", "()V"));
         int callAt = vText.indexOf(pkt + ".process ()V");
         int createAt = pText.indexOf(create);
-        failed += check("W103 上游指紋：processServer 恰呼叫 process 1 次、在 sendToClients 之前；process 恰 1 處 CreateItem，"
-                        + "在背包 getItemWithID 之後、接著 setID；轉發用的 write 讀封包的 items",
+        failed += check("W103 上游指紋：processServer 恰呼叫 process 1 次、在 sendToClients 之前；process 的後備分支恰 1 處、"
+                        + "在背包 getItemWithID 之後；轉發用的 write 讀封包的 items",
                 callAt >= 0 && callAt == vText.lastIndexOf(pkt + ".process ()V") && callAt < vText.indexOf(pkt + ".sendToClients ")
                 && createAt >= 0 && createAt == pText.lastIndexOf(create)
                 && pText.indexOf(fromBag) >= 0 && pText.indexOf(fromBag) < createAt
@@ -7577,10 +7588,15 @@ public final class SmokeCheck {
                 && otherMethodsSame(jar, distJava, pkt, "processServer", serverDesc));
         ClassNode g = classNode(distJava, guard);
         String bad = teleportHandlerViolations(g);
+        String beginText = methodText(declaredMethod(g, "begin", beginDesc));
+        String removeAll = "java/util/ArrayList.removeAll (Ljava/util/Collection;)Z";
         failed += check("W103 helper 契約：catch 只有 RuntimeException／LinkageError／ReflectiveOperationException（沒有 Throwable、Error、catch-all），"
-                        + "每個 DebugLog.log 都在含 RuntimeException＋LinkageError 的 try 內；begin 只用 Iterator.remove 動封包的清單" + bad,
+                        + "每個 DebugLog.log 都在含 RuntimeException＋LinkageError 的 try 內；begin 只用 1 次 removeAll 動封包的清單"
+                        + "（沒有 Iterator.remove、clear、remove、set）" + bad,
                 bad.isEmpty() && !declaredMethod(g, "begin", beginDesc).tryCatchBlocks.isEmpty()
-                && methodText(declaredMethod(g, "begin", beginDesc)).contains("java/util/Iterator.remove ()V"));
+                && beginText.indexOf(removeAll) >= 0 && beginText.indexOf(removeAll) == beginText.lastIndexOf(removeAll)
+                && !beginText.contains("java/util/Iterator.remove ") && !beginText.contains("java/util/ArrayList.clear ")
+                && !beginText.contains("java/util/ArrayList.remove ") && !beginText.contains("java/util/ArrayList.set "));
         ClassNode widened = classNode(distJava, guard);
         ClassNode unguarded = classNode(distJava, guard);
         MethodNode wReport = widened.methods.stream().filter(m -> m.name.equals("report")).findFirst().orElse(null);
