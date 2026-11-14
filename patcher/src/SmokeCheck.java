@@ -7539,9 +7539,9 @@ public final class SmokeCheck {
     }
 
     /**
-     * W103：42.22.2 原版本體（去 debug 的 methodText SHA-256）。begin 靠 process「背包查不到才走後備分支、過程中不動背包」；
-     * enforce 拿掉項目後的結果靠 process 開頭的卸下段（lambda$process$0、isItemsContains）；「伺服器不處理被拿掉的項目」
-     * 另靠 parse 只碰背包裡找得到的 ID。
+     * W103：42.22.2 原版本體（去 debug 的 methodText SHA-256）。begin 靠 process「背包查不到才走後備分支、過程中不動背包」
+     *（process 途中改狀態的只有 WornItems.setItem／remove，兩個都只動穿戴清單）；enforce 拿掉項目後的結果靠 process 開頭的
+     * 卸下段（lambda$process$0、isItemsContains）；「伺服器不處理被拿掉的項目」另靠 parse 只碰背包裡找得到的 ID。
      */
     static final String[][] WORN_ITEM_LOCKED = {
             {"zombie/network/packets/SyncClothingPacket", "process", "()V",
@@ -7554,6 +7554,10 @@ public final class SmokeCheck {
                     "6edd76aef2b1e2e5a44de9c968e94896d18af1224cd28b8696c9ecdbecd86fc9"},
             {"zombie/network/packets/SyncClothingPacket", "parseClothing", "(Lzombie/core/network/ByteBufferReader;I)V",
                     "4f56675ad7d39ff2395c449b290a0fd0caf54f0c53aa76d030f4c26ce57ae487"},
+            {"zombie/characters/WornItems/WornItems", "setItem", "(Lzombie/scripting/objects/ItemBodyLocation;Lzombie/inventory/InventoryItem;)V",
+                    "e63fbbeb1d5a4d0564db89b5af1cb2486a95cb15c80b2a0e2f7ce251e1bcf051"},
+            {"zombie/characters/WornItems/WornItems", "remove", "(Lzombie/inventory/InventoryItem;)V",
+                    "4ef1d26a82d1672e080b80ce420834c0d4ff408526ed4aea15bc86786658dc22"},
     };
 
     /**

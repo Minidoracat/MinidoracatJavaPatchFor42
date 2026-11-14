@@ -1054,7 +1054,7 @@ public final class PatchConfig {
         patches.add(itemFields);
 
         // W103：穿戴同步驗證（docs/patches.md 2dk）。SyncClothingPacket.processServer 頭部 begin(packet, connection)（slots 0、2）：
-        // 封包列的穿戴物在伺服器的穿戴欄與背包都找不到時記一行，enforce 另從封包的清單拿掉；原版 process 與轉發照跑。
+        // 封包列的穿戴物在伺服器那位玩家的背包裡找不到時記一行（不看穿戴欄），enforce 整包判斷完才從封包的清單拿掉；原版 process 與轉發照跑。
         // -Dmdc.wornItemGuard=observe|enforce|off，預設 observe。
         Patcher.ClassPatch clothingSync = new Patcher.ClassPatch("zombie/network/packets/SyncClothingPacket");
         Patcher.MethodOps clothingSyncServer = clothingSync.method("processServer",

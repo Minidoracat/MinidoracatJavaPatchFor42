@@ -5615,7 +5615,7 @@ console（`kept`、`dropped` 合計每 10 秒最多 20 行）：
 **守門與驗證**：
 - SmokeCheck：上游指紋——`processServer` 恰呼叫 `processModData` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `moddata`；原版 `processModData` 與 `parse` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
 - `ItemModDataGuardTest`（`build.ps1` [9zzm/10]，on、自訂保留鍵、off、jar 原版、logthrow 五個 JVM，自驗 argv）：走真 `processServer` 與它呼叫的真 `processModData`。保留鍵被改寫、封包沒帶、封包憑空帶、伺服器那件沒有 modData、保留鍵在 metatable：伺服器那份與轉發用的封包表都是伺服器的值，各記一行；內容相同（含巢狀表）不記；封包沒帶 modData 不動；其他鍵照封包；第二個保留鍵（旗標值帶空白）也保留、不在清單的鍵照原版；判不出物品時封包的 modData 被拿掉、記 `anomalies` 與一行 `dropped`。off 與 jar 原版照收（負對照）。logthrow：日誌串流一寫就拋例外時保護照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
-- 實機 E2E（2026-11-14，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1114b`）`RESULT PASS`，伺服器那份的保留鍵沒有變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1114b`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝行為與原版相同，首次生效行寫 `mode=off`、沒有 `kept` 行。
+- 實機 E2E（2026-11-15，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1115c`）`RESULT PASS`（5 項檢查），伺服器那份的保留鍵沒有變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1115c`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝行為與原版相同，首次生效行寫 `mode=off`、沒有 `kept` 行。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcItemModDataGuard.class` 與 `zombie/network/packets/SyncItemFieldsPacket.class`（186 → 188 個 class：84 個 patched class、249 個命中點、104 個 helper）。
 
@@ -5645,8 +5645,9 @@ console（`unbacked`、`anomaly` 合計每 10 秒最多 20 行）：
 **開關**：`-Dmdc.wornItemGuard=observe|enforce|off`，預設 `observe`，需重啟。**開 `enforce` 之前先看 observe 的紀錄**：`enforce` 會讓伺服器把背包裡找不到的穿戴物卸下（原版本來就會卸下封包沒列的穿戴物，被拿掉的項目等於沒列）。正常遊玩或 MOD 如果會出現 `unbacked` 行，先弄清楚來源再開。
 
 **守門與驗證**：
-- SmokeCheck：上游指紋——`processServer` 恰呼叫 `process` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `items`；原版 `process`、它開頭卸下段用到的兩個方法、`parse` 與 `parseClothing` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照），動封包清單的只有一次 `removeAll`。
-- `WornItemGuardTest`（`build.ps1` [9zzn/10]，observe、enforce、off、jar 原版、logthrow 五個 JVM，自驗 argv）：真 `WornItems`、走真 `processServer` 與它呼叫的真 `process`。一包七項（背包裡的衣物、已穿的衣物、背包裡不是衣物的穿戴物，加四項無對應項，其中兩項已在穿戴欄）：observe 記四行、清單不動，原版處理到的每一項都有記到；enforce 清單少四項、背包裡有的照穿；off 與 jar 原版不記（負對照）。同一包裡前面的項目改變穿戴欄的情況另測一包，結果相同。種類字串帶空白、等號、換行或超過 64 字元時 log 裡清成 `?` 並截短；清單尾端有壞項目時記 `anomaly`、不外拋、清單一項都不動。logthrow：日誌串流一寫就拋例外時照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
+- SmokeCheck：上游指紋——`processServer` 恰呼叫 `process` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `items`；原版 `process`、它開頭卸下段用到的兩個方法、`parse`、`parseClothing` 與 `WornItems.setItem`／`remove` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）；`begin` 恰 1 次 `ArrayList.removeAll`，沒有 `Iterator.remove`／`clear`／`remove`／`set`。
+- `WornItemGuardTest`（`build.ps1` [9zzn/10]，observe、enforce、off、jar 原版、logthrow 五個 JVM，自驗 argv）：真 `WornItems`、走真 `processServer` 與它呼叫的真 `process`。一包七項（背包裡的衣物、已穿的衣物、背包裡不是衣物的穿戴物，加四項無對應項，其中兩項已在穿戴欄）：observe 記四行、清單不動，背包查不到的項目沒有漏記；enforce 清單少四項、背包裡有的照穿；off 與 jar 原版不記（負對照）。同一包裡前面的項目改變穿戴欄的情況另測一包，結果相同。種類字串帶空白、等號、換行或超過 64 字元時 log 裡清成 `?` 並截短；清單尾端有壞項目時記 `anomaly`、不外拋、清單一項都不動。logthrow：日誌串流一寫就拋例外時照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
+- 實機 E2E（2026-11-15，9950X3D，42.22.2 專用伺服器，一般權限的客戶端；情境不公開）：observe（`w103-obs-1115b`）`RESULT PASS`，伺服器的結果與 off 輪（`w103-off-1115b`）相同，console 有首次生效行與 `unbacked … action=logged` 行；enforce（`w103-enf-1115b`）`RESULT PASS`，console 兩行 `action=removed`，背包裡的物品照常穿上。三輪都是 `[mdc-agent] ARMED: 85 patched classes`、零連結錯誤；登入與穿上背包裡的物品沒有產生 `unbacked` 行。只測了登入與換穿，沒有涵蓋受傷、包紮等其他會同步穿戴的情況。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcWornItemGuard.class` 與 `zombie/network/packets/SyncClothingPacket.class`（188 → 190 個 class：85 個 patched class、250 個命中點、105 個 helper）。
 
