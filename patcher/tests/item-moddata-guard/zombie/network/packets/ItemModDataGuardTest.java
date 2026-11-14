@@ -39,6 +39,8 @@ public final class ItemModDataGuardTest {
 
     private static int failed;
     private static UdpConnection conn;
+    /** logthrow：日誌串流改拋 OutOfMemoryError（證明 Error 不被吞）。 */
+    private static boolean oom;
 
     public static void main(String[] args) throws Exception {
         zombie.core.random.RandStandard.INSTANCE.init();
@@ -56,12 +58,16 @@ public final class ItemModDataGuardTest {
             }
             expect("自驗：vanilla＝封包類別來自 jar（" + packetFrom + "）、classpath 沒有 helper", guardAbsent && packetFrom.endsWith(".jar"));
         } else {
-            String want = "on".equals(mode) ? "[MinidoracatEconomy]" : "keys".equals(mode) ? "[Alpha, Beta]" : "[]";
+            String want = "on".equals(mode) || "logthrow".equals(mode) ? "[MinidoracatEconomy]" : "keys".equals(mode) ? "[Alpha, Beta]" : "[]";
             expect("自驗：argv=" + mode + " 與實際保留鍵 " + keys() + " 相符、封包類別來自 dist（" + packetFrom + "）",
                     keys().equals(want) && !packetFrom.endsWith(".jar"));
         }
         GameServer.server = true;
         conn = conn(player((short) 7, "tester"));
+        if ("logthrow".equals(mode)) {
+            logThrow(key);
+            return;
+        }
         ByteArrayOutputStream log = captureLog();
         int refusedCases = 0;
 
@@ -110,6 +116,15 @@ public final class ItemModDataGuardTest {
                 dump(r.item.getModData()).equals(serverDump) && r.packet.moddata == null);
         expect("封包沒帶 modData：零新 log", keptRows(log).size() == rowsBefore);
 
+        // 伺服器那張表自己沒有鍵、保留鍵在 metatable（hasModData() 是 false，rawget 讀得到）：轉發用的封包表要和伺服器讀到的一致。
+        KahluaTable hollow = table();
+        hollow.setMetatable(table(key, table("mark", "server")));
+        r = run(hollow, table(key, table("mark", "client"), "other", 6.0));
+        String serverSees = dump(r.item.getModData().rawget(key));
+        expect("保留鍵在 metatable：伺服器讀到 " + serverSees + "、轉發用的封包表相同",
+                serverSees.equals(guarded ? "{mark=server}" : "{mark=client}") && dump(r.packet.moddata.rawget(key)).equals(serverSees));
+        refusedCases++;
+
         if ("keys".equals(mode)) {
             // 第二個保留鍵（旗標值帶空白）也保留；預設的鍵不在清單裡就照原版被取代。
             r = run(table("Alpha", 1.0, "Beta", "b", "MinidoracatEconomy", table("mark", "server")),
@@ -124,7 +139,9 @@ public final class ItemModDataGuardTest {
             broken.moddata = table(key, 1.0);
             Class.forName(GUARD).getMethod("begin", SyncItemFieldsPacket.class, UdpConnection.class).invoke(null, broken, conn);
             expect("判不出物品：封包的 modData " + (guarded ? "被拿掉" : "不動"), (broken.moddata == null) == guarded);
-            expect("anomalies 恰 " + (guarded ? 1 : 0), (long) accessor("anomaliesForTest") == (guarded ? 1 : 0));
+            expect("anomalies 恰 " + (guarded ? 1 : 0) + "、" + (guarded ? "記一行 dropped" : "不記"),
+                    (long) accessor("anomaliesForTest") == (guarded ? 1 : 0)
+                    && allRows(log).stream().filter(x -> x.contains(" dropped modData reason=NullPointerException ")).count() == (guarded ? 1 : 0));
         }
 
         List<String> rows = keptRows(log);
@@ -149,6 +166,56 @@ public final class ItemModDataGuardTest {
             System.exit(1);
         }
         OUT.println("item-moddata-guard OK mode=" + mode);
+    }
+
+    /** 日誌鏈拋例外：首次生效與 kept 記錄爆掉時保護照做、原版照常跑完、只計 anomalies；改拋 OutOfMemoryError 時照常外拋。 */
+    private static void logThrow(String key) throws Exception {
+        DebugType.General.setLogSeverity(LogSeverity.All);
+        DebugLog.getInstance().setStdOut(new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+                explode();
+            }
+
+            @Override
+            public void write(byte[] b, int off, int len) {
+                explode();
+            }
+        });
+        Throwable t = null;
+        try {
+            DebugLog.log("[ItemModDataGuardTest] self-check");
+        } catch (Throwable e) {
+            t = e;
+        }
+        expect("自驗：DebugLog.log 真的拋例外（" + t + "）", t instanceof IllegalStateException);
+        t = null;
+        Run r = null;
+        try {
+            r = run(table(key, table("mark", "server"), "other", 1.0), table(key, table("mark", "client"), "other", 2.0));
+        } catch (Throwable e) {
+            t = e;
+        }
+        expect("首次生效與 kept 記錄拋例外：真 processServer 照常跑完、不外拋、保留鍵仍是伺服器的值、其他鍵照封包、anomalies 2（" + t + "）",
+                t == null && r != null && dump(r.item.getModData()).equals(dump(table(key, table("mark", "server"), "other", 2.0)))
+                        && dump(r.packet.moddata).equals(dump(r.item.getModData())) && (long) accessor("anomaliesForTest") == 2);
+        oom = true;
+        t = null;
+        try {
+            run(table(key, table("mark", "server")), table(key, table("mark", "client")));
+        } catch (Throwable e) {
+            t = e;
+        }
+        expect("Error 照常外拋：日誌鏈拋 OutOfMemoryError 時不被吞，從 processServer 拋出（" + t + "）", t instanceof OutOfMemoryError);
+        OUT.println(failed == 0 ? "item-moddata-guard OK mode=logthrow" : "item-moddata-guard FAIL " + failed + " 項");
+        System.exit(failed == 0 ? 0 : 1);
+    }
+
+    private static void explode() {
+        if (oom) {
+            throw new OutOfMemoryError("<test> logger oom");
+        }
+        throw new IllegalStateException("<test> logger exploded");
     }
 
     private record Run(SyncItemFieldsPacket packet, InventoryItem item) {

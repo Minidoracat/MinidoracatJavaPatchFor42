@@ -54,9 +54,9 @@ public final class MdcItemModDataGuard {
         }
         try {
             InventoryItem item = ((ContainerID) CONTAINER_ID.get(packet)).getContainer().getItemWithID(packet.itemId);
-            KahluaTable server = item.hasModData() ? item.getModData() : null;
+            KahluaTable server = item.getModData();   // 不用 hasModData()：它只看表自己的鍵，rawget 還會讀 metatable
             for (String key : KEYS) {
-                Object kept = server == null ? null : server.rawget(key);
+                Object kept = server.rawget(key);
                 Object sent = packet.moddata.rawget(key);
                 if (kept == null && sent == null) {
                     continue;
@@ -71,6 +71,7 @@ public final class MdcItemModDataGuard {
         } catch (RuntimeException | ReflectiveOperationException | LinkageError e) {
             anomalies++;
             packet.moddata = null;   // 判不出來就整份不套用：伺服器那份不動，代價只是這包的 modData 沒生效
+            reportDropped(e);
         }
     }
 
@@ -118,6 +119,17 @@ public final class MdcItemModDataGuard {
             DebugLog.log(TAG + " kept key=" + key + " item=" + item.getFullType() + "#" + item.getID()
                     + " connectionPlayers=" + (connection != null ? MdcTimedActionProbe.connectionPlayers(connection) : "?")
                     + " refused=" + refused + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+    }
+
+    private static void reportDropped(Throwable cause) {
+        try {
+            if (allowLine()) {
+                DebugLog.log(TAG + " dropped modData reason=" + cause.getClass().getSimpleName()
+                        + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
+            }
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
         }

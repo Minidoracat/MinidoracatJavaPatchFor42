@@ -1002,7 +1002,7 @@ Assert-Ok "MdcUnseatedVehicleWatchTest（off，kill switch）"
 java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest logthrow
 Assert-Ok "MdcUnseatedVehicleWatchTest（logthrow observe，日誌拋例外照原版完成、Error 照常外拋）"
 
-Write-Host "[9zzm/10] 物品資料同步驗證（W102）：真 processServer 套用封包的 modData；保留鍵被改、被拿掉、憑空加上、封包沒帶 modData、伺服器沒有 modData 時，伺服器那份與轉發用的封包表都是伺服器的值並各記一行 log，內容相同不記；其他鍵照原版整份取代；自訂保留鍵清單；判不出物品時整份不套用並記 anomalies；off 與 jar 原版照收（負對照）..."
+Write-Host "[9zzm/10] 物品資料同步驗證（W102）：真 processServer 套用封包的 modData；保留鍵被改、被拿掉、憑空加上、伺服器沒有 modData、保留鍵在 metatable 時，伺服器那份與轉發用的封包表都是伺服器的值並各記一行 log；內容相同不記、封包沒帶 modData 不動也不記；其他鍵照原版整份取代；自訂保留鍵清單；判不出物品時整份不套用、記 anomalies 與一行 dropped；off 與 jar 原版照收（負對照）；logthrow：日誌拋例外時保護照做、Error 照常外拋..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest on
 Assert-Ok "ItemModDataGuardTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.itemModDataKeys=Alpha, Beta" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest keys
@@ -1011,6 +1011,8 @@ java -Xverify:all "-Dmdc.itemModDataGuard=off" -cp "$R\work\out;$R\dist\java;$TJ
 Assert-Ok "ItemModDataGuardTest（off，kill switch）"
 java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.ItemModDataGuardTest vanilla
 Assert-Ok "ItemModDataGuardTest（vanilla，jar 原版負對照）"
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest logthrow
+Assert-Ok "ItemModDataGuardTest（logthrow on，日誌拋例外時保護照做、Error 照常外拋）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark

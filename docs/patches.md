@@ -5596,15 +5596,16 @@ ERROR: General > GameWindow.frameStep> Exception thrown
 
 **檢查**：封包帶 modData 時，把封包那份表裡的每個保留鍵改成伺服器那件物品目前的值；伺服器沒有這個鍵就從封包拿掉。之後原版流程照跑：伺服器那份的保留鍵不變（封包沒帶這個鍵時也留著），轉發給其他客戶端的是伺服器的值。其他鍵與耐久、名稱、收藏、掛載位置等欄位照原版。封包沒帶 modData 時原版本來就不動伺服器那份，不處理。
 
-**保留鍵**：`-Dmdc.itemModDataKeys`（逗號分隔），預設 `MinidoracatEconomy`（家族 Economy MOD 寫在物品上的紀錄）。MOD 在客戶端寫自己的鍵、再靠這個封包帶回伺服器的做法不受影響，除非那個鍵被列進保留鍵。
+**保留鍵**：`-Dmdc.itemModDataKeys`（逗號分隔；預設值在 `MdcItemModDataGuard`）。不在清單裡的鍵不受影響。
 
-**手術**：`SyncItemFieldsPacket.processServer` 頭部 `MdcItemModDataGuard.begin(packet, connection)`（HeadCall slots 0、2；新 ClassPatch，命中 1），原版指令一條都不改。helper 判不出物品（例外）時把封包的 modData 設成 null：這一包的 modData 整份不套用、伺服器那份不動，其他欄位照常；`Error` 照常外拋。
+**手術**：`SyncItemFieldsPacket.processServer` 頭部 `MdcItemModDataGuard.begin(packet, connection)`（HeadCall slots 0、2；新 ClassPatch，命中 1），原版指令一條都不改。helper 判不出物品（例外）時把封包的 modData 設成 null：這一包的 modData 整份不套用、伺服器那份不動，其他欄位照常，並記一行 `dropped`；`LinkageError` 以外的 `Error` 照常外拋。
 
-console（客戶端的值與伺服器不同時，每 10 秒最多 20 行）：
+console（`kept`、`dropped` 合計每 10 秒最多 20 行）：
 
 ```text
-[MinidoracatJavaPatch][ItemModDataGuard] 首次生效 mode=on keys=MinidoracatEconomy reflect=ok.
+[MinidoracatJavaPatch][ItemModDataGuard] 首次生效 mode=on keys=<保留鍵> reflect=ok.
 [MinidoracatJavaPatch][ItemModDataGuard] kept key=<鍵> item=<物品類型>#<id> connectionPlayers=<…> refused=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][ItemModDataGuard] dropped modData reason=<例外類別> suppressed=<n> anomalies=<n>.
 ```
 
 `kept` 行不一定是惡意：伺服器剛改過保留鍵、客戶端那份還沒收到更新時送出的封包也會記一行。
@@ -5612,13 +5613,13 @@ console（客戶端的值與伺服器不同時，每 10 秒最多 20 行）：
 **kill switch**：`-Dmdc.itemModDataGuard=0|off` 照原版，需重啟。
 
 **守門與驗證**：
-- SmokeCheck：上游指紋——`processServer` 恰呼叫 `processModData` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `moddata`；原版 `processModData` 本體 SHA 鎖（配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 `begin` 不接 `Throwable`。
-- `ItemModDataGuardTest`（`build.ps1` [9zzm/10]，on、自訂保留鍵、off、jar 原版四個 JVM，自驗 argv）：走真 `processServer` 與它呼叫的真 `processModData`。保留鍵被改寫、封包沒帶、封包憑空帶、伺服器那件沒有 modData：伺服器那份與轉發用的封包表都是伺服器的值，各記一行；內容相同（含巢狀表）不記；封包沒帶 modData 不動；其他鍵照封包；第二個保留鍵（旗標值帶空白）也保留、不在清單的鍵照原版；判不出物品時封包的 modData 被拿掉並記 `anomalies`。off 與 jar 原版照收（負對照）。
-- 實機 E2E（2026-11-14，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1114a`）`RESULT PASS`，客戶端兩次同步後伺服器那份的保留鍵都沒變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept key=MinidoracatEconomy … connectionPlayers=0:test`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1114a`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝照原版採用客戶端的值，首次生效行寫 `mode=off`、沒有 `kept` 行。
+- SmokeCheck：上游指紋——`processServer` 恰呼叫 `processModData` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `moddata`；原版 `processModData` 與 `parse` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
+- `ItemModDataGuardTest`（`build.ps1` [9zzm/10]，on、自訂保留鍵、off、jar 原版、logthrow 五個 JVM，自驗 argv）：走真 `processServer` 與它呼叫的真 `processModData`。保留鍵被改寫、封包沒帶、封包憑空帶、伺服器那件沒有 modData、保留鍵在 metatable：伺服器那份與轉發用的封包表都是伺服器的值，各記一行；內容相同（含巢狀表）不記；封包沒帶 modData 不動；其他鍵照封包；第二個保留鍵（旗標值帶空白）也保留、不在清單的鍵照原版；判不出物品時封包的 modData 被拿掉、記 `anomalies` 與一行 `dropped`。off 與 jar 原版照收（負對照）。logthrow：日誌串流一寫就拋例外時保護照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
+- 實機 E2E（2026-11-14，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1114a`）`RESULT PASS`，伺服器那份的保留鍵沒有變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1114a`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝行為與原版相同，首次生效行寫 `mode=off`、沒有 `kept` 行。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcItemModDataGuard.class` 與 `zombie/network/packets/SyncItemFieldsPacket.class`（186 → 188 個 class：84 個 patched class、249 個命中點、104 個 helper）。
 
-**退場**：官方讓伺服器不再採用客戶端送來的物品 modData，或 SmokeCheck 的上游指紋／SHA 鎖轉紅時重估。
+**退場**：官方在伺服器端驗證這個封包帶的物品資料，或 SmokeCheck 的上游指紋／SHA 鎖轉紅時重估。
 
 ---
 
