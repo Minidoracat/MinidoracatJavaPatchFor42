@@ -28,7 +28,7 @@ import zombie.network.fields.ContainerID;
  * {@code processServer}（dist 內手術後的，或 vanilla 模式的 jar 原版）與它呼叫的真 {@code processModData}；轉發內容看封包的
  * {@code moddata}（原版轉發的 {@code write} 序列化的就是它）。物品是只蓋掉無關欄位 setter 的替身，modData 走原版實作。
  * argv：{@code on}（出貨組態）／{@code keys}（{@code -Dmdc.itemModDataKeys=Alpha, Beta}）／{@code off}（kill switch）／
- * {@code vanilla}（classpath 不含 dist，原版負對照），自驗。
+ * {@code vanilla}（classpath 不含 dist，原版負對照）／{@code logthrow}（日誌串流一寫就拋例外：保護照做、Error 照常外拋），自驗。
  */
 public final class ItemModDataGuardTest {
 

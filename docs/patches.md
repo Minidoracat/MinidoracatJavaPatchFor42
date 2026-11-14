@@ -5615,7 +5615,7 @@ console（`kept`、`dropped` 合計每 10 秒最多 20 行）：
 **守門與驗證**：
 - SmokeCheck：上游指紋——`processServer` 恰呼叫 `processModData` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `moddata`；原版 `processModData` 與 `parse` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
 - `ItemModDataGuardTest`（`build.ps1` [9zzm/10]，on、自訂保留鍵、off、jar 原版、logthrow 五個 JVM，自驗 argv）：走真 `processServer` 與它呼叫的真 `processModData`。保留鍵被改寫、封包沒帶、封包憑空帶、伺服器那件沒有 modData、保留鍵在 metatable：伺服器那份與轉發用的封包表都是伺服器的值，各記一行；內容相同（含巢狀表）不記；封包沒帶 modData 不動；其他鍵照封包；第二個保留鍵（旗標值帶空白）也保留、不在清單的鍵照原版；判不出物品時封包的 modData 被拿掉、記 `anomalies` 與一行 `dropped`。off 與 jar 原版照收（負對照）。logthrow：日誌串流一寫就拋例外時保護照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
-- 實機 E2E（2026-11-14，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1114a`）`RESULT PASS`，伺服器那份的保留鍵沒有變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1114a`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝行為與原版相同，首次生效行寫 `mode=off`、沒有 `kept` 行。
+- 實機 E2E（2026-11-14，9950X3D，42.22.2 專用伺服器以 agent jar 開服，一般權限的客戶端；情境不公開）：on（`w102-on-1114b`）`RESULT PASS`，伺服器那份的保留鍵沒有變，同一包帶的其他鍵與名稱照常同步；伺服器 console 有首次生效行與兩行 `kept`，`[mdc-agent] ARMED: 84 patched classes`、零連結錯誤。kill switch（`w102-off-1114b`，`-Dmdc.itemModDataGuard=off`）`RESULT PASS`＝行為與原版相同，首次生效行寫 `mode=off`、沒有 `kept` 行。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcItemModDataGuard.class` 與 `zombie/network/packets/SyncItemFieldsPacket.class`（186 → 188 個 class：84 個 patched class、249 個命中點、104 個 helper）。
 

@@ -9232,7 +9232,7 @@ public final class SmokeCheck {
             String what = lock[0].substring(lock[0].lastIndexOf('/') + 1) + "." + lock[1] + lock[2];
             MethodNode body = declaredMethod(cn, lock[1], lock[2]);
             String got = body == null ? "missing" : sha256Hex(methodText(body));
-            failed += check(tag + " vanilla 前提：" + what + " 本體（去 debug 的 methodText SHA-256）與 42.21 相同", got.equals(lock[3]));
+            failed += check(tag + " vanilla 前提：" + what + " 本體（去 debug 的 methodText SHA-256）與鎖定的原版相同", got.equals(lock[3]));
             if (!got.equals(lock[3])) {
                 System.out.println("  實際 SHA：" + got);
             }
