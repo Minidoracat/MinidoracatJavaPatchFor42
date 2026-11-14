@@ -3990,6 +3990,7 @@ public final class SmokeCheck {
         failed += checkLightSettings(jar, distJava);
         failed += checkItemModDataGuard(jar, distJava);
         failed += checkWornItemGuard(jar, distJava);
+        failed += checkTransactionExtraGuard(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
@@ -7558,6 +7559,21 @@ public final class SmokeCheck {
                     "e63fbbeb1d5a4d0564db89b5af1cb2486a95cb15c80b2a0e2f7ce251e1bcf051"},
             {"zombie/characters/WornItems/WornItems", "remove", "(Lzombie/inventory/InventoryItem;)V",
                     "4ef1d26a82d1672e080b80ce420834c0d4ff408526ed4aea15bc86786658dc22"},
+            // 顯示用物品種類表（MdcWornItemGuard.BODY_MODELS）照這幾個方法列：客戶端替傷口與繃帶建的物品種類
+            {"zombie/characters/BodyDamage/BodyPartType", "getBandageModel", "()Ljava/lang/String;",
+                    "bded60f15796847faddbcd7b7c7616412858de0f4f88569017081fb4a0941b95"},
+            {"zombie/characters/BodyDamage/BodyPartType", "getBiteWoundModel", "(Lzombie/characters/CharacterGender;)Ljava/lang/String;",
+                    "15e7153e16b8edeb5bc69867b4f2f42d4b579052127323cf18560c8350ca2ec5"},
+            {"zombie/characters/BodyDamage/BodyPartType", "getScratchWoundModel", "(Lzombie/characters/CharacterGender;)Ljava/lang/String;",
+                    "be48d9606d0c4fbbc2a68240264edec3b99e9858ff4175dfee4c473f589e43f9"},
+            {"zombie/characters/BodyDamage/BodyPartType", "getCutWoundModel", "(Lzombie/characters/CharacterGender;)Ljava/lang/String;",
+                    "06f622318c309383ad3f1e1161596dbc738d8bf8f32000c3e16ca91f43de500c"},
+            {"zombie/characters/CharacterGender", "toString", "()Ljava/lang/String;",
+                    "f0f1ed2390c413a1713e611d05776c69d7f0e9a96a8a5e7ec3cea62c87cfbc9e"},
+            {"zombie/characters/IsoGameCharacter$Bandages", "getBloodBandageType", "(Ljava/lang/String;)Ljava/lang/String;",
+                    "4e97f16c506bf0b29b058806a29adb0f1a751594d7303c3b57514e21a8f037d6"},
+            {"zombie/characters/IsoGameCharacter$Bandages", "addBandageModel", "(Lzombie/characters/IsoGameCharacter;Ljava/lang/String;)V",
+                    "0f64dad73ede0da38b1ea83ff75f1a348ed886f49d15b27aab3f4a7424d2580e"},
     };
 
     /**
@@ -7611,6 +7627,111 @@ public final class SmokeCheck {
             uAnnounce.tryCatchBlocks.clear();
         }
         failed += check("W103 例外型別鎖負對照：report 的 catch 放寬成 Throwable、announce 的 log 拿掉 try 都會紅",
+                mutable && !teleportHandlerViolations(widened).isEmpty() && !teleportHandlerViolations(unguarded).isEmpty());
+        return failed;
+    }
+
+    /**
+     * W104：42.22.2 原版本體。helper 靠 updateItem 換型分支的順序（移出背包→CreateItem→放回背包→結尾判斷）、
+     * getClothingItemExtra 回腳本的清單；「原版客戶端的交易不帶 extra」靠 createItemTransaction；一致性檢查只看有沒有任何換型選項。
+     * 換型動作那條路靠 NetTimedAction 的 set／parse：參數照建構子的參數順序送、伺服器照同一個順序交給建構子。
+     *（建構子與 complete 在 media/lua 的 ISClothingExtraAction.lua，不在 jar 裡，建置期鎖不到；換版時用 E2E 情境 transaction-extra-mp 重驗。）
+     */
+    static final String[][] TX_EXTRA_LOCKED = {
+            {"zombie/core/Transaction", "updateItem", "(Lzombie/core/Transaction$TransactionEntry;)Z",
+                    "31768bfcfe5f1dd4e21fa110633b021ba8345d5c832f4e3e997031aba631a420"},
+            {"zombie/core/TransactionManager", "createItemTransaction",
+                    "(Lzombie/characters/IsoPlayer;Ljava/util/List;Lzombie/inventory/ItemContainer;Lzombie/inventory/ItemContainer;)B",
+                    "8c82421d13e3344a897e24d385f7f4eadebf6ce35354b3e7117dcb5eb6cdf66c"},
+            {"zombie/core/TransactionManager", "isConsistent",
+                    "(ILzombie/inventory/InventoryItem;Lzombie/inventory/ItemContainer;Lzombie/inventory/ItemContainer;Ljava/lang/String;"
+                            + "Lzombie/network/packets/ItemTransactionPacket;Lzombie/characters/IsoPlayer;)B",
+                    "62ba539699db1dc6289ba57ee59fd61689c92236b82cfa5b0651d3a3d1923ff5"},
+            {"zombie/inventory/InventoryItemFactory", "CreateItem",
+                    "(Lzombie/inventory/InventoryItem;Ljava/lang/String;)Lzombie/inventory/InventoryItem;",
+                    "431d1393d51593c76203a4282e6702938343c1989d53641c0ac07f9845e3f061"},
+            {"zombie/inventory/InventoryItem", "getClothingItemExtra", "()Ljava/util/ArrayList;",
+                    "9683ee78f2ede3d82e7e99d01aa74dd9af4b4c75a066242feea0f4be351bfa2a"},
+            {"zombie/inventory/ItemContainer", "Remove", "(Lzombie/inventory/InventoryItem;)V",
+                    "6c3703ca75e583ed4ebb5ff24538c6a6a654b5ec632a822c1f6435149b5c0b80"},
+            // 拒絕時原物不會不見，靠的是原版接著 AddItem 把它放回背包
+            {"zombie/inventory/ItemContainer", "AddItem", "(Lzombie/inventory/InventoryItem;)Lzombie/inventory/InventoryItem;",
+                    "794b13295b6b5faee77755da62c086312ed1fdd96f9da84eba1254da60f446c1"},
+            {"zombie/core/NetTimedAction", "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                    "f2d4244f393df4b9ec5a5b0f1f2919b69d7c180e2c88f6ee8d24c9e4dd08bed9"},
+            {"zombie/core/NetTimedAction", "set", "(Lzombie/characters/IsoPlayer;Lse/krka/kahlua/vm/KahluaTable;)V",
+                    "b6a8db8d27b4e7acfa4ccf4308e75616af7eccdf539789b80df95fac5fa7675d"},
+    };
+
+    /**
+     * W104 衣物換型種類驗證（物品交易與換型動作，docs/patches.md 2dl）：上游指紋（任一項變紅＝官方行為變了，先重估撤刀，不改斷言）、同形手術、helper 契約。
+     */
+    static int checkTransactionExtraGuard(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String tx = "zombie/core/Transaction";
+        String guard = "zombie/core/MdcTransactionExtraGuard";
+        String itemDesc = "(Lzombie/core/Transaction$TransactionEntry;)Z";
+        String createDesc = "(Lzombie/inventory/InventoryItem;Ljava/lang/String;)Lzombie/inventory/InventoryItem;";
+        String handsDesc = "(Lzombie/inventory/InventoryItem;)Z";
+        String create = "INVOKESTATIC zombie/inventory/InventoryItemFactory.CreateItem " + createDesc;
+        String hands = "INVOKEVIRTUAL zombie/characters/IsoPlayer.removeFromHands " + handsDesc;
+        MethodNode vItem = methodFromJar(jar, tx, "updateItem", itemDesc);
+        String vText = methodText(vItem);
+        int createAt = vText.indexOf(create);
+        failed += check("W104 上游指紋：updateItem 恰 1 處 CreateItem(item, 種類)、3 處 IsoPlayer.removeFromHands；CreateItem 前面是讀交易的 extra、"
+                        + "在移出背包之後、放回背包之前",
+                countExactCalls(vItem, Opcodes.INVOKESTATIC, "zombie/inventory/InventoryItemFactory", "CreateItem", createDesc) == 1
+                && countExactCalls(vItem, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "removeFromHands", handsDesc) == 3
+                && createAt > 0
+                && vText.substring(0, createAt).endsWith("GETFIELD " + tx + ".extra : Ljava/lang/String;\n    ")
+                && vText.substring(0, createAt).contains("INVOKEVIRTUAL zombie/inventory/ItemContainer.Remove (Lzombie/inventory/InventoryItem;)V")
+                && vText.substring(createAt).contains("INVOKEVIRTUAL zombie/inventory/ItemContainer.AddItem "));
+        failed += shaLocks(jar, "W104", TX_EXTRA_LOCKED);
+        MethodNode pItem = method(distJava, tx, "updateItem", itemDesc);
+        failed += check("W104 手術後：updateItem 只有那 4 個呼叫換成 helper（同形），其餘指令與 frames 不變；Transaction 其餘方法不變",
+                methodText(pItem).equals(vText
+                        .replace(create, "INVOKESTATIC " + guard + ".create " + createDesc)
+                        .replace(hands, "INVOKESTATIC " + guard + ".removeFromHands (Lzombie/characters/IsoPlayer;Lzombie/inventory/InventoryItem;)Z"))
+                && otherMethodsSame(jar, distJava, tx, "updateItem", itemDesc));
+        ClassNode g = classNode(distJava, guard);
+        String bad = teleportHandlerViolations(g);
+        MethodNode gCreate = declaredMethod(g, "create", createDesc);
+        MethodNode gHands = declaredMethod(g, "removeFromHands", "(Lzombie/characters/IsoPlayer;Lzombie/inventory/InventoryItem;)Z");
+        failed += check("W104 helper 契約：catch 只有 RuntimeException／LinkageError，每個 DebugLog.log 都在含兩者的 try 內；"
+                        + "create 與 removeFromHands 自己沒有 try（原版呼叫的例外照常外拋），各呼叫原版 1 次" + bad,
+                bad.isEmpty() && gCreate.tryCatchBlocks.isEmpty() && gHands.tryCatchBlocks.isEmpty()
+                && countExactCalls(gCreate, Opcodes.INVOKESTATIC, "zombie/inventory/InventoryItemFactory", "CreateItem", createDesc) == 1
+                && countExactCalls(gHands, Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "removeFromHands", handsDesc) == 1);
+        String pcHelper = "(Lse/krka/kahlua/integration/LuaCaller;Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)"
+                + "Lse/krka/kahlua/integration/LuaReturn;";
+        MethodNode ntaCall = method(distJava, "zombie/mdc/NetTimedActionGuard", "protectedCall", pcHelper);
+        MethodNode gAction = declaredMethod(g, "refuseAction", "([Ljava/lang/Object;)Z");
+        boolean classCheckInTry = false;
+        for (AbstractInsnNode in : gAction.instructions) {
+            if (isCall(in, Opcodes.INVOKESTATIC, guard, "isExtraAction", "(Ljava/lang/Object;)Z")) {
+                int at = gAction.instructions.indexOf(in);
+                for (TryCatchBlockNode t : gAction.tryCatchBlocks) {
+                    classCheckInTry |= gAction.instructions.indexOf(t.start) <= at && at < gAction.instructions.indexOf(t.end);
+                }
+            }
+        }
+        failed += check("W104 換型動作：NetTimedActionGuard.protectedCall 恰問 refuseAction 1 次、在呼叫 Lua 建構子之前；"
+                        + "refuseAction 的類別辨認在 try 內（其餘的例外處理由 TransactionExtraGuardTest 的動作例外與 logthrow 案例驗）",
+                countExactCalls(ntaCall, Opcodes.INVOKESTATIC, guard, "refuseAction", "([Ljava/lang/Object;)Z") == 1
+                && firstCallIndex(ntaCall, Opcodes.INVOKESTATIC, guard, "refuseAction", "([Ljava/lang/Object;)Z")
+                        < firstCallIndex(ntaCall, Opcodes.INVOKEVIRTUAL, "se/krka/kahlua/integration/LuaCaller", "protectedCall",
+                                "(Lse/krka/kahlua/vm/KahluaThread;Ljava/lang/Object;[Ljava/lang/Object;)Lse/krka/kahlua/integration/LuaReturn;")
+                && classCheckInTry);
+        ClassNode widened = classNode(distJava, guard);
+        ClassNode unguarded = classNode(distJava, guard);
+        MethodNode wReport = widened.methods.stream().filter(m -> m.name.equals("report")).findFirst().orElse(null);
+        MethodNode uAnnounce = declaredMethod(unguarded, "announce", "()V");
+        boolean mutable = wReport != null && !wReport.tryCatchBlocks.isEmpty() && uAnnounce != null && !uAnnounce.tryCatchBlocks.isEmpty();
+        if (mutable) {
+            wReport.tryCatchBlocks.get(0).type = "java/lang/Throwable";
+            uAnnounce.tryCatchBlocks.clear();
+        }
+        failed += check("W104 例外型別鎖負對照：report 的 catch 放寬成 Throwable、announce 的 log 拿掉 try 都會紅",
                 mutable && !teleportHandlerViolations(widened).isEmpty() && !teleportHandlerViolations(unguarded).isEmpty());
         return failed;
     }

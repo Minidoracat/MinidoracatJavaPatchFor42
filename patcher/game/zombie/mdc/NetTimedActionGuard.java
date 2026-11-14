@@ -8,6 +8,7 @@ import se.krka.kahlua.integration.LuaReturn;
 import se.krka.kahlua.vm.KahluaTable;
 import se.krka.kahlua.vm.KahluaThread;
 import zombie.core.MdcTimedActionProbe;
+import zombie.core.MdcTransactionExtraGuard;
 import zombie.core.NetTimedAction;
 import zombie.core.network.ByteBufferReader;
 import zombie.core.raknet.UdpConnection;
@@ -143,6 +144,9 @@ public final class NetTimedActionGuard {
      *
      * <p>本封包參數已解析失敗時<b>不呼叫</b> Lua 建構子（{@code arguments[]} 不完整），直接回
      * LuaFail；該分支與 B 刀的 kill switch 無關（是 D 刀的語意）。
+     *
+     * <p>W104：換型動作指定的種類不合時（{@link MdcTransactionExtraGuard#refuseAction}）同樣不呼叫建構子、回 LuaFail；
+     * 開關是 W104 自己的 {@code -Dmdc.transactionExtraGuard}。
      */
     public static LuaReturn protectedCall(LuaCaller caller, KahluaThread thread, Object fn, Object[] args) {
         boolean argsUnusable = ARGS_FAILED.get() != null;
@@ -151,6 +155,9 @@ public final class NetTimedActionGuard {
         if (argsUnusable) {
             argsRejected.incrementAndGet();
             return LuaReturn.createReturn(new Object[]{ Boolean.FALSE, "mdc: timed action args unusable" });
+        }
+        if (MdcTransactionExtraGuard.refuseAction(args)) {
+            return LuaReturn.createReturn(new Object[]{ Boolean.FALSE, "mdc: clothing extra type refused" });
         }
         if (!CALL_GUARD) {
             return caller.protectedCall(thread, fn, args);

@@ -160,6 +160,7 @@ $helperEntries = @(
     'zombie/network/packets/MdcLightSettingsGuard.class',
     'zombie/network/packets/MdcItemModDataGuard.class',
     'zombie/network/packets/MdcWornItemGuard.class',
+    'zombie/core/MdcTransactionExtraGuard.class',
     'zombie/mdc/PlayerLosFilter.class',
     'zombie/mdc/PlayerLosFilter$Filter.class',
     'zombie/mdc/PlayerLosFilter$Plain.class',
@@ -1026,6 +1027,18 @@ java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.WornItemGuardTest
 Assert-Ok "WornItemGuardTest（vanilla，jar 原版負對照）"
 java -Xverify:all "-Dmdc.wornItemGuard=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest logthrow
 Assert-Ok "WornItemGuardTest（logthrow enforce，日誌拋例外時照做、Error 照常外拋）"
+
+Write-Host "[9zzo/10] 衣物換型種類驗證（W104）：原物腳本列的換型種類（短名、加 module、原物自己的種類）照原版；物品交易帶不在清單的種類時 on 回傳原物、不建，observe 只記、照原版建；換型動作帶不在清單的種類（含衍生類別、物品解析不到、種類不是字串、缺參數）時 on 不建構、回失敗；off 與 jar 原版照建不記（負對照）；判斷出例外時 on 擋下；種類字串進 log 前清過；logthrow：日誌拋例外時照做、Error 照常外拋..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.TransactionExtraGuardTest on
+Assert-Ok "TransactionExtraGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.transactionExtraGuard=observe" "-Dmdc.transactionExtraAllow=Base.Hat:Mod.Hat_Hidden, bad,:x,Mod.Hat_Hidden:Base.Hat2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.TransactionExtraGuardTest observe
+Assert-Ok "TransactionExtraGuardTest（observe，帶放行清單）"
+java -Xverify:all "-Dmdc.transactionExtraGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.TransactionExtraGuardTest off
+Assert-Ok "TransactionExtraGuardTest（off，kill switch）"
+java -Xverify:all -cp "$R\work\out;$TJ" zombie.core.TransactionExtraGuardTest vanilla
+Assert-Ok "TransactionExtraGuardTest（vanilla，jar 原版負對照）"
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.TransactionExtraGuardTest logthrow
+Assert-Ok "TransactionExtraGuardTest（logthrow on，日誌拋例外時照做、Error 照常外拋）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark

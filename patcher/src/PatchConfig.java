@@ -1054,7 +1054,8 @@ public final class PatchConfig {
         patches.add(itemFields);
 
         // W103：穿戴同步驗證（docs/patches.md 2dk）。SyncClothingPacket.processServer 頭部 begin(packet, connection)（slots 0、2）：
-        // 封包列的穿戴物在伺服器那位玩家的背包裡找不到時記一行（不看穿戴欄），enforce 整包判斷完才從封包的清單拿掉；原版 process 與轉發照跑。
+        // 封包列的穿戴物在伺服器那位玩家的背包裡找不到時記一行（不看穿戴欄；傷口與繃帶的顯示用物品只累計，記 bodyModels 行），
+        // enforce 整包判斷完才從封包的清單拿掉；原版 process 與轉發照跑。
         // -Dmdc.wornItemGuard=observe|enforce|off，預設 observe。
         Patcher.ClassPatch clothingSync = new Patcher.ClassPatch("zombie/network/packets/SyncClothingPacket");
         Patcher.MethodOps clothingSyncServer = clothingSync.method("processServer",
@@ -1063,6 +1064,20 @@ public final class PatchConfig {
                 "(Lzombie/network/packets/SyncClothingPacket;Lzombie/core/raknet/UdpConnection;)V", new int[]{0, 2});
         clothingSyncServer.expectedHits = 1;
         patches.add(clothingSync);
+
+        // W104：衣物換型種類驗證（docs/patches.md 2dl）。物品交易這條路：Transaction.updateItem 換型分支的 CreateItem(item, extra) 改道
+        // create：extra 不是原物腳本列的換型種類時回傳原物、不建新物品。同方法三處 IsoPlayer.removeFromHands 改道同名 helper，
+        // 只為記下玩家，呼叫照原版。-Dmdc.transactionExtraGuard=on|observe|off，預設 on。
+        // 換型動作那條路不加手術：上面 W10 的 NetTimedActionGuard.protectedCall 在呼叫 Lua 建構子前問 MdcTransactionExtraGuard.refuseAction。
+        String txExtraGuard = "zombie/core/MdcTransactionExtraGuard";
+        Patcher.ClassPatch txExtra = new Patcher.ClassPatch("zombie/core/Transaction");
+        Patcher.MethodOps txUpdateItem = txExtra.method("updateItem", "(Lzombie/core/Transaction$TransactionEntry;)Z");
+        txUpdateItem.redirects.add(new Patcher.Site(Opcodes.INVOKESTATIC, "zombie/inventory/InventoryItemFactory", "CreateItem",
+                "(Lzombie/inventory/InventoryItem;Ljava/lang/String;)Lzombie/inventory/InventoryItem;", txExtraGuard, "create"));
+        txUpdateItem.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/characters/IsoPlayer", "removeFromHands",
+                "(Lzombie/inventory/InventoryItem;)Z", txExtraGuard, "removeFromHands"));
+        txUpdateItem.expectedHits = 4;   // CreateItem 1＋removeFromHands 3
+        patches.add(txExtra);
 
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");

@@ -99,10 +99,11 @@ public final class WornItemGuardTest {
             expect("種類字串的換行與控制字元清掉、截成 64 字元（" + cleaned.length() + "）",
                     cleaned.length() == 64 && cleaned.startsWith("A?B?C?x") && cleaned.chars().allMatch(ch -> ch >= 0x20 && ch < 0x7f));
             expect("unbacked 計數 4、anomalies 0", guardLong("unbackedForTest") == 4 && guardLong("anomaliesForTest") == 0);
-            expect("首次生效行恰 1 行", rows(log, TAG + " 首次生效 mode=" + mode + " reflect=ok.").size() == 1);
+            expect("首次生效行恰 1 行", rows(log, TAG + " 首次生效 mode=" + mode + " bodyModelTypes=").size() == 1
+                    && rows(log, " reflect=ok.").size() == 1);
         } else if ("off".equals(mode)) {
             expect("off：零計數、首次生效行寫 mode=off",
-                    guardLong("unbackedForTest") == 0 && rows(log, TAG + " 首次生效 mode=off reflect=ok.").size() == 1);
+                    guardLong("unbackedForTest") == 0 && rows(log, TAG + " 首次生效 mode=off bodyModelTypes=").size() == 1);
         }
 
         // 同一包前面的項目把後面那一項原本穿著的東西擠掉：背包裡的 10 改穿到 16 的位置，原版輪到 16 時它已經不在穿戴欄。
@@ -128,6 +129,42 @@ public final class WornItemGuardTest {
                     before.equals(new ArrayList<Object>(broken.items)) && guardLong("anomaliesForTest") == 1
                             && rows(log, TAG + " anomaly reason=NullPointerException ").size() == 1
                             && guardLong("unbackedForTest") == 8);
+
+            // 傷口與繃帶的顯示用物品：不逐項記、只累計，第一次出現記一行 bodyModels；10 分鐘內再出現不再記
+            Method isModel = Class.forName(GUARD).getDeclaredMethod("isBodyModelForTest", String.class);
+            isModel.setAccessible(true);
+            expect("顯示用物品種類表：繃帶（乾淨、帶血）與各性別的傷口在表內，一般衣物與 null 不在",
+                    (boolean) isModel.invoke(null, "Base.Bandage_RightHand") && (boolean) isModel.invoke(null, "Base.Bandage_RightHand_Blood")
+                            && (boolean) isModel.invoke(null, "Base.Wound_RHand_Bite_Female") && (boolean) isModel.invoke(null, "Base.Wound_LForearm_Laceration_Male")
+                            && !(boolean) isModel.invoke(null, "Base.Glasses_Normal") && !(boolean) isModel.invoke(null, (Object) null));
+            int rowsBefore = rows(log, TAG + " unbacked ").size();
+            World model = world();
+            model.items.add(desc(97, "Base.Bandage_RightHand_Blood", ItemBodyLocation.BANDAGE));
+            model.packet.processServer(null, model.conn);
+            World model2 = world();
+            model2.items.add(desc(97, "Base.Wound_RHand_Bite_Female", ItemBodyLocation.BANDAGE));
+            model2.packet.processServer(null, model2.conn);
+            List<String> beats = rows(log, TAG + " bodyModels total=");
+            expect("顯示用物品：兩包各 1 項只累計（" + guardLong("bodyModelsForTest") + "）、unbacked 行只多另外 4＋4 行、bodyModels 行恰 1 行（" + beats + "）"
+                            + (enforce ? "、enforce 連它一起拿掉（" + model.ids() + "）" : "、清單不動"),
+                    guardLong("bodyModelsForTest") == 2 && rows(log, TAG + " unbacked ").size() == rowsBefore + 8 && beats.size() == 1
+                            && beats.get(0).contains(" bodyModels total=1 action=" + (enforce ? "removed" : "counted") + " unbacked=")
+                            && guardLong("unbackedForTest") == 16
+                            && model.ids().equals(enforce ? "[10, 11, 14]" : "[10, 11, 14, 15, 16, 99, 98, 97]"));
+
+            // 已經穿著的普通衣物（16，背包沒有）被封包改報成顯示用物品的種類：穿著的不是顯示用物品，所以照樣逐項記、不算顯示用物品。
+            //（這個 JVM 到這裡已接近每 10 秒 20 行的上限，行數不一定滿 4；計數才是準的）
+            long modelsBefore = guardLong("bodyModelsForTest");
+            long unbackedCountBefore = guardLong("unbackedForTest");
+            int fakeBefore = rows(log, TAG + " unbacked ").size();
+            World fake = world();
+            fake.items.get(4).itemType = "Base.Bandage_RightHand";
+            fake.packet.processServer(null, fake.conn);
+            List<String> fakeRows = rows(log, TAG + " unbacked ");
+            expect("穿著的普通衣物假報顯示用物品的種類：不算顯示用物品、照樣算無對應項並逐項記",
+                    guardLong("bodyModelsForTest") == modelsBefore && guardLong("unbackedForTest") == unbackedCountBefore + 4
+                            && fakeRows.subList(fakeBefore, fakeRows.size()).stream()
+                                    .anyMatch(r -> r.contains(" unbacked type=Base.Bandage_RightHand id=16 ") && r.contains(" worn=1 ")));
         }
 
         if (failed > 0) {
