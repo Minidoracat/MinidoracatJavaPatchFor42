@@ -6228,6 +6228,39 @@ ERROR: General > GameWindow.frameStep> Exception thrown
 
 ---
 
+<a id="2dj"></a>
+## 2dj. Item data sync check (W102, server, default on)
+
+Hardens server-side validation of `SyncItemFields`: for item modData keys that only the server should write (reserved keys), the server does not take the client's value. The details of the gap are not described in public documents.
+
+**Check**: when the packet carries modData, each reserved key in the packet's table is replaced with the value the server's item currently holds; if the server has no such key it is removed from the packet. Vanilla then runs unchanged: the server's reserved keys stay as they were (also when the packet did not carry the key), and other clients are forwarded the server's value. Other keys and the condition, name, favourite and attachment fields behave as in vanilla. A packet without modData already leaves the server's copy alone in vanilla, so nothing is done.
+
+**Reserved keys**: `-Dmdc.itemModDataKeys` (comma separated), default `MinidoracatEconomy` (the record the family Economy mod writes on items). Mods that write their own keys on the client and rely on this packet to carry them to the server are unaffected unless that key is listed.
+
+**Surgery**: `MdcItemModDataGuard.begin(packet, connection)` at the head of `SyncItemFieldsPacket.processServer` (HeadCall slots 0 and 2; new ClassPatch, 1 hit); no vanilla instruction is changed. If the helper cannot resolve the item (an exception), it sets the packet's modData to null: that packet's modData is not applied at all, the server's copy stays, and the other fields are processed as usual. An `Error` still propagates.
+
+Console (when the client's value differs from the server's; at most 20 lines per 10 s):
+
+```text
+[MinidoracatJavaPatch][ItemModDataGuard] 首次生效 mode=on keys=MinidoracatEconomy reflect=ok.
+[MinidoracatJavaPatch][ItemModDataGuard] kept key=<key> item=<item type>#<id> connectionPlayers=<…> refused=<n> suppressed=<n> anomalies=<n>.
+```
+
+A `kept` line is not necessarily malicious: a packet sent while the client has not yet received the server's latest change to a reserved key also logs one.
+
+**Kill switch**: `-Dmdc.itemModDataGuard=0|off` restores vanilla, restart required.
+
+**Guards and verification**:
+- SmokeCheck: upstream fingerprint: `processServer` calls `processModData` exactly once, before forwarding, and the forwarding `write` reads the packet's `moddata`; SHA lock on vanilla's `processModData` body (with a negative control); after surgery the head is `aload_0; aload_2; begin`, all other instructions and frames are unchanged and so are the other methods; the helper's `begin` does not catch `Throwable`.
+- `ItemModDataGuardTest` (`build.ps1` [9zzm/10]; four JVMs: on, custom reserved keys, off, vanilla jar; argv self-checked): runs the real `processServer` and the real `processModData` it calls. Reserved key rewritten, missing from the packet, invented by the packet, and a server item without modData: the server's copy and the packet table used for forwarding both hold the server's value, one log line each; equal content (nested tables included) logs nothing; a packet without modData changes nothing; other keys follow the packet; a second reserved key (flag value with spaces) is kept too and a key not on the list behaves as in vanilla; when the item cannot be resolved the packet's modData is dropped and `anomalies` counts it. Off and the vanilla jar accept everything (negative controls).
+- Live E2E (2026-11-14, 9950X3D, a 42.22.2 dedicated server started with the agent jar and a client with a regular account; the scenario is not published): on (`w102-on-1114a`) `RESULT PASS`: after two syncs from the client the server's reserved key was unchanged while the other keys and the name carried by the same packets synced as usual; the server console has the first-activation line and two `kept key=MinidoracatEconomy … connectionPlayers=0:test` lines, `[mdc-agent] ARMED: 84 patched classes` and no linkage errors. Kill switch (`w102-off-1114a`, `-Dmdc.itemModDataGuard=off`) `RESULT PASS` meaning the client's value is taken as in vanilla; the first-activation line says `mode=off` and there are no `kept` lines.
+
+**Deployment**: the manifest gains `zombie/network/packets/MdcItemModDataGuard.class` and `zombie/network/packets/SyncItemFieldsPacket.class` (186 → 188 classes: 84 patched classes, 249 patch sites, 104 helpers).
+
+**Retirement**: when the server no longer takes item modData from the client, or re-evaluate when the SmokeCheck upstream fingerprint or SHA lock turns red.
+
+---
+
 <a id="3"></a>
 ## 3. Post-deployment verification checklist
 

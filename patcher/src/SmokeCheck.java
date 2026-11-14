@@ -3989,6 +3989,7 @@ public final class SmokeCheck {
         failed += checkActionValidation(jar, distJava);
         failed += checkZombieReuseOwner(jar, distJava);
         failed += checkLightSettings(jar, distJava);
+        failed += checkItemModDataGuard(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
@@ -7479,6 +7480,63 @@ public final class SmokeCheck {
                 && prevReal(setOwner).getOpcode() == Opcodes.ACONST_NULL
                 && prevReal(setPlayer).getOpcode() == Opcodes.ACONST_NULL
                 && h.tryCatchBlocks.stream().allMatch(t -> "java/lang/RuntimeException".equals(t.type)));
+        return failed;
+    }
+
+    /** W102：42.22.2 原版 processModData 本體（去 debug 的 methodText SHA-256）。begin 靠它「wipe 後逐鍵照封包那份寫回」的語意。 */
+    static final String W102_PROCESS_MODDATA_SHA = "4f40732f55084263be5452dd12f9893cc0675c771bced066738a665af289704e";
+
+    /**
+     * W102 物品資料同步驗證：存在理由（processServer 把封包的 modData 整份套到伺服器物品、之後才轉發，轉發的 write 讀同一份表；
+     * 變紅＝官方行為變了，先重估撤刀，不改斷言）、頭部 headCall、helper 契約。
+     */
+    static int checkItemModDataGuard(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String pkt = "zombie/network/packets/SyncItemFieldsPacket";
+        String guard = "zombie/network/packets/MdcItemModDataGuard";
+        String serverDesc = "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
+        String beginDesc = "(L" + pkt + ";Lzombie/core/raknet/UdpConnection;)V";
+        String modGet = "GETFIELD " + pkt + ".moddata : Lse/krka/kahlua/vm/KahluaTable;";
+        String vText = methodText(methodFromJar(jar, pkt, "processServer", serverDesc));
+        int applyAt = vText.indexOf(pkt + ".processModData ()V");
+        failed += check("W102 上游指紋：processServer 恰呼叫 processModData 1 次、在 sendToRelativeClients 之前；"
+                        + "轉發用的 write 讀封包的 moddata",
+                applyAt >= 0 && applyAt == vText.lastIndexOf(pkt + ".processModData ()V")
+                && applyAt < vText.indexOf(pkt + ".sendToRelativeClients ")
+                && methodText(methodFromJar(jar, pkt, "write", "(Lzombie/core/network/ByteBufferWriter;)V")).contains(modGet));
+        ClassNode vCls = new ClassNode();
+        try (java.util.jar.JarFile jf = new java.util.jar.JarFile(jar.toFile())) {
+            new ClassReader(jf.getInputStream(jf.getJarEntry(pkt + ".class")).readAllBytes()).accept(vCls, ClassReader.SKIP_DEBUG);
+        }
+        MethodNode vApply = declaredMethod(vCls, "processModData", "()V");
+        String got = vApply == null ? "missing" : sha256Hex(methodText(vApply));
+        failed += check("W102 vanilla 前提：processModData 本體（去 debug 的 methodText SHA-256）與 42.22.2 相同", got.equals(W102_PROCESS_MODDATA_SHA));
+        if (!got.equals(W102_PROCESS_MODDATA_SHA)) {
+            System.out.println("  實際 SHA：" + got);
+        }
+        String mutation = vApply == null ? "none" : wmIndexMutate(vApply);
+        failed += check("W102 SHA 鎖負對照：processModData " + mutation + " → SHA 鎖變紅",
+                got.equals(W102_PROCESS_MODDATA_SHA) && !mutation.equals("none")
+                && !sha256Hex(methodText(vApply)).equals(W102_PROCESS_MODDATA_SHA));
+        MethodNode pServer = method(distJava, pkt, "processServer", serverDesc);
+        boolean othersSame = classNodeFromJar(jar, pkt).methods.stream()
+                .filter(m -> !(m.name.equals("processServer") && m.desc.equals(serverDesc))).allMatch(m -> {
+                    try {
+                        return methodText(m).equals(methodText(method(distJava, pkt, m.name, m.desc)));
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+        failed += check("W102 手術後：processServer 頭部 aload_0／aload_2／begin，其餘指令與 frames 不變；SyncItemFieldsPacket 其餘方法不變",
+                headCallSlotsOk(pServer, guard, "begin", beginDesc, 0, 2)
+                && methodText(pServer).equals("    ALOAD 0\n    ALOAD 2\n    INVOKESTATIC " + guard + ".begin " + beginDesc + "\n" + vText)
+                && othersSame);
+        MethodNode gBegin = method(distJava, guard, "begin", beginDesc);
+        failed += check("W102 helper 契約：begin 有 try、不接 Throwable（Error 照常外拋），失敗時把封包的 moddata 設成 null",
+                !gBegin.tryCatchBlocks.isEmpty()
+                && gBegin.tryCatchBlocks.stream().allMatch(t -> t.type != null && !t.type.equals("java/lang/Throwable")
+                        && !t.type.equals("java/lang/Error"))
+                && methodText(gBegin).contains("ACONST_NULL\n    PUTFIELD " + pkt + ".moddata"));
         return failed;
     }
 

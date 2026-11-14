@@ -1042,6 +1042,17 @@ public final class PatchConfig {
         lightParse.expectedHits = 12;   // begin＋activated＋九個 setter（setBulbItemRaw 兩處）
         patches.add(lightSettings);
 
+        // W102：物品資料同步驗證（docs/patches.md 2dj）。SyncItemFieldsPacket.processServer 頭部 begin(packet, connection)
+        //（slots 0、2）：封包帶 modData 時，把封包那份表裡的保留鍵換成伺服器那件物品的現值（沒有就拿掉），原版 processModData
+        // 與轉發照跑。kill switch -Dmdc.itemModDataGuard=0|off；保留鍵 -Dmdc.itemModDataKeys。
+        Patcher.ClassPatch itemFields = new Patcher.ClassPatch("zombie/network/packets/SyncItemFieldsPacket");
+        Patcher.MethodOps itemFieldsServer = itemFields.method("processServer",
+                "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
+        itemFieldsServer.headCall = new Patcher.HeadCall("zombie/network/packets/MdcItemModDataGuard", "begin",
+                "(Lzombie/network/packets/SyncItemFieldsPacket;Lzombie/core/raknet/UdpConnection;)V", new int[]{0, 2});
+        itemFieldsServer.expectedHits = 1;
+        patches.add(itemFields);
+
         // W31：只在兩個既有廣播入口共用本批已完成的 body；單連線回覆維持原版。
         Patcher.ClassPatch fishSchool = new Patcher.ClassPatch("zombie/iso/FishSchoolManager");
         for (String methodName : new String[]{"updateSeed", "updateFishingData"}) {
