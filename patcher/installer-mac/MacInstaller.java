@@ -40,7 +40,8 @@ import java.util.zip.ZipFile;
  * 只碰三個位置：{@code .mdc-patches/MinidoracatClientPatches.jar}、{@code .mdc-patches/state.json}（schemaVersion 2，
  * 和 Windows／MdcPatchRuntime 同一份格式），以及 {@code Contents/Info.plist} 的 JVMOptions 裡自家那一行
  * {@code -javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=…}（Mac 的啟動器走 JLI_Launch，-javaagent 直接可用，
- * 不需要 Windows 的 agent 載入器 DLL）。唯一例外：玩家同意時改 JVMOptions 裡 -Xmx 的值，移除時不改回。
+ * 不需要 Windows 的 agent 載入器 DLL）。唯一例外：玩家同意時改 JVMOptions 裡 -Xmx 的值，移除時不改回；主選單 [5] 只改這個值，
+ * 沒裝修補也能改，不碰安裝紀錄。
  *
  * <p>沒有 journal：所有新內容先寫成同資料夾的暫存檔並驗 SHA，再連續原子改名。啟用順序 jar → state → plist、
  * 停用順序 plist → state → jar，任何中斷點都不會留下「plist 指著不存在的 jar」；中斷後重跑安裝或移除即可收斂。
@@ -708,6 +709,18 @@ public final class MacInstaller {
         return ramGb >= 32 ? 8192 : ramGb >= 16 ? 6144 : ramGb >= 12 ? 4096 : 0;
     }
 
+    /** 改成 mb 會讓 JVM 起不來（初始堆積大於上限，或認不得）時回原因，否則 null。 */
+    private String memoryBlocker(List<String> options, int mb) {
+        for (String o : options) {
+            boolean initial = o.startsWith("-Xms") || o.startsWith("-XX:InitialHeapSize") || o.startsWith("-XX:MinHeapSize");
+            if (initial && !(o.matches("-Xms" + HEAP_SIZE) && xmxMb(o) <= mb)) {
+                return L("Info.plist 的 " + o + " 大於 " + mb + " MB 或認不得，改成這個上限遊戲會開不起來。",
+                        "Info.plist has " + o + ", which is larger than " + mb + " MB or not understood; the game would not start with that limit.");
+            }
+        }
+        return null;
+    }
+
     /** 要把 -Xmx 改成多少 MB；null＝不動。--memory-mb 照做；互動時目前值低於建議值才問，Return 或 Y＝調高。 */
     private Integer memoryChoice(InfoPlist plist) {
         int xi = xmxIndex(plist.options);
@@ -716,13 +729,8 @@ public final class MacInstaller {
                 throw new Fail(CONFLICT, L("Info.plist 找不到可以調整的記憶體上限（要剛好一條 -Xmx，格式像 -Xmx3072m），沒辦法用 --memory-mb。",
                         "Info.plist has no memory limit this installer can change (exactly one -Xmx, like -Xmx3072m), so --memory-mb cannot be used."));
             }
-            for (String o : plist.options) { // 調低到初始堆積以下 JVM 會拒絕啟動
-                boolean initial = o.startsWith("-Xms") || o.startsWith("-XX:InitialHeapSize") || o.startsWith("-XX:MinHeapSize");
-                if (initial && !(o.matches("-Xms" + HEAP_SIZE) && xmxMb(o) <= memoryMb)) {
-                    throw new Fail(CONFLICT, L("Info.plist 的 " + o + " 大於 " + memoryMb + " MB 或認不得，改成這個上限遊戲會開不起來。",
-                            "Info.plist has " + o + ", which is larger than " + memoryMb + " MB or not understood; the game would not start with that limit."));
-                }
-            }
+            String why = memoryBlocker(plist.options, memoryMb); // 調低到初始堆積以下 JVM 會拒絕啟動
+            if (why != null) throw new Fail(CONFLICT, why);
             return memoryMb == xmxMb(plist.options.get(xi)) ? null : memoryMb;
         }
         if (!interactive || xi < 0) return null;
@@ -1156,9 +1164,11 @@ public final class MacInstaller {
             info(L("  [2] 移除部分修補", "  [2] Remove some patches"));
             info(L("  [3] 全部移除", "  [3] Remove everything"));
             info(L("  [4] 查看目前安裝狀態", "  [4] Show installation status"));
+            String memLabel = memoryLabel();
+            info(L("  [5] 調整遊戲記憶體上限（" + memLabel + "）", "  [5] Change the game memory limit (" + memLabel + ")"));
             info(L("  [L] English", "  [L] 中文"));
             info(L("  [0] 離開", "  [0] Exit"));
-            String c = choice(L("請輸入數字後按 Return", "Type a number and press Return"), List.of("0", "1", "2", "3", "4", "L"), null);
+            String c = choice(L("請輸入數字後按 Return", "Type a number and press Return"), List.of("0", "1", "2", "3", "4", "5", "L"), null);
             if (c.equals("L")) {
                 zh = !zh;
                 continue;
@@ -1183,6 +1193,7 @@ public final class MacInstaller {
                         }
                     }
                     case "3" -> uninstall(List.of(), true);
+                    case "5" -> memory();
                     default -> status();
                 }
             } catch (Fail f) {
@@ -1192,6 +1203,109 @@ public final class MacInstaller {
             }
             info("");
             if (ask(L("按 Return 回到主選單", "Press Return to return to the main menu")) == null) return;
+        }
+    }
+
+    // ------------------------------------------------------------------ 主選單 [5]：調整遊戲記憶體上限
+    /** 主選單那行括號裡的字；讀不到或認不得只說無法判斷（主選單不因此失敗）。 */
+    private String memoryLabel() {
+        int cur = -1;
+        try {
+            InfoPlist p = readPlist();
+            int xi = p.problem == null ? xmxIndex(p.options) : -1;
+            if (xi >= 0) cur = xmxMb(p.options.get(xi));
+        } catch (Fail | IOException e) {
+            // 照樣顯示主選單
+        }
+        if (cur < 0) return L("目前：無法判斷", "now: unknown");
+        int rec = recommendedMb(ramGb);
+        return rec > 0 ? L("目前 " + cur + " MB，建議 " + rec + " MB", "now " + cur + " MB, recommended " + rec + " MB")
+                : L("目前 " + cur + " MB", "now " + cur + " MB");
+    }
+
+    /** 只改 -Xmx：沒裝修補也能改；不走 plistGate（那些是 agent 的前提）；單檔原子替換，不碰安裝紀錄。 */
+    private void memory() throws IOException {
+        FileLock lock = lock();
+        try {
+            assertNotRunning();
+            InfoPlist plist = readPlist();
+            if (plist.problem != null) {
+                throw new Fail(CONFLICT, L("Info.plist 的格式和遊戲原本的不同（" + plist.problem + "），不知道怎麼安全地修改。",
+                        "Info.plist does not look like the game's own file (" + plist.problem + "), so it cannot be changed safely. ") + restoreHint());
+            }
+            int xi = xmxIndex(plist.options);
+            if (xi < 0) {
+                throw new Fail(CONFLICT, L("Info.plist 找不到可以調整的記憶體上限（要剛好一條 -Xmx，格式像 -Xmx3072m）。要回到原版的 " + VANILLA_MEMORY_MB + " MB，用 Steam 驗證遊戲檔案的完整性。",
+                        "Info.plist has no memory limit this installer can change (exactly one -Xmx, like -Xmx3072m). To go back to the game's " + VANILLA_MEMORY_MB + " MB, verify the game files with Steam."));
+            }
+            int cur = xmxMb(plist.options.get(xi)), rec = recommendedMb(ramGb);
+            head(L("調整遊戲記憶體上限", "Change the game memory limit"));
+            info(L("  目前最多用 " + cur + " MB（Info.plist 的 " + plist.options.get(xi) + "）。", "  The game can use at most " + cur + " MB now (" + plist.options.get(xi) + " in Info.plist)."));
+            if (rec > 0) info(L("  這台 Mac 約有 " + ramGb + " GB 記憶體，建議 " + rec + " MB。", "  This Mac has about " + ramGb + " GB RAM; " + rec + " MB is recommended."));
+            else if (ramGb > 0) info(L("  這台 Mac 約有 " + ramGb + " GB 記憶體，沒有建議調高的值。", "  This Mac has about " + ramGb + " GB RAM; raising the limit is not recommended."));
+            info(L("  這是遊戲本身的設定：移除修補不會改回；Steam 更新或驗證遊戲檔案後會回到 " + VANILLA_MEMORY_MB + " MB。",
+                    "  It is the game's own setting: removing the patches does not change it back; a Steam update or file verification resets it to " + VANILLA_MEMORY_MB + " MB."));
+            List<String> opts = new ArrayList<>(List.of("0"));
+            if (rec > 0) {
+                info(L("  [1] 改成建議值 " + rec + " MB", "  [1] Use the recommended " + rec + " MB"));
+                opts.add("1");
+            }
+            info(L("  [2] 自訂", "  [2] Enter a custom value"));
+            info(L("  [3] 恢復預設 " + VANILLA_MEMORY_MB + " MB", "  [3] Restore the default " + VANILLA_MEMORY_MB + " MB"));
+            info(L("  [0] 返回", "  [0] Back"));
+            opts.add("2");
+            opts.add("3");
+            String c = choice(L("請輸入數字後按 Return", "Type a number and press Return"), opts, null);
+            if (c.equals("0")) return;
+            int mb = c.equals("1") ? rec : VANILLA_MEMORY_MB;
+            if (c.equals("2")) {
+                info(L("  輸入 MB 數：" + VANILLA_MEMORY_MB + " 以上的整數，例如 8192（8 GB）。直接按 Return 取消。",
+                        "  Enter a whole number of MB, at least " + VANILLA_MEMORY_MB + ", for example 8192 (8 GB). Press Return alone to cancel."));
+                while (true) {
+                    String a = ask("MB");
+                    if (a == null || a.isEmpty()) {
+                        info(L("已取消。", "Cancelled."));
+                        return;
+                    }
+                    int n = a.matches("\\d{1,7}") ? Integer.parseInt(a) : -1;
+                    String why = n < VANILLA_MEMORY_MB ? L("請輸入 " + VANILLA_MEMORY_MB + " 以上的整數（單位是 MB，不要加 g 或 m）。", "Enter a whole number of MB, at least " + VANILLA_MEMORY_MB + " (no g or m).")
+                            : ramGb > 0 && n > ramGb * 1024 ? L("這台 Mac 只有約 " + ramGb + " GB 記憶體（" + ramGb * 1024 + " MB），上限不能比它大。", "This Mac has only about " + ramGb + " GB of RAM (" + ramGb * 1024 + " MB); the limit cannot be larger than that.")
+                            : memoryBlocker(plist.options, n);
+                    if (why == null) {
+                        mb = n;
+                        break;
+                    }
+                    bad(why);
+                }
+            } else {
+                String why = memoryBlocker(plist.options, mb);
+                if (why != null) throw new Fail(CONFLICT, why);
+            }
+            if (mb == cur) {
+                good(L("目前已經是 " + cur + " MB，不需要變更。", "It is already " + cur + " MB; nothing to change."));
+                return;
+            }
+            info(L("  遊戲記憶體上限：", "  Game memory limit: ") + cur + " → " + mb + " MB");
+            // shortcut: 「過半」是經驗值（建議值表最高是 RAM 的 37.5%），沒實測；有玩家回報再調
+            if (c.equals("2") && ramGb > 0 && mb > ramGb * 512) {
+                warn(L(mb + " MB 超過這台 Mac 記憶體（約 " + ramGb + " GB）的一半。遊戲的貼圖和其他程式也要用記憶體，設太高整台 Mac 會變慢。",
+                        mb + " MB is more than half of this Mac's RAM (about " + ramGb + " GB). The game's textures and other programs need memory too; setting it too high slows the whole Mac down."));
+            }
+            if (!confirm(L("確定要修改嗎？輸入 Y 按 Return 開始（輸入 N 取消）", "Change it now? Type Y and press Return to start (N to cancel)"))) {
+                info(L("已取消。", "Cancelled."));
+                return;
+            }
+            byte[] newPlist = plist.replace(xi, "-Xmx" + mb + "m");
+            writeProbe();
+            try {
+                clearLeftovers();
+                publish(plistPath, newPlist, "plist");
+            } catch (IOException e) {
+                throw new Fail(WRITE, L("寫不進 Info.plist，沒有變更任何檔案：", "Could not write Info.plist; nothing was changed: ") + e.getMessage());
+            }
+            good(L("完成：遊戲記憶體上限已改成 " + mb + " MB，下次啟動遊戲生效。", "Done: the game memory limit is now " + mb + " MB. It takes effect the next time the game starts."));
+        } finally {
+            unlock(lock);
         }
     }
 

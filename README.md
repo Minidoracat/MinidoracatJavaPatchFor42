@@ -331,6 +331,14 @@ Enter when it asks about the game's memory limit to raise it to the recommended 
 it is done, press Enter, then `0` to exit. To pick another variant, choose `1` again; to remove everything or see the
 status, paste the same line and choose `3` (remove everything) or `4` (status).
 
+**Changing the game memory limit (from 0.3.7).** Item `5` of the main menu shows the current limit and the
+recommendation for your computer. Choose `5`, then `1` for the recommended value, `2` to type your own (whole MB, at
+least 3072 and at most your RAM; it warns above half of your RAM) or `3` to restore the game's default 3072 MB, and
+confirm with `Y`. It only changes `-Xmx` in `ProjectZomboid64.json` (`Info.plist` on macOS), works with or without the
+patches installed, and takes effect the next time the game starts. Removing the patches keeps the value; Steam's
+"Verify integrity of game files" puts 3072 MB back. On Windows, PZ_Optimization may change the value itself when the
+game starts.
+
 To run one action without the menu, use `& ([scriptblock]::Create((irm <the URL above>))) status`; the trailing
 arguments go to the installer unchanged (`status`, `uninstall -All`; `-Lang en` alone opens the menu in English). The
 command runs `install-windows.ps1` from this repo's release page, so using it means trusting this repo and GitHub;
@@ -402,6 +410,8 @@ their authors (inference: PZ_Optimization itself was not tested).
 ```
 
 It downloads `MinidoracatClientPatches-<game version>-<package version>-macOS.zip` from the newest release, checks its SHA-256 against the value built into the script, and opens the installer's menu (the same as on Windows). The menu follows the first of your macOS preferred languages (Traditional Chinese if it is Chinese, English otherwise); press `L` to switch. To install or update, choose `1`, then `1`, press Return to accept the recommended variant, press Return when it asks about the game's memory limit to raise it, and confirm with `Y`; when it is done, press Return, then `0` to exit. To remove everything, paste the same line and choose `3`. Adding a space and `status` or `uninstall --all` to the end of the line runs that action without the menu; `--lang en` opens the menu in English. If you only see a line starting with `curl:`, the download failed; paste the line again. The line runs `install-mac.sh` from this repository's release page, so using it means trusting this repository and GitHub; the SHA-256 check catches broken or mismatched downloads, not a compromised repository. To read the script first, run `curl -fsSL <that URL> | less`. For an older package, use `releases/download/client-v<package version>/install-mac.sh` instead of `releases/latest/download/install-mac.sh` (up to 0.3.5 it installs right away instead of opening the menu).
+
+Item `5` of the main menu changes the game memory limit, the same as on Windows (see above).
 
 Without the command: download the `-macOS.zip` (check it with `shasum -a 256`), double-click it to extract it, open Terminal, type `bash ` (with a space), drag `Install-Patches.command` from the extracted folder into the window and press Return; the menus are the same as on Windows. Double-clicking `Install-Patches.command` does not work because macOS blocks scripts that are not notarized.
 

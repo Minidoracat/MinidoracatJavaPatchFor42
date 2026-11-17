@@ -465,7 +465,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.6.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.7.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -644,6 +644,32 @@ unchanged (Windows: `& ([scriptblock]::Create((irm <URL>))) status`; Mac: `statu
 installer's "remove everything" messages now say to paste the line again and choose `[3]`. The `quick` action stays
 and only runs when asked for by name. When updating, the menu picks the recommended variant (memory and conflicts)
 instead of keeping the installed one as `quick` did.
+
+**Main menu item [5] changes the game memory limit (from 0.3.7)**: the user asked to see the current limit and the
+recommended value in the menu and to pick the recommended value, a custom value or the default; the question at install
+time stays. Item `[5]` of both main menus shows the current limit and the recommendation (`unknown` when the `-Xmx` is
+not understood); the submenu is `[1]` recommended (left out when there is none), `[2]` custom, `[3]` restore the
+default 3072 MB, `[0]` back. Only the `-Xmx` entry changes: Windows uses `New-LauncherBytes -KeepOurs` (our own
+entries stay as they are and where they are, unlike install, which merges them into one at the front), the Mac uses
+`InfoPlist.replace` in place. It needs no package and no install record, so it works without the patches and does not
+create `.mdc-patches`. The write is one file replacement outside the transaction: a transaction always writes
+state.json (`-NewState $null` deletes it). On the Mac it is an atomic rename; on Windows `ReplaceFile` can fail after
+moving the old file away (errors 1176/1177), so `Publish-File` moves the temporary file into place on its next try,
+and [5] reports a missing json as such instead of "nothing was changed". The order is
+the same as install: take the game-folder lock, check the game is not running, restore an unfinished transaction (its
+journal holds the before/after SHA of the json; changing the json first would make it impossible to restore), then
+read the launch settings. It only needs editable launch settings and a recognized `-Xmx`; a classpath that does not
+match (including the PZ_Optimization AOT cache) and the Mac `plistGate` (WorkingDirectory, JVMClassPath, extra jars)
+are preconditions of the agent and do not block a memory change. A custom value is whole MB, at least 3072, at most
+the physical RAM when it is known, with a warning above half of it (half is a rule of thumb, not measured). All three
+paths go through the same `-Xms`/`InitialHeapSize`/`MinHeapSize` check (`Get-MemoryBlocker`/`memoryBlocker`, shared
+with `-MemoryMb`), so restoring 3072 with an `-Xms` above it stops with code 7 and leaves `-Xms` alone. The default
+is the constant 3072, not the value before install (state does not record it). Nothing is written when the target
+equals the current value (`-Xmx3g` keeps its spelling when restoring the default). On Windows a line warns when
+PZ_Optimization is present: it rewrites the json's `-Xmx` itself when the game starts (2026-10-20 log:
+`gcHeap=auto … -> 4096 MB … (launcher JSON updated)`). No CLI action was added; non-interactive use is still
+`install -MemoryMb`/`--memory-mb`. Tests: `Run-InstallerTests.ps1` 87–93 and the "main menu [5]" part of
+`MacInstallerTest` (interrupted write code 12, lock code 4, a WorkingDirectory mismatch still allowed).
 
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,

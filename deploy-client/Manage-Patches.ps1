@@ -10,7 +10,7 @@
         不直接用 -javaagent：遊戲啟動器自己載入 jvm.dll，JVM 為 -javaagent 載入 jre64\bin\instrument.dll 時找不到同資料夾的
         java.dll／jli.dll，遊戲會起不來；載入器先以完整路徑載入那兩個 DLL，再把呼叫原樣轉給 instrument.dll。
         只動自己那一條：其他 vmArgs、windows 區段與使用者的修改照原文保留；寫入前重新 parse 驗證。
-        唯一例外：玩家同意時改頂層 vmArgs 裡 -Xmx 的值（移除時不改回）。
+        唯一例外：玩家同意時改頂層 vmArgs 裡 -Xmx 的值（移除時不改回）。主選單 [5] 只改這個值：單檔原子替換、不經交易，不碰 state.json。
       * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json（schemaVersion=2），runtime 與 installer 的同一份真相。
         0.2.x 的 schemaVersion=1（loose class 清單）讀得懂：升級或移除時在同一筆交易刪掉那些 loose class。
       * install 是「加裝」：保留已安裝的其它模組；同 exclusiveGroup 的新變體才會替換舊變體。
@@ -18,8 +18,8 @@
       * uninstall 只移除所選；仍被保留模組依賴的模組（例如 core）自動保留。
       * 所有影像經暫存檔驗 SHA 後原子替換；交易先備份→journal→寫→刪→state→已完成終態。
         復原只接受交易前／後影像；未知現況保留。終態落地前不刪備份，清理中斷可重入。
-      * status／開選單一律唯讀，只會提醒有未完成交易；復原只發生在 install／uninstall，
-        而且順序固定：拿遊戲目錄鎖 → 確認遊戲沒在跑 → 復原 → 才重新讀 state 規劃。
+      * status／開選單一律唯讀，只會提醒有未完成交易；復原只發生在 install／uninstall／主選單 [5] 調記憶體，
+        而且順序固定：拿遊戲目錄鎖 → 確認遊戲沒在跑 → 復原 → 才重新讀 state 或啟動設定。
       * 只碰 .mdc-patches\ 底下的 agent jar／state、ProjectZomboid64.json 的自己那一條（與玩家同意時的 -Xmx），以及要清掉的自家舊版 loose class；
         遊戲 jar／exe／存檔不改。SHA 用於辨識損毀或過期內容，不是簽章；同權限者同時偽造 metadata 與檔案不在防護範圍。
       * 啟動設定讀不到、格式不符、classpath 上 projectzomboid.jar 前面還有別的 jar（如 PZ_Optimization AOT 快取）時拒裝；
@@ -162,8 +162,12 @@ function Publish-File([string]$path, [byte[]]$bytes, [string]$SourcePath, [strin
             # 防毒或索引服務會短暫開著剛寫過的檔（實測 ProjectZomboid64.json 偶發 "Unable to remove the file to be replaced"）；
             # 有限次重試，仍失敗就照常拋出，由交易回復
             for ($attempt = 1; ; $attempt++) {
-                try { [System.IO.File]::Replace($tmp, $path, [NullString]::Value); break }
-                catch { if ($attempt -ge 5) { throw }; Start-Sleep -Milliseconds 200 }
+                try {
+                    # ReplaceFile 錯誤 1176／1177 時原檔可能已被移走、暫存檔還在原名：下一輪直接搬上去
+                    if (-not [System.IO.File]::Exists($path)) { [System.IO.File]::Move($tmp, $path) }
+                    else { [System.IO.File]::Replace($tmp, $path, [NullString]::Value) }
+                    break
+                } catch { if ($attempt -ge 5) { throw }; Start-Sleep -Milliseconds 200 }
             }
         } else {
             [System.IO.File]::Move($tmp, $path)
@@ -501,17 +505,24 @@ function Get-RamGb {
     try { return [int][Math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB) } catch { return 0 }
 }
 
+# 改成 $mb 會讓 JVM 起不來（初始堆積大於上限，或認不得）時回原因，否則 $null
+function Get-MemoryBlocker($launcher, [int]$mb) {
+    foreach ($o in $launcher.HeapFloor) {
+        if (-not ($o -cmatch $HEAP_ARG -and $o.StartsWith('-Xms') -and (Get-HeapMb $o) -le $mb)) {
+            return (L "ProjectZomboid64.json 的 $o 大於 $mb MB 或認不得，改成這個上限遊戲會開不起來。" "ProjectZomboid64.json has $o, which is larger than $mb MB or not understood; the game would not start with that limit.")
+        }
+    }
+    return $null
+}
+
 # 要把 -Xmx 改成多少 MB；0＝不動。-MemoryMb 照做（會讓 JVM 起不來時 code 7）；互動時目前值低於建議值才問，Enter 或 Y＝調高
 function Get-MemoryChoice($launcher, [bool]$interactive) {
     if ($script:MemoryTarget) {
         if (-not $launcher.Xmx) {
             Fail $EXIT_CONFLICT (L 'ProjectZomboid64.json 找不到可以調整的記憶體上限（頂層 vmArgs 要剛好一條 -Xmx，格式像 -Xmx3072m，windows 區段沒有別的 -Xmx），沒辦法用 -MemoryMb。' 'ProjectZomboid64.json has no memory limit this installer can change (exactly one -Xmx in the top-level vmArgs, like -Xmx3072m, and none in the windows section), so -MemoryMb cannot be used.')
         }
-        foreach ($o in $launcher.HeapFloor) {
-            if (-not ($o -cmatch $HEAP_ARG -and $o.StartsWith('-Xms') -and (Get-HeapMb $o) -le $script:MemoryTarget)) {
-                Fail $EXIT_CONFLICT (L "ProjectZomboid64.json 的 $o 大於 $($script:MemoryTarget) MB 或認不得，改成這個上限遊戲會開不起來。" "ProjectZomboid64.json has $o, which is larger than $($script:MemoryTarget) MB or not understood; the game would not start with that limit.")
-            }
-        }
+        $why = Get-MemoryBlocker $launcher $script:MemoryTarget
+        if ($why) { Fail $EXIT_CONFLICT $why }
         if ($script:MemoryTarget -eq (Get-HeapMb $launcher.Xmx)) { return 0 }
         return $script:MemoryTarget
     }
@@ -600,13 +611,13 @@ function Read-Launcher([string]$gameRoot) {
 }
 
 # 頂層 vmArgs 換成「拿掉自己那一條、需要時在最前面補一條 $newArg」，$xmxMb 非 0 時把 $launcher.Xmx 換成 -Xmx<$xmxMb>m；
-# 沒有變動回 $null，否則回新的檔案 bytes。
+# -KeepOurs（主選單 [5] 只改記憶體）時自己那幾條原樣原位保留。沒有變動回 $null，否則回新的檔案 bytes。
 # 排最前面：JVM 照啟動參數的順序載入各 agent、跑 premain（環境變數 JAVA_TOOL_OPTIONS 裡的更早），本包先跑，別的 agent
 # 就來不及在本包檢查之前載入要換的 class（那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：
 # retransformation incapable 的 transformer（不論它的 agent 排在哪裡）與排在本包之前的 capable transformer 改過的 class
 # 本包不換（NOT APPLIED）；排在之後的 capable transformer（Java 或 native agent 的）改的是修補版，本包看不到。
-function New-LauncherBytes($launcher, [string]$newArg, [int]$xmxMb = 0) {
-    $kept = @($launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) })
+function New-LauncherBytes($launcher, [string]$newArg, [int]$xmxMb = 0, [switch]$KeepOurs) {
+    $kept = @(if ($KeepOurs) { $launcher.VmArgs } else { $launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) } })
     if ($xmxMb) { $kept = @($kept | ForEach-Object { if ($_ -ceq $launcher.Xmx) { "-Xmx${xmxMb}m" } else { $_ } }) }
     $desired = @(if ($newArg) { @($newArg) + @($kept) } else { $kept })
     if (($desired -join "`n") -ceq (@($launcher.VmArgs) -join "`n") -and $desired.Count -eq @($launcher.VmArgs).Count) { return $null }
@@ -1889,7 +1900,7 @@ function Invoke-Status {
     Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
     if (Test-PendingTransaction $GameRoot) {
         # status 是唯讀的：只報告，不復原（復原要動檔案，得先確認遊戲已關閉）
-        Write-Warn2 (L '偵測到未完成的安裝／卸載交易。status 不會修改任何檔案；請關閉遊戲後執行安裝或卸載，屆時會自動先復原。' 'An unfinished install/uninstall was detected. Status does not change any files; close the game and run install or uninstall, which will restore it automatically first.')
+        Write-Warn2 (L '偵測到未完成的安裝／卸載交易。status 不會修改任何檔案；請關閉遊戲後執行安裝、卸載或調整記憶體，屆時會自動先復原。' 'An unfinished install/uninstall was detected. Status does not change any files; close the game and run install, uninstall or the memory change, which will restore it automatically first.')
     }
     $launcher = Read-Launcher $GameRoot
     if ($launcher.Problem) { Write-Warn2 $launcher.Problem }
@@ -1979,6 +1990,94 @@ function Invoke-Status {
     }
 }
 
+# ---------------------------------------------------------------- 動作：調整遊戲記憶體上限（主選單 [5]）
+# 主選單那行括號裡的字；讀不到或認不得都只說無法判斷（主選單不因此失敗）
+function Get-MemoryLabel([string]$gameRoot, [int]$ramGb) {
+    $cur = $null
+    try {
+        $l = Read-Launcher $gameRoot
+        if ($l.Editable -and $l.Xmx) { $cur = Get-HeapMb $l.Xmx }
+    } catch { $script:FailCode = $null }
+    if ($null -eq $cur) { return (L '目前：無法判斷' 'now: unknown') }
+    $rec = Get-RecommendedMb $ramGb
+    if ($rec) { return (L "目前 $cur MB，建議 $rec MB" "now $cur MB, recommended $rec MB") }
+    return (L "目前 $cur MB" "now $cur MB")
+}
+
+# 只改頂層 -Xmx：不需要安裝包或安裝紀錄，沒裝修補也能改；單檔原子替換只有新舊兩態，不經交易（交易一定會寫 state.json）
+function Invoke-Memory {
+    param([string]$GameRoot, [int]$RamGb)
+    $lock = Enter-GameRootLock $GameRoot
+    try {
+        Assert-GameNotRunning $GameRoot
+        # 未完成交易的 journal 記著 json 的前後 SHA；不先復原就改，之後就復原不了
+        Resume-PendingTransaction $GameRoot
+        $launcher = Read-Launcher $GameRoot
+        if (-not $launcher.Editable) { Fail $EXIT_CONFLICT ((L '沒辦法調整記憶體上限：' 'Cannot change the memory limit: ') + $launcher.Problem) }
+        if (-not $launcher.Xmx) {
+            Fail $EXIT_CONFLICT (L 'ProjectZomboid64.json 找不到可以調整的記憶體上限（頂層 vmArgs 要剛好一條 -Xmx，格式像 -Xmx3072m，windows 區段沒有別的 -Xmx）。要回到原版的 3072 MB，用 Steam 驗證遊戲檔案的完整性。' 'ProjectZomboid64.json has no memory limit this installer can change (exactly one -Xmx in the top-level vmArgs, like -Xmx3072m, and none in the windows section). To go back to the game''s 3072 MB, verify the game files with Steam.')
+        }
+        $cur = Get-HeapMb $launcher.Xmx
+        $rec = Get-RecommendedMb $RamGb
+        Write-Head (L '調整遊戲記憶體上限' 'Change the game memory limit')
+        Write-Info (L "  目前最多用 $cur MB（ProjectZomboid64.json 的 $($launcher.Xmx)）。" "  The game can use at most $cur MB now ($($launcher.Xmx) in ProjectZomboid64.json).")
+        if ($rec) { Write-Info (L "  這台電腦約有 $RamGb GB 記憶體，建議 $rec MB。" "  This PC has about $RamGb GB RAM; $rec MB is recommended.") }
+        elseif ($RamGb -gt 0) { Write-Info (L "  這台電腦約有 $RamGb GB 記憶體，沒有建議調高的值。" "  This PC has about $RamGb GB RAM; raising the limit is not recommended.") }
+        Write-Info (L "  這是遊戲本身的設定：移除修補不會改回；Steam 更新或驗證遊戲檔案後會回到 $VANILLA_MEMORY_MB MB。" "  It is the game's own setting: removing the patches does not change it back; a Steam update or file verification resets it to $VANILLA_MEMORY_MB MB.")
+        # 2026-10-20 實測：PZ_Optimization 啟動時會自己改寫這個 json 的 -Xmx（gcHeap=auto）
+        if ($launcher.Pzopt -or @($launcher.VmArgs | Where-Object { $_ -like '-Dpzopt.*' }).Count -gt 0) {
+            Write-Warn2 (L '偵測到 PZ_Optimization：它會在遊戲啟動時自己調整這個值，這裡改的可能被它改回去；請改用它自己的記憶體設定。' 'PZ_Optimization was detected: it adjusts this value itself when the game starts, so a change made here may be undone; use its own memory setting instead.')
+        }
+        $opts = @('0')
+        if ($rec) { Write-Info (L "  [1] 改成建議值 $rec MB" "  [1] Use the recommended $rec MB"); $opts += '1' }
+        Write-Info (L '  [2] 自訂' '  [2] Enter a custom value')
+        Write-Info (L "  [3] 恢復預設 $VANILLA_MEMORY_MB MB" "  [3] Restore the default $VANILLA_MEMORY_MB MB")
+        Write-Info (L '  [0] 返回' '  [0] Back')
+        $opts += '2', '3'
+        $c = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') $opts
+        if ($c -eq '0') { return }
+        $mb = if ($c -eq '1') { $rec } else { $VANILLA_MEMORY_MB }
+        if ($c -eq '2') {
+            Write-Info (L "  輸入 MB 數：$VANILLA_MEMORY_MB 以上的整數，例如 8192（8 GB）。直接按 Enter 取消。" "  Enter a whole number of MB, at least $VANILLA_MEMORY_MB, for example 8192 (8 GB). Press Enter alone to cancel.")
+            while ($true) {
+                $ans = Read-Host 'MB'
+                if ($null -eq $ans -or $ans.Trim() -eq '') { Write-Info (L '已取消。' 'Cancelled.'); return }
+                $ans = $ans.Trim()
+                if ($ans -notmatch '^[0-9]{1,7}$' -or [int]$ans -lt $VANILLA_MEMORY_MB) {
+                    $why = L "請輸入 $VANILLA_MEMORY_MB 以上的整數（單位是 MB，不要加 g 或 m）。" "Enter a whole number of MB, at least $VANILLA_MEMORY_MB (no g or m)."
+                } elseif ($RamGb -gt 0 -and [int]$ans -gt $RamGb * 1024) {
+                    $why = L "這台電腦只有約 $RamGb GB 記憶體（$($RamGb * 1024) MB），上限不能比它大。" "This PC has only about $RamGb GB of RAM ($($RamGb * 1024) MB); the limit cannot be larger than that."
+                } else { $why = Get-MemoryBlocker $launcher ([int]$ans) }
+                if (-not $why) { $mb = [int]$ans; break }
+                Write-Bad $why
+            }
+        } else {
+            $why = Get-MemoryBlocker $launcher $mb
+            if ($why) { Fail $EXIT_CONFLICT $why }
+        }
+        if ($mb -eq $cur) { Write-Good (L "目前已經是 $cur MB，不需要變更。" "It is already $cur MB; nothing to change."); return }
+        Write-Info (L "  遊戲記憶體上限：$cur → $mb MB" "  Game memory limit: $cur -> $mb MB")
+        # shortcut: 「過半」是經驗值（建議值表最高是 RAM 的 37.5%），沒實測；有玩家回報再調
+        if ($c -eq '2' -and $RamGb -gt 0 -and $mb -gt $RamGb * 512) {
+            Write-Warn2 (L "$mb MB 超過這台電腦記憶體（約 $RamGb GB）的一半。遊戲的貼圖和其他程式也要用記憶體，設太高整台電腦會變慢。" "$mb MB is more than half of this PC's RAM (about $RamGb GB). The game's textures and other programs need memory too; setting it too high slows the whole PC down.")
+        }
+        $ans = Read-Host (L '確定要修改嗎？輸入 Y 按 Enter 開始（輸入 N 取消）' 'Change it now? Type Y and press Enter to start (N to cancel)')
+        if ($ans -notmatch '^[Yy]') { Write-Info (L '已取消。' 'Cancelled.'); return }
+        $bytes = New-LauncherBytes $launcher $null $mb -KeepOurs
+        $jsonPath = Get-FullTargetPath $GameRoot $LAUNCHER_REL
+        try { Publish-File -path $jsonPath -bytes $bytes -ExpectedSha (Get-BytesSha256 $bytes) }
+        catch {
+            if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
+                Fail $EXIT_INTERNAL ((L 'ProjectZomboid64.json 不見了，請用 Steam 驗證遊戲檔案的完整性：' 'ProjectZomboid64.json is gone; verify the game files with Steam: ') + $_.Exception.Message)
+            }
+            Fail $EXIT_INTERNAL ((L '寫不進 ProjectZomboid64.json，沒有變更任何檔案：' 'Could not write ProjectZomboid64.json; nothing was changed: ') + $_.Exception.Message)
+        }
+        Write-Good (L "完成：遊戲記憶體上限已改成 $mb MB，下次啟動遊戲生效。" "Done: the game memory limit is now $mb MB. It takes effect the next time the game starts.")
+    } finally {
+        Exit-GameRootLock $lock
+    }
+}
+
 # ---------------------------------------------------------------- 互動選單
 function Read-Choice([string]$prompt, [string[]]$valid, [string]$default = '') {
     while ($true) {
@@ -2055,7 +2154,7 @@ function Select-UninstallModules([string[]]$installed) {
         $ok = $true
         foreach ($tok in ($ans -split ',')) {
             $t = $tok.Trim()
-            if ($t -notmatch '^\d+$' -or [int]$t -lt 1 -or [int]$t -gt $installed.Count) { $ok = $false; break }
+            if ($t -notmatch '^[0-9]{1,9}$' -or [int]$t -lt 1 -or [int]$t -gt $installed.Count) { $ok = $false; break }
             $picked += $installed[[int]$t - 1]
         }
         if ($ok -and $picked.Count -gt 0) { return @($picked | Sort-Object -Unique) }
@@ -2065,20 +2164,23 @@ function Select-UninstallModules([string[]]$installed) {
 
 function Invoke-Menu {
     param($Manifest, [string]$PackageDir, [string]$GameRoot)
+    $ramGb = Get-RamGb   # CIM 查一次就好
     while ($true) {
         Write-Head (L 'Minidoracat Project Zomboid 客戶端模組管理' 'Minidoracat Project Zomboid client patch manager')
         Write-Info (L "  遊戲目錄：$GameRoot" "  Game folder: $GameRoot")
         if (Test-PendingTransaction $GameRoot) {
-            # 光是開選單不會動任何檔案；復原一律等到真的要安裝／卸載時才做
-            Write-Warn2 (L '偵測到未完成的安裝／卸載交易，執行安裝或卸載時會先自動復原（請先關閉遊戲）。' 'An unfinished install/uninstall was detected; it will be restored automatically the next time you install or remove (close the game first).')
+            # 光是開選單不會動任何檔案；復原一律等到真的要安裝／卸載／調整記憶體時才做
+            Write-Warn2 (L '偵測到未完成的安裝／卸載交易，執行安裝、卸載或調整記憶體時會先自動復原（請先關閉遊戲）。' 'An unfinished install/uninstall was detected; it will be restored automatically the next time you install, remove or change the memory limit (close the game first).')
         }
         Write-Info (L '  [1] 安裝或更新修補' '  [1] Install or update patches')
         Write-Info (L '  [2] 移除部分修補' '  [2] Remove some patches')
         Write-Info (L '  [3] 全部移除' '  [3] Remove everything')
         Write-Info (L '  [4] 查看目前安裝狀態' '  [4] Show installation status')
+        $memLabel = Get-MemoryLabel $GameRoot $ramGb
+        Write-Info (L "  [5] 調整遊戲記憶體上限（$memLabel）" "  [5] Change the game memory limit ($memLabel)")
         Write-Info (L '  [L] English' '  [L] 中文')
         Write-Info (L '  [0] 離開' '  [0] Exit')
-        $c = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') @('0', '1', '2', '3', '4', 'L')
+        $c = Read-Choice (L '請輸入數字後按 Enter' 'Type a number and press Enter') @('0', '1', '2', '3', '4', '5', 'L')
         if ($c -eq 'L') {
             # 切換語言後直接重畫選單，不需要「按 Enter 回到主選單」
             $script:Lang = if ($script:Lang -eq 'en') { 'zh' } else { 'en' }
@@ -2109,6 +2211,7 @@ function Invoke-Menu {
                 }
                 '3' { Invoke-Uninstall -Manifest $Manifest -GameRoot $GameRoot -Requested @() -RemoveAll $true -Interactive $true }
                 '4' { Invoke-Status -Manifest $Manifest -GameRoot $GameRoot }
+                '5' { Invoke-Memory -GameRoot $GameRoot -RamGb $ramGb }
                 '0' { return }
             }
         } catch {
@@ -2137,7 +2240,7 @@ function Main {
 
     $script:MemoryTarget = 0
     if ($MemoryMb) {
-        if ($MemoryMb -notmatch '^\d{1,7}$' -or [int]$MemoryMb -lt $VANILLA_MEMORY_MB) {
+        if ($MemoryMb -notmatch '^[0-9]{1,7}$' -or [int]$MemoryMb -lt $VANILLA_MEMORY_MB) {
             Fail $EXIT_USAGE (L "-MemoryMb 要是至少 $VANILLA_MEMORY_MB 的整數（MB）。" "-MemoryMb must be a whole number of MB, at least $VANILLA_MEMORY_MB.")
         }
         $script:MemoryTarget = [int]$MemoryMb

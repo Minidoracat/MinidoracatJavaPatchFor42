@@ -281,6 +281,95 @@ public final class MacInstallerTest {
         noDanglingArg("install with memory interrupted at plist");
         eq(xmx(), "-Xmx3072m", "memory untouched when the plist write fails");
 
+        // 主選單 [5] 調整記憶體上限：選單吞掉動作的錯誤、行程仍 0，錯誤看輸出的 (code N)
+        fresh();
+        expectIn(0, "0\n", "menu", "--ram-gb", "32");
+        has("[5] Change the game memory limit (now 3072 MB, recommended 8192 MB)");
+        expectIn(0, "0\n", "menu", "--ram-gb", "8");
+        has("(now 3072 MB)");
+        expectIn(0, "0\n", "menu", "--ram-gb", "32", "--lang", "zh");
+        has("[5] 調整遊戲記憶體上限（目前 3072 MB，建議 8192 MB）");
+        // 沒裝修補選 [1]：只改 -Xmx、不建 .mdc-patches；[3] 恢復後逐位元組回原版
+        expectIn(0, "5\n1\nY\n\n0\n", "menu", "--ram-gb", "32");
+        has("3072 → 8192 MB");
+        eq(Files.readString(plist), VANILLA.replace("-Xmx3072m", "-Xmx8192m"), "menu [5] raised only -Xmx");
+        eq(Files.exists(root.resolve(".mdc-patches")), false, "no .mdc-patches from the memory menu");
+        expectIn(0, "5\n1\n\n0\n", "menu", "--ram-gb", "32");
+        has("It is already 8192 MB");
+        expectIn(0, "5\n3\nN\n\n0\n", "menu", "--ram-gb", "32");
+        has("Cancelled");
+        expectIn(0, "5\n3\nY\n\n0\n", "menu", "--ram-gb", "32");
+        vanilla();
+        noLeftovers();
+        // 8 GB 沒有 [1]；在子選單或自訂處讀到 EOF：不寫
+        expectIn(0, "5\n1\n0\n\n0\n", "menu", "--ram-gb", "8");
+        has("Please enter: 0 / 2 / 3");
+        expectIn(0, "5\n2\n", "menu", "--ram-gb", "32");
+        vanilla();
+        // 已裝修補：自己那行原位，state 不變；全部移除只留下 -Xmx
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        byte[] stateBefore = Files.readAllBytes(root.resolve(MacInstaller.STATE_REL));
+        expectIn(0, "5\n1\nY\n\n0\n", "menu", "--ram-gb", "32");
+        eq(first(), MacInstaller.agentArg(List.of("core", STD)), "launch option kept by the memory menu");
+        eq(xmx(), "-Xmx8192m", "memory menu with patches installed");
+        eq(Arrays.equals(stateBefore, Files.readAllBytes(root.resolve(MacInstaller.STATE_REL))), true, "state untouched by the memory menu");
+        expect(0, "status");
+        has("Active: yes");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        eq(Files.readString(plist), VANILLA.replace("-Xmx3072m", "-Xmx8192m"), "removal keeps the menu's memory change");
+        // [2] 自訂：格式、下限、RAM 上限重問；過半警告；偵測不到 RAM 不設上限；空行取消
+        fresh();
+        expectIn(0, "5\n2\nabc\n100\n8g\n40000\n10240\nY\n\n0\n", "menu", "--ram-gb", "32");
+        has("cannot be larger than that");
+        eq(out.contains("more than half"), false, "no warning below half");
+        eq(xmx(), "-Xmx10240m", "custom value applied");
+        expectIn(0, "5\n2\n12288\nY\n\n0\n", "menu", "--ram-gb", "16");
+        has("more than half of this Mac's RAM");
+        eq(xmx(), "-Xmx12288m", "custom value above half applied");
+        expectIn(0, "5\n2\n65536\nY\n\n0\n", "menu");
+        eq(xmx(), "-Xmx65536m", "no upper bound without RAM size");
+        expectIn(0, "5\n2\n\n\n0\n", "menu", "--ram-gb", "32");
+        has("Cancelled");
+        eq(xmx(), "-Xmx65536m", "empty custom value cancels");
+        // -Xms：恢復預設被擋（7、plist 不動）；自訂低於 -Xms 重問
+        fresh();
+        Files.writeString(plist, withXms);
+        expectIn(0, "5\n3\n\n0\n", "menu", "--ram-gb", "32");
+        has("(code 7)");
+        has("-Xms4096m");
+        eq(Files.readString(plist), withXms, "restore default blocked by -Xms");
+        expectIn(0, "5\n2\n3500\n4096\nY\n\n0\n", "menu", "--ram-gb", "32");
+        has("larger than 3500 MB");
+        eq(xmx(), "-Xmx4096m", "custom value equal to -Xms");
+        // 讀不懂的 plist 與認不得的 -Xmx：無法判斷、選 [5] 得 7；啟動器前提不符（WorkingDirectory）仍可改
+        fresh();
+        Files.writeString(plist, VANILLA.replace("<dict>", "<dict>\n<!-- c -->"));
+        expectIn(0, "5\n\n0\n", "menu", "--ram-gb", "32");
+        has("now: unknown");
+        has("(code 7)");
+        Files.writeString(plist, VANILLA.replace("-Xmx3072m", "-Xmx3145728k"));
+        expectIn(0, "5\n\n0\n", "menu", "--ram-gb", "32");
+        has("(code 7)");
+        String otherWd = VANILLA.replace("$APP_ROOT/Contents/Java</string>", "$APP_ROOT/Contents</string>");
+        Files.writeString(plist, otherWd);
+        expectIn(0, "5\n1\nY\n\n0\n", "menu", "--ram-gb", "32");
+        eq(Files.readString(plist), otherWd.replace("-Xmx3072m", "-Xmx8192m"), "memory menu skips the agent preconditions");
+        // 寫入中斷 → 12、plist 不動；持鎖 → 4
+        fresh();
+        MacInstaller.failAt = "plist";
+        expectIn(0, "5\n1\nY\n\n0\n", "menu", "--ram-gb", "32");
+        MacInstaller.failAt = null;
+        has("(code 12)");
+        eq(Files.readString(plist), VANILLA, "plist untouched when the memory write fails");
+        try (FileChannel ch = FileChannel.open(root.resolve(".mdc-patches.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                FileLock l = ch.lock()) {
+            expectIn(0, "5\n\n0\n", "menu", "--ram-gb", "32");
+            has("(code 4)");
+        }
+        expectIn(0, "5\n1\nY\n\n0\n", "menu", "--ram-gb", "32");
+        eq(xmx(), "-Xmx8192m", "memory menu works after the failed write");
+        noLeftovers();
+
         // 修補檔被變造：不刪；換回包內那份就能刪
         fresh();
         expect(0, "install", "--non-interactive", "--modules", STD);

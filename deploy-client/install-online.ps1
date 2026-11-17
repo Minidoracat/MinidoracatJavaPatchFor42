@@ -1,5 +1,5 @@
 # Minidoracat client patches for Windows, one-line installer: downloads this release's package, checks its SHA-256 and opens
-# the installer's menu (install, remove, status; [L] switches the language):
+# the installer's menu (install, remove, status, memory limit; [L] switches the language):
 #   irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
 # To run one action instead, anything after the last parenthesis goes to Manage-Patches.ps1 (status, uninstall -All, -Lang en):
 #   & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) status

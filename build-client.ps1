@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.6'
+$PACKAGE_VERSION = '0.3.7'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -512,6 +512,9 @@ only 8 GB was tested in the real game, on macOS). It is the game's own setting: 
 patches keeps it, and a Steam update or "Verify integrity of game files" puts 3 GB back
 (installing again asks again). If you put -Xmx in the game's Steam launch options
 yourself, that value wins over ProjectZomboid64.json.
+To change the limit later (recommended value, your own value in MB, or back to the
+default 3 GB), run the installer and choose 5 in the main menu. It works with or
+without the patches installed and takes effect the next time the game starts.
 
 GAME UPDATES
 You no longer have to remove the patches before a game update. Every time the game
@@ -645,6 +648,7 @@ $fixListZh
 記憶體 32 GB 以上建議 8 GB、16 GB 以上建議 6 GB、12 GB 以上建議 4 GB（和 macOS 版相同；只有 8 GB 實測過，而且是在 macOS 版）。
 這是遊戲本身的設定：移除修補時不會改回；Steam 更新或「驗證遊戲檔案的完整性」會回到 3 GB，到時再安裝一次會再問。
 你自己在 Steam 的遊戲啟動選項寫了 -Xmx 的話，以啟動選項為準。
+之後要改上限（建議值、自己輸入 MB 數，或恢復預設 3 GB），執行安裝器、在主選單選 5；有沒有裝修補都能改，下次開遊戲生效。
 
 【遊戲更新】
 遊戲更新前不用再先移除修補。每次開遊戲時修補都會比對 projectzomboid.jar，不是建置時那一版就自己停用，
@@ -826,6 +830,9 @@ your Mac, the installer asks whether to raise it: 8 GB on a Mac with 32 GB of RA
 6 GB with 16 GB or more, 4 GB with 12 GB or more (only 8 GB was tested in the real game).
 It is the game's own setting: removing the patches keeps it, and a Steam update or
 "Verify integrity of game files" puts 3 GB back (installing again asks again).
+To change the limit later (recommended value, your own value in MB, or back to the
+default 3 GB), run the installer and choose 5 in the main menu. It works with or
+without the patches installed and takes effect the next time the game starts.
 
 GAME UPDATES
 You do not have to remove the patches before a game update. Every time the game starts,
@@ -938,6 +945,7 @@ macOS 問「終端機」能不能取用「下載項目」或修改其他 App 時
 （Zomboid/console.txt 出現 OutOfMemoryError）。目前上限低於這台 Mac 的建議值時，安裝器會問要不要調高：
 記憶體 32 GB 以上建議 8 GB、16 GB 以上建議 6 GB、12 GB 以上建議 4 GB（只有 8 GB 在遊戲裡實測過）。
 這是遊戲本身的設定：移除修補時不會改回；Steam 更新或「驗證遊戲檔案的完整性」會回到 3 GB，到時再安裝一次會再問。
+之後要改上限（建議值、自己輸入 MB 數，或恢復預設 3 GB），執行安裝器、在主選單選 5；有沒有裝修補都能改，下次開遊戲生效。
 
 【遊戲更新】
 遊戲更新前不用先移除修補。每次開遊戲時修補都會比對 projectzomboid.jar，不是建置時那一版就自己停用，遊戲照原版跑。

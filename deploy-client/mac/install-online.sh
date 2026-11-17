@@ -1,6 +1,6 @@
 #!/bin/bash
 # Minidoracat client patches for macOS, one-line installer: downloads this release's package, checks its SHA-256 and opens
-# the installer's menu (install, remove, status; [L] switches the language):
+# the installer's menu (install, remove, status, memory limit; [L] switches the language):
 #   /bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
 # Words after the closing parenthesis go to the installer instead (status, uninstall --all, --lang en).
 # build-client.ps1 fills in the @...@ values; the zip and this script come from the same build.
