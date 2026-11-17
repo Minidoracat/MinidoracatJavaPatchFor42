@@ -465,7 +465,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.3.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.4.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -495,7 +495,8 @@ write access to one of those folders; the path stays relative so that moving the
 the loader; `Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the
 entry and both files. Only our entry changes: the installer replaces just the text span of the top-level `vmArgs` array and
 re-parses the result, every other byte (BOM and line endings included) is kept, and uninstalling restores the file
-byte for byte. Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
+byte for byte (the one exception is an `-Xmx` the player agreed to raise; see "Windows memory limit" below).
+Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
 transaction writes before it deletes and can be rolled back from the state backup, so the json never points at a
 deleted jar: with the agent jar missing the JVM does not start at all (`Error opening zip file or JAR manifest
 missing`, tested on the game's Zulu 25 JRE). A Steam update or file verification restores the vanilla json; status
@@ -564,6 +565,30 @@ verification puts 3072 back behind the installer's back). `MacInstallerTest` cov
 unknown `-Xmx` forms and an interruption while writing the plist; `command-test.sh` drives the built `install-mac.sh`
 with a fake `curl` (URL, arguments, temporary folder removed, truncated zip and failed download stop with code 6 before
 the installer runs, half a script runs nothing).
+
+**Windows memory limit (from 0.3.4)**: the vanilla `ProjectZomboid64.json` has `-Xmx3072m` with ZGC, like the Mac
+`Info.plist`, so the Windows installer follows the Mac rules and the same recommendation table (8192 MB with 32 GB of
+RAM or more, 6144 with 16 GB, 4096 with 12 GB; `Get-RecommendedMb` and `MacInstaller.recommendedMb` must change
+together). The launcher orders the options as top-level `vmArgs`, then the command line, then the `windows` section,
+and the JVM takes the last `-Xmx`/`-XX:MaxHeapSize` (measured: a command-line `-Xmx8g` beat the json's `-Xmx32072m`).
+So the value is only recognized when the whole json, `windows` section included, has exactly one, in the top level,
+written as `-Xmx<1-7 digits>[mM]` or `-Xmx<1-5 digits>[gG]`; anything else means no question and a normal install.
+The question comes after the conflict and tamper checks and before the "already up to date" check, so both the menu
+and `-Action install` ask, and only when the current value is below the recommendation (Enter or `Y` raises it). The
+new value replaces that one element in the same write (the third parameter of `New-LauncherBytes`), and the existing
+check that only `vmArgs` changed to the expected list still runs. `-MemoryMb N` (at least 3072, otherwise code 2)
+applies a value without asking; it stops with code 7 and writes nothing when there is no `-Xmx` it can change, or when
+an `-Xms`, `-XX:InitialHeapSize` or `-XX:MinHeapSize` is not a recognized `-Xms` no larger than the target (measured:
+`-Xms4096m -Xmx3072m` does not start). Removing the patches keeps the value and says how to get 3072 back; status shows
+the current limit. On Windows the reason is the 2026-10-08 observation on the production server's mod set (2.55-2.9 GB
+after collection, peaks of 5.0-6.2 GB with a 12 GB limit), not a crash, so the question says "may not be enough". On
+real Windows hardware only the json value taking effect was checked (`max: 8192 Mb` in the console); of the three
+recommendations only 8192 has run in the game, on macOS.
+Known limit: an `-Xmx` the player put in the Steam launch options wins over the json (documented, not detected).
+Installer tests 71-80 cover the question at three RAM sizes, changing only the memory on an existing install, the cases
+that must not ask, six unrecognized forms, `-MemoryMb`, the English UI, removal with BOM/CRLF and other agents
+differing only in `-Xmx`, the menu, and the removal note without an install record; the environment variable
+`MDC_PATCHES_TEST_RAM_GB` fixes the RAM size for them.
 
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,

@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.3'
+$PACKAGE_VERSION = '0.3.4'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -487,12 +487,24 @@ INSTALL
 5. Type 1 and press Enter (client fixes).
 6. When asked for the version, just press Enter: the recommended one is picked
    for your PC (its memory, and whether another mod already replaces game classes).
-7. When asked to confirm, type Y and press Enter.
-8. When it says it is done, press Enter, then type 0 and Enter to exit.
-9. Start the game from Steam as usual. ProjectZomboid64.bat does not read
-   ProjectZomboid64.json, so starting the game with it skips the patches.
+7. If it asks about the game's memory limit, press Enter to raise it (see MEMORY below).
+8. When asked to confirm, type Y and press Enter.
+9. When it says it is done, press Enter, then type 0 and Enter to exit.
+10. Start the game from Steam as usual. ProjectZomboid64.bat does not read
+    ProjectZomboid64.json, so starting the game with it skips the patches.
 The menus follow your Windows display language (Chinese or English). Press L in
 the main menu to switch, or start it with: Install-Patches.bat -Lang en
+
+MEMORY
+The game starts with a 3 GB Java memory limit (-Xmx3072m in ProjectZomboid64.json). On a
+server with many mods that may not be enough: the game gets laggy, and in bad cases it
+closes (OutOfMemoryError in the console). When the limit is lower than recommended for
+your PC, the installer asks whether to raise it: 8 GB on a PC with 32 GB of RAM or more,
+6 GB with 16 GB or more, 4 GB with 12 GB or more (the same values as the macOS version;
+only 8 GB was tested in the real game, on macOS). It is the game's own setting: removing the
+patches keeps it, and a Steam update or "Verify integrity of game files" puts 3 GB back
+(installing again asks again). If you put -Xmx in the game's Steam launch options
+yourself, that value wins over ProjectZomboid64.json.
 
 GAME UPDATES
 You no longer have to remove the patches before a game update. Every time the game
@@ -543,8 +555,9 @@ SAFETY
 - The installer only works on the exact game version it was built for: it checks the
   SHA-256 of your projectzomboid.jar and of the patch file before writing them, and the
   patch file checks projectzomboid.jar again at every game start.
-- It only changes its own files (the .mdc-patches folder) and its own launch option in
-  ProjectZomboid64.json; your other options and other mods' lines stay as they are.
+- It only changes its own files (the .mdc-patches folder), its own launch option in
+  ProjectZomboid64.json and, when you agree, the -Xmx memory limit (removing the patches
+  keeps it); your other options and other mods' lines stay as they are.
   Unknown or modified files are never overwritten or deleted, and an interrupted install
   can be rolled back.
 - Check your download: compare the SHA-256 of $zipName with SHA256SUMS.txt on the
@@ -565,9 +578,10 @@ Boundaries
   to load its own agent support. Its source code is in the repository
   (patcher/agent-loader/mdc-agent-loader.c).
 - Changes ProjectZomboid64.json only by adding or removing its own -agentpath option (it
-  goes first in vmArgs, so this package starts before other agents). It does not change
-  the game jar. Other Java agents (-javaagent, -agentlib, -agentpath) stay, but changing
-  the same class as another agent is not supported: a class that was changed before this
+  goes first in vmArgs, so this package starts before other agents) and, when you agree,
+  changing the -Xmx value. It does not change the game jar. Other Java agents (-javaagent,
+  -agentlib, -agentpath) stay, but changing the same class as another agent is not
+  supported: a class that was changed before this
   package sees it is skipped ([mdc-agent] NOT APPLIED in the console), and changes another
   agent makes after this package cannot be detected. If a class to patch is already loaded
   when this package starts, the whole package stays off ([mdc-agent] DISARMED).
@@ -576,6 +590,9 @@ Boundaries
 - Old TexPipeline v3.0 packages (42.20.3/42.20.4) are recognized only when every SHA
   matches, even after a game update: installing replaces them, removing deletes them.
   Anything else must be removed with its own uninstaller first.
+- Command line: Install-Patches.bat -Action install -MemoryMb N (N at least 3072) sets
+  the memory limit to N MB without asking; it stops with code 7 and changes nothing when
+  ProjectZomboid64.json has no single -Xmx it can change.
 - Never remove patches while the game is running. If an install was interrupted, run the
   installer again before starting the game.
 - Nothing is uploaded. Profiler captures stay in Zomboid/Lua/MinidoracatDevProfiler/captures/.
@@ -599,10 +616,18 @@ $fixListZh
 4. 輸入 1 按 Enter（安裝或更新修補）。
 5. 輸入 1 按 Enter（客戶端修復）。
 6. 選版本時直接按 Enter，程式會依你的電腦自動選好。
-7. 問「確定要安裝嗎？」時，輸入 Y 按 Enter。
-8. 看到安裝完成後按 Enter，再輸入 0 按 Enter 關閉。
-9. 照平常從 Steam 開遊戲。ProjectZomboid64.bat 不讀 ProjectZomboid64.json，用它開遊戲不會載入修補。
+7. 問到遊戲記憶體上限時，直接按 Enter 就會調到建議值（見下面【記憶體】）。
+8. 問「確定要安裝嗎？」時，輸入 Y 按 Enter。
+9. 看到安裝完成後按 Enter，再輸入 0 按 Enter 關閉。
+10. 照平常從 Steam 開遊戲。ProjectZomboid64.bat 不讀 ProjectZomboid64.json，用它開遊戲不會載入修補。
 選單語言跟著 Windows 顯示語言；主選單按 L 可切換中文／英文。
+
+【記憶體】
+遊戲預設最多只用 3 GB Java 記憶體（ProjectZomboid64.json 的 -Xmx3072m），MOD 多的伺服器可能不夠用：
+不夠時遊戲會變卡，嚴重時閃退（console 出現 OutOfMemoryError）。目前上限低於這台電腦的建議值時，安裝器會問要不要調高：
+記憶體 32 GB 以上建議 8 GB、16 GB 以上建議 6 GB、12 GB 以上建議 4 GB（和 macOS 版相同；只有 8 GB 實測過，而且是在 macOS 版）。
+這是遊戲本身的設定：移除修補時不會改回；Steam 更新或「驗證遊戲檔案的完整性」會回到 3 GB，到時再安裝一次會再問。
+你自己在 Steam 的遊戲啟動選項寫了 -Xmx 的話，以啟動選項為準。
 
 【遊戲更新】
 遊戲更新前不用再先移除修補。每次開遊戲時修補都會比對 projectzomboid.jar，不是建置時那一版就自己停用，
@@ -642,7 +667,8 @@ $fixListZh
 
 【安全驗證】
 - 安裝器只接受對應版本的遊戲：寫入前會比對 projectzomboid.jar 與修補檔的 SHA-256；修補檔每次開遊戲也會再比對一次 jar。
-- 只動自己的檔案（.mdc-patches 資料夾）與 ProjectZomboid64.json 裡自己那一條啟動參數；你的其他設定與別的 MOD 加的參數照原樣保留。
+- 只動自己的檔案（.mdc-patches 資料夾）、ProjectZomboid64.json 裡自己那一條啟動參數，以及你同意時的 -Xmx 記憶體上限
+  （移除修補時不改回）；你的其他設定與別的 MOD 加的參數照原樣保留。
   不明或變造的檔案不會被自動覆蓋或刪除，安裝中斷可以復原。
 - 下載後可比對 $zipName 的 SHA-256 與發布頁的 SHA256SUMS.txt
   （PowerShell：Get-FileHash .\$zipName）。
@@ -658,13 +684,15 @@ $modulesZh
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
 - $LOADER_NAME 是讓遊戲載入 Java agent 用的小工具（幾 KB）：遊戲的啟動器不能直接用 -javaagent
   （Java 執行環境會載入不了自己的 agent 支援）。原始碼在 repo 的 patcher/agent-loader/mdc-agent-loader.c。
-- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -agentpath（排在 vmArgs 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
+- 只在 ProjectZomboid64.json 加或拿掉自己那一條 -agentpath（排在 vmArgs 最前面，比其他 agent 先啟動），以及你同意時改 -Xmx 的值；不改遊戲 JAR。
   其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留，但不支援和它們修改同一個 class：在本包之前就被改過的 class
   不換（console 印 [mdc-agent] NOT APPLIED）；別的 agent 在本包之後才改的，本包偵測不到。本包啟動時要修補的 class 已經被載入，
   就整包不啟用（印 [mdc-agent] DISARMED）。
 - console 印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
 - 舊 v3.0 包必須整組 SHA 完全吻合才會接管或移除（不受目前遊戲版本影響）；辨識不了時先用舊版 uninstaller。
 - JVM 執行中不得移除修補。交易中斷時，先重跑管理器復原，再開遊戲。
+- 命令列：Install-Patches.bat -Action install -MemoryMb N（N 至少 3072）不詢問、直接把記憶體上限設成 N MB；
+  ProjectZomboid64.json 沒有剛好一條可以改的 -Xmx 時以代碼 7 停止，不改任何檔案。
 
 資料僅保存本機：Zomboid/Lua/MinidoracatDevProfiler/captures/。
 本包不含自動 log 上傳、正式服監控或玩家回報收集。

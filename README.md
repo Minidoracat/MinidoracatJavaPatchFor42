@@ -323,7 +323,8 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
    asks you to paste the path only if it cannot (`-GameDir "<path>"` also works).
 2. Run `Install-Patches.bat`, choose `1` (install or update), then `1` (client fixes).
 3. Press Enter to accept the recommended variant (standard for 32 GB RAM or more, low-memory otherwise, compatible
-   when another mod already replaces the game classes the full variants patch), then `Y` to confirm.
+   when another mod already replaces the game classes the full variants patch). If it asks about the game's memory
+   limit, press Enter to raise it to the recommended value. Then type `Y` to confirm.
 
 The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
 or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for and checks
@@ -332,8 +333,9 @@ the SHA-256 of `projectzomboid.jar` and of the package files. Since 0.3.0 the pa
 from starting): the installer puts `MinidoracatClientPatches.jar` and a small loader, `mdc-agent-loader.dll` (the
 game's launcher needs it to load a Java agent; its source is in `patcher/agent-loader/`), into the game folder's
 `.mdc-patches` and adds one `-agentpath:` launch option to `ProjectZomboid64.json`; the game's own files stay
-untouched. Uninstalling removes only that option and keeps your other settings (a custom `-Xmx`, for example), and
-an interrupted install rolls
+untouched. Uninstalling removes only that option and keeps your other settings (a custom `-Xmx`, for example);
+a memory limit you agreed to raise while installing is kept too (Steam's "Verify integrity of game files" puts 3072 MB
+back). An interrupted install rolls
 back. **No need to uninstall before a game update**: when the jar changes, the patches switch themselves off and the
 game runs vanilla. Steam updates often restore the original `ProjectZomboid64.json`; the patches are then inactive
 (the installer's status shows "installed but not active"), and running `Install-Patches.bat` from the package for the
