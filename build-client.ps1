@@ -710,6 +710,8 @@ if ((Get-FileHash -LiteralPath "$pkgMac\$AGENT_JAR_NAME" -Algorithm SHA256).Hash
     throw 'Windows 與 macOS 套件的 agent jar 不同'
 }
 $zipNameMac = "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION-macOS.zip"
+# 一行指令的網址每一版都相同（Release 資產 install-mac.sh 一定要跟著每個 client 版上傳）
+$macOneLineUrl = 'https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh'
 # 本檔在 Windows checkout 是 CRLF，here-string 的換行跟著是 CRLF（Write-Utf8 寫出時才轉 LF）
 $modulesMacEn = $modulesEn -replace '\(add them to vmArgs in(\r?\n)  ProjectZomboid64\.json\)', '(add them to JVMOptions in$1  Project Zomboid.app/Contents/Info.plist)'
 $modulesMacZh = $modulesZh.Replace('（加在 ProjectZomboid64.json 的 vmArgs）', '（加在 Project Zomboid.app/Contents/Info.plist 的 JVMOptions）')
@@ -728,7 +730,22 @@ $fixListEn
 Tested on an Apple silicon Mac, natively and as the Intel (x86_64) build under Rosetta 2.
 Intel Macs use the same steps but have not been tested on real Intel hardware yet.
 
-INSTALL
+INSTALL (easiest: one line in Terminal)
+1. Quit the game.
+2. Open Terminal (Applications > Utilities > Terminal).
+3. Paste this line and press Return:
+   /bin/bash -c "`$(curl -fsSL $macOneLineUrl)"
+   It downloads the newest package, checks its SHA-256, finds the game through Steam and
+   picks the recommended version for your Mac.
+4. If it asks about the game's memory limit, press Return to raise it (see MEMORY below).
+5. When asked to confirm, type Y and press Return.
+6. Start the game from Steam as usual (both "Play Project Zomboid" and "Compatibility
+   Mode" load the patches).
+If you only see a line starting with "curl:", the download did not work: check your
+connection and paste the line again. To remove the patches, see the status or change
+options, add a space and menu to the end of the same line.
+
+INSTALL WITH THIS ZIP (without pasting a command)
 1. Quit the game.
 2. Double-click the zip to extract it. Keep all the files together.
 3. Open Terminal (Applications > Utilities > Terminal).
@@ -741,14 +758,23 @@ INSTALL
 6. Type 1 and press Return (client fixes).
 7. When asked for the version, just press Return: the recommended one is picked for your
    Mac (its memory, and whether another mod already replaces game classes).
-8. When asked to confirm, type Y and press Return.
-9. When it says it is done, press Return, then type 0 and Return to exit.
-10. Start the game from Steam as usual (both "Play Project Zomboid" and "Compatibility
-   Mode" load the patches).
+8. If it asks about the game's memory limit, press Return to raise it (see MEMORY below).
+9. When asked to confirm, type Y and press Return.
+10. When it says it is done, press Return, then type 0 and Return to exit.
+11. Start the game from Steam as usual.
 If macOS asks whether Terminal may access the Downloads folder or change other apps,
 allow it: the installer has to read the extracted files and write into
 Project Zomboid.app. The menus follow your Mac's language (Chinese or English);
 press L in the main menu to switch.
+
+MEMORY
+The game starts with a 3 GB Java memory limit (-Xmx3072m in Info.plist). On a server with
+many mods that is not enough: the game closes a few minutes after joining
+(OutOfMemoryError in Zomboid/console.txt). When the limit is lower than recommended for
+your Mac, the installer asks whether to raise it: 8 GB on a Mac with 32 GB of RAM or more,
+6 GB with 16 GB or more, 4 GB with 12 GB or more (only 8 GB was tested in the real game).
+It is the game's own setting: removing the patches keeps it, and a Steam update or
+"Verify integrity of game files" puts 3 GB back (installing again asks again).
 
 GAME UPDATES
 You do not have to remove the patches before a game update. Every time the game starts,
@@ -761,8 +787,9 @@ is out, install it the same way; the old one does not need to be removed first.
 Do not delete the .mdc-patches folder by hand: while Info.plist still has the launch
 option, the game does not start without that file. If that happened, run the installer
 and choose 3 (remove everything), or let Steam verify the game files.
-To remove everything at any time: quit the game, run Install-Patches.command the same way
-(deleted it? download the same zip again), type 3 and Return, then Y and Return.
+To remove everything at any time: quit the game, paste the one-line command with a space
+and menu at the end (or run Install-Patches.command the same way as above), type 3 and
+Return, then Y and Return.
 
 OTHER MODS THAT REPLACE GAME CLASSES
 Some mods put .class files into the game. Since 42.22 such files make the game throw a
@@ -776,10 +803,15 @@ SAFETY
 - The installer only works on the exact game version it was built for: it checks the
   SHA-256 of your projectzomboid.jar and of the patch file before writing them, and the
   patch file checks projectzomboid.jar again at every game start.
-- It only changes its own files (the .mdc-patches folder) and its own launch option in
-  Info.plist; the rest of Info.plist stays byte for byte as it was, and removing
-  everything gives back the exact original file. Unknown or modified files are never
-  overwritten or deleted. If an install or removal is interrupted, run it again.
+- It only changes its own files (the .mdc-patches folder), its own launch option in
+  Info.plist and, when you agree, the -Xmx memory limit; the rest of Info.plist stays
+  byte for byte as it was, and removing everything gives back the original file (with
+  the memory limit you chose). Unknown or modified files are never overwritten or
+  deleted. If an install or removal is interrupted, run it again.
+- The one-line command runs install-mac.sh from this project's GitHub release page, so
+  using it means trusting this repository and GitHub. Its SHA-256 check catches broken or
+  mismatched downloads, not a compromised repository. To read the script first, run
+  curl -fsSL $macOneLineUrl | less, or use this zip instead.
 - Check your download: compare the SHA-256 of $zipNameMac with SHA256SUMS.txt on the
   release page (Terminal: shasum -a 256 $zipNameMac).
 - Source code and technical details: $repoUrl
@@ -793,10 +825,12 @@ $modulesMacEn
 Boundaries
 - Manages only our own patches; it never removes other authors' tools.
 - The installer (mdc-mac-installer.jar) runs with the Java that comes with the game.
-  Command line: bash Install-Patches.command [status|install|uninstall]
-  [--modules id,...] [--all] [--non-interactive] [--lang zh|en]; set PZ_APP to the path of
-  Project Zomboid.app when the game is not in a Steam library.
-- Changes Info.plist only by adding or removing its own -javaagent option (it goes first
+  Command line: bash Install-Patches.command [status|install|quick|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]; quick is
+  what the one-line command runs (keep the installed modules or pick the recommended
+  ones, ask about memory, confirm). Set PZ_APP to the path of Project Zomboid.app when the
+  game is not in a Steam library.
+- Changes Info.plist only by adding or removing its own -javaagent option and, when you agree, the -Xmx value (the option goes first
   in JVMOptions, so this package starts before other agents). Other Java agents
   (-javaagent, -agentlib, -agentpath) stay, but changing the same class as another agent is
   not supported: a class that was changed before this package sees it is skipped
@@ -818,7 +852,18 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進 Projec
 $fixListZh
 在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；Intel Mac 步驟相同，但還沒有在 Intel 實機上測。
 
-【怎麼安裝】
+【怎麼安裝（最簡單：在終端機貼一行）】
+1. 結束遊戲。
+2. 打開「終端機」（應用程式 → 工具程式 → 終端機）。
+3. 貼上這一行，按 Return：
+   /bin/bash -c "`$(curl -fsSL $macOneLineUrl)"
+   它會下載最新的安裝包、比對 SHA-256、透過 Steam 找到遊戲，並依你的 Mac 選好建議的版本。
+4. 問到遊戲記憶體上限時，直接按 Return 就會調到建議值（見下面【記憶體】）。
+5. 問「確定要安裝嗎？」時，輸入 Y 按 Return。
+6. 照平常從 Steam 開遊戲（「執行 Project Zomboid」和「Compatibility Mode」都會載入修補）。
+只看到一行 curl: 開頭的英文，就是沒下載成功：檢查網路後再貼一次。要移除、看狀態或改選項：同一行最後加一個空格和 menu。
+
+【用這個 zip 安裝（不想貼指令時）】
 1. 結束遊戲。
 2. 雙擊 zip 解壓縮。檔案要放在一起，不要只拉出其中一個。
 3. 打開「終端機」（應用程式 → 工具程式 → 終端機）。
@@ -828,11 +873,18 @@ $fixListZh
 5. 輸入 1 按 Return（安裝或更新修補）。
 6. 輸入 1 按 Return（客戶端修復）。
 7. 選版本時直接按 Return，程式會依你的 Mac 自動選好。
-8. 問「確定要安裝嗎？」時，輸入 Y 按 Return。
-9. 看到安裝完成後按 Return，再輸入 0 按 Return 離開。
-10. 照平常從 Steam 開遊戲（「執行 Project Zomboid」和「Compatibility Mode」都會載入修補）。
+8. 問到遊戲記憶體上限時，直接按 Return 就會調到建議值（見下面【記憶體】）。
+9. 問「確定要安裝嗎？」時，輸入 Y 按 Return。
+10. 看到安裝完成後按 Return，再輸入 0 按 Return 離開。
+11. 照平常從 Steam 開遊戲。
 macOS 問「終端機」能不能取用「下載項目」或修改其他 App 時請允許：安裝器要讀解壓出來的檔案、寫進 Project Zomboid.app。
 選單語言跟著 Mac 的語言；主選單按 L 可切換中文／英文。
+
+【記憶體】
+遊戲預設最多只用 3 GB Java 記憶體（Info.plist 的 -Xmx3072m），MOD 多的伺服器不夠用，連線幾分鐘後會閃退
+（Zomboid/console.txt 出現 OutOfMemoryError）。目前上限低於這台 Mac 的建議值時，安裝器會問要不要調高：
+記憶體 32 GB 以上建議 8 GB、16 GB 以上建議 6 GB、12 GB 以上建議 4 GB（只有 8 GB 在遊戲裡實測過）。
+這是遊戲本身的設定：移除修補時不會改回；Steam 更新或「驗證遊戲檔案的完整性」會回到 3 GB，到時再安裝一次會再問。
 
 【遊戲更新】
 遊戲更新前不用先移除修補。每次開遊戲時修補都會比對 projectzomboid.jar，不是建置時那一版就自己停用，遊戲照原版跑。
@@ -841,7 +893,7 @@ Steam 更新或「驗證遊戲檔案的完整性」也可能把 Info.plist 換�
 等對應新版的修補包發布後，照上面的步驟安裝即可，不用先移除舊的。
 不要自己刪掉 .mdc-patches 資料夾：Info.plist 還有啟動參數時，少了那個檔案遊戲會開不起來。
 已經發生的話，執行安裝器選 3（全部移除），或用 Steam 驗證遊戲檔案的完整性。
-想全部移除時：結束遊戲，用同樣的方式執行 Install-Patches.command（刪掉了就重新下載同一個 zip），
+想全部移除時：結束遊戲，貼上同一行指令並在最後加一個空格和 menu（或照上面用 Install-Patches.command），
 輸入 3 按 Return，再輸入 Y 按 Return 確認。
 
 【和其他替換遊戲 class 的 MOD 一起用】
@@ -852,8 +904,11 @@ Steam 更新或「驗證遊戲檔案的完整性」也可能把 Info.plist 換�
 
 【安全驗證】
 - 安裝器只接受對應版本的遊戲：寫入前會比對 projectzomboid.jar 與修補檔的 SHA-256；修補檔每次開遊戲也會再比對一次 jar。
-- 只動自己的檔案（.mdc-patches 資料夾）與 Info.plist 裡自己那一條啟動參數；Info.plist 其他內容逐位元組保持原樣，
-  全部移除後就是原本的檔案。不明或變造的檔案不會被自動覆蓋或刪除。安裝或移除中斷時，再執行一次即可。
+- 只動自己的檔案（.mdc-patches 資料夾）、Info.plist 裡自己那一條啟動參數，以及你同意時的 -Xmx 記憶體上限；
+  Info.plist 其他內容逐位元組保持原樣，全部移除後就是原本的檔案（記憶體上限維持你選的值）。
+  不明或變造的檔案不會被自動覆蓋或刪除。安裝或移除中斷時，再執行一次即可。
+- 一行指令執行的是本專案 GitHub 發布頁上的 install-mac.sh，用它就是信任這個 repo 和 GitHub。
+  它比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容：curl -fsSL $macOneLineUrl | less，或改用這個 zip。
 - 下載後可比對 $zipNameMac 的 SHA-256 與發布頁的 SHA256SUMS.txt
   （終端機：shasum -a 256 $zipNameMac）。
 - 原始碼與技術說明：$repoUrl
@@ -866,9 +921,10 @@ $modulesMacZh
 
 安全邊界
 - 只管理自家 patch，不移除其它作者的工具。
-- 安裝器（mdc-mac-installer.jar）用遊戲自帶的 Java 執行。命令列：bash Install-Patches.command [status|install|uninstall]
-  [--modules id,...] [--all] [--non-interactive] [--lang zh|en]；遊戲不在 Steam 資料庫裡時，用 PZ_APP 指定 Project Zomboid.app 的路徑。
-- 只在 Info.plist 加或拿掉自己那一條 -javaagent（排在 JVMOptions 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
+- 安裝器（mdc-mac-installer.jar）用遊戲自帶的 Java 執行。命令列：bash Install-Patches.command [status|install|quick|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]；quick 就是一行指令執行的動作
+  （沿用已裝的模組或選建議的、問記憶體、確認）。遊戲不在 Steam 資料庫裡時，用 PZ_APP 指定 Project Zomboid.app 的路徑。
+- 只在 Info.plist 加或拿掉自己那一條 -javaagent（排在 JVMOptions 最前面，比其他 agent 先啟動），以及你同意時改 -Xmx 的值；不改遊戲 JAR。
   其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留，但不支援和它們修改同一個 class：在本包之前就被改過的 class
   不換（console 印 [mdc-agent] NOT APPLIED）；別的 agent 在本包之後才改的，本包偵測不到。
 - console（Zomboid/console.txt）印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
@@ -879,10 +935,6 @@ $modulesMacZh
 "@
 Write-Utf8 "$pkgMac\README-INSTALL.txt" $instructionsMacEn
 Write-Utf8 "$pkgMac\README-INSTALL.zh-TW.txt" $instructionsMacZh
-
-# 啟動腳本：假的 HOME、Steam 資料庫與 .app（路徑含空白、括號、中文），假 java 記下收到的參數
-& $BASH "$R\patcher\tests-installer-mac\command-test.sh" $pkgMac (Join-Path $R 'work/mac-command-test')
-Assert-Ok 'command-test.sh'
 
 # 端到端：Mac 版面的遊戲（42.22.2 原版 Info.plist＋建置基準 jar）上安裝 → 照啟動器的方式（工作目錄 Contents/Java、
 # 用 plist 裡的相對路徑參數）載入 agent 必須 ARMED → 遊戲裡的 MdcPatchRuntime 認得安裝紀錄 → 全部移除後 plist 逐位元組回原樣
@@ -925,9 +977,24 @@ New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $zip = Join-Path $outDir "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
-$zipMac = Join-Path $outDir $zipNameMac
-& $JAVA -cp $OUT UnixZip $pkgMac $zipMac
+# 一行指令（install-mac.sh）和它要下載的 zip 出自同一次建置：先放在 $DIST、測過才複製到 output
+$zipMacDist = Join-Path $DIST $zipNameMac
+if (Test-Path -LiteralPath $zipMacDist) { Remove-Item -LiteralPath $zipMacDist -Force }
+& $JAVA -cp $OUT UnixZip $pkgMac $zipMacDist
 Assert-Ok 'UnixZip macOS'
+$zipMacSha = (Get-FileHash -LiteralPath $zipMacDist -Algorithm SHA256).Hash.ToLowerInvariant()
+$bootstrap = [System.IO.File]::ReadAllText("$R\deploy-client\mac\install-online.sh").Replace('@PACKAGE_VERSION@', $PACKAGE_VERSION).Replace('@ZIP_NAME@', $zipNameMac).Replace('@ZIP_SHA256@', $zipMacSha).Replace('@GAME_VERSION@', $GAME_VERSION)
+if ($bootstrap -match '@[A-Z0-9_]+@' -or $bootstrap.Contains("`r") -or $zipMacSha -notmatch '^[0-9a-f]{64}$') { throw 'install-mac.sh：佔位符沒填完、有 CR，或 zip 的 SHA 格式不對' }
+$bootstrapDist = Join-Path $DIST 'install-mac.sh'
+Write-Utf8 $bootstrapDist $bootstrap
+& $BASH -n $bootstrapDist
+Assert-Ok 'bash -n install-mac.sh'
+# 啟動腳本與一行指令：假的 HOME、Steam 資料庫與 .app（路徑含空白、括號、中文），假 java／curl 記下收到的參數
+& $BASH "$R\patcher\tests-installer-mac\command-test.sh" $pkgMac (Join-Path $R 'work/mac-command-test') $bootstrapDist.Replace('\', '/') $zipMacDist.Replace('\', '/')
+Assert-Ok 'command-test.sh'
+$zipMac = Join-Path $outDir $zipNameMac
+Copy-Item -LiteralPath $zipMacDist, $bootstrapDist -Destination $outDir -Force
 Write-Host "完成：$zip"
 Write-Host "完成：$zipMac"
+Write-Host "完成：$(Join-Path $outDir 'install-mac.sh')（zip SHA256 $zipMacSha）"
 Write-Host "未壓縮套件：$pkg、$pkgMac"

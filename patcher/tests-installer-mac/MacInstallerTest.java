@@ -148,7 +148,7 @@ public final class MacInstallerTest {
         has("not from this package");
         // 互動選單：有衝突時預設推薦相容版
         expect(0, "uninstall", "--non-interactive", "--all");
-        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "32");
+        expectIn(0, "1\n1\n\nN\nY\n\n0\n", "menu", "--ram-gb", "32");
         eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "menu recommends compat on conflict");
         expect(0, "uninstall", "--non-interactive", "--all");
         // zombie/mdc 底下的外來 class 連相容版都擋
@@ -159,9 +159,9 @@ public final class MacInstallerTest {
 
         // 互動選單：記憶體推薦、[L] 切換語言
         fresh();
-        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "32", "--lang", "en");
+        expectIn(0, "1\n1\n\nN\nY\n\n0\n", "menu", "--ram-gb", "32", "--lang", "en");
         eq(List.of("core", STD), MacInstaller.moduleIds(state()), "32 GB -> standard");
-        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "16", "--lang", "en");
+        expectIn(0, "1\n1\n\nN\nY\n\n0\n", "menu", "--ram-gb", "16", "--lang", "en");
         eq(List.of("core", LOW), MacInstaller.moduleIds(state()), "16 GB -> lowmem");
         expectIn(0, "L\n4\n\n0\n", "menu", "--lang", "en");
         has("安裝狀態");
@@ -170,6 +170,116 @@ public final class MacInstallerTest {
         vanilla();
         expectIn(0, "1\n0\n0\n", "menu", "--lang", "en");
         vanilla();
+
+        // quick（一行指令）：沒裝 → core＋建議變體；記憶體題按 Return＝調高；全部移除只留下調過的記憶體
+        fresh();
+        eq(MacInstaller.xmxMb(xmx()), MacInstaller.VANILLA_MEMORY_MB, "fixture -Xmx is the vanilla value");
+        expectIn(0, "\nY\n", "quick", "--ram-gb", "32");
+        eq(List.of("core", STD), MacInstaller.moduleIds(state()), "quick 32 GB -> standard");
+        has("3072 → 8192 MB");
+        eq(first(), MacInstaller.agentArg(List.of("core", STD)), "quick plist");
+        eq(xmx(), "-Xmx8192m", "memory raised");
+        expect(0, "status");
+        has("Game memory limit: 8192 MB");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        has("stays at 8192 MB");
+        eq(Files.readString(plist), VANILLA.replace("-Xmx3072m", "-Xmx8192m"), "removal keeps only the memory change");
+        // 16 GB 答 N：省記憶體版、記憶體不動
+        fresh();
+        expectIn(0, "N\nY\n", "quick", "--ram-gb", "16");
+        has("6144 MB is recommended");
+        eq(List.of("core", LOW), MacInstaller.moduleIds(state()), "quick 16 GB -> lowmem");
+        eq(xmx(), "-Xmx3072m", "memory kept on N");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+        // 在記憶體題就讀到 EOF：什麼都不寫
+        fresh();
+        expectIn(0, "", "quick", "--ram-gb", "32");
+        has("Cancelled");
+        vanilla();
+        // 已裝省記憶體版＋profiler：32 GB 也沿用，不換成標準版；部分移除只剩 core 時補上變體
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", "profiler," + LOW);
+        expectIn(0, "N\nY\n", "quick", "--ram-gb", "32");
+        eq(List.of("core", "profiler", LOW), MacInstaller.moduleIds(state()), "quick keeps the installed variant");
+        expect(0, "uninstall", "--non-interactive", "--modules", "profiler," + LOW);
+        eq(List.of("core"), MacInstaller.moduleIds(state()), "only core left");
+        expectIn(0, "N\nY\n", "quick", "--ram-gb", "32");
+        eq(List.of("core", STD), MacInstaller.moduleIds(state()), "quick adds a variant when only core is left");
+        // 已是最新、這次才同意調高：只改記憶體；答 yes 這類字會再問一次
+        expectIn(0, "yes\n\nY\n", "quick", "--ram-gb", "32");
+        has("Please enter: Y / N");
+        eq(List.of("core", STD), MacInstaller.moduleIds(state()), "modules unchanged when only memory changes");
+        eq(xmx(), "-Xmx8192m", "memory raised on an up-to-date install");
+        // 外來 class 擋住完整版：quick 改裝相容版
+        fresh();
+        Files.createDirectories(root.resolve("zombie/iso"));
+        Files.write(root.resolve("zombie/iso/IsoChunk.class"), new byte[] {1});
+        expectIn(0, "N\nY\n", "quick", "--ram-gb", "32");
+        eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "quick falls back to compat");
+        // 已經比建議值高：不問、不降；8 GB 與不知道記憶體：不問
+        fresh();
+        Files.writeString(plist, VANILLA.replace("-Xmx3072m", "-Xmx12288m"));
+        expectIn(0, "Y\n", "quick", "--ram-gb", "32");
+        eq(out.contains("Raise it?"), false, "no question above the recommendation");
+        eq(xmx(), "-Xmx12288m", "never lowered");
+        for (String ram : List.of("8", "0")) {
+            fresh();
+            expectIn(0, "Y\n", "quick", "--ram-gb", ram);
+            eq(out.contains("Raise it?"), false, "no question with " + ram + " GB");
+            eq(xmx(), "-Xmx3072m", "kept with " + ram + " GB");
+        }
+        // 認不得的 -Xmx（沒有、兩條、單位不對、g 太大會溢位、另有 -XX:MaxHeapSize）：照常安裝、不問；--memory-mb 則 7
+        for (String odd : List.of(VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", ""),
+                VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-Xmx3072m</string>\n\t\t<string>-Xmx4g</string>\n"),
+                VANILLA.replace("-Xmx3072m", "-Xmx3145728k"),
+                VANILLA.replace("-Xmx3072m", "-Xmx3000000g"),
+                VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-Xmx3072m</string>\n\t\t<string>-XX:MaxHeapSize=4g</string>\n"))) {
+            fresh();
+            Files.writeString(plist, odd);
+            expectIn(0, "Y\n", "quick", "--ram-gb", "32");
+            eq(out.contains("Raise it?"), false, "no question for an unknown -Xmx");
+            eq(first(), MacInstaller.agentArg(List.of("core", STD)), "installed despite an unknown -Xmx");
+            expect(7, "install", "--non-interactive", "--modules", STD, "--memory-mb", "8192");
+        }
+        // -Xmx3g 當成 3072 MB
+        fresh();
+        Files.writeString(plist, VANILLA.replace("-Xmx3072m", "-Xmx3g"));
+        expectIn(0, "\nY\n", "quick", "--ram-gb", "32");
+        has("3072 → 8192 MB");
+        eq(xmx(), "-Xmx8192m", "3g raised");
+        // --memory-mb：非互動照做；太小或不是數字 → 2
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", STD, "--memory-mb", "6144");
+        eq(xmx(), "-Xmx6144m", "--memory-mb applied");
+        eq(first(), MacInstaller.agentArg(List.of("core", STD)), "--memory-mb with the launch option");
+        expect(2, "install", "--non-interactive", "--modules", STD, "--memory-mb", "100");
+        expect(2, "install", "--non-interactive", "--modules", STD, "--memory-mb", "abc");
+        // --memory-mb 低於既有 -Xms（或認不得的初始堆積）：JVM 會拒絕啟動 → 7，plist 不動
+        fresh();
+        String withXms = VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-Xms4096m</string>\n\t\t<string>-Xmx8192m</string>\n");
+        Files.writeString(plist, withXms);
+        expect(7, "install", "--non-interactive", "--modules", STD, "--memory-mb", "3072");
+        eq(Files.readString(plist), withXms, "plist untouched when -Xms is larger");
+        expect(0, "install", "--non-interactive", "--modules", STD, "--memory-mb", "4096");
+        eq(xmx(), "-Xmx4096m", "--memory-mb equal to -Xms is fine");
+        fresh();
+        Files.writeString(plist, VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-XX:InitialHeapSize=1g</string>\n\t\t<string>-Xmx3072m</string>\n"));
+        expect(7, "install", "--non-interactive", "--modules", STD, "--memory-mb", "8192");
+        // Steam 換回原版 plist 後再跑 quick：補回參數，記憶體再問一次
+        fresh();
+        expectIn(0, "\nY\n", "quick", "--ram-gb", "32");
+        Files.writeString(plist, VANILLA);
+        expectIn(0, "\nY\n", "quick", "--ram-gb", "32");
+        has("3072 → 8192 MB");
+        eq(first(), MacInstaller.agentArg(List.of("core", STD)), "quick restores the launch option");
+        // 寫 plist 時中斷：記憶體也沒改，plist 不指向不存在的 jar
+        fresh();
+        MacInstaller.failAt = "plist";
+        expect(12, "install", "--non-interactive", "--modules", STD, "--memory-mb", "8192");
+        MacInstaller.failAt = null;
+        noDanglingArg("install with memory interrupted at plist");
+        eq(xmx(), "-Xmx3072m", "memory untouched when the plist write fails");
 
         // 修補檔被變造：不刪；換回包內那份就能刪
         fresh();
@@ -261,6 +371,11 @@ public final class MacInstallerTest {
             if (variant.equals("crlf")) eq(new String(Files.readAllBytes(plist), StandardCharsets.UTF_8).replace("\r\n", "").contains("\n"), false, "crlf kept");
             expect(0, "uninstall", "--non-interactive", "--all");
             eq(Arrays.equals(Files.readAllBytes(plist), orig), true, variant + " round trip");
+            // 加上記憶體調整：移除後只差那個數字
+            expect(0, "install", "--non-interactive", "--modules", STD, "--memory-mb", "8192");
+            expect(0, "uninstall", "--non-interactive", "--all");
+            eq(Arrays.equals(Files.readAllBytes(plist), new String(orig, StandardCharsets.UTF_8).replace("-Xmx3072m", "-Xmx8192m").getBytes(StandardCharsets.UTF_8)), true,
+                    variant + " round trip with memory");
         }
 
         // 不可編輯的 plist：安裝 7；全部移除時文字裡有自家參數 → 7，沒有就照常刪檔
@@ -449,6 +564,11 @@ public final class MacInstallerTest {
         InfoPlist p = InfoPlist.parse(Files.readAllBytes(plist));
         if (p.problem != null) throw new AssertionError("plist problem: " + p.problem);
         return p.options.get(0);
+    }
+
+    static String xmx() throws IOException {
+        List<String> o = InfoPlist.parse(Files.readAllBytes(plist)).options;
+        return o.get(MacInstaller.xmxIndex(o));
     }
 
     static void vanilla() throws IOException {

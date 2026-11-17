@@ -544,6 +544,27 @@ Build checks: `MacInstallerTest` (a fake .app whose path has spaces, parentheses
 plist equals the original byte for byte). On the M2 Pro the x86_64 path (`arch -x86_64` with `jre-x86_64` and the x86_64
 slice of `JavaAppLauncher`, `os.arch=x86_64`) was also ARMED with `compatible=true`; real Intel hardware has not been tested.
 
+**One-line install and memory limit (from 0.3.3)**: every client release also carries `install-mac.sh`, built from
+`deploy-client/mac/install-online.sh` with the version, the macOS zip name and its SHA-256 filled in (zip and script
+come from the same build and must be uploaded together, in the same `gh release create`). Players paste
+`/bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"`;
+the script downloads `releases/download/client-v<package>/<zip>` into `mktemp -d`, compares the SHA-256 (an empty
+result is refused), extracts it with `unzip` and runs `Install-Patches.command quick` (or the words given after the
+line, such as `menu`), then deletes the temporary folder. Everything sits inside `main`, called on the last line, so
+a download cut off halfway runs nothing. `quick` keeps the installed modules (updating them to this package), adds the
+recommended variant when no `client-fixes-*` is installed, and switches to the compatible variant when a foreign class
+blocks the full one. The game's `Info.plist` has `-Xmx3072m`, which ran out of heap about three minutes after joining
+the production server on a 32 GB Mac (`OutOfMemoryError: Java heap space`) and stayed up with `-Xmx8192m`. When there
+is exactly one `-Xmx<number>[mMgG]` and it is below the recommendation (8192 MB with 32 GB of RAM or more, 6144 with
+16 GB, 4096 with 12 GB; the last two are not measured), every interactive install asks; Return or `Y` replaces that one
+value in place in the same plist write, and `--memory-mb N` (at least 3072) sets it non-interactively. This is the only
+exception to "only the launch-option line changes": removing everything keeps the raised value, because removing the
+patches should not bring the crash back, and the original value could not be recorded reliably anyway (a Steam
+verification puts 3072 back behind the installer's back). `MacInstallerTest` covers the variants, the questions,
+unknown `-Xmx` forms and an interruption while writing the plist; `command-test.sh` drives the built `install-mac.sh`
+with a fake `curl` (URL, arguments, temporary folder removed, truncated zip and failed download stop with code 6 before
+the installer runs, half a script runs nothing).
+
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,
 `WorldStreamer`, `IsoChunk`, `RoomDef` and `FBORenderCutaways` (the version subscribed locally on 2026-10-29 also

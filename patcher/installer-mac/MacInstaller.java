@@ -40,7 +40,7 @@ import java.util.zip.ZipFile;
  * 只碰三個位置：{@code .mdc-patches/MinidoracatClientPatches.jar}、{@code .mdc-patches/state.json}（schemaVersion 2，
  * 和 Windows／MdcPatchRuntime 同一份格式），以及 {@code Contents/Info.plist} 的 JVMOptions 裡自家那一行
  * {@code -javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=…}（Mac 的啟動器走 JLI_Launch，-javaagent 直接可用，
- * 不需要 Windows 的 agent 載入器 DLL）。
+ * 不需要 Windows 的 agent 載入器 DLL）。唯一例外：玩家同意時改 JVMOptions 裡 -Xmx 的值，移除時不改回。
  *
  * <p>沒有 journal：所有新內容先寫成同資料夾的暫存檔並驗 SHA，再連續原子改名。啟用順序 jar → state → plist、
  * 停用順序 plist → state → jar，任何中斷點都不會留下「plist 指著不存在的 jar」；中斷後重跑安裝或移除即可收斂。
@@ -57,6 +57,8 @@ public final class MacInstaller {
     static final Set<String> MODULE_IDS = Set.of("core", "profiler", "client-fixes-standard", "client-fixes-lowmem",
             "client-fixes-compat");
     static final String COMPAT = "client-fixes-compat";
+    /** 遊戲原版 Info.plist 的 -Xmx3072m（patcher/tests-installer-mac/Info.plist.42.22.2）；--memory-mb 不得低於它。 */
+    static final int VANILLA_MEMORY_MB = 3072;
 
     static final class Fail extends RuntimeException {
         final int code;
@@ -72,6 +74,7 @@ public final class MacInstaller {
     private boolean zh;
     private boolean interactive = true;
     private int ramGb;
+    private Integer memoryMb;
     private Path app, contents, root, plistPath;
     private Path pkgDir;
     private Map<String, Object> manifest;
@@ -150,10 +153,10 @@ public final class MacInstaller {
         for (int k = 0; k < args.length; k++) {
             String a = args[k];
             switch (a) {
-                case "menu", "status", "install", "uninstall" -> action = a;
+                case "menu", "status", "install", "uninstall", "quick" -> action = a;
                 case "--all" -> all = true;
                 case "--non-interactive" -> interactive = false;
-                case "--app", "--package-dir", "--modules", "--ram-gb", "--lang" -> {
+                case "--app", "--package-dir", "--modules", "--ram-gb", "--lang", "--memory-mb" -> {
                     if (k + 1 >= args.length) throw new Fail(USAGE, "missing value for " + a);
                     String v = args[++k];
                     switch (a) {
@@ -169,12 +172,18 @@ public final class MacInstaller {
                                 throw new Fail(USAGE, "--ram-gb must be a number");
                             }
                         }
+                        case "--memory-mb" -> {
+                            if (!v.matches("\\d{1,7}") || Integer.parseInt(v) < VANILLA_MEMORY_MB) {
+                                throw new Fail(USAGE, "--memory-mb must be a number of MB, at least " + VANILLA_MEMORY_MB);
+                            }
+                            memoryMb = Integer.parseInt(v);
+                        }
                         default -> lang = v;
                     }
                 }
                 default -> throw new Fail(USAGE, "unknown argument: " + a
-                        + "\nusage: [menu|status|install|uninstall] --app <Project Zomboid.app> [--package-dir <dir>]"
-                        + " [--modules id,...] [--all] [--non-interactive] [--ram-gb N] [--lang auto|zh|en]");
+                        + "\nusage: [menu|status|install|quick|uninstall] --app <Project Zomboid.app> [--package-dir <dir>]"
+                        + " [--modules id,...] [--all] [--non-interactive] [--ram-gb N] [--memory-mb N] [--lang auto|zh|en]");
             }
         }
         if (!Set.of("auto", "zh", "en").contains(lang)) throw new Fail(USAGE, "--lang must be auto, zh or en");
@@ -185,11 +194,12 @@ public final class MacInstaller {
         resolveApp(appArg);
         pkgDir = pkgArg != null ? Path.of(pkgArg).toAbsolutePath().normalize() : defaultPackageDir();
         if (pkgDir != null && Files.isRegularFile(pkgDir.resolve("manifest.json"))) manifest = readManifest(pkgDir);
-        if (action.equals("install") && manifest == null) {
+        if ((action.equals("install") || action.equals("quick")) && manifest == null) {
             throw new Fail(PACKAGE, L("找不到 manifest.json：請從解壓後的安裝包資料夾執行。", "manifest.json not found: run this from the extracted package folder."));
         }
         switch (action) {
             case "status" -> status();
+            case "quick" -> install(quickTargets(), false);
             case "install" -> {
                 List<String> req = requested;
                 if (!all && req.isEmpty() && interactive) {
@@ -660,6 +670,73 @@ public final class MacInstaller {
         return a != null && (a.equals("Y") || a.equals("y"));
     }
 
+    // ------------------------------------------------------------------ quick 與記憶體
+    /** 一行指令安裝：沿用已裝的模組（更新到這個包）；沒有任何客戶端修復變體就補建議的那個；完整版裝不上時改相容版。 */
+    private List<String> quickTargets() throws IOException {
+        List<String> req = new ArrayList<>(moduleIds(readState()));
+        req.removeIf(id -> manifestModule(id) == null);
+        if (req.stream().noneMatch(id -> id.startsWith("client-fixes-"))) req.add(ramGb >= 32 ? "client-fixes-standard" : "client-fixes-lowmem");
+        if (!compatAdvice(req).isEmpty()) {
+            req.replaceAll(id -> id.startsWith("client-fixes-") ? COMPAT : id);
+            info(L("  遊戲裡已有其他 MOD 替換的遊戲 class，改裝相容版（只含車輛的修補）。", "  Another mod already replaces game classes; installing the compatible version (vehicle fixes only)."));
+        }
+        return req;
+    }
+
+    private static final String HEAP_SIZE = "(\\d{1,7}[mM]|\\d{1,5}[gG])";
+
+    /** 恰好一條 -Xmx、格式是 -Xmx&lt;數字&gt;m 或 g、而且沒有 -XX:MaxHeapSize 時回傳它的位置，否則 -1（不認得就不碰）。 */
+    static int xmxIndex(List<String> options) {
+        int found = -1;
+        for (int k = 0; k < options.size(); k++) {
+            if (options.get(k).startsWith("-XX:MaxHeapSize")) return -1;
+            if (!options.get(k).startsWith("-Xmx")) continue;
+            if (found >= 0) return -1;
+            found = k;
+        }
+        return found >= 0 && options.get(found).matches("-Xmx" + HEAP_SIZE) ? found : -1;
+    }
+
+    /** -Xmx 或 -Xms 的值換成 MB（呼叫端先確認格式符合 HEAP_SIZE）。 */
+    static int xmxMb(String option) {
+        int n = Integer.parseInt(option.substring(4, option.length() - 1));
+        return Character.toLowerCase(option.charAt(option.length() - 1)) == 'g' ? n * 1024 : n;
+    }
+
+    /** 依實體記憶體給的建議上限；只有 8192 在 32 GB 的 Mac 連正式服實測過，6144／4096 是推測。0＝不建議調整。 */
+    static int recommendedMb(int ramGb) {
+        return ramGb >= 32 ? 8192 : ramGb >= 16 ? 6144 : ramGb >= 12 ? 4096 : 0;
+    }
+
+    /** 要把 -Xmx 改成多少 MB；null＝不動。--memory-mb 照做；互動時目前值低於建議值才問，Return 或 Y＝調高。 */
+    private Integer memoryChoice(InfoPlist plist) {
+        int xi = xmxIndex(plist.options);
+        if (memoryMb != null) {
+            if (xi < 0) {
+                throw new Fail(CONFLICT, L("Info.plist 找不到可以調整的記憶體上限（要剛好一條 -Xmx，格式像 -Xmx3072m），沒辦法用 --memory-mb。",
+                        "Info.plist has no memory limit this installer can change (exactly one -Xmx, like -Xmx3072m), so --memory-mb cannot be used."));
+            }
+            for (String o : plist.options) { // 調低到初始堆積以下 JVM 會拒絕啟動
+                boolean initial = o.startsWith("-Xms") || o.startsWith("-XX:InitialHeapSize") || o.startsWith("-XX:MinHeapSize");
+                if (initial && !(o.matches("-Xms" + HEAP_SIZE) && xmxMb(o) <= memoryMb)) {
+                    throw new Fail(CONFLICT, L("Info.plist 的 " + o + " 大於 " + memoryMb + " MB 或認不得，改成這個上限遊戲會開不起來。",
+                            "Info.plist has " + o + ", which is larger than " + memoryMb + " MB or not understood; the game would not start with that limit."));
+                }
+            }
+            return memoryMb == xmxMb(plist.options.get(xi)) ? null : memoryMb;
+        }
+        if (!interactive || xi < 0) return null;
+        int cur = xmxMb(plist.options.get(xi)), rec = recommendedMb(ramGb);
+        if (rec <= cur) return null;
+        head(L("遊戲記憶體上限", "Game memory limit"));
+        info(L("  遊戲目前最多只用 " + cur + " MB 記憶體（Info.plist 的 " + plist.options.get(xi) + "）。MOD 多的伺服器不夠用，連線幾分鐘後會閃退（console 出現 OutOfMemoryError）。",
+                "  The game can use at most " + cur + " MB of memory now (" + plist.options.get(xi) + " in Info.plist). On a server with many mods that is not enough, and the game closes a few minutes after joining (OutOfMemoryError in the console)."));
+        info(L("  這台 Mac 約有 " + ramGb + " GB 記憶體，建議調到 " + rec + " MB。這是遊戲本身的設定：移除修補時不會改回；Steam 更新或驗證遊戲檔案後會回到 " + VANILLA_MEMORY_MB + " MB，到時再執行一次安裝會再問。",
+                "  This Mac has about " + ramGb + " GB RAM; " + rec + " MB is recommended. It is the game's own setting: removing the patches does not change it back; a Steam update or file verification resets it to " + VANILLA_MEMORY_MB + " MB, and installing again asks again."));
+        String a = choice(L("要調高嗎？直接按 Return 或輸入 Y＝調高，輸入 N＝不調", "Raise it? Press Return or type Y to raise it, N to keep it"), List.of("Y", "N"), "Y");
+        return a.equals("Y") ? rec : null;
+    }
+
     // ------------------------------------------------------------------ install
     private void install(List<String> requested, boolean all) throws IOException {
         if (!all && requested.isEmpty()) throw new Fail(USAGE, L("沒有指定要安裝的模組（--modules id,... 或 --all）。", "No modules given (--modules id,... or --all)."));
@@ -720,6 +797,8 @@ public final class MacInstaller {
                 }
                 throw new Fail(CONFLICT, why + L("請先把那個 MOD 完整移除後再安裝，或保留它、不裝本包。", "Remove that mod completely, then install again; or keep it and do not install this package."));
             }
+            Integer newMb = memoryChoice(plist);
+            if (newMb != null) info(L("  遊戲記憶體上限：", "  Game memory limit: ") + xmxMb(plist.options.get(xmxIndex(plist.options))) + " → " + newMb + " MB");
 
             List<Map<String, Object>> entries = new ArrayList<>();
             for (String id : target) {
@@ -733,6 +812,10 @@ public final class MacInstaller {
             }
             byte[] newState = stateBytes(jarSha, Json.str(manifest, "packageVersion", ""), newAgentSha, entries);
             byte[] newPlist = plist.edit(MacInstaller::isOurArg, agentArg(target));
+            if (newMb != null) {
+                InfoPlist base = newPlist == null ? plist : InfoPlist.parse(newPlist);
+                newPlist = base.replace(xmxIndex(base.options), "-Xmx" + newMb + "m");
+            }
             byte[] curState = readOrNull(root.resolve(STATE_REL));
             boolean agentSame = newAgentSha.equals(curAgentSha);
             boolean stateSame = curState != null && java.util.Arrays.equals(curState, newState);
@@ -892,6 +975,11 @@ public final class MacInstaller {
             throw new Fail(WRITE, L("寫入中斷（" + e.getMessage() + "）。請再執行一次移除。", "Writing was interrupted (" + e.getMessage() + "). Run remove again."));
         }
         good(L("完成：已全部移除，遊戲會照原版啟動。", "Done: everything was removed; the game starts unpatched."));
+        int xi = plist.problem == null ? xmxIndex(plist.options) : -1;
+        if (xi >= 0 && xmxMb(plist.options.get(xi)) != VANILLA_MEMORY_MB) {
+            info(L("  遊戲記憶體上限維持 " + xmxMb(plist.options.get(xi)) + " MB：這是遊戲本身的設定，移除修補不會改它。要回到原本的 " + VANILLA_MEMORY_MB + " MB，用 Steam 驗證遊戲檔案的完整性。",
+                    "  The game memory limit stays at " + xmxMb(plist.options.get(xi)) + " MB: it is the game's own setting, and removing the patches does not change it. To go back to " + VANILLA_MEMORY_MB + " MB, verify the game files with Steam."));
+        }
     }
 
     // ------------------------------------------------------------------ status
@@ -903,6 +991,8 @@ public final class MacInstaller {
         Path jar = root.resolve("projectzomboid.jar");
         String jarSha = sha256(jar);
         info(L("  遊戲 jar SHA256：", "  Game jar SHA256: ") + jarSha);
+        int xi = plist.problem == null ? xmxIndex(plist.options) : -1;
+        info(L("  遊戲記憶體上限：", "  Game memory limit: ") + (xi >= 0 ? xmxMb(plist.options.get(xi)) + " MB" : L("無法判斷", "unknown")));
         Map<String, Object> state = readState();
         List<String> ids = moduleIds(state);
         List<String> ours = plist.problem == null ? plist.options.stream().filter(MacInstaller::isOurArg).toList() : List.of();

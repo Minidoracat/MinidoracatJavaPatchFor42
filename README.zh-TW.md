@@ -289,7 +289,17 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
 
-**macOS。** 改下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`（可用 `shasum -a 256` 比對）。結束遊戲、雙擊 zip 解壓縮，打開「終端機」，輸入 `bash `（後面有一個空格），把解壓出來的 `Install-Patches.command` 拖進視窗再按 Return；之後的選單和 Windows 版相同。直接雙擊 `Install-Patches.command` 不行，macOS 會擋下沒有經過公證的腳本。安裝器用遊戲自帶的 Java 執行，會透過 Steam 找到 `Project Zomboid.app`（找不到時請你拖進視窗，也可以用 `PZ_APP` 指定），把同一個 `MinidoracatClientPatches.jar` 放進 `Project Zomboid.app/Contents/Java/.mdc-patches`，並在 `Project Zomboid.app/Contents/Info.plist` 的 `JVMOptions` 加一條 `-javaagent:` 啟動參數。Mac 的啟動器可以直接載入 Java agent，所以不需要載入器 DLL。`Info.plist` 只會多那一行，全部移除（選單 `3`）後逐位元組回到原本的檔案。Steam 更新或「驗證遊戲檔案的完整性」可能把 `Info.plist` 換回原版，這時狀態會顯示「已安裝但沒有啟用」，再安裝一次就會恢復。在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；還沒有在 Intel Mac 上實測。
+**macOS。** 結束遊戲，打開「終端機」（應用程式 › 工具程式），貼上這一行按 Return：
+
+```sh
+/bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
+```
+
+它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`，用腳本內建的值比對 SHA-256，再執行安裝器：已經裝的模組照舊、沒裝就選建議的版本，問要不要調高遊戲記憶體上限，最後輸入 `Y` 確認。同一行最後加一個空格和 `menu` 會開完整選單（全部移除、狀態、其他版本）。只看到一行 `curl:` 開頭的英文就是沒下載成功，再貼一次即可。這行指令執行的是本 repo 發布頁上的 `install-mac.sh`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以執行 `curl -fsSL <那個網址> | less`。要裝舊版，把網址裡的 `releases/latest/download/install-mac.sh` 換成 `releases/download/client-v<包版本>/install-mac.sh`。
+
+不想貼指令：下載 `-macOS.zip`（可用 `shasum -a 256` 比對），雙擊解壓縮，打開「終端機」，輸入 `bash `（後面有一個空格），把解壓出來的 `Install-Patches.command` 拖進視窗再按 Return；之後的選單和 Windows 版相同。直接雙擊 `Install-Patches.command` 不行，macOS 會擋下沒有經過公證的腳本。
+
+安裝器用遊戲自帶的 Java 執行，會透過 Steam 找到 `Project Zomboid.app`（找不到時請你拖進視窗，也可以用 `PZ_APP` 指定），把同一個 `MinidoracatClientPatches.jar` 放進 `Project Zomboid.app/Contents/Java/.mdc-patches`，並在 `Project Zomboid.app/Contents/Info.plist` 的 `JVMOptions` 加一條 `-javaagent:` 啟動參數。Mac 的啟動器可以直接載入 Java agent，所以不需要載入器 DLL。遊戲預設最多只用 3 GB Java 記憶體（`-Xmx3072m`），MOD 多的伺服器不夠用，連線幾分鐘後會以 `OutOfMemoryError` 閃退；上限低於這台 Mac 的建議值時（記憶體 32 GB 以上建議 8 GB、16 GB 以上 6 GB、12 GB 以上 4 GB；只有 8 GB 在遊戲裡實測過），安裝器會問要不要調高。除了記憶體上限，`Info.plist` 只會多那一行啟動參數，全部移除（選單 `3`）後逐位元組回到原本的檔案；調高過的記憶體上限是遊戲本身的設定，移除時不會改回。Steam 更新或「驗證遊戲檔案的完整性」可能把 `Info.plist` 換回原版（記憶體也回到 3 GB），這時狀態會顯示「已安裝但沒有啟用」，再安裝一次就會恢復，也會再問一次記憶體。在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；還沒有在 Intel Mac 上實測。
 
 也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL；以及 Git for Windows 的 bash，用來測 macOS 的啟動腳本）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
@@ -318,7 +328,7 @@ patcher/game-client*/          客戶端修復 helper 與共用客戶端核心
 patcher/game-profiler/         DevProfiler runtime
 patcher/tests*/                行為測試（伺服器、客戶端、安裝器、profiler）
 deploy/                        伺服器 install.sh／uninstall.sh 與閘門測試
-deploy-client/                 客戶端安裝器（Manage-Patches.ps1 與 .bat 啟動檔；mac/Install-Patches.command）
+deploy-client/                 客戶端安裝器（Manage-Patches.ps1 與 .bat 啟動檔；mac/Install-Patches.command、mac/install-online.sh）
 patcher/installer-mac/         macOS 客戶端安裝器（mdc-mac-installer.jar，用遊戲自帶的 Java 執行）
 native-observer/               LD_PRELOAD／LD_AUDIT native 防護、啟動 wrapper、測試
 scripts/                       上面列出的選用工具

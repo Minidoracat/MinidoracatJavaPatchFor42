@@ -16,9 +16,10 @@ import org.w3c.dom.Node;
 import org.xml.sax.InputSource;
 
 /**
- * 遊戲 .app 的 Contents/Info.plist：只動 JVMOptions 陣列裡自家那一行。
+ * 遊戲 .app 的 Contents/Info.plist：只動 JVMOptions 陣列裡自家那一行，以及玩家同意時的 -Xmx 那一項的值。
  * 文字定位（每個 &lt;string&gt; 各占一行）與 XML 解析的結果必須相同，否則判為不可編輯（problem 非 null）；
- * 插入或刪除的永遠是一整行，所以拿掉自家行後其餘位元組與原檔相同，卸載就逐位元組回到原樣。
+ * 插入或刪除的永遠是一整行，所以拿掉自家行後其餘位元組與原檔相同，卸載就逐位元組回到原樣
+ * （例外：玩家同意調高的 -Xmx 值是遊戲設定，卸載不改回）。
  */
 final class InfoPlist {
     private static final String KEY = "<key>JVMOptions</key>";
@@ -31,6 +32,8 @@ final class InfoPlist {
     final List<String> options = new ArrayList<>();
     /** 每個值所在整行的 [起, 迄)（含換行）。 */
     final List<int[]> lines = new ArrayList<>();
+    /** 每個值在 &lt;string&gt; 與 &lt;/string&gt; 之間的 [起, 迄)。 */
+    final List<int[]> values = new ArrayList<>();
     int closeLineStart = -1;
     String workingDirectory;
     boolean hasClassPath;
@@ -114,6 +117,7 @@ final class InfoPlist {
                 return;
             }
             lines.add(new int[] { t.lastIndexOf('\n', i - 1) + 1, eol + 1 });
+            values.add(new int[] { i + "<string>".length(), end });
             options.add(unescape(raw));
             i = after;
         }
@@ -220,6 +224,18 @@ final class InfoPlist {
         if (check.problem != null || !check.options.equals(expected) || !check.strip(ours).equals(stripped)) {
             throw new IllegalStateException("rewritten Info.plist did not pass the check");
         }
+        return encode(result);
+    }
+
+    /** 把第 k 個選項的文字就地換掉（同一行，其餘位元組不動）；寫回前重新解析，只有那一項不同才算過。 */
+    byte[] replace(int k, String value) {
+        if (problem != null) throw new IllegalStateException("Info.plist is not editable: " + problem);
+        int[] v = values.get(k);
+        String result = text.substring(0, v[0]) + escape(value) + text.substring(v[1]);
+        List<String> expected = new ArrayList<>(options);
+        expected.set(k, value);
+        InfoPlist check = parse(encode(result));
+        if (check.problem != null || !check.options.equals(expected)) throw new IllegalStateException("rewritten Info.plist did not pass the check");
         return encode(result);
     }
 

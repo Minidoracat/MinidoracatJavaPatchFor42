@@ -2,10 +2,13 @@
 # Install-Patches.command 在假的 HOME、Steam 資料庫與 .app 上跑（路徑含空白、括號、中文）：
 # 找遊戲的順序（PZ_APP → Steam 預設 → libraryfolders.vdf → 拖進視窗）、Java 選擇（aarch64 跑不動就換 x86_64）、
 # 交給安裝器的參數，以及缺檔、找不到遊戲、找不到 Java 的結束代碼。假 java 只記下收到的參數。
-# 用法：bash command-test.sh <pkg-mac 資料夾> <工作資料夾>
+# 給了第 3、4 個參數時，再測一行指令的 install-mac.sh（假 curl 交出那個 zip）：網址、SHA 檢查、參數、暫存清理、半份腳本。
+# 用法：bash command-test.sh <pkg-mac 資料夾> <工作資料夾> [install-mac.sh <macOS zip>]
 set -u
 PKG="$1"
 W="$2"
+BOOT="${3:-}"
+ZIPF="${4:-}"
 rm -rf "$W"
 mkdir -p "$W"
 W="$(cd "$W" && pwd)" # 從 pwsh 呼叫時是 D:\...，反斜線會被當成拖曳路徑的跳脫字元
@@ -28,7 +31,7 @@ make_app() { # $1 .app 路徑、$2 aarch64 能不能跑
         if [ "$ARCH" = aarch64 ] && [ "$2" = no ]; then
             printf '#!/bin/bash\nexit 1\n' > "$J"
         else
-            printf '#!/bin/bash\n[ "$1" = -version ] && exit 0\nprintf "%%s\\n" "$0" "$@" > "$ARGS_OUT"\n' > "$J"
+            printf '#!/bin/bash\n[ "$1" = -version ] && exit 0\nprintf "%%s\\n" "$0" "$@" > "$ARGS_OUT"\nexit ${FAKE_JAVA_EXIT:-0}\n' > "$J"
         fi
         chmod +x "$J"
     done
@@ -44,10 +47,10 @@ run() { # $1 期望的結束代碼，其餘是 HOME 與參數；stdin 由呼叫�
 }
 
 expect_args() { # 期望交給 java 的參數（逐行）
-    local want
-    want="$(printf '%s\n' "$@")"
     [ -f "$ARGS_OUT" ] || { fail "java not called"; return; }
-    [ "$(tail -n +2 "$ARGS_OUT")" = "$want" ] || { fail "java args differ"; diff <(tail -n +2 "$ARGS_OUT") <(printf '%s\n' "$@"); }
+    printf '%s\n' "$@" > "$W/want.txt"
+    tail -n +2 "$ARGS_OUT" > "$W/got.txt"
+    cmp -s "$W/got.txt" "$W/want.txt" || { fail "java args differ"; diff "$W/got.txt" "$W/want.txt"; }
 }
 
 # 1) 遊戲在 libraryfolders.vdf 列的第二個資料庫；aarch64 的 java 跑不動 → 用 x86_64
@@ -92,6 +95,54 @@ PZ_APP="$BROKEN" run 3 "$H" status < /dev/null
 # 5) 安裝器 jar 不在旁邊 → 6
 rm "$P/mdc-mac-installer.jar"
 run 6 "$H" status < /dev/null
+
+# 6) 一行指令（install-mac.sh）：假 curl 交出建置出來的 zip
+if [ -n "$BOOT" ]; then
+    FB="$W/fakebin"
+    mkdir -p "$FB"
+    CURL_OUT="$W/curl-args.txt"
+    export CURL_OUT FAKE_ZIP="$ZIPF"
+    printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$@" > "$CURL_OUT"' 'o=""; prev=""' \
+        'for a in "$@"; do [ "$prev" = -o ] && o="$a"; prev="$a"; done' \
+        'case "${FAKE_CURL:-ok}" in' \
+        '  fail) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;;' \
+        '  trunc) head -c 1000 "$FAKE_ZIP" > "$o" ;;' \
+        '  *) cp "$FAKE_ZIP" "$o" ;;' 'esac' > "$FB/curl"
+    chmod +x "$FB/curl"
+    ZIPNAME="$(basename "$ZIPF")"
+    VER="$(printf '%s' "$ZIPNAME" | sed -n 's/^MinidoracatClientPatches-[^-]*-\(.*\)-macOS\.zip$/\1/p')"
+    URL="https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/download/client-v$VER/$ZIPNAME"
+    boot() { # $1 期望的結束代碼（any＝不檢查），其餘交給 bash；FAKE_CURL／FAKE_JAVA_EXIT 由呼叫端設
+        local want="$1"
+        shift
+        rm -f "$ARGS_OUT" "$CURL_OUT"
+        HOME="$H" PZ_APP="$OTHER" PATH="$FB:$PATH" bash "$@" > "$W/out.txt" 2>&1 < /dev/null
+        local got=$?
+        [ "$want" = any ] || [ "$got" = "$want" ] || { fail "bootstrap exit $got != $want for $*"; cat "$W/out.txt"; }
+    }
+    last_args() { tail -n +10 "$ARGS_OUT" | tr '\n' ' '; }
+    boot 0 -c "$(cat "$BOOT")"
+    grep -qx -- "$URL" "$CURL_OUT" || fail "bootstrap URL is not $URL"
+    [ "$(last_args)" = "quick " ] || fail "no args should run quick, got: $(last_args)"
+    PKGDIR="$(sed -n '/^--package-dir$/{n;p;}' "$ARGS_OUT")"
+    [ -n "$PKGDIR" ] && [ ! -e "$PKGDIR" ] || fail "temporary package folder left behind: $PKGDIR"
+    grep -q 'menu' "$W/out.txt" || fail "no hint about menu after quick"
+    boot 0 -c "$(cat "$BOOT")" menu
+    [ "$(last_args)" = "menu " ] || fail "bash -c ... menu should pass menu, got: $(last_args)"
+    boot 0 -c "$(cat "$BOOT")" --lang en
+    [ "$(last_args)" = "--lang en " ] || fail "bash -c ... --lang en should pass both words, got: $(last_args)"
+    boot 0 "$BOOT" uninstall --all
+    [ "$(last_args)" = "uninstall --all " ] || fail "file form should pass args, got: $(last_args)"
+    FAKE_JAVA_EXIT=7 boot 7 -c "$(cat "$BOOT")"
+    FAKE_CURL=trunc boot 6 -c "$(cat "$BOOT")"
+    [ ! -f "$ARGS_OUT" ] || fail "installer ran with a truncated zip"
+    grep -q 'SHA-256' "$W/out.txt" || fail "no SHA-256 message for a truncated zip"
+    FAKE_CURL=fail boot 6 -c "$(cat "$BOOT")"
+    [ ! -f "$ARGS_OUT" ] || fail "installer ran after a failed download"
+    SIZE="$(wc -c < "$BOOT")"
+    boot any -c "$(head -c $((SIZE / 2)) "$BOOT")"
+    [ ! -f "$CURL_OUT" ] && [ ! -f "$ARGS_OUT" ] || fail "half a script ran something"
+fi
 
 if [ "$FAILS" -ne 0 ]; then
     echo "command-test: $FAILS failure(s)"
