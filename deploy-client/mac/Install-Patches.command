@@ -1,6 +1,6 @@
 #!/bin/bash
 # Minidoracat client patches for macOS: finds Project Zomboid.app and runs the installer with the game's own Java.
-# Usage (Terminal): bash <drag this file here> [status|install|quick|uninstall] [--memory-mb N] [--lang en] ...
+# Usage (Terminal): bash <drag this file here> [menu|status|install|quick|uninstall] [--memory-mb N] [--lang en] ...
 # bash 3.2 (macOS default): no associative arrays, mapfile or ${x,,}.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

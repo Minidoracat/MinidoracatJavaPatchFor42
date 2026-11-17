@@ -171,7 +171,7 @@ public final class MacInstallerTest {
         expectIn(0, "1\n0\n0\n", "menu", "--lang", "en");
         vanilla();
 
-        // quick（一行指令）：沒裝 → core＋建議變體；記憶體題按 Return＝調高；全部移除只留下調過的記憶體
+        // quick：沒裝 → core＋建議變體；記憶體題按 Return＝調高；全部移除只留下調過的記憶體
         fresh();
         eq(MacInstaller.xmxMb(xmx()), MacInstaller.VANILLA_MEMORY_MB, "fixture -Xmx is the vanilla value");
         expectIn(0, "\nY\n", "quick", "--ram-gb", "32");

@@ -273,7 +273,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
 ```
 
-它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再開安裝器的選單；暫存資料夾用完就刪。選單跟著 Windows 的顯示語言或地區格式（任一是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`（安裝或更新）、`1`（客戶端修復），直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時建議相容版），問到遊戲記憶體上限時按 Enter 調到建議值，再輸入 `Y` 確認。要全部移除、看狀態或換其他版本，也是貼同一行，在選單選 `3`（全部移除）或 `4`（查看狀態）。
+它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再開安裝器的選單；暫存資料夾用完就刪。選單跟著 Windows 的顯示語言或地區格式（任一是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`（安裝或更新）、`1`（客戶端修復），直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時建議相容版），問到遊戲記憶體上限時按 Enter 調到建議值，再輸入 `Y` 確認；完成後按 Enter，再輸入 `0` 離開。要換其他版本也是選 `1`；要全部移除或看狀態，貼同一行，在選單選 `3`（全部移除）或 `4`（查看狀態）。
 
 要直接執行某個動作而不開選單，改用 `& ([scriptblock]::Create((irm <上面的網址>))) status` 這種寫法，最後的參數原樣交給安裝器（例如 `status`、`uninstall -All`；只加 `-Lang en` 會用英文開選單）。這行指令執行的是本 repo 發布頁上的 `install-windows.ps1`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以只執行 `irm <那個網址>`。要裝舊版，把網址裡的 `releases/latest/download` 換成 `releases/download/client-v<包版本>`（0.3.5 起才有這個檔；0.3.5 不帶參數時會直接安裝，不開選單）。
 
@@ -304,7 +304,7 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 /bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
 ```
 
-它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`，用腳本內建的值比對 SHA-256，再開安裝器的選單（和 Windows 版相同）。選單跟著 macOS 的偏好語言（第一個是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`、`1`，直接按 Return 選建議的版本，問到遊戲記憶體上限時按 Return 調高，再輸入 `Y` 確認；全部移除也是貼同一行，選 `3`。同一行最後加一個空格和 `status` 或 `uninstall --all` 會直接執行那個動作、不開選單；加 `--lang en` 會用英文開選單。只看到一行 `curl:` 開頭的英文就是沒下載成功，再貼一次即可。這行指令執行的是本 repo 發布頁上的 `install-mac.sh`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以執行 `curl -fsSL <那個網址> | less`。要裝舊版，把網址裡的 `releases/latest/download/install-mac.sh` 換成 `releases/download/client-v<包版本>/install-mac.sh`（0.3.5 以前不帶參數時會直接安裝，不開選單）。
+它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`，用腳本內建的值比對 SHA-256，再開安裝器的選單（和 Windows 版相同）。選單跟著 macOS 的偏好語言（第一個是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`、`1`，直接按 Return 選建議的版本，問到遊戲記憶體上限時按 Return 調高，再輸入 `Y` 確認；完成後按 Return，再輸入 `0` 離開。全部移除也是貼同一行，選 `3`。同一行最後加一個空格和 `status` 或 `uninstall --all` 會直接執行那個動作、不開選單；加 `--lang en` 會用英文開選單。只看到一行 `curl:` 開頭的英文就是沒下載成功，再貼一次即可。這行指令執行的是本 repo 發布頁上的 `install-mac.sh`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以執行 `curl -fsSL <那個網址> | less`。要裝舊版，把網址裡的 `releases/latest/download/install-mac.sh` 換成 `releases/download/client-v<包版本>/install-mac.sh`（0.3.5 以前不帶參數時會直接安裝，不開選單）。
 
 不想貼指令：下載 `-macOS.zip`（可用 `shasum -a 256` 比對），雙擊解壓縮，打開「終端機」，輸入 `bash `（後面有一個空格），把解壓出來的 `Install-Patches.command` 拖進視窗再按 Return；之後的選單和 Windows 版相同。直接雙擊 `Install-Patches.command` 不行，macOS 會擋下沒有經過公證的腳本。
 

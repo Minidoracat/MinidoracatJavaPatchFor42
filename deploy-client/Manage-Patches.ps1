@@ -1495,7 +1495,7 @@ function Get-AllInstallTargets($manifest, [string[]]$installed) {
     return @($targets)
 }
 
-# 一行指令的預設動作 quick（規則和 MacInstaller.quickTargets 相同，要一起改）：已裝的客戶端修復變體照舊，
+# quick 動作（一行指令後面加 quick 時才用；規則和 MacInstaller.quickTargets 相同，要一起改）：已裝的客戶端修復變體照舊，
 # 沒裝過就依記憶體選；完整版被別的 MOD 擋住而相容版裝得上時改相容版。
 # 只回傳變體：其他已裝的模組由 install 的「加裝」契約保留。
 function Get-QuickTargets($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$installed) {

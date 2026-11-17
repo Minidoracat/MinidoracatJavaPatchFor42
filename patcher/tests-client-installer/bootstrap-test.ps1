@@ -60,6 +60,11 @@ Reset
 $out = Run { & ([scriptblock]::Create($text)) status }
 Check ($script:PsArgs.Count -eq 6 -and $script:PsArgs[-1] -eq 'status') "arguments end with status ($($script:PsArgs -join ' '))"
 Check ($out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]') -and -not ($out -match '\\u[0-9a-fA-F]{4}')) 'English only'
+Reset
+[Threading.Thread]::CurrentThread.CurrentCulture = 'zh-TW'
+$out = Run { $text | iex }
+Check ($out.Contains([regex]::Unescape('\u4e0b\u8f09\u4e2d\uff1a') + $zipName)) 'Chinese when only the regional format is Chinese'
+[Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
 
 Write-Host '3) arguments pass through unchanged; -Lang en also switches the bootstrap''s own lines (Chinese UI)'
 Reset

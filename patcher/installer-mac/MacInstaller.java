@@ -671,7 +671,7 @@ public final class MacInstaller {
     }
 
     // ------------------------------------------------------------------ quick 與記憶體
-    /** 一行指令安裝：沿用已裝的模組（更新到這個包）；沒有任何客戶端修復變體就補建議的那個；完整版裝不上時改相容版。 */
+    /** quick 動作（明確帶 quick 時才用；一行指令預設開選單）：沿用已裝的模組（更新到這個包）；沒有任何客戶端修復變體就補建議的那個；完整版裝不上時改相容版。 */
     private List<String> quickTargets() throws IOException {
         List<String> req = new ArrayList<>(moduleIds(readState()));
         req.removeIf(id -> manifestModule(id) == null);

@@ -627,20 +627,23 @@ tests 81-86 cover quick (two RAM sizes, keeping
 the variant, switching to compatible, 0.2.x and the old v3.0 package, an unfinished transaction, non-interactive) and
 the four `-Lang auto` combinations.
 
-**The one-line commands open the menu (from 0.3.6)**: the user asked for both one-line commands to always open the
-menu, with the language picked from the system first and a way to switch it, so `install-windows.ps1` and
-`install-mac.sh` without arguments now run `menu` (the Mac from 0.3.3 to 0.3.5 and Windows 0.3.5 ran `quick`) and no
-longer print a second "paste this to remove" line: installing, updating, removing and status all use the same line.
-Both main menus already had `[L]` to switch between Chinese and English, and the automatic choice is unchanged: on
-Windows the display language or regional format, on the Mac the first preferred language as Java reads it (on the M2
-Pro with `AppleLanguages` `zh-Hant-TW`, Java reported `user.language=zh` with `LANG=en_US.UTF-8`, with `LANG=C` and
-with an empty environment). The Mac one-line command's own lines used to be printed in both languages; they now follow
-the same source (Chinese when the first entry of `defaults read -g AppleLanguages` starts with `zh`), and a trailing
-`--lang zh`/`--lang en` wins. `command-test.sh` uses a fake `defaults` to test no preferred language, `zh-Hant-TW`
-and both `--lang` values. Arguments still go to the installer unchanged (Windows:
-`& ([scriptblock]::Create((irm <URL>))) status`; Mac: `status` after the same line). The installer's "remove
-everything" messages now say to paste the line again and choose `[3]`. The `quick` action stays and only runs when
-asked for by name.
+**The one-line commands open the menu (from 0.3.6)**: where the Mac and Windows one-line sections above say the
+command runs `quick` and a second line opens the menu, that is the behavior up to 0.3.5. The user asked for both
+one-line commands to always open the menu, with the language picked from the system first and a way to switch it, so
+`install-windows.ps1` and `install-mac.sh` without arguments now run `menu` (the Mac from 0.3.3 to 0.3.5 and Windows
+0.3.5 ran `quick`) and no longer print a second "paste this to remove" line: installing, updating, removing and status
+all use the same line. Both main menus already had `[L]` to switch between Chinese and English, and the automatic
+choice is unchanged: on Windows the display language or regional format, on the Mac the first preferred language as
+Java reads it (on the M2 Pro with `AppleLanguages` `zh-Hant-TW`, Java reported `user.language=zh` with
+`LANG=en_US.UTF-8`, with `LANG=C` and with an empty environment). The Mac one-line command's own lines used to be
+printed in both languages; they now follow the same source (Chinese when the first entry of
+`defaults read -g AppleLanguages` starts with `zh`), and a trailing `--lang zh`/`--lang en` wins. `command-test.sh`
+uses a fake `defaults` to test no preferred language, `zh-Hant-TW`, English first with Chinese second, and both
+`--lang` values; `bootstrap-test.ps1` also tests a Chinese regional format alone. Arguments still go to the installer
+unchanged (Windows: `& ([scriptblock]::Create((irm <URL>))) status`; Mac: `status` after the same line). The
+installer's "remove everything" messages now say to paste the line again and choose `[3]`. The `quick` action stays
+and only runs when asked for by name. When updating, the menu picks the recommended variant (memory and conflicts)
+instead of keeping the installed one as `quick` did.
 
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,

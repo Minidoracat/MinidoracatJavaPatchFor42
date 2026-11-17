@@ -109,8 +109,9 @@ if [ -n "$BOOT" ]; then
         '  trunc) head -c 1000 "$FAKE_ZIP" > "$o" ;;' \
         '  *) cp "$FAKE_ZIP" "$o" ;;' 'esac' > "$FB/curl"
     chmod +x "$FB/curl"
-    # 假 defaults：FAKE_LANGS 是系統偏好語言的第一個（空白＝讀不到）
-    printf '%s\n' '#!/bin/bash' '[ -n "$FAKE_LANGS" ] && printf "(\n    \"%s\"\n)\n" "$FAKE_LANGS"' > "$FB/defaults"
+    # 假 defaults：只回答 read -g AppleLanguages；FAKE_LANGS 以空白分隔、照偏好順序（空白＝讀不到）
+    printf '%s\n' '#!/bin/bash' '[ "$*" = "read -g AppleLanguages" ] && [ -n "$FAKE_LANGS" ] || exit 1' \
+        'echo "("; for l in $FAKE_LANGS; do echo "    \"$l\","; done; echo ")"' > "$FB/defaults"
     chmod +x "$FB/defaults"
     ZIPNAME="$(basename "$ZIPF")"
     VER="$(printf '%s' "$ZIPNAME" | sed -n 's/^MinidoracatClientPatches-[^-]*-\(.*\)-macOS\.zip$/\1/p')"
@@ -132,6 +133,8 @@ if [ -n "$BOOT" ]; then
     grep -q "^Downloading $ZIPNAME" "$W/out.txt" && ! grep -q '下載中' "$W/out.txt" || fail "no preferred language should print English only"
     FAKE_LANGS=zh-Hant-TW boot 0 -c "$(cat "$BOOT")"
     grep -q "^下載中：$ZIPNAME" "$W/out.txt" && ! grep -q 'Downloading' "$W/out.txt" || fail "zh-Hant-TW should print Chinese only"
+    FAKE_LANGS='en-US zh-Hant-TW' boot 0 -c "$(cat "$BOOT")"
+    grep -q "^Downloading $ZIPNAME" "$W/out.txt" && ! grep -q '下載中' "$W/out.txt" || fail "only the first preferred language counts"
     FAKE_LANGS=zh-Hant-TW boot 0 -c "$(cat "$BOOT")" status --lang en
     [ "$(last_args)" = "status --lang en " ] || fail "bash -c ... status --lang en should pass all words, got: $(last_args)"
     grep -q "^Downloading $ZIPNAME" "$W/out.txt" || fail "--lang en should win over a Chinese system"

@@ -1524,7 +1524,7 @@ try {
     $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir)
     Check ($r.Code -eq 6) '沒有 manifest.json：代碼 6'
     $r = Invoke-Installer @('quick', '-NonInteractive', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
-    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '位置參數 quick（一行指令就是這樣傳）'
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '位置參數 quick（一行指令後面加 quick 就是這樣傳）'
 
     Start-Case '86. -Lang auto：顯示語言或地區格式任一是中文就用中文（UTF-8 主控台下 5.1 的顯示語言會變 en-US）'
     Reset-GameDir
