@@ -14,7 +14,7 @@
       * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json（schemaVersion=2），runtime 與 installer 的同一份真相。
         0.2.x 的 schemaVersion=1（loose class 清單）讀得懂：升級或移除時在同一筆交易刪掉那些 loose class。
       * install 是「加裝」：保留已安裝的其它模組；同 exclusiveGroup 的新變體才會替換舊變體。
-      * quick（一行指令 install-windows.ps1 的預設動作）：沿用已裝的客戶端修復變體，沒裝過依記憶體選，再走 install 的計畫、記憶體詢問與 Y 確認。
+      * quick（一行指令後面加 quick 時才用；預設開選單）：沿用已裝的客戶端修復變體，沒裝過依記憶體選，再走 install 的計畫、記憶體詢問與 Y 確認。
       * uninstall 只移除所選；仍被保留模組依賴的模組（例如 core）自動保留。
       * 所有影像經暫存檔驗 SHA 後原子替換；交易先備份→journal→寫→刪→state→已完成終態。
         復原只接受交易前／後影像；未知現況保留。終態落地前不刪備份，清理中斷可重入。
@@ -1508,9 +1508,9 @@ function Get-QuickTargets($manifest, [string]$packageDir, [string]$gameRoot, [st
     return @($variant)
 }
 
-# 叫玩家「全部移除」時的說法：用 zip 裝的有 Uninstall-Patches.bat，用一行指令裝的只有選單指令
+# 叫玩家「全部移除」時的說法：用 zip 裝的有 Uninstall-Patches.bat，用一行指令裝的再貼一次那行指令就會開選單
 function Get-RemoveAllHint {
-    L '請用安裝器的「全部移除」（執行 Uninstall-Patches.bat 輸入 A；用一行指令安裝的，貼選單指令選 [3]）' 'use the installer''s "Remove everything" (run Uninstall-Patches.bat and type A; if you installed with the one-line command, paste the menu command and choose [3])'
+    L '請用安裝器的「全部移除」（執行 Uninstall-Patches.bat 輸入 A；用一行指令安裝的，再貼一次那行指令選 [3]）' 'use the installer''s "Remove everything" (run Uninstall-Patches.bat and type A; if you installed with the one-line command, paste it again and choose [3])'
 }
 
 # Windows 11 的智慧型應用程式控制（Smart App Control）：0＝關、1＝強制、2＝評估。強制模式會擋下未簽章的 mdc-agent-loader.dll，

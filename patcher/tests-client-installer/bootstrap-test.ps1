@@ -10,7 +10,6 @@ $script:FakeZip = $Zip
 $zipName = Split-Path -Leaf $Zip
 if ($zipName -notmatch '^MinidoracatClientPatches-[^-]+-(.+)\.zip$') { throw "unexpected zip name $zipName" }
 $version = $Matches[1]
-$latest = 'https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1'
 $script:Fails = 0
 function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "  PASS $what" } else { $script:Fails++; Write-Host "  FAIL $what" -ForegroundColor Red }
@@ -44,23 +43,23 @@ Reset
 [Threading.Thread]::CurrentThread.CurrentUICulture = 'zh-TW'
 $out = Run { $text | iex }
 Check ($script:Uri -eq "https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/download/client-v$version/$zipName") "download URL $script:Uri"
-Check (($script:PsArgs -join '|') -eq "-NoProfile|-ExecutionPolicy|Bypass|-File|$($script:Seen.File)|quick") "installer arguments $($script:PsArgs -join ' ')"
+Check (($script:PsArgs -join '|') -eq "-NoProfile|-ExecutionPolicy|Bypass|-File|$($script:Seen.File)|menu") "installer arguments $($script:PsArgs -join ' ')"
 Check ($script:Seen.Script -and $script:Seen.Manifest) 'package extracted, manifest.json next to Manage-Patches.ps1'
 Check ([string]::IsNullOrEmpty($script:Seen.ModPath) -and $script:Seen.Enc -eq $enc0) 'installer sees an empty PSModulePath and an untouched console encoding'
 Check (-not (Test-Path -LiteralPath (Split-Path (Split-Path $script:Seen.File)))) 'temporary folder removed'
 Check ([string]$env:PSModulePath -eq [string]$mp0 -and [Console]::OutputEncoding.WebName -eq $enc0) 'PSModulePath and console encoding restored'
 Check ($LASTEXITCODE -eq 0) "LASTEXITCODE $LASTEXITCODE"
-Check ($out.Contains([regex]::Unescape('\u4e0b\u8f09\u4e2d\uff1a') + $zipName) -and $out.Contains("& ([scriptblock]::Create((irm $latest))) menu")) 'Chinese text decoded and the menu command printed'
+Check ($out.Contains([regex]::Unescape('\u4e0b\u8f09\u4e2d\uff1a') + $zipName)) 'Chinese text decoded'
 Check (-not ($out -match '\\u[0-9a-fA-F]{4}')) 'no \uXXXX escapes reach the screen'
 Check (-not (Get-Command L -ErrorAction SilentlyContinue) -and -not (Test-Path variable:sha) -and -not (Test-Path variable:releases) -and $ErrorActionPreference -eq 'Stop' -and $ProgressPreference -ne 'SilentlyContinue') 'nothing left in the caller''s session'
 
-Write-Host '2) scriptblock form with menu (English UI and region)'
+Write-Host '2) scriptblock form with one action (English UI and region)'
 Reset
 [Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
 [Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
-$out = Run { & ([scriptblock]::Create($text)) menu }
-Check ($script:PsArgs.Count -eq 6 -and $script:PsArgs[-1] -eq 'menu') "arguments end with menu ($($script:PsArgs -join ' '))"
-Check (-not $out.Contains('paste this line') -and $out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]') -and -not ($out -match '\\u[0-9a-fA-F]{4}')) 'English only, no menu hint after menu'
+$out = Run { & ([scriptblock]::Create($text)) status }
+Check ($script:PsArgs.Count -eq 6 -and $script:PsArgs[-1] -eq 'status') "arguments end with status ($($script:PsArgs -join ' '))"
+Check ($out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]') -and -not ($out -match '\\u[0-9a-fA-F]{4}')) 'English only'
 
 Write-Host '3) arguments pass through unchanged; -Lang en also switches the bootstrap''s own lines (Chinese UI)'
 Reset
@@ -74,13 +73,13 @@ Write-Host '4) installer fails with code 7'
 Reset
 $script:FakeExit = 7
 $out = Run { $text | iex }
-Check ($LASTEXITCODE -eq 7 -and $out.Contains('paste this line')) "LASTEXITCODE $LASTEXITCODE and the menu command still shown"
+Check ($LASTEXITCODE -eq 7) "LASTEXITCODE $LASTEXITCODE"
 
 Write-Host '5) truncated download'
 Reset
 $script:Mode = 'trunc'
 $out = Run { $text | iex }
-Check ($LASTEXITCODE -eq 6 -and $null -eq $script:PsArgs -and $out.Contains('SHA-256') -and $out.Contains('[Error]') -and -not $out.Contains('paste this line')) "LASTEXITCODE $LASTEXITCODE, installer not run"
+Check ($LASTEXITCODE -eq 6 -and $null -eq $script:PsArgs -and $out.Contains('SHA-256') -and $out.Contains('[Error]')) "LASTEXITCODE $LASTEXITCODE, installer not run"
 Check ((TempLeft) -eq $temp0) 'no temporary folder left'
 
 Write-Host '6) download fails'

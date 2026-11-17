@@ -1,7 +1,8 @@
-# Minidoracat client patches for Windows, one-line installer: downloads this release's package, checks its SHA-256, runs it.
+# Minidoracat client patches for Windows, one-line installer: downloads this release's package, checks its SHA-256 and opens
+# the installer's menu (install, remove, status; [L] switches the language):
 #   irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
-# Menu (remove, status, other variants); anything after the last parenthesis goes to Manage-Patches.ps1:
-#   & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
+# To run one action instead, anything after the last parenthesis goes to Manage-Patches.ps1 (status, uninstall -All, -Lang en):
+#   & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) status
 # build-client.ps1 fills in the @...@ values and turns every non-ASCII character into \uXXXX: Windows PowerShell 5.1 reads the
 # download as Latin-1, so players must get pure ASCII. Chinese text goes only in the first argument of L, as a fixed single-quoted
 # string without backslashes; values are added with -f afterwards. The zip and this script come from the same build.
@@ -19,7 +20,7 @@
     $zh = @([Globalization.CultureInfo]::CurrentUICulture.Name, [Globalization.CultureInfo]::CurrentCulture.Name) -like 'zh*'
     function L([string]$z, [string]$e) { if ($zh) { [regex]::Unescape($z) } else { $e } }
     $a = @($args)
-    if ($a.Count -eq 0) { $a = @('quick') }
+    if ($a.Count -eq 0) { $a = @('menu') }
     # -Lang zh/en passed on to the installer also sets the language of these few lines
     for ($i = 0; $i -lt $a.Count - 1; $i++) { if ($a[$i] -eq '-Lang' -and $a[$i + 1] -in 'zh', 'en') { $zh = $a[$i + 1] -eq 'zh' } }
     Write-Host "Minidoracat Client Patches $version (Project Zomboid @GAME_VERSION@)"
@@ -31,7 +32,6 @@
     $dir = Join-Path ([IO.Path]::GetTempPath()) ('mdc-client-patches-' + [Guid]::NewGuid().ToString('N'))
     $oldModulePath = $env:PSModulePath
     $code = 6
-    $ran = $false
     try {
         New-Item -ItemType Directory -Path $dir | Out-Null
         $zip = Join-Path $dir $zipName
@@ -50,7 +50,6 @@
         $env:PSModulePath = $null
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'pkg\Manage-Patches.ps1') @a
         $code = $LASTEXITCODE
-        $ran = $true
     } catch {
         Write-Host ''
         Write-Host ((L '[錯誤] {0}' '[Error] {0}') -f $_.Exception.Message) -ForegroundColor Red
@@ -59,9 +58,4 @@
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
     $global:LASTEXITCODE = $code
-    if ($ran -and $a[0] -eq 'quick') {
-        Write-Host ''
-        Write-Host (L '要移除、看狀態或改選項，貼這一行（會開選單）：' 'To remove, see the status or change options, paste this line (it opens the menu):')
-        Write-Host "& ([scriptblock]::Create((irm $releases/latest/download/install-windows.ps1))) menu"
-    }
 } @args

@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.5'
+$PACKAGE_VERSION = '0.3.6'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -480,11 +480,9 @@ $fixListEn
 INSTALL WITHOUT THIS ZIP (one line in PowerShell)
 Close the game, open PowerShell (press the Windows key, type PowerShell, press Enter),
 paste this line and press Enter. It downloads the latest package, checks its SHA-256 and
-installs; answer the memory question and type Y, the same as below:
+opens the same menu as Install-Patches.bat; continue from step 4 below. To remove
+everything or see the status later, paste the same line again.
     irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
-To remove everything, see the status or pick another version, paste this line instead
-(it opens the same menu as Install-Patches.bat):
-    & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
 
 INSTALL WITH THIS ZIP
 1. Close the game.
@@ -527,8 +525,8 @@ launch option, the game does not start without that file (Java stops with "Error
 zip file"). If that happened, remove everything (below), or let Steam verify the game
 files, which puts back the original ProjectZomboid64.json.
 To remove everything at any time: close the game, double-click Uninstall-Patches.bat in
-this folder, type A and Enter, then Y and Enter. Deleted the folder? Paste the menu line
-from the top of this file and choose 3 (any newer package can remove an older install).
+this folder, type A and Enter, then Y and Enter. Deleted the folder? Paste the PowerShell
+line from the top of this file and choose 3 (any newer package can remove an older install).
 
 WINDOWS SMART APP CONTROL
 The patches load through a small DLL (mdc-agent-loader.dll) that is not code-signed. On a
@@ -622,10 +620,9 @@ $fixListZh
 
 【不下載 zip：在 PowerShell 貼一行】
 關閉遊戲，打開 PowerShell（按 Windows 鍵，輸入 PowerShell，按 Enter），貼上這一行按 Enter。
-它會下載最新的安裝包、比對 SHA-256 再安裝；問記憶體時按 Enter，最後輸入 Y，和下面一樣：
+它會下載最新的安裝包、比對 SHA-256，再開和 Install-Patches.bat 一樣的選單；接著照下面第 4 步做。
+之後要全部移除或看狀態，再貼一次同一行就好。
     irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
-要全部移除、看狀態或換其他版本，改貼這一行（會開和 Install-Patches.bat 一樣的選單）：
-    & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
 
 【用這個 zip 安裝】
 1. 關閉遊戲。
@@ -657,7 +654,7 @@ $fixListZh
 （Java 顯示「Error opening zip file」）。已經發生的話，照下面全部移除，
 或用 Steam 驗證遊戲檔案的完整性（會換回原版的 ProjectZomboid64.json）。
 想全部移除時：關閉遊戲，雙擊這個資料夾裡的 Uninstall-Patches.bat，輸入 A 按 Enter，再輸入 Y 按 Enter 確認。
-資料夾刪掉了，就貼這份說明開頭的選單那一行，選 3（比較新的安裝包也能移除舊版）。
+資料夾刪掉了，就貼這份說明開頭的 PowerShell 那一行，選 3（比較新的安裝包也能移除舊版）。
 
 【Windows 智慧型應用程式控制】
 修補是靠一個沒有程式碼簽章的小 DLL（mdc-agent-loader.dll）載入的。Windows 11 的「智慧型應用程式控制」
@@ -786,14 +783,18 @@ INSTALL (easiest: one line in Terminal)
 3. Paste this line and press Return:
    /bin/bash -c "`$(curl -fsSL $macOneLineUrl)"
    It downloads the newest package, checks its SHA-256, finds the game through Steam and
-   picks the recommended version for your Mac.
-4. If it asks about the game's memory limit, press Return to raise it (see MEMORY below).
-5. When asked to confirm, type Y and press Return.
-6. Start the game from Steam as usual (both "Play Project Zomboid" and "Compatibility
+   opens the installer's menu. The menu follows your Mac's language (Chinese or
+   English); press L to switch.
+4. Type 1 and press Return (install or update patches), then 1 again (client fixes).
+5. When asked for the version, just press Return: the recommended one is picked.
+6. If it asks about the game's memory limit, press Return to raise it (see MEMORY below).
+7. When asked to confirm, type Y and press Return; when it is done, press Return, then
+   type 0 and Return to exit.
+8. Start the game from Steam as usual (both "Play Project Zomboid" and "Compatibility
    Mode" load the patches).
 If you only see a line starting with "curl:", the download did not work: check your
-connection and paste the line again. To remove the patches, see the status or change
-options, add a space and menu to the end of the same line.
+connection and paste the line again. To remove the patches or see the status later,
+paste the same line again.
 
 INSTALL WITH THIS ZIP (without pasting a command)
 1. Quit the game.
@@ -837,9 +838,8 @@ is out, install it the same way; the old one does not need to be removed first.
 Do not delete the .mdc-patches folder by hand: while Info.plist still has the launch
 option, the game does not start without that file. If that happened, run the installer
 and choose 3 (remove everything), or let Steam verify the game files.
-To remove everything at any time: quit the game, paste the one-line command with a space
-and menu at the end (or run Install-Patches.command the same way as above), type 3 and
-Return, then Y and Return.
+To remove everything at any time: quit the game, paste the one-line command again (or run
+Install-Patches.command the same way as above), type 3 and Return, then Y and Return.
 
 OTHER MODS THAT REPLACE GAME CLASSES
 Some mods put .class files into the game. Since 42.22 such files make the game throw a
@@ -875,10 +875,10 @@ $modulesMacEn
 Boundaries
 - Manages only our own patches; it never removes other authors' tools.
 - The installer (mdc-mac-installer.jar) runs with the Java that comes with the game.
-  Command line: bash Install-Patches.command [status|install|quick|uninstall]
-  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]; quick is
-  what the one-line command runs (keep the installed modules or pick the recommended
-  ones, ask about memory, confirm). Set PZ_APP to the path of Project Zomboid.app when the
+  Command line: bash Install-Patches.command [menu|status|install|quick|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]. The
+  one-line command opens the menu; words after it go to the installer the same way
+  (/bin/bash -c "`$(curl ...)" status). Set PZ_APP to the path of Project Zomboid.app when the
   game is not in a Steam library.
 - Changes Info.plist only by adding or removing its own -javaagent option and, when you agree, the -Xmx value (the option goes first
   in JVMOptions, so this package starts before other agents). Other Java agents
@@ -907,11 +907,14 @@ $fixListZh
 2. 打開「終端機」（應用程式 → 工具程式 → 終端機）。
 3. 貼上這一行，按 Return：
    /bin/bash -c "`$(curl -fsSL $macOneLineUrl)"
-   它會下載最新的安裝包、比對 SHA-256、透過 Steam 找到遊戲，並依你的 Mac 選好建議的版本。
-4. 問到遊戲記憶體上限時，直接按 Return 就會調到建議值（見下面【記憶體】）。
-5. 問「確定要安裝嗎？」時，輸入 Y 按 Return。
-6. 照平常從 Steam 開遊戲（「執行 Project Zomboid」和「Compatibility Mode」都會載入修補）。
-只看到一行 curl: 開頭的英文，就是沒下載成功：檢查網路後再貼一次。要移除、看狀態或改選項：同一行最後加一個空格和 menu。
+   它會下載最新的安裝包、比對 SHA-256、透過 Steam 找到遊戲，再開安裝器的選單。
+   選單跟著 Mac 的語言；按 L 可切換中文／英文。
+4. 輸入 1 按 Return（安裝或更新修補），再輸入 1 按 Return（客戶端修復）。
+5. 選版本時直接按 Return，程式會依你的 Mac 自動選好。
+6. 問到遊戲記憶體上限時，直接按 Return 就會調到建議值（見下面【記憶體】）。
+7. 問「確定要安裝嗎？」時，輸入 Y 按 Return；看到安裝完成後按 Return，再輸入 0 按 Return 離開。
+8. 照平常從 Steam 開遊戲（「執行 Project Zomboid」和「Compatibility Mode」都會載入修補）。
+只看到一行 curl: 開頭的英文，就是沒下載成功：檢查網路後再貼一次。之後要移除或看狀態，再貼一次同一行就好。
 
 【用這個 zip 安裝（不想貼指令時）】
 1. 結束遊戲。
@@ -943,7 +946,7 @@ Steam 更新或「驗證遊戲檔案的完整性」也可能把 Info.plist 換�
 等對應新版的修補包發布後，照上面的步驟安裝即可，不用先移除舊的。
 不要自己刪掉 .mdc-patches 資料夾：Info.plist 還有啟動參數時，少了那個檔案遊戲會開不起來。
 已經發生的話，執行安裝器選 3（全部移除），或用 Steam 驗證遊戲檔案的完整性。
-想全部移除時：結束遊戲，貼上同一行指令並在最後加一個空格和 menu（或照上面用 Install-Patches.command），
+想全部移除時：結束遊戲，再貼一次同一行指令（或照上面用 Install-Patches.command），
 輸入 3 按 Return，再輸入 Y 按 Return 確認。
 
 【和其他替換遊戲 class 的 MOD 一起用】
@@ -971,9 +974,9 @@ $modulesMacZh
 
 安全邊界
 - 只管理自家 patch，不移除其它作者的工具。
-- 安裝器（mdc-mac-installer.jar）用遊戲自帶的 Java 執行。命令列：bash Install-Patches.command [status|install|quick|uninstall]
-  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]；quick 就是一行指令執行的動作
-  （沿用已裝的模組或選建議的、問記憶體、確認）。遊戲不在 Steam 資料庫裡時，用 PZ_APP 指定 Project Zomboid.app 的路徑。
+- 安裝器（mdc-mac-installer.jar）用遊戲自帶的 Java 執行。命令列：bash Install-Patches.command [menu|status|install|quick|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--memory-mb N] [--lang zh|en]。一行指令會開選單，
+  後面加的參數也會原樣交給安裝器（/bin/bash -c "`$(curl ...)" status）。遊戲不在 Steam 資料庫裡時，用 PZ_APP 指定 Project Zomboid.app 的路徑。
 - 只在 Info.plist 加或拿掉自己那一條 -javaagent（排在 JVMOptions 最前面，比其他 agent 先啟動），以及你同意時改 -Xmx 的值；不改遊戲 JAR。
   其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留，但不支援和它們修改同一個 class：在本包之前就被改過的 class
   不換（console 印 [mdc-agent] NOT APPLIED）；別的 agent 在本包之後才改的，本包偵測不到。

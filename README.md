@@ -322,22 +322,22 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 ```
 
 It downloads `MinidoracatClientPatches-<game version>-<package version>.zip` from the latest release, checks its
-SHA-256 against the value built into the script, extracts it to a temporary folder and runs the installer: modules you
-already have stay, otherwise it picks the recommended variant (standard for 32 GB RAM or more, low-memory otherwise,
-compatible when another mod already replaces the game classes the full variants patch), shows the plan, asks whether
-to raise the game's memory limit and asks you to type `Y`. The temporary folder is deleted afterwards. To update,
-paste the same line. To remove everything, see the status or pick another variant, paste this line to open the menu
-(it is also printed after installing):
+SHA-256 against the value built into the script, extracts it to a temporary folder and opens the installer's menu; the
+temporary folder is deleted afterwards. The menu follows the Windows display language or regional format (Traditional
+Chinese if either is Chinese, English otherwise); press `L` to switch. To install or update, choose `1` (install or
+update), then `1` (client fixes), press Enter to accept the recommended variant (standard for 32 GB RAM or more,
+low-memory otherwise, compatible when another mod already replaces the game classes the full variants patch), press
+Enter when it asks about the game's memory limit to raise it to the recommended value, and type `Y` to confirm. To
+remove everything, see the status or pick another variant, paste the same line and choose `3` (remove everything) or
+`4` (status).
 
-```powershell
-& ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
-```
-
-Replace `menu` with other arguments and they go to the installer unchanged, for example `status`, `uninstall -All`
-or `-Lang en`. The command runs `install-windows.ps1` from this repo's release page, so using it means trusting this
-repo and GitHub; the SHA-256 check only catches a broken download or mismatched versions, not a hijacked repo. To read
-the script first, run just `irm <that URL>`. For an older version, replace `releases/latest/download` with
-`releases/download/client-v<package version>` (the file exists from 0.3.5 on).
+To run one action without the menu, use `& ([scriptblock]::Create((irm <the URL above>))) status`; the trailing
+arguments go to the installer unchanged (`status`, `uninstall -All`; `-Lang en` alone opens the menu in English). The
+command runs `install-windows.ps1` from this repo's release page, so using it means trusting this repo and GitHub;
+the SHA-256 check only catches a broken download or mismatched versions, not a hijacked repo. To read the script
+first, run just `irm <that URL>`. For an older version, replace `releases/latest/download` with
+`releases/download/client-v<package version>` (the file exists from 0.3.5 on; 0.3.5 installs right away instead of
+opening the menu).
 
 Without the command: download `MinidoracatClientPatches-<game version>-<package version>.zip` from
 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) and check it against `SHA256SUMS.txt`
@@ -364,8 +364,8 @@ back. **No need to uninstall before a game update**: when the jar changes, the p
 game runs vanilla. Steam updates often restore the original `ProjectZomboid64.json`; the patches are then inactive
 (the installer's status shows "installed but not active"), and pasting the command again (or running `Install-Patches.bat`
 from the package for the new version) turns them back on. Do not delete the `.mdc-patches` folder by hand: with the
-launch option still there and the files gone, the game does not start. Remove the patches with the menu command
-(choose `3`) or `Uninstall-Patches.bat` (choose `A`). Removal only reads the install record in the game folder and a
+launch option still there and the files gone, the game does not start. Remove the patches by pasting the command
+again and choosing `3`, or with `Uninstall-Patches.bat` (choose `A`). Removal only reads the install record in the game folder and a
 newer installer can remove an older install, so you do not need to keep the extracted folder. Starting the game
 through `ProjectZomboid64.bat` or `ShowConsole.bat` skips `ProjectZomboid64.json`, so the patches do not load.
 Upgrading from 0.2.x: close the game and paste the command or run the new `Install-Patches.bat`; the `.class` files
@@ -393,7 +393,7 @@ it). Also, from 42.22 on, a `.class` file in the same package as an official cla
 `SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
 their authors (inference: PZ_Optimization itself was not tested).
 
-**Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, remove everything with the menu command (choose `3`) or `Uninstall-Patches.bat`. We do not ask you to change that Windows setting.
+**Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, remove everything by pasting the command again and choosing `3`, or with `Uninstall-Patches.bat`. We do not ask you to change that Windows setting.
 
 **macOS.** Quit the game, open Terminal (Applications ▸ Utilities), paste this line and press Return:
 
@@ -401,7 +401,7 @@ their authors (inference: PZ_Optimization itself was not tested).
 /bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
 ```
 
-It downloads `MinidoracatClientPatches-<game version>-<package version>-macOS.zip` from the newest release, checks its SHA-256 against the value built into the script, and runs the installer: it keeps the modules you already have or picks the recommended ones, asks about the game's memory limit, and asks you to confirm with `Y`. Add a space and `menu` to the end of the same line for the full menu (remove everything, status, other variants). If you only see a line starting with `curl:`, the download failed; paste the line again. The line runs `install-mac.sh` from this repository's release page, so using it means trusting this repository and GitHub; the SHA-256 check catches broken or mismatched downloads, not a compromised repository. To read the script first, run `curl -fsSL <that URL> | less`. For an older package, use `releases/download/client-v<package version>/install-mac.sh` instead of `releases/latest/download/install-mac.sh`.
+It downloads `MinidoracatClientPatches-<game version>-<package version>-macOS.zip` from the newest release, checks its SHA-256 against the value built into the script, and opens the installer's menu (the same as on Windows). The menu follows the first of your macOS preferred languages (Traditional Chinese if it is Chinese, English otherwise); press `L` to switch. To install or update, choose `1`, then `1`, press Return to accept the recommended variant, press Return when it asks about the game's memory limit to raise it, and confirm with `Y`; to remove everything, paste the same line and choose `3`. Adding a space and `status` or `uninstall --all` to the end of the line runs that action without the menu; `--lang en` opens the menu in English. If you only see a line starting with `curl:`, the download failed; paste the line again. The line runs `install-mac.sh` from this repository's release page, so using it means trusting this repository and GitHub; the SHA-256 check catches broken or mismatched downloads, not a compromised repository. To read the script first, run `curl -fsSL <that URL> | less`. For an older package, use `releases/download/client-v<package version>/install-mac.sh` instead of `releases/latest/download/install-mac.sh` (up to 0.3.5 it installs right away instead of opening the menu).
 
 Without the command: download the `-macOS.zip` (check it with `shasum -a 256`), double-click it to extract it, open Terminal, type `bash ` (with a space), drag `Install-Patches.command` from the extracted folder into the window and press Return; the menus are the same as on Windows. Double-clicking `Install-Patches.command` does not work because macOS blocks scripts that are not notarized.
 

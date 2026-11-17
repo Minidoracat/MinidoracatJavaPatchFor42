@@ -109,6 +109,9 @@ if [ -n "$BOOT" ]; then
         '  trunc) head -c 1000 "$FAKE_ZIP" > "$o" ;;' \
         '  *) cp "$FAKE_ZIP" "$o" ;;' 'esac' > "$FB/curl"
     chmod +x "$FB/curl"
+    # 假 defaults：FAKE_LANGS 是系統偏好語言的第一個（空白＝讀不到）
+    printf '%s\n' '#!/bin/bash' '[ -n "$FAKE_LANGS" ] && printf "(\n    \"%s\"\n)\n" "$FAKE_LANGS"' > "$FB/defaults"
+    chmod +x "$FB/defaults"
     ZIPNAME="$(basename "$ZIPF")"
     VER="$(printf '%s' "$ZIPNAME" | sed -n 's/^MinidoracatClientPatches-[^-]*-\(.*\)-macOS\.zip$/\1/p')"
     URL="https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/download/client-v$VER/$ZIPNAME"
@@ -123,14 +126,18 @@ if [ -n "$BOOT" ]; then
     last_args() { tail -n +10 "$ARGS_OUT" | tr '\n' ' '; }
     boot 0 -c "$(cat "$BOOT")"
     grep -qx -- "$URL" "$CURL_OUT" || fail "bootstrap URL is not $URL"
-    [ "$(last_args)" = "quick " ] || fail "no args should run quick, got: $(last_args)"
+    [ "$(last_args)" = "menu " ] || fail "no args should open the menu, got: $(last_args)"
     PKGDIR="$(sed -n '/^--package-dir$/{n;p;}' "$ARGS_OUT")"
     [ -n "$PKGDIR" ] && [ ! -e "$PKGDIR" ] || fail "temporary package folder left behind: $PKGDIR"
-    grep -q 'menu' "$W/out.txt" || fail "no hint about menu after quick"
-    boot 0 -c "$(cat "$BOOT")" menu
-    [ "$(last_args)" = "menu " ] || fail "bash -c ... menu should pass menu, got: $(last_args)"
-    boot 0 -c "$(cat "$BOOT")" --lang en
-    [ "$(last_args)" = "--lang en " ] || fail "bash -c ... --lang en should pass both words, got: $(last_args)"
+    grep -q "^Downloading $ZIPNAME" "$W/out.txt" && ! grep -q '下載中' "$W/out.txt" || fail "no preferred language should print English only"
+    FAKE_LANGS=zh-Hant-TW boot 0 -c "$(cat "$BOOT")"
+    grep -q "^下載中：$ZIPNAME" "$W/out.txt" && ! grep -q 'Downloading' "$W/out.txt" || fail "zh-Hant-TW should print Chinese only"
+    FAKE_LANGS=zh-Hant-TW boot 0 -c "$(cat "$BOOT")" status --lang en
+    [ "$(last_args)" = "status --lang en " ] || fail "bash -c ... status --lang en should pass all words, got: $(last_args)"
+    grep -q "^Downloading $ZIPNAME" "$W/out.txt" || fail "--lang en should win over a Chinese system"
+    FAKE_LANGS=en-US boot 0 -c "$(cat "$BOOT")" --lang zh
+    [ "$(last_args)" = "--lang zh " ] || fail "bash -c ... --lang zh should pass both words, got: $(last_args)"
+    grep -q "^下載中：$ZIPNAME" "$W/out.txt" || fail "--lang zh should win over an English system"
     boot 0 "$BOOT" uninstall --all
     [ "$(last_args)" = "uninstall --all " ] || fail "file form should pass args, got: $(last_args)"
     FAKE_JAVA_EXIT=7 boot 7 -c "$(cat "$BOOT")"
