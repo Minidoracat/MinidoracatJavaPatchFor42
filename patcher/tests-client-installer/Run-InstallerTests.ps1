@@ -1449,6 +1449,92 @@ try {
     Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force
     $r = Invoke-UninstallAll
     Check ($r.Code -eq 0 -and $r.Out.Contains('維持 8192 MB') -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192) '拿掉啟動參數、保留 8192，並說明'
+
+    $Quick = { param([string[]]$lines, [string]$pkg = $PkgV1, [string]$lang = 'zh') Invoke-Installer @('-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $pkg) $lang $lines }
+
+    Start-Case '81. quick 乾淨目錄：8 GB 裝省記憶體版；32 GB 裝標準版並問記憶體；再跑一次不需要變更'
+    Reset-GameDir
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem')) -and (Test-ArgModules 'core,client-fixes-lowmem')) '8 GB：core + lowmem'
+    Check ($r.Out.Contains('安裝計畫') -and -not $r.Out.Contains('要安裝什麼') -and -not $r.Out.Contains('要用哪個版本')) '直接顯示安裝計畫，不問要裝什麼、哪個版本'
+    Reset-GameDir
+    $r = & $Quick @('N')
+    Check ($r.Code -eq 0 -and $r.Out.Contains('已取消') -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and (Test-JsonIsOriginal)) '確認時輸入 N：取消，沒有寫入'
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('', 'Y')
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-standard')) -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '32 GB：core + standard，Enter 調到 8192'
+        $r = & $Quick @('N', 'N')
+        Check ($r.Code -eq 0 -and $r.Out.Contains('不需要任何變更')) '再跑一次：不需要任何變更'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '82. quick 沿用已裝的變體與其他模組，更新到新包（32 GB 也不換成標準版）'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler', 'client-fixes-lowmem') $PkgV1
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('N', 'Y') $PkgV2
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'profiler', 'client-fixes-lowmem')) -and (Test-ArgModules 'core,profiler,client-fixes-lowmem')) '模組照舊'
+        Check ((Test-GameFileIs $AGENT_REL $C_AGENT_V2) -and (Get-InstalledState).packageVersion -eq 'v4.1') 'agent jar 與紀錄更新到新包'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '83. quick 遇到別的 MOD 蓋掉完整版的 class：改裝相容版；相容版也裝不上時代碼 7'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat')) -and $r.Out.Contains('改裝相容版')) '改裝相容版並說明'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '別的 MOD 的檔案沒被動'
+    Reset-GameDir
+    $r = Invoke-Install @('client-fixes-standard') $PkgV1
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = & $Quick @('Y') $PkgV2
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat')) -and $r.Out.Contains('取代變體')) '已裝標準版後才出現衝突：換成相容版'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_VEH) 'pzopt-vehicle'
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 7 -and -not $r.Out.Contains('改裝相容版') -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '相容版也裝不上：代碼 7，不寫入'
+
+    Start-Case '84. quick 從 0.2.x 升級、接管舊 v3.0 包：沿用原來的變體'
+    Reset-GameDir
+    Set-V1Install
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('N', 'Y')
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem')) -and (Get-InstalledState).schemaVersion -eq 2 -and -not (Test-Path -LiteralPath (GameFile 'zombie'))) '0.2.x lowmem：32 GB 仍是 lowmem，舊 loose class 刪掉'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+    Reset-GameDir
+    Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
+    Write-TextFile (GameFile $P_FIX_TIDAM) $C_LEGACY_TIDAM_STD
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-standard')) -and $r.Out.Contains('接管舊版包') -and -not (Test-Path -LiteralPath (GameFile 'zombie'))) '舊 v3.0 標準版：8 GB 仍是 standard，舊檔接管後刪掉'
+
+    Start-Case '85. quick 非互動、未完成交易、英文、沒有變體、沒有安裝包、位置參數'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '-NonInteractive：不問直接裝'
+    Reset-GameDir
+    Set-PendingTransaction
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and $r.Out -match '復原' -and (Test-GameFileIs $AGENT_REL $C_AGENT_V1) -and -not (Test-GameFile '.mdc-patches/journal.json') -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '未完成交易：先復原再照常'
+    $r = Invoke-Installer @('quick', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'en' @('N', 'N')
+    Check ($r.Code -eq 0 -and $r.Out.Contains('Already up to date')) '英文：已是目標狀態'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $PkgSolo)
+    Check ($r.Code -eq 2) '包裡沒有客戶端修復變體：代碼 2'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir)
+    Check ($r.Code -eq 6) '沒有 manifest.json：代碼 6'
+    $r = Invoke-Installer @('quick', '-NonInteractive', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '位置參數 quick（一行指令就是這樣傳）'
+
+    Start-Case '86. -Lang auto：顯示語言或地區格式任一是中文就用中文（UTF-8 主控台下 5.1 的顯示語言會變 en-US）'
+    Reset-GameDir
+    $ErrorActionPreference = 'Continue'
+    foreach ($pair in @(@('en-US', 'zh-TW', $true), @('zh-TW', 'en-US', $true), @('en-US', 'en-US', $false), @('ja-JP', 'ja-JP', $false))) {
+        $cmd = "[Threading.Thread]::CurrentThread.CurrentUICulture = '$($pair[0])'; [Threading.Thread]::CurrentThread.CurrentCulture = '$($pair[1])'; & '$Installer' -NonInteractive -Action status -GameDir '$GameDir' -PackageDir '$PkgV1'; exit `$LASTEXITCODE"
+        $out = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1 | Out-String)
+        Check ($LASTEXITCODE -eq 0 -and $out.Contains('安裝狀態') -eq $pair[2] -and $out.Contains('Install status') -ne $pair[2]) "顯示語言 $($pair[0])、地區格式 $($pair[1])：$(if ($pair[2]) { '中文' } else { '英文' })"
+    }
+    $ErrorActionPreference = 'Stop'
 }
 finally {
     Write-Host ''

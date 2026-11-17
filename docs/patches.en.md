@@ -465,7 +465,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.4.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.5.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -589,6 +589,39 @@ Installer tests 71-80 cover the question at three RAM sizes, changing only the m
 that must not ask, six unrecognized forms, `-MemoryMb`, the English UI, removal with BOM/CRLF and other agents
 differing only in `-Xmx`, the menu, and the removal note without an install record; the environment variable
 `MDC_PATCHES_TEST_RAM_GB` fixes the RAM size for them.
+
+**Windows one-line command (from 0.3.5)**: every client release also carries `install-windows.ps1`, made from
+`deploy-client/install-online.ps1` with the version, the Windows zip name and its SHA-256 filled in (it comes from the
+same build as the zip and must be uploaded in the same `gh release create`, or
+`releases/latest/download/install-windows.ps1` returns 404). Players paste
+`irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex` into
+PowerShell; the menu is `& ([scriptblock]::Create((irm <same URL>))) menu`, and the trailing arguments go to
+`Manage-Patches.ps1` unchanged (`status`, `uninstall -All`, `-Lang en`). Neither form has quotes. Windows PowerShell
+5.1's `irm` decodes a download without a charset as Latin-1 (measured: Chinese turns into mojibake; pwsh 7 is fine),
+so the build turns every non-ASCII character of the template into `\uXXXX`, the result must be pure ASCII with LF
+(checked by the build), and Chinese text may only be the first argument of `L`, restored at run time with
+`[regex]::Unescape`. Everything is one script block that only the last line closes and calls, so a script cut off
+halfway runs nothing; `irm | iex` runs in the player's own window, so the script never calls `exit`, leaves no
+variables behind and reports the exit code in `$LASTEXITCODE`. It downloads the zip into a new folder under `%TEMP%`,
+computes the SHA-256 with .NET and extracts with `ZipFile` (`Get-FileHash` and `Expand-Archive` fail in a 5.1 that
+inherited pwsh 7's module path, measured), clears `PSModulePath` and runs the installer as a child process,
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File Manage-Patches.ps1 quick` (its `exit` only ends the child),
+then deletes the folder and restores `PSModulePath`; it does not change the console code page.
+`Manage-Patches.ps1 -Action quick` follows the Mac quick rules: an installed client-fixes variant stays, otherwise the
+variant follows the RAM size (standard from 32 GB), and the compatible variant replaces a full one that another mod
+blocks when the compatible one fits. The target is worked out inside `Invoke-Install` after an unfinished transaction
+has been restored; everything else (plan, memory question, `Y`, "already up to date", the 0.2.x upgrade) is a normal
+install. The menu command is printed whenever the installer ran, not only on success, because its error messages may
+tell the player to remove everything; those messages now name both `Uninstall-Patches.bat` and the menu command. From
+the same version `-Lang auto` picks Chinese when either the display language or the regional format is Chinese: when
+the console code page is switched to UTF-8 (`chcp 65001` in `Install-Patches.bat`), 5.1 reports `CurrentUICulture` as
+en-US. The build runs `patcher/tests-client-installer/bootstrap-test.ps1` under both Windows PowerShell 5.1 and
+pwsh 7: same-named functions replace `Invoke-WebRequest` and `powershell.exe` to test `irm | iex`, the scriptblock
+form with arguments, argument pass-through, an installer failure code, a truncated zip and a failed download (code 6,
+installer not run, temporary folder removed) and a script cut off at every sixteenth (nothing runs), and finally a real
+child process runs `status` against a fake game folder. Installer tests 81-86 cover quick (three RAM sizes, keeping
+the variant, switching to compatible, 0.2.x and the old v3.0 package, an unfinished transaction, non-interactive) and
+the four `-Lang auto` combinations.
 
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,

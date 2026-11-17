@@ -14,6 +14,7 @@
       * 安裝狀態寫在 <遊戲根>\.mdc-patches\state.json（schemaVersion=2），runtime 與 installer 的同一份真相。
         0.2.x 的 schemaVersion=1（loose class 清單）讀得懂：升級或移除時在同一筆交易刪掉那些 loose class。
       * install 是「加裝」：保留已安裝的其它模組；同 exclusiveGroup 的新變體才會替換舊變體。
+      * quick（一行指令 install-windows.ps1 的預設動作）：沿用已裝的客戶端修復變體，沒裝過依記憶體選，再走 install 的計畫、記憶體詢問與 Y 確認。
       * uninstall 只移除所選；仍被保留模組依賴的模組（例如 core）自動保留。
       * 所有影像經暫存檔驗 SHA 後原子替換；交易先備份→journal→寫→刪→state→已完成終態。
         復原只接受交易前／後影像；未知現況保留。終態落地前不刪備份，清理中斷可重入。
@@ -29,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('menu', 'status', 'install', 'uninstall')]
+    [ValidateSet('menu', 'status', 'install', 'uninstall', 'quick')]
     [string]$Action = 'menu',
     [string]$GameDir,
     [string]$PackageDir,
@@ -44,9 +45,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------- 語言
-# auto：Windows 顯示語言是中文就用中文，其它一律英文。選單可用 [L] 切換。
+# auto：Windows 顯示語言或地區格式是中文就用中文，其它一律英文。選單可用 [L] 切換。
+# 主控台字碼頁不是該語言自己的那個（例如 chcp 65001）時，5.1 會把 CurrentUICulture 降成 en-US，所以也看 CurrentCulture。
 if ($Lang -eq 'auto') {
-    $script:Lang = if ([System.Globalization.CultureInfo]::CurrentUICulture.Name -like 'zh*') { 'zh' } else { 'en' }
+    $script:Lang = if (@([System.Globalization.CultureInfo]::CurrentUICulture.Name, [System.Globalization.CultureInfo]::CurrentCulture.Name) -like 'zh*') { 'zh' } else { 'en' }
 }
 
 function L([string]$zh, [string]$en) {
@@ -1493,6 +1495,24 @@ function Get-AllInstallTargets($manifest, [string[]]$installed) {
     return @($targets)
 }
 
+# 一行指令的預設動作 quick（規則和 MacInstaller.quickTargets 相同，要一起改）：已裝的客戶端修復變體照舊，
+# 沒裝過就依記憶體選；完整版被別的 MOD 擋住而相容版裝得上時改相容版。
+# 只回傳變體：其他已裝的模組由 install 的「加裝」契約保留。
+function Get-QuickTargets($manifest, [string]$packageDir, [string]$gameRoot, [string[]]$installed) {
+    $variant = @($installed | Where-Object { $_ -like 'client-fixes-*' -and (Get-Module $manifest $_) })[0]
+    if (-not $variant) { $variant = if ((Get-RamGb) -ge 32) { 'client-fixes-standard' } else { 'client-fixes-lowmem' } }
+    if (@(Get-CompatAdvice $manifest $packageDir $gameRoot @($variant)).Count -gt 0) {
+        $variant = 'client-fixes-compat'
+        Write-Info (L '遊戲資料夾裡已有其他 MOD 替換的遊戲 class，改裝相容版（只含車輛的修補）。' 'Another mod already replaces game classes; installing the compatible version (vehicle fixes only).')
+    }
+    return @($variant)
+}
+
+# 叫玩家「全部移除」時的說法：用 zip 裝的有 Uninstall-Patches.bat，用一行指令裝的只有選單指令
+function Get-RemoveAllHint {
+    L '請用安裝器的「全部移除」（執行 Uninstall-Patches.bat 輸入 A；用一行指令安裝的，貼選單指令選 [3]）' 'use the installer''s "Remove everything" (run Uninstall-Patches.bat and type A; if you installed with the one-line command, paste the menu command and choose [3])'
+}
+
 # Windows 11 的智慧型應用程式控制（Smart App Control）：0＝關、1＝強制、2＝評估。強制模式會擋下未簽章的 mdc-agent-loader.dll，
 # -agentpath 載入失敗＝JVM 不啟動，遊戲開不起來（2026-11-13 在一台強制模式的機器實測 0.3.1）。讀不到就當成沒有這個功能。
 # MDC_PATCHES_TEST_SAC 只給安裝器測試模擬狀態用。
@@ -1509,9 +1529,9 @@ function Get-AppControlBlockedText {
 }
 
 function Invoke-Install {
-    param($Manifest, [string]$PackageDir, [string]$GameRoot, [string[]]$Requested, [bool]$RequestAll, [bool]$Interactive)
+    param($Manifest, [string]$PackageDir, [string]$GameRoot, [string[]]$Requested, [bool]$RequestAll, [bool]$Interactive, [bool]$Quick)
 
-    if (-not $RequestAll -and @($Requested).Count -eq 0) {
+    if (-not $RequestAll -and -not $Quick -and @($Requested).Count -eq 0) {
         Fail $EXIT_USAGE (L '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。' 'No modules to install were given. Use -Modules id[,id...] or -All.')
     }
 
@@ -1539,9 +1559,9 @@ function Invoke-Install {
         $appControl = Get-SmartAppControlState
         if ($appControl -eq 1) {
             Fail $EXIT_APPCONTROL ((Get-AppControlBlockedText) + [Environment]::NewLine +
-                (L '  所以不安裝，沒有變更任何檔案。已經裝過而遊戲開不起來時，請執行 Uninstall-Patches.bat 全部移除。' '  Nothing was installed and no file was changed. If the patches are already installed and the game does not start, run Uninstall-Patches.bat and remove everything.'))
+                (L "  所以不安裝，沒有變更任何檔案。已經裝過而遊戲開不起來時，$(Get-RemoveAllHint)。" "  Nothing was installed and no file was changed. If the patches are already installed and the game does not start, $(Get-RemoveAllHint)."))
         } elseif ($appControl -eq 2) {
-            Write-Warn2 (L "這台電腦的 Windows「智慧型應用程式控制」在評估模式。Windows 之後可能自己轉成強制模式，那時會擋下 $LOADER_REL、遊戲開不起來：遇到時請執行 Uninstall-Patches.bat 全部移除。" "Windows Smart App Control is in evaluation mode on this PC. Windows may switch it to enforcing later; it would then block $LOADER_REL and the game would not start. If that happens, run Uninstall-Patches.bat and remove everything.")
+            Write-Warn2 (L "這台電腦的 Windows「智慧型應用程式控制」在評估模式。Windows 之後可能自己轉成強制模式，那時會擋下 $LOADER_REL、遊戲開不起來：遇到時$(Get-RemoveAllHint)。" "Windows Smart App Control is in evaluation mode on this PC. Windows may switch it to enforcing later; it would then block $LOADER_REL and the game would not start. If that happens, $(Get-RemoveAllHint).")
         }
 
         # 復原完才讀，state 與 legacy 都必須是「現在」的磁碟狀態
@@ -1551,6 +1571,7 @@ function Invoke-Install {
         $installed = @(Get-InstalledModules $Manifest $state $legacy)
 
         if ($RequestAll) { $Requested = Get-AllInstallTargets $Manifest $installed }
+        if ($Quick) { $Requested = Get-QuickTargets $Manifest $PackageDir $GameRoot $installed }
         if (@($Requested).Count -eq 0) {
             Fail $EXIT_USAGE (L '沒有指定要安裝的模組。請用 -Modules id[,id...] 或 -All。' 'No modules to install were given. Use -Modules id[,id...] or -All.')
         }
@@ -1923,7 +1944,7 @@ function Invoke-Status {
             Write-Info (L "  啟用狀態：已啟用（$expected）" "  Active: yes ($expected)")
         }
         if (@($launcher.Ours).Count -gt 0 -and (Get-SmartAppControlState) -eq 1) {
-            Write-Warn2 ((Get-AppControlBlockedText) + (L '請執行 Uninstall-Patches.bat 全部移除，遊戲才開得起來。' ' Run Uninstall-Patches.bat and remove everything so the game can start.'))
+            Write-Warn2 ((Get-AppControlBlockedText) + (L "$(Get-RemoveAllHint)，遊戲才開得起來。" " To make the game start again, $(Get-RemoveAllHint)."))
         }
     }
     $jarPackages = if ($jarSha) { Get-JarPackages $jarPath } else { @{} }
@@ -2128,7 +2149,7 @@ function Main {
     $packageDir = Resolve-PackageDir $PackageDir $scriptDir
     $manifest = $null
     if ($packageDir) { $manifest = Read-Manifest $packageDir }
-    if ($Action -eq 'install' -and -not $manifest) {
+    if ($Action -in 'install', 'quick' -and -not $manifest) {
         Fail $EXIT_PACKAGE (L '找不到 manifest.json。請在解壓後的安裝包資料夾內執行，或用 -PackageDir 指定。' 'manifest.json not found. Run this from the extracted package folder, or pass -PackageDir.')
     }
 
@@ -2138,6 +2159,7 @@ function Main {
 
     switch ($Action) {
         'status' { Invoke-Status -Manifest $manifest -GameRoot $gameRoot }
+        'quick' { Invoke-Install -Manifest $manifest -PackageDir $packageDir -GameRoot $gameRoot -Requested @() -RequestAll $false -Interactive $interactive -Quick $true }
         'install' {
             $req = $requested
             if (-not $All -and $req.Count -eq 0 -and $interactive) {

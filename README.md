@@ -314,7 +314,32 @@ known is still recommended. Build-time checks and the deployment checklist are d
 
 ## Client patches: install
 
-For players. Download `MinidoracatClientPatches-<game version>-<package version>.zip` from
+For players. Close the game, open PowerShell (press the Windows key, type `PowerShell`, press Enter), paste this line
+and press Enter:
+
+```powershell
+irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
+```
+
+It downloads `MinidoracatClientPatches-<game version>-<package version>.zip` from the latest release, checks its
+SHA-256 against the value built into the script, extracts it to a temporary folder and runs the installer: modules you
+already have stay, otherwise it picks the recommended variant (standard for 32 GB RAM or more, low-memory otherwise,
+compatible when another mod already replaces the game classes the full variants patch), asks whether to raise the
+game's memory limit, shows the plan and asks you to type `Y`. The temporary folder is deleted afterwards. To update,
+paste the same line. To remove everything, see the status or pick another variant, paste this line to open the menu
+(it is also printed after installing):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
+```
+
+Replace `menu` with other arguments and they go to the installer unchanged, for example `status`, `uninstall -All`
+or `-Lang en`. The command runs `install-windows.ps1` from this repo's release page, so using it means trusting this
+repo and GitHub; the SHA-256 check only catches a broken download or mismatched versions, not a hijacked repo. To read
+the script first, run just `irm <that URL>`. For an older version, replace `releases/latest/download` with
+`releases/download/client-v<package version>` (the file exists from 0.3.5 on).
+
+Without the command: download `MinidoracatClientPatches-<game version>-<package version>.zip` from
 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) and check it against `SHA256SUMS.txt`
 (`Get-FileHash .\MinidoracatClientPatches-*.zip`).
 
@@ -322,12 +347,11 @@ For players. Download `MinidoracatClientPatches-<game version>-<package version>
    to be in the game folder. The installer finds the game through Steam by itself, even on another drive, and
    asks you to paste the path only if it cannot (`-GameDir "<path>"` also works).
 2. Run `Install-Patches.bat`, choose `1` (install or update), then `1` (client fixes).
-3. Press Enter to accept the recommended variant (standard for 32 GB RAM or more, low-memory otherwise, compatible
-   when another mod already replaces the game classes the full variants patch). If it asks about the game's memory
-   limit, press Enter to raise it to the recommended value. Then type `Y` to confirm.
+3. Press Enter to accept the recommended variant. If it asks about the game's memory limit, press Enter to raise it
+   to the recommended value. Then type `Y` to confirm.
 
-The installer follows the Windows display language (Traditional Chinese or English); press `L` in the main menu
-or run `Install-Patches.bat -Lang en` to switch. It only works on the exact game version it was built for and checks
+The installer follows the Windows display language or regional format (Traditional Chinese if either is Chinese,
+English otherwise); press `L` in the main menu or add `-Lang en` to switch. It only works on the exact game version it was built for and checks
 the SHA-256 of `projectzomboid.jar` and of the package files. Since 0.3.0 the patches load as a Java agent (from
 42.22 on the official jar is signed, and the old way of putting `.class` files into the game folder keeps the game
 from starting): the installer puts `MinidoracatClientPatches.jar` and a small loader, `mdc-agent-loader.dll` (the
@@ -338,13 +362,15 @@ a memory limit you agreed to raise while installing is kept too (Steam's "Verify
 back). An interrupted install rolls
 back. **No need to uninstall before a game update**: when the jar changes, the patches switch themselves off and the
 game runs vanilla. Steam updates often restore the original `ProjectZomboid64.json`; the patches are then inactive
-(the installer's status shows "installed but not active"), and running `Install-Patches.bat` from the package for the
-new version turns them back on. Do not delete the `.mdc-patches` folder by hand: with the launch option still there and
-the files gone, the game does not start. Remove the patches with `Uninstall-Patches.bat` (choose `A`), so keep the
-extracted folder (or download the same zip again when you need it). Starting the game through `ProjectZomboid64.bat`
-or `ShowConsole.bat` skips `ProjectZomboid64.json`, so the patches do not load. Upgrading from 0.2.x: close the game
-and run the new `Install-Patches.bat`; the `.class` files the old version put into the game folder are removed in
-the same install. It also recognizes the old TexPipeline v3.0 package (the one that only came with `uninstall.bat`).
+(the installer's status shows "installed but not active"), and pasting the command again (or running `Install-Patches.bat`
+from the package for the new version) turns them back on. Do not delete the `.mdc-patches` folder by hand: with the
+launch option still there and the files gone, the game does not start. Remove the patches with the menu command
+(choose `3`) or `Uninstall-Patches.bat` (choose `A`). Removal only reads the install record in the game folder and a
+newer installer can remove an older install, so you do not need to keep the extracted folder. Starting the game
+through `ProjectZomboid64.bat` or `ShowConsole.bat` skips `ProjectZomboid64.json`, so the patches do not load.
+Upgrading from 0.2.x: close the game and paste the command or run the new `Install-Patches.bat`; the `.class` files
+the old version put into the game folder are removed in the same install. It also recognizes the old TexPipeline v3.0
+package (the one that only came with `uninstall.bat`).
 
 | Module | Purpose |
 |---|---|
@@ -367,7 +393,7 @@ it). Also, from 42.22 on, a `.class` file in the same package as an official cla
 `SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
 their authors (inference: PZ_Optimization itself was not tested).
 
-**Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, run `Uninstall-Patches.bat` and remove everything. We do not ask you to change that Windows setting.
+**Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, remove everything with the menu command (choose `3`) or `Uninstall-Patches.bat`. We do not ask you to change that Windows setting.
 
 **macOS.** Quit the game, open Terminal (Applications ▸ Utilities), paste this line and press Return:
 
@@ -452,6 +478,6 @@ Third-party: the build uses OW2 ASM 9.8 (BSD-3-Clause), redistributed in `lib/` 
   from `projectzomboid.jar`**, produced by the patcher in this repository from the unmodified official jar of
   the stated game version. They only work with a legitimately owned copy of that exact version, and the
   installer refuses any other. If The Indie Stone asks us to stop distributing them, we will.
-- Modifying game files is at your own risk. `bash uninstall.sh` (server) and `Uninstall-Patches.bat` (client)
+- Modifying game files is at your own risk. `bash uninstall.sh` (server) and the client installer's "Remove everything"
   remove the patches; back up your server before installing.
 - Rebuild and re-verify after every Project Zomboid update. Never apply an old patch to a new game version.

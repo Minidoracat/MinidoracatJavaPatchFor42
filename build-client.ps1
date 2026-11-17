@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.4'
+$PACKAGE_VERSION = '0.3.5'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -477,7 +477,16 @@ to ProjectZomboid64.json.
 projectzomboid.jar itself is not modified.
 $fixListEn
 
-INSTALL
+INSTALL WITHOUT THIS ZIP (one line in PowerShell)
+Close the game, open PowerShell (press the Windows key, type PowerShell, press Enter),
+paste this line and press Enter. It downloads the latest package, checks its SHA-256 and
+installs; answer the memory question and type Y, the same as below:
+    irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
+To remove everything, see the status or pick another version, paste this line instead
+(it opens the same menu as Install-Patches.bat):
+    & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
+
+INSTALL WITH THIS ZIP
 1. Close the game.
 2. Extract the whole zip into any folder, such as your Desktop or Downloads; it does
    not need to be in the game folder. Keep all the files together.
@@ -492,8 +501,8 @@ INSTALL
 9. When it says it is done, press Enter, then type 0 and Enter to exit.
 10. Start the game from Steam as usual. ProjectZomboid64.bat does not read
     ProjectZomboid64.json, so starting the game with it skips the patches.
-The menus follow your Windows display language (Chinese or English). Press L in
-the main menu to switch, or start it with: Install-Patches.bat -Lang en
+The menus follow your Windows display language or regional format (Chinese or English).
+Press L in the main menu to switch, or start it with: Install-Patches.bat -Lang en
 
 MEMORY
 The game starts with a 3 GB Java memory limit (-Xmx3072m in ProjectZomboid64.json). On a
@@ -515,18 +524,19 @@ the launch option. When a package for the new game version is out, install it th
 way; the old one does not need to be removed first.
 Do not delete the .mdc-patches folder by hand: while ProjectZomboid64.json still has the
 launch option, the game does not start without that file (Java stops with "Error opening
-zip file"). If that happened, run Uninstall-Patches.bat and type A, or let Steam verify
-the game files, which puts back the original ProjectZomboid64.json.
+zip file"). If that happened, remove everything (below), or let Steam verify the game
+files, which puts back the original ProjectZomboid64.json.
 To remove everything at any time: close the game, double-click Uninstall-Patches.bat in
-this folder (deleted it? download the same zip again), type A and Enter, then Y and Enter.
+this folder, type A and Enter, then Y and Enter. Deleted the folder? Paste the menu line
+from the top of this file and choose 3 (any newer package can remove an older install).
 
 WINDOWS SMART APP CONTROL
 The patches load through a small DLL (mdc-agent-loader.dll) that is not code-signed. On a
 PC where Windows 11 Smart App Control is enforcing ("On"), Windows blocks that DLL and the
 game does not start at all. The installer checks this and refuses to install there (code
 11); nothing is changed. If Smart App Control became enforcing after you installed (it can
-switch from evaluation by itself) and the game stopped starting, run Uninstall-Patches.bat
-and type A. We do not ask you to change that Windows setting.
+switch from evaluation by itself) and the game stopped starting, remove everything (see
+GAME UPDATES). We do not ask you to change that Windows setting.
 
 UPGRADING FROM 0.2.x
 Versions 0.2.x put class files directly into the game folder. Since 42.22 the game jar
@@ -562,6 +572,9 @@ SAFETY
   can be rolled back.
 - Check your download: compare the SHA-256 of $zipName with SHA256SUMS.txt on the
   release page (PowerShell: Get-FileHash .\$zipName).
+- The PowerShell one-line command runs install-windows.ps1 from this project's GitHub
+  release page, so using it means trusting this repo and GitHub; its SHA-256 check only
+  catches a broken download or mismatched versions. To read it first: irm <that URL>
 - Source code and technical details: $repoUrl
 
 =====================================================================
@@ -607,7 +620,14 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小�
 .mdc-patches 資料夾，並在 ProjectZomboid64.json 加一條啟動參數（-agentpath:...）。projectzomboid.jar 本身不會被改。
 $fixListZh
 
-【怎麼安裝】
+【不下載 zip：在 PowerShell 貼一行】
+關閉遊戲，打開 PowerShell（按 Windows 鍵，輸入 PowerShell，按 Enter），貼上這一行按 Enter。
+它會下載最新的安裝包、比對 SHA-256 再安裝；問記憶體時按 Enter，最後輸入 Y，和下面一樣：
+    irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
+要全部移除、看狀態或換其他版本，改貼這一行（會開和 Install-Patches.bat 一樣的選單）：
+    & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
+
+【用這個 zip 安裝】
 1. 關閉遊戲。
 2. 把整個壓縮檔解壓縮到任何資料夾都可以（例如桌面或下載），不用放進遊戲目錄；
    檔案要放在一起，不要只拉出其中一個。
@@ -620,7 +640,7 @@ $fixListZh
 8. 問「確定要安裝嗎？」時，輸入 Y 按 Enter。
 9. 看到安裝完成後按 Enter，再輸入 0 按 Enter 關閉。
 10. 照平常從 Steam 開遊戲。ProjectZomboid64.bat 不讀 ProjectZomboid64.json，用它開遊戲不會載入修補。
-選單語言跟著 Windows 顯示語言；主選單按 L 可切換中文／英文。
+選單語言跟著 Windows 的顯示語言或地區格式；主選單按 L 可切換中文／英文。
 
 【記憶體】
 遊戲預設最多只用 3 GB Java 記憶體（ProjectZomboid64.json 的 -Xmx3072m），MOD 多的伺服器可能不夠用：
@@ -634,16 +654,16 @@ $fixListZh
 遊戲照原版跑；Steam 更新也可能把 ProjectZomboid64.json 換回原版，啟動參數就跟著不見。
 等對應新版的修補包發布後，照上面的步驟安裝即可，不用先移除舊的。
 不要自己刪掉 .mdc-patches 資料夾：ProjectZomboid64.json 還有啟動參數時，少了那個檔案遊戲會開不起來
-（Java 顯示「Error opening zip file」）。已經發生的話，執行 Uninstall-Patches.bat 輸入 A，
+（Java 顯示「Error opening zip file」）。已經發生的話，照下面全部移除，
 或用 Steam 驗證遊戲檔案的完整性（會換回原版的 ProjectZomboid64.json）。
-想全部移除時：關閉遊戲，雙擊這個資料夾裡的 Uninstall-Patches.bat（資料夾刪掉了就重新下載同一個 zip），
-輸入 A 按 Enter，再輸入 Y 按 Enter 確認。
+想全部移除時：關閉遊戲，雙擊這個資料夾裡的 Uninstall-Patches.bat，輸入 A 按 Enter，再輸入 Y 按 Enter 確認。
+資料夾刪掉了，就貼這份說明開頭的選單那一行，選 3（比較新的安裝包也能移除舊版）。
 
 【Windows 智慧型應用程式控制】
 修補是靠一個沒有程式碼簽章的小 DLL（mdc-agent-loader.dll）載入的。Windows 11 的「智慧型應用程式控制」
 在強制模式（「開啟」）的電腦上，Windows 會擋下這個 DLL，遊戲完全開不起來。安裝器會先檢查，
 在這種電腦上不安裝（代碼 11），也不變更任何檔案。安裝之後它才變成強制模式（評估模式會自己轉）、
-遊戲開不起來時，執行 Uninstall-Patches.bat 輸入 A。我們不會要你去改那個 Windows 設定。
+遊戲開不起來時，照【遊戲更新】最後一段全部移除。我們不會要你去改那個 Windows 設定。
 
 【從 0.2.x 升級】
 0.2.x 把 class 檔直接放在遊戲資料夾。42.22 起遊戲 jar 有簽章，遊戲一載入這些檔案就丟 SecurityException。
@@ -672,6 +692,8 @@ $fixListZh
   不明或變造的檔案不會被自動覆蓋或刪除，安裝中斷可以復原。
 - 下載後可比對 $zipName 的 SHA-256 與發布頁的 SHA256SUMS.txt
   （PowerShell：Get-FileHash .\$zipName）。
+- PowerShell 一行指令執行的是本專案 GitHub 發布頁上的 install-windows.ps1，用它就是信任這個 repo 和 GitHub；
+  它比對 SHA-256 只能擋下載損壞或版本不同步。想先看內容：irm <那個網址>
 - 原始碼與技術說明：$repoUrl
 
 =====================================================================
@@ -1002,9 +1024,29 @@ Write-Host 'macOS 端到端 OK：安裝 → 相對路徑 -javaagent ARMED → ru
 Write-Host '[8/8] 打包（不發布、不安裝）'
 $outDir = Join-Path $R 'output'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-$zip = Join-Path $outDir "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION.zip"
-if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-Compress-Archive -Path "$pkg\*" -DestinationPath $zip
+# Windows 的一行指令（install-windows.ps1）同理：zip 先壓到 $DIST，bootstrap 測過才一起複製到 output
+$zipDist = Join-Path $DIST $zipName
+if (Test-Path -LiteralPath $zipDist) { Remove-Item -LiteralPath $zipDist -Force }
+Compress-Archive -Path "$pkg\*" -DestinationPath $zipDist
+$zipSha = (Get-FileHash -LiteralPath $zipDist -Algorithm SHA256).Hash.ToLowerInvariant()
+$bootWin = [System.IO.File]::ReadAllText("$R\deploy-client\install-online.ps1").Replace("`r`n", "`n").Replace('@PACKAGE_VERSION@', $PACKAGE_VERSION).Replace('@ZIP_NAME@', $zipName).Replace('@ZIP_SHA256@', $zipSha).Replace('@GAME_VERSION@', $GAME_VERSION)
+# Windows PowerShell 5.1 的 irm 把下載內容當 Latin-1：非 ASCII 一律轉 \uXXXX，執行時由模板的 L 還原
+$bootWin = [regex]::Replace($bootWin, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+if ($bootWin -match '@[A-Z0-9_]+@' -or $zipSha -notmatch '^[0-9a-f]{64}$') { throw 'install-windows.ps1：佔位符沒填完，或 zip 的 SHA 格式不對' }
+if (@($bootWin -split "`n" | Where-Object { $_ -match '\\u[0-9a-f]{4}' -and $_ -notmatch "\(L '" }).Count) { throw 'install-windows.ps1：中文只能放在 L 的第一個參數' }
+$bootWinDist = Join-Path $DIST 'install-windows.ps1'
+Write-Utf8 $bootWinDist $bootWin
+if (@([System.IO.File]::ReadAllBytes($bootWinDist) | Where-Object { $_ -ge 0x80 -or $_ -eq 13 }).Count) { throw 'install-windows.ps1 必須是純 ASCII、LF' }
+foreach ($ps in 'powershell.exe', 'pwsh.exe') {
+    # 兩個都必跑：玩家多半用內建的 5.1，也有人用 7；從 pwsh 叫 5.1 時清掉 PSModulePath（已知坑：Get-FileHash 找不到）
+    $oldModulePath = $env:PSModulePath
+    if ($ps -eq 'powershell.exe') { $env:PSModulePath = $null }
+    try { & $ps -NoProfile -ExecutionPolicy Bypass -File "$R\patcher\tests-client-installer\bootstrap-test.ps1" -Boot $bootWinDist -Zip $zipDist -Jar $JAR -Work (Join-Path $R 'work/win-bootstrap-test') }
+    finally { $env:PSModulePath = $oldModulePath }
+    Assert-Ok "bootstrap-test.ps1 ($ps)"
+}
+$zip = Join-Path $outDir $zipName
+Copy-Item -LiteralPath $zipDist, $bootWinDist -Destination $outDir -Force
 # 一行指令（install-mac.sh）和它要下載的 zip 出自同一次建置：先放在 $DIST、測過才複製到 output
 $zipMacDist = Join-Path $DIST $zipNameMac
 if (Test-Path -LiteralPath $zipMacDist) { Remove-Item -LiteralPath $zipMacDist -Force }
@@ -1025,4 +1067,5 @@ Copy-Item -LiteralPath $zipMacDist, $bootstrapDist -Destination $outDir -Force
 Write-Host "完成：$zip"
 Write-Host "完成：$zipMac"
 Write-Host "完成：$(Join-Path $outDir 'install-mac.sh')（zip SHA256 $zipMacSha）"
+Write-Host "完成：$(Join-Path $outDir 'install-windows.ps1')（zip SHA256 $zipSha）"
 Write-Host "未壓縮套件：$pkg、$pkgMac"

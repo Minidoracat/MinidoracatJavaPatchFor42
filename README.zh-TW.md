@@ -267,15 +267,28 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 ## 客戶端修補：安裝
 
-給玩家使用。從 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，並與
-`SHA256SUMS.txt` 比對（`Get-FileHash .\MinidoracatClientPatches-*.zip`）。
+給玩家使用。關閉遊戲，打開 PowerShell（按 Windows 鍵，輸入 `PowerShell`，按 Enter），貼上這一行按 Enter：
+
+```powershell
+irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
+```
+
+它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再執行安裝器：已經裝的模組照舊、沒裝就選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），問要不要調高遊戲記憶體上限，顯示安裝計畫後輸入 `Y` 確認；暫存資料夾用完就刪。更新也是貼同一行。要全部移除、看狀態或換其他版本，貼這一行開選單（安裝完也會印出來）：
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu
+```
+
+最後的 `menu` 換成其他參數會原樣交給安裝器，例如 `status`、`uninstall -All`、`-Lang en`。這行指令執行的是本 repo 發布頁上的 `install-windows.ps1`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以只執行 `irm <那個網址>`。要裝舊版，把網址裡的 `releases/latest/download` 換成 `releases/download/client-v<包版本>`（0.3.5 起才有這個檔）。
+
+不想貼指令：從 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，並與 `SHA256SUMS.txt` 比對（`Get-FileHash .\MinidoracatClientPatches-*.zip`）。
 
 1. 關閉遊戲，把整個 zip 解壓縮到任何資料夾（桌面、下載都可以，不必放進遊戲目錄）。安裝程式會自己透過 Steam
    找到遊戲目錄，遊戲裝在別的硬碟也找得到；找不到時才會請你貼上路徑（也可以用 `-GameDir "<路徑>"` 指定）。
 2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
-3. 直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版）。問到遊戲記憶體上限時直接按 Enter 調到建議值，再輸入 `Y` 確認。
+3. 直接按 Enter 選建議的版本。問到遊戲記憶體上限時直接按 Enter 調到建議值，再輸入 `Y` 確認。
 
-安裝器跟著 Windows 顯示語言（繁體中文或英文），主選單按 `L` 或執行 `Install-Patches.bat -Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與包內檔案的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 和一個小小的載入器 `mdc-agent-loader.dll`（遊戲的啟動器要靠它才載入得了 Java agent，原始碼在 `patcher/agent-loader/`）放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-agentpath:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，安裝時同意調高的記憶體上限也一樣保留（要回到 3072 MB 用 Steam 驗證遊戲檔案的完整性），中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後重新執行 `Install-Patches.bat` 即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而檔案不在時，遊戲起不來；要移除請執行 `Uninstall-Patches.bat`（選 `A`），所以解壓縮出來的資料夾請留著（刪掉了就重新下載同一個 zip）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接執行新版 `Install-Patches.bat`，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
+安裝器跟著 Windows 的顯示語言或地區格式（任一是中文就用繁體中文，否則英文），主選單按 `L` 或加 `-Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與包內檔案的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 和一個小小的載入器 `mdc-agent-loader.dll`（遊戲的啟動器要靠它才載入得了 Java agent，原始碼在 `patcher/agent-loader/`）放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-agentpath:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，安裝時同意調高的記憶體上限也一樣保留（要回到 3072 MB 用 Steam 驗證遊戲檔案的完整性），中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後再貼一次一行指令（或重新執行 `Install-Patches.bat`）即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而檔案不在時，遊戲起不來；要移除請貼選單那一行選 `3`，或執行 `Uninstall-Patches.bat`（選 `A`）。移除只看遊戲資料夾裡的安裝紀錄，用比較新的安裝器也能移除舊版，所以用 zip 安裝的也不必留著解壓縮的資料夾（刪掉了就貼選單那一行，或重新下載 zip）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接貼一行指令或執行新版 `Install-Patches.bat`，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
 
 | 模組 | 用途 |
 |---|---|
@@ -287,7 +300,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）會把 `.class` 檔放進遊戲資料夾。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新（推測：沒有實測 PZ_Optimization 本身）。
 
-**Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
+**Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，貼選單那一行選 `3`，或執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
 
 **macOS。** 結束遊戲，打開「終端機」（應用程式 › 工具程式），貼上這一行按 Return：
 
@@ -365,5 +378,5 @@ MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服�
 - repo 本身不含任何遊戲檔案。**客戶端發布包含有 `projectzomboid.jar` 中少數類別的修改版**，由本 repo 的 patcher
   從指定版本的官方原版 jar 產生；只能搭配合法持有的同一版本遊戲使用，安裝器也會拒絕其他版本。若 The Indie
   Stone 要求停止散布，我們會照辦。
-- **修改遊戲檔案風險自負。** 伺服器用 `bash uninstall.sh`、客戶端用 `Uninstall-Patches.bat` 移除修補；安裝前請先備份伺服器。
+- **修改遊戲檔案風險自負。** 伺服器用 `bash uninstall.sh`、客戶端用安裝器的「全部移除」移除修補；安裝前請先備份伺服器。
 - **每次 Project Zomboid 更新後都必須重新建置與驗證**，切勿把舊修補套到新版遊戲上。
