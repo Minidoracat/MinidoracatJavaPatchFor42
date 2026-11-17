@@ -596,13 +596,15 @@ same build as the zip and must be uploaded in the same `gh release create`, or
 `releases/latest/download/install-windows.ps1` returns 404). Players paste
 `irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex` into
 PowerShell; the menu is `& ([scriptblock]::Create((irm <same URL>))) menu`, and the trailing arguments go to
-`Manage-Patches.ps1` unchanged (`status`, `uninstall -All`, `-Lang en`). Neither form has quotes. Windows PowerShell
+`Manage-Patches.ps1` unchanged (`status`, `uninstall -All`, `-Lang en`; `-Lang zh`/`-Lang en` also sets the language
+of the bootstrap's own lines). Neither form has quotes. Windows PowerShell
 5.1's `irm` decodes a download without a charset as Latin-1 (measured: Chinese turns into mojibake; pwsh 7 is fine),
 so the build turns every non-ASCII character of the template into `\uXXXX`, the result must be pure ASCII with LF
 (checked by the build), and Chinese text may only be the first argument of `L`, restored at run time with
 `[regex]::Unescape`. Everything is one script block that only the last line closes and calls, so a script cut off
 halfway runs nothing; `irm | iex` runs in the player's own window, so the script never calls `exit`, leaves no
-variables behind and reports the exit code in `$LASTEXITCODE`. It downloads the zip into a new folder under `%TEMP%`,
+variables behind and reports the exit code in `$LASTEXITCODE` (also with pwsh 7.4+'s
+`$PSNativeCommandUseErrorActionPreference` on). It downloads the zip into a new folder under `%TEMP%`,
 computes the SHA-256 with .NET and extracts with `ZipFile` (`Get-FileHash` and `Expand-Archive` fail in a 5.1 that
 inherited pwsh 7's module path, measured), clears `PSModulePath` and runs the installer as a child process,
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File Manage-Patches.ps1 quick` (its `exit` only ends the child),
@@ -617,9 +619,11 @@ the same version `-Lang auto` picks Chinese when either the display language or 
 the console code page is switched to UTF-8 (`chcp 65001` in `Install-Patches.bat`), 5.1 reports `CurrentUICulture` as
 en-US. The build runs `patcher/tests-client-installer/bootstrap-test.ps1` under both Windows PowerShell 5.1 and
 pwsh 7: same-named functions replace `Invoke-WebRequest` and `powershell.exe` to test `irm | iex`, the scriptblock
-form with arguments, argument pass-through, an installer failure code, a truncated zip and a failed download (code 6,
-installer not run, temporary folder removed) and a script cut off at every sixteenth (nothing runs), and finally a real
-child process runs `status` against a fake game folder. Installer tests 81-86 cover quick (three RAM sizes, keeping
+form with arguments, argument pass-through and `-Lang en`, an installer failure code, a truncated zip and a failed
+download (code 6, installer not run, temporary folder removed) and a script cut off at every sixteenth (nothing runs),
+then a real child process runs `status` against a fake game folder, and once more with
+`$PSNativeCommandUseErrorActionPreference` on to check that the installer's exit code comes back unchanged. Installer
+tests 81-86 cover quick (two RAM sizes, keeping
 the variant, switching to compatible, 0.2.x and the old v3.0 package, an unfinished transaction, non-interactive) and
 the four `-Lang auto` combinations.
 

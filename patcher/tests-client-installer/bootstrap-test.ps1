@@ -60,12 +60,15 @@ Reset
 [Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
 $out = Run { & ([scriptblock]::Create($text)) menu }
 Check ($script:PsArgs.Count -eq 6 -and $script:PsArgs[-1] -eq 'menu') "arguments end with menu ($($script:PsArgs -join ' '))"
-Check (-not $out.Contains('paste this line') -and $out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]')) 'English only, no menu hint after menu'
+Check (-not $out.Contains('paste this line') -and $out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]') -and -not ($out -match '\\u[0-9a-fA-F]{4}')) 'English only, no menu hint after menu'
 
-Write-Host '3) arguments pass through unchanged'
+Write-Host '3) arguments pass through unchanged; -Lang en also switches the bootstrap''s own lines (Chinese UI)'
 Reset
+[Threading.Thread]::CurrentThread.CurrentUICulture = 'zh-TW'
 $out = Run { iex "& { $text } uninstall -All -Lang en" }
 Check (($script:PsArgs[5..8] -join ' ') -eq 'uninstall -All -Lang en') "arguments $($script:PsArgs[5..8] -join ' ')"
+Check ($out.Contains("Downloading $zipName") -and -not ($out -match '[^\x00-\x7F]')) 'English bootstrap lines with -Lang en'
+[Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
 
 Write-Host '4) installer fails with code 7'
 Reset
@@ -111,6 +114,10 @@ $out = Run { & ([scriptblock]::Create($text)) status -NonInteractive -GameDir $g
 Check ($LASTEXITCODE -eq 0 -and $out.Contains("This package offers: $version") -and -not $out.Contains('does not match this package')) "status exit $LASTEXITCODE, offers $version for this game jar"
 Check ((TempLeft) -eq $temp0) 'no temporary folder left'
 Write-Host '  caller can still print after the installer ran'
+$global:PSNativeCommandUseErrorActionPreference = $true
+$out = Run { & ([scriptblock]::Create($text)) status -NonInteractive -GameDir (Join-Path $Work 'none') -Lang en }
+Check ($LASTEXITCODE -eq 3) "installer exit code survives PSNativeCommandUseErrorActionPreference ($LASTEXITCODE)"
+$global:PSNativeCommandUseErrorActionPreference = $false
 Remove-Item -LiteralPath $Work -Recurse -Force
 
 if ($script:Fails -gt 0) { Write-Host "bootstrap-test: $script:Fails failed" -ForegroundColor Red; exit 1 }

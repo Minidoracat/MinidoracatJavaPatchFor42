@@ -273,7 +273,7 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
 ```
 
-它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再執行安裝器：已經裝的模組照舊、沒裝就選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），問要不要調高遊戲記憶體上限，顯示安裝計畫後輸入 `Y` 確認；暫存資料夾用完就刪。更新也是貼同一行。要全部移除、看狀態或換其他版本，貼這一行開選單（安裝完也會印出來）：
+它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再執行安裝器：已經裝的模組照舊、沒裝就選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時選相容版），顯示安裝計畫，問要不要調高遊戲記憶體上限，再輸入 `Y` 確認；暫存資料夾用完就刪。更新也是貼同一行。要全部移除、看狀態或換其他版本，貼這一行開選單（安裝完也會印出來）：
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1))) menu

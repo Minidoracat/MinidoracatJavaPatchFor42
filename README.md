@@ -324,8 +324,8 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 It downloads `MinidoracatClientPatches-<game version>-<package version>.zip` from the latest release, checks its
 SHA-256 against the value built into the script, extracts it to a temporary folder and runs the installer: modules you
 already have stay, otherwise it picks the recommended variant (standard for 32 GB RAM or more, low-memory otherwise,
-compatible when another mod already replaces the game classes the full variants patch), asks whether to raise the
-game's memory limit, shows the plan and asks you to type `Y`. The temporary folder is deleted afterwards. To update,
+compatible when another mod already replaces the game classes the full variants patch), shows the plan, asks whether
+to raise the game's memory limit and asks you to type `Y`. The temporary folder is deleted afterwards. To update,
 paste the same line. To remove everything, see the status or pick another variant, paste this line to open the menu
 (it is also printed after installing):
 

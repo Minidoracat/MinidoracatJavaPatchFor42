@@ -20,6 +20,8 @@
     function L([string]$z, [string]$e) { if ($zh) { [regex]::Unescape($z) } else { $e } }
     $a = @($args)
     if ($a.Count -eq 0) { $a = @('quick') }
+    # -Lang zh/en passed on to the installer also sets the language of these few lines
+    for ($i = 0; $i -lt $a.Count - 1; $i++) { if ($a[$i] -eq '-Lang' -and $a[$i + 1] -in 'zh', 'en') { $zh = $a[$i + 1] -eq 'zh' } }
     Write-Host "Minidoracat Client Patches $version (Project Zomboid @GAME_VERSION@)"
     if ($Host.Name -eq 'Windows PowerShell ISE Host') {
         # the installer is a console program that asks questions; the ISE cannot run those
