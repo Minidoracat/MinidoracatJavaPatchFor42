@@ -364,17 +364,8 @@ $manifest = [ordered]@{
 Write-Utf8 "$pkg\manifest.json" (($manifest | ConvertTo-Json -Depth 12) + "`n")
 $repoUrl = 'https://github.com/Minidoracat/MinidoracatJavaPatchFor42'
 $zipName = "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION.zip"
-$instructionsEn = @"
-Minidoracat Client Patches $PACKAGE_VERSION / Project Zomboid $GAME_VERSION
-(繁體中文說明：README-INSTALL.zh-TW.txt)
-
-WHAT THIS IS
-Unofficial client-side fixes that only change the game on your own PC. Since 42.22 the
-game jar is signed, so the fixes are applied by a small Java agent while the game loads:
-the installer copies $AGENT_JAR_NAME and a small loader ($LOADER_NAME) into the
-.mdc-patches folder inside the game folder and adds one launch option (-agentpath:...)
-to ProjectZomboid64.json.
-projectzomboid.jar itself is not modified.
+# 修補清單與模組說明 Windows、macOS 兩份 README 共用
+$fixListEn = @"
 - Players, zombies and vehicles turn invisible (only the shadow and name tag remain).
 - Walking or driving into an area with player-built houses: an error in the
   bottom-right, the screen goes black and you are disconnected to the main menu
@@ -392,6 +383,99 @@ projectzomboid.jar itself is not modified.
   find the few splats near the shared edge. The neighbours' splats are now looked up by
   which edge they are near (the picture stays the same).
 If you have never seen these problems, you do not need this package.
+"@
+$modulesEn = @"
+- Client fixes: the standard variant raises the texture wait limit to 4 GiB (use it with
+  32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one
+  of these two or the compatible version below.
+  Both include the texture leak fixes, a chunk-streaming log for black-edge reports
+  (logging only), the player-built room disconnect fix (a chunk whose rooms were rebuilt
+  while it was loading is re-bound to the new rooms, the same way the game updates chunks
+  that are already loaded) and two vehicle animation speed-ups that keep the picture
+  identical: an unchanged vehicle part pose is not recomputed (checked against a full
+  recomputation now and then; any difference switches it off for the session), and a
+  per-bone check that allocates in vanilla is answered directly when the model has no
+  re-parented bones. Both also include the vehicle teleport fix: when a vehicle reaches a
+  square that has not loaded, the game pulls it back into the chunk it is listed in, but
+  that chunk may already have been unloaded and reused somewhere else; the vehicle is now
+  pulled into the nearest adjacent loaded chunk instead, or, if no neighbour is loaded,
+  left where it is (the game has already stopped it) until that area loads. Two related
+  fixes for a vehicle left on an unloaded chunk with you aboard: the vehicle keeps
+  updating (vanilla stops sending its position and the engine goes silent), and the
+  server's old position no longer pulls the driver back when this client is driving it.
+  Both also include the room table race fix: the map-loading thread and a rebuild of
+  nearby player-built buildings no longer change the same room tables at the same time
+  (vanilla can disconnect you with an error such as "isoRoom is null"). Both also include
+  a floor blood speed-up that keeps the picture identical: drawing a chunk only looks at
+  the splats of its neighbours that lie near the shared edge instead of scanning their
+  whole lists (checked against a full scan now and then; any difference switches it off
+  for the session).
+  JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
+  -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
+  -Dmdc.driverRecallGuard=off, -Dmdc.metaGridLock=off and -Dmdc.bloodSplatIndex=off turn
+  them off; -Dmdc.agent=off turns the whole package off (add them to vmArgs in
+  ProjectZomboid64.json).
+- Client fixes, compatible version: only the fixes in classes that mods such as
+  PZ_Optimization leave alone: the vehicle fixes (unchanged pose skip, teleport, vehicle
+  left on an unloaded chunk, vehicle under the floor). The texture, room-disconnect,
+  room-table, floor blood and chunk-streaming fixes are not in it. Choose it only when
+  you use such a mod.
+- DevProfiler: performance tool for mod developers; its interface is the separate mod
+  MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
+  this game session actually reached the hook.
+- The player-built room XL tree fix of earlier packages is gone: 42.22.2 fixed it in the
+  game itself.
+"@
+$fixListZh = @"
+- 隊友、殭屍、車輛看不到，只剩影子和名牌。
+- 走進或開車進入有自建房的區域時，右下角跳錯、畫面一黑，被斷線送回主選單
+  （42.21.0 起的官方 bug，42.22.2 仍在：那一帶地圖載入途中剛好有人在附近蓋或拆東西時發生）。
+- KI5、rSemiTruck 這類門、引擎蓋、車窗會動的模組車，停著也每幀重算動畫，車多的地方會卡；
+  停著沒變的車不再重算（畫面不變）。
+- 開車開進還沒載入的黑色區域時，車突然被丟到幾十到幾百格外（樹林、水裡）（42.21.0 起的官方 bug，42.22.2 仍在）；
+  改成照遊戲原意拉回旁邊已載入的地方。
+- 大戰之後地上滿是血跡、畫面變卡：每重畫一個 chunk，遊戲就把 8 個鄰居的血跡清單整份掃一遍，
+  只為了找出靠近交界的那幾筆；改成直接查靠那一邊的血跡（畫面不變）。
+沒遇過這些問題的人可以不用裝。
+"@
+$modulesZh = @"
+- 客戶端修復：標準版把貼圖等待門檻放寬到 4 GiB（建議 32GB 以上 RAM）；
+  省記憶體版保留原版 50 MiB 門檻。這兩版和下面的相容版三者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
+  兩版都含自建房斷線修補：chunk 載入途中自建房被重建時，照遊戲更新已載入 chunk 的方式
+  把格子重新綁到新房間，不再斷線。
+  兩版也都含兩項車輛動畫加速，畫面與原版相同：零件姿勢沒變就不重算（不定期抽查一次完整重算，
+  不一致就本次遊戲停用），以及模型沒有骨頭改掛時，每根骨頭的檢查不再配置物件。
+  兩版都含開車瞬移修補：車開到還沒載入的格子時，遊戲會把車拉回它登記的 chunk，
+  但那個 chunk 可能已經卸載並被重用到別處；改成拉進相鄰最近的已載入 chunk，相鄰都沒載入就留在原地（遊戲已經讓車停住）等載入。
+  兩版也含兩項相關修補（車上有你、車卻被留在已卸載的 chunk 上時）：車照常更新（原版會停止送位置、引擎聲消失），
+  以及你自己開的車不會再被伺服器的舊位置把駕駛拉回去。
+  兩版也含房間表同時寫入修補：背景載入地圖和重建附近的自建建築不再同時改同一份房間表
+  （原版會跳出「isoRoom is null」這類錯誤並斷線）。
+  兩版也含地上血跡加速，畫面與原版相同：畫一個 chunk 時，鄰居的血跡只看靠交界那一邊的，不再整份掃過
+  （不定期抽查一次整份掃描，不一致就本次遊戲停用）。
+  JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
+  -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
+  -Dmdc.metaGridLock=off、-Dmdc.bloodSplatIndex=off 可分別關閉；-Dmdc.agent=off 關掉整包
+  （加在 ProjectZomboid64.json 的 vmArgs）。
+- 客戶端修復・相容版：只含 PZ_Optimization 這類 MOD 不替換的 class 裡的修補：車輛修補
+  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表、地上血跡與串流紀錄這幾項。
+  只在和這類 MOD 一起用時選它。
+- DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
+  installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
+- 舊版的自建房間 XL 樹修補已移除：42.22.2 官方已修好。
+"@
+$instructionsEn = @"
+Minidoracat Client Patches $PACKAGE_VERSION / Project Zomboid $GAME_VERSION
+(繁體中文說明：README-INSTALL.zh-TW.txt)
+
+WHAT THIS IS
+Unofficial client-side fixes that only change the game on your own PC. Since 42.22 the
+game jar is signed, so the fixes are applied by a small Java agent while the game loads:
+the installer copies $AGENT_JAR_NAME and a small loader ($LOADER_NAME) into the
+.mdc-patches folder inside the game folder and adds one launch option (-agentpath:...)
+to ProjectZomboid64.json.
+projectzomboid.jar itself is not modified.
+$fixListEn
 
 INSTALL
 1. Close the game.
@@ -471,46 +555,7 @@ SAFETY
 Advanced
 
 Modules
-- Client fixes: the standard variant raises the texture wait limit to 4 GiB (use it with
-  32 GB RAM or more); the low-memory variant keeps the vanilla 50 MiB limit. Choose one
-  of these two or the compatible version below.
-  Both include the texture leak fixes, a chunk-streaming log for black-edge reports
-  (logging only), the player-built room disconnect fix (a chunk whose rooms were rebuilt
-  while it was loading is re-bound to the new rooms, the same way the game updates chunks
-  that are already loaded) and two vehicle animation speed-ups that keep the picture
-  identical: an unchanged vehicle part pose is not recomputed (checked against a full
-  recomputation now and then; any difference switches it off for the session), and a
-  per-bone check that allocates in vanilla is answered directly when the model has no
-  re-parented bones. Both also include the vehicle teleport fix: when a vehicle reaches a
-  square that has not loaded, the game pulls it back into the chunk it is listed in, but
-  that chunk may already have been unloaded and reused somewhere else; the vehicle is now
-  pulled into the nearest adjacent loaded chunk instead, or, if no neighbour is loaded,
-  left where it is (the game has already stopped it) until that area loads. Two related
-  fixes for a vehicle left on an unloaded chunk with you aboard: the vehicle keeps
-  updating (vanilla stops sending its position and the engine goes silent), and the
-  server's old position no longer pulls the driver back when this client is driving it.
-  Both also include the room table race fix: the map-loading thread and a rebuild of
-  nearby player-built buildings no longer change the same room tables at the same time
-  (vanilla can disconnect you with an error such as "isoRoom is null"). Both also include
-  a floor blood speed-up that keeps the picture identical: drawing a chunk only looks at
-  the splats of its neighbours that lie near the shared edge instead of scanning their
-  whole lists (checked against a full scan now and then; any difference switches it off
-  for the session).
-  JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
-  -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
-  -Dmdc.driverRecallGuard=off, -Dmdc.metaGridLock=off and -Dmdc.bloodSplatIndex=off turn
-  them off; -Dmdc.agent=off turns the whole package off (add them to vmArgs in
-  ProjectZomboid64.json).
-- Client fixes, compatible version: only the fixes in classes that mods such as
-  PZ_Optimization leave alone: the vehicle fixes (unchanged pose skip, teleport, vehicle
-  left on an unloaded chunk, vehicle under the floor). The texture, room-disconnect,
-  room-table, floor blood and chunk-streaming fixes are not in it. Choose it only when
-  you use such a mod.
-- DevProfiler: performance tool for mod developers; its interface is the separate mod
-  MinidoracatDevProfilerFor42. "installed" means the files verified; "hook observed" means
-  this game session actually reached the hook.
-- The player-built room XL tree fix of earlier packages is gone: 42.22.2 fixed it in the
-  game itself.
+$modulesEn
 
 Boundaries
 - Manages only our own patches; it is not compatible with third-party ZombieBuddy APIs and
@@ -543,16 +588,7 @@ Minidoracat Client Patches $PACKAGE_VERSION / PZ $GAME_VERSION
 只改你自己電腦上的遊戲，修三個問題、減輕兩個效能問題。42.22 起遊戲 jar 有簽章，修補改由一個小小的
 Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小小的載入器（$LOADER_NAME）放進遊戲資料夾裡的
 .mdc-patches 資料夾，並在 ProjectZomboid64.json 加一條啟動參數（-agentpath:...）。projectzomboid.jar 本身不會被改。
-- 隊友、殭屍、車輛看不到，只剩影子和名牌。
-- 走進或開車進入有自建房的區域時，右下角跳錯、畫面一黑，被斷線送回主選單
-  （42.21.0 起的官方 bug，42.22.2 仍在：那一帶地圖載入途中剛好有人在附近蓋或拆東西時發生）。
-- KI5、rSemiTruck 這類門、引擎蓋、車窗會動的模組車，停著也每幀重算動畫，車多的地方會卡；
-  停著沒變的車不再重算（畫面不變）。
-- 開車開進還沒載入的黑色區域時，車突然被丟到幾十到幾百格外（樹林、水裡）（42.21.0 起的官方 bug，42.22.2 仍在）；
-  改成照遊戲原意拉回旁邊已載入的地方。
-- 大戰之後地上滿是血跡、畫面變卡：每重畫一個 chunk，遊戲就把 8 個鄰居的血跡清單整份掃一遍，
-  只為了找出靠近交界的那幾筆；改成直接查靠那一邊的血跡（畫面不變）。
-沒遇過這些問題的人可以不用裝。
+$fixListZh
 
 【怎麼安裝】
 1. 關閉遊戲。
@@ -616,30 +652,7 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小�
 以下是給開發者與進階使用者的說明，一般玩家不用看。
 
 模組說明
-- 客戶端修復：標準版把貼圖等待門檻放寬到 4 GiB（建議 32GB 以上 RAM）；
-  省記憶體版保留原版 50 MiB 門檻。這兩版和下面的相容版三者擇一。另附黑邊時的串流紀錄（只記錄不改行為）。
-  兩版都含自建房斷線修補：chunk 載入途中自建房被重建時，照遊戲更新已載入 chunk 的方式
-  把格子重新綁到新房間，不再斷線。
-  兩版也都含兩項車輛動畫加速，畫面與原版相同：零件姿勢沒變就不重算（不定期抽查一次完整重算，
-  不一致就本次遊戲停用），以及模型沒有骨頭改掛時，每根骨頭的檢查不再配置物件。
-  兩版都含開車瞬移修補：車開到還沒載入的格子時，遊戲會把車拉回它登記的 chunk，
-  但那個 chunk 可能已經卸載並被重用到別處；改成拉進相鄰最近的已載入 chunk，相鄰都沒載入就留在原地（遊戲已經讓車停住）等載入。
-  兩版也含兩項相關修補（車上有你、車卻被留在已卸載的 chunk 上時）：車照常更新（原版會停止送位置、引擎聲消失），
-  以及你自己開的車不會再被伺服器的舊位置把駕駛拉回去。
-  兩版也含房間表同時寫入修補：背景載入地圖和重建附近的自建建築不再同時改同一份房間表
-  （原版會跳出「isoRoom is null」這類錯誤並斷線）。
-  兩版也含地上血跡加速，畫面與原版相同：畫一個 chunk 時，鄰居的血跡只看靠交界那一邊的，不再整份掃過
-  （不定期抽查一次整份掃描，不一致就本次遊戲停用）。
-  JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
-  -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
-  -Dmdc.metaGridLock=off、-Dmdc.bloodSplatIndex=off 可分別關閉；-Dmdc.agent=off 關掉整包
-  （加在 ProjectZomboid64.json 的 vmArgs）。
-- 客戶端修復・相容版：只含 PZ_Optimization 這類 MOD 不替換的 class 裡的修補：車輛修補
-  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表、地上血跡與串流紀錄這幾項。
-  只在和這類 MOD 一起用時選它。
-- DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
-  installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
-- 舊版的自建房間 XL 樹修補已移除：42.22.2 官方已修好。
+$modulesZh
 
 安全邊界
 - 只管理自家 patch，不相容第三方 ZombieBuddy API，也不移除其它作者的工具。
@@ -659,11 +672,262 @@ Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 和一個小�
 Write-Utf8 "$pkg\README-INSTALL.txt" $instructionsEn
 Write-Utf8 "$pkg\README-INSTALL.zh-TW.txt" $instructionsZh
 
+# ---------- macOS 套件：同一顆 agent jar，安裝器改用 Java（mdc-mac-installer.jar）＋ Install-Patches.command。
+# Mac 的啟動器（JavaAppLauncher）經 JLI_Launch 建 JVM，-javaagent 直接可用，不需要 $LOADER_NAME（實機 42.22.2 驗過）。
+$BASH = 'C:\Program Files\Git\bin\bash.exe'
+if (-not (Test-Path -LiteralPath $BASH)) { throw "找不到 Git Bash（$BASH）：macOS 啟動腳本要用 bash 驗證" }
+$macClasses = Join-Path $R 'work/mac-installer-classes'
+$macTestClasses = Join-Path $R 'work/mac-installer-test-classes'
+foreach ($d in @($macClasses, $macTestClasses)) {
+    if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+    New-Item -ItemType Directory -Path $d | Out-Null
+}
+# 遊戲自帶 JRE 是 25；--release 17 只是讓安裝器不依賴新 API
+& $JAVAC -encoding UTF-8 --release 17 '-Xlint:all,-serial' -Werror -d $macClasses @((Get-ChildItem "$R\patcher\installer-mac" -Filter '*.java').FullName)
+Assert-Ok 'javac installer-mac'
+$macInstallerJar = Join-Path $DIST 'mdc-mac-installer.jar'
+if (Test-Path -LiteralPath $macInstallerJar) { Remove-Item -LiteralPath $macInstallerJar -Force }
+& (Join-Path $JDK 'bin/jar.exe') --create --file $macInstallerJar --date=2000-01-01T00:00:00Z --main-class MacInstaller -C $macClasses .
+Assert-Ok 'jar mdc-mac-installer.jar'
+& $JAVAC -encoding UTF-8 --release 17 -cp $macClasses -d $macTestClasses @((Get-ChildItem "$R\patcher\tests-installer-mac" -Filter '*.java').FullName)
+Assert-Ok 'javac tests-installer-mac'
+& $JAVA -cp "$macClasses;$macTestClasses" MacInstallerTest (Join-Path $R 'work/mac-installer-test')
+Assert-Ok 'MacInstallerTest'
+
+$macCommand = "$R\deploy-client\mac\Install-Patches.command"
+if ([System.IO.File]::ReadAllText($macCommand).Contains("`r")) { throw 'Install-Patches.command 有 CR：macOS 的 bash 會把它當成指令的一部分（檢查 .gitattributes 的 eol=lf）' }
+& $BASH -n $macCommand
+Assert-Ok 'bash -n Install-Patches.command'
+
+$pkgMac = Join-Path $DIST 'pkg-mac'
+if (Test-Path -LiteralPath $pkgMac) { Remove-Item -LiteralPath $pkgMac -Recurse -Force }
+New-Item -ItemType Directory -Path $pkgMac | Out-Null
+Copy-Item -LiteralPath $agentJar, $macInstallerJar, $macCommand -Destination $pkgMac
+$macManifest = [ordered]@{}
+foreach ($k in $manifest.Keys) { if ($k -notin @('loader', 'legacyPackages')) { $macManifest[$k] = $manifest[$k] } }
+Write-Utf8 "$pkgMac\manifest.json" (($macManifest | ConvertTo-Json -Depth 12) + "`n")
+if ((Get-FileHash -LiteralPath "$pkgMac\$AGENT_JAR_NAME" -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath "$pkg\$AGENT_JAR_NAME" -Algorithm SHA256).Hash) {
+    throw 'Windows 與 macOS 套件的 agent jar 不同'
+}
+$zipNameMac = "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION-macOS.zip"
+# 本檔在 Windows checkout 是 CRLF，here-string 的換行跟著是 CRLF（Write-Utf8 寫出時才轉 LF）
+$modulesMacEn = $modulesEn -replace '\(add them to vmArgs in(\r?\n)  ProjectZomboid64\.json\)', '(add them to JVMOptions in$1  Project Zomboid.app/Contents/Info.plist)'
+$modulesMacZh = $modulesZh.Replace('（加在 ProjectZomboid64.json 的 vmArgs）', '（加在 Project Zomboid.app/Contents/Info.plist 的 JVMOptions）')
+if ($modulesMacEn -eq $modulesEn -or $modulesMacZh -eq $modulesZh) { throw 'macOS README：JVM 參數位置的替換沒有命中（模組說明的文字改了？）' }
+$instructionsMacEn = @"
+Minidoracat Client Patches $PACKAGE_VERSION for macOS / Project Zomboid $GAME_VERSION
+(繁體中文說明：README-INSTALL.zh-TW.txt)
+
+WHAT THIS IS
+Unofficial client-side fixes that only change the game on your own Mac. Since 42.22 the
+game jar is signed, so the fixes are applied by a small Java agent while the game loads:
+the installer copies $AGENT_JAR_NAME into Project Zomboid.app/Contents/Java/.mdc-patches
+and adds one launch option (-javaagent:...) to Project Zomboid.app/Contents/Info.plist.
+projectzomboid.jar itself is not modified.
+$fixListEn
+Tested on an Apple silicon Mac, natively and as the Intel (x86_64) build under Rosetta 2.
+Intel Macs use the same steps but have not been tested on real Intel hardware yet.
+
+INSTALL
+1. Quit the game.
+2. Double-click the zip to extract it. Keep all the files together.
+3. Open Terminal (Applications > Utilities > Terminal).
+4. Type bash and a space, drag Install-Patches.command from the extracted folder into the
+   Terminal window, then press Return. (Double-clicking Install-Patches.command does not
+   work: macOS blocks scripts that are not notarized.)
+   The installer finds the game through Steam by itself and asks you to drag
+   Project Zomboid.app into the window only if it cannot.
+5. Type 1 and press Return (install or update patches).
+6. Type 1 and press Return (client fixes).
+7. When asked for the version, just press Return: the recommended one is picked for your
+   Mac (its memory, and whether another mod already replaces game classes).
+8. When asked to confirm, type Y and press Return.
+9. When it says it is done, press Return, then type 0 and Return to exit.
+10. Start the game from Steam as usual (both "Play Project Zomboid" and "Compatibility
+   Mode" load the patches).
+If macOS asks whether Terminal may access the Downloads folder or change other apps,
+allow it: the installer has to read the extracted files and write into
+Project Zomboid.app. The menus follow your Mac's language (Chinese or English);
+press L in the main menu to switch.
+
+GAME UPDATES
+You do not have to remove the patches before a game update. Every time the game starts,
+the patches check projectzomboid.jar and switch themselves off when it is not the exact
+version they were built for, so after an update the game simply runs without them. A
+Steam update or "Verify integrity of game files" may also put back the original
+Info.plist, which drops the launch option (the installer's status then says "installed
+but not active"; installing again puts it back). When a package for the new game version
+is out, install it the same way; the old one does not need to be removed first.
+Do not delete the .mdc-patches folder by hand: while Info.plist still has the launch
+option, the game does not start without that file. If that happened, run the installer
+and choose 3 (remove everything), or let Steam verify the game files.
+To remove everything at any time: quit the game, run Install-Patches.command the same way
+(deleted it? download the same zip again), type 3 and Return, then Y and Return.
+
+OTHER MODS THAT REPLACE GAME CLASSES
+Some mods put .class files into the game. Since 42.22 such files make the game throw a
+SecurityException on their own, with or without this package; the installer warns when
+it finds them. When one of them replaces a class this package patches, the installer
+stops with code 7 and changes nothing. Do not delete just the files it lists: that mod's
+other files still need them. To keep that mod, install the compatible version (vehicle
+fixes only); the installer recommends it when another mod is in the way.
+
+SAFETY
+- The installer only works on the exact game version it was built for: it checks the
+  SHA-256 of your projectzomboid.jar and of the patch file before writing them, and the
+  patch file checks projectzomboid.jar again at every game start.
+- It only changes its own files (the .mdc-patches folder) and its own launch option in
+  Info.plist; the rest of Info.plist stays byte for byte as it was, and removing
+  everything gives back the exact original file. Unknown or modified files are never
+  overwritten or deleted. If an install or removal is interrupted, run it again.
+- Check your download: compare the SHA-256 of $zipNameMac with SHA256SUMS.txt on the
+  release page (Terminal: shasum -a 256 $zipNameMac).
+- Source code and technical details: $repoUrl
+
+=====================================================================
+Advanced
+
+Modules
+$modulesMacEn
+
+Boundaries
+- Manages only our own patches; it never removes other authors' tools.
+- The installer (mdc-mac-installer.jar) runs with the Java that comes with the game.
+  Command line: bash Install-Patches.command [status|install|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--lang zh|en]; set PZ_APP to the path of
+  Project Zomboid.app when the game is not in a Steam library.
+- Changes Info.plist only by adding or removing its own -javaagent option (it goes first
+  in JVMOptions, so this package starts before other agents). Other Java agents
+  (-javaagent, -agentlib, -agentpath) stay, but changing the same class as another agent is
+  not supported: a class that was changed before this package sees it is skipped
+  ([mdc-agent] NOT APPLIED in the console), and changes another agent makes after this
+  package cannot be detected.
+- The console (Zomboid/console.txt) shows [mdc-agent] ARMED when the patches are active
+  and [mdc-agent] DISARMED (with the reason) when they switched themselves off.
+- Never remove patches while the game is running; the installer refuses (code 4).
+- Nothing is uploaded. Profiler captures stay in Zomboid/Lua/MinidoracatDevProfiler/captures/.
+"@
+$instructionsMacZh = @"
+Minidoracat Client Patches $PACKAGE_VERSION macOS 版 / PZ $GAME_VERSION
+(English: README-INSTALL.txt)
+
+【這是什麼】
+只改你自己 Mac 上的遊戲，修三個問題、減輕兩個效能問題。42.22 起遊戲 jar 有簽章，修補改由一個小小的
+Java agent 在遊戲載入時套上：安裝器把 $AGENT_JAR_NAME 放進 Project Zomboid.app/Contents/Java/.mdc-patches，
+並在 Project Zomboid.app/Contents/Info.plist 加一條啟動參數（-javaagent:...）。projectzomboid.jar 本身不會被改。
+$fixListZh
+在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；Intel Mac 步驟相同，但還沒有在 Intel 實機上測。
+
+【怎麼安裝】
+1. 結束遊戲。
+2. 雙擊 zip 解壓縮。檔案要放在一起，不要只拉出其中一個。
+3. 打開「終端機」（應用程式 → 工具程式 → 終端機）。
+4. 輸入 bash 和一個空格，把解壓出來的 Install-Patches.command 拖進終端機視窗，按 Return。
+   （直接雙擊 Install-Patches.command 不行：macOS 會擋下沒有經過公證的腳本。）
+   程式會自己透過 Steam 找到遊戲；找不到時才會請你把 Project Zomboid.app 拖進視窗。
+5. 輸入 1 按 Return（安裝或更新修補）。
+6. 輸入 1 按 Return（客戶端修復）。
+7. 選版本時直接按 Return，程式會依你的 Mac 自動選好。
+8. 問「確定要安裝嗎？」時，輸入 Y 按 Return。
+9. 看到安裝完成後按 Return，再輸入 0 按 Return 離開。
+10. 照平常從 Steam 開遊戲（「執行 Project Zomboid」和「Compatibility Mode」都會載入修補）。
+macOS 問「終端機」能不能取用「下載項目」或修改其他 App 時請允許：安裝器要讀解壓出來的檔案、寫進 Project Zomboid.app。
+選單語言跟著 Mac 的語言；主選單按 L 可切換中文／英文。
+
+【遊戲更新】
+遊戲更新前不用先移除修補。每次開遊戲時修補都會比對 projectzomboid.jar，不是建置時那一版就自己停用，遊戲照原版跑。
+Steam 更新或「驗證遊戲檔案的完整性」也可能把 Info.plist 換回原版，啟動參數就跟著不見
+（這時安裝器的狀態會顯示「已安裝但沒有啟用」，再安裝一次就會補回去）。
+等對應新版的修補包發布後，照上面的步驟安裝即可，不用先移除舊的。
+不要自己刪掉 .mdc-patches 資料夾：Info.plist 還有啟動參數時，少了那個檔案遊戲會開不起來。
+已經發生的話，執行安裝器選 3（全部移除），或用 Steam 驗證遊戲檔案的完整性。
+想全部移除時：結束遊戲，用同樣的方式執行 Install-Patches.command（刪掉了就重新下載同一個 zip），
+輸入 3 按 Return，再輸入 Y 按 Return 確認。
+
+【和其他替換遊戲 class 的 MOD 一起用】
+有些 MOD 會把 .class 檔放進遊戲裡。42.22 起這類檔案本身就會讓遊戲丟 SecurityException（有沒有裝本包都一樣），
+安裝器看到時會提醒。它替換的 class 正好是本包要修補的時，安裝器會以 code 7 停止，不改任何檔案。
+不要只刪除它列出的檔案，那個 MOD 的其他檔案還需要它們。要保留那個 MOD，就裝相容版（只含車輛的修補）；
+有別的 MOD 擋著時，安裝器會建議你選它。
+
+【安全驗證】
+- 安裝器只接受對應版本的遊戲：寫入前會比對 projectzomboid.jar 與修補檔的 SHA-256；修補檔每次開遊戲也會再比對一次 jar。
+- 只動自己的檔案（.mdc-patches 資料夾）與 Info.plist 裡自己那一條啟動參數；Info.plist 其他內容逐位元組保持原樣，
+  全部移除後就是原本的檔案。不明或變造的檔案不會被自動覆蓋或刪除。安裝或移除中斷時，再執行一次即可。
+- 下載後可比對 $zipNameMac 的 SHA-256 與發布頁的 SHA256SUMS.txt
+  （終端機：shasum -a 256 $zipNameMac）。
+- 原始碼與技術說明：$repoUrl
+
+=====================================================================
+以下是給開發者與進階使用者的說明，一般玩家不用看。
+
+模組說明
+$modulesMacZh
+
+安全邊界
+- 只管理自家 patch，不移除其它作者的工具。
+- 安裝器（mdc-mac-installer.jar）用遊戲自帶的 Java 執行。命令列：bash Install-Patches.command [status|install|uninstall]
+  [--modules id,...] [--all] [--non-interactive] [--lang zh|en]；遊戲不在 Steam 資料庫裡時，用 PZ_APP 指定 Project Zomboid.app 的路徑。
+- 只在 Info.plist 加或拿掉自己那一條 -javaagent（排在 JVMOptions 最前面，比其他 agent 先啟動）；不改遊戲 JAR。
+  其他 Java agent（-javaagent、-agentlib、-agentpath）照樣保留，但不支援和它們修改同一個 class：在本包之前就被改過的 class
+  不換（console 印 [mdc-agent] NOT APPLIED）；別的 agent 在本包之後才改的，本包偵測不到。
+- console（Zomboid/console.txt）印 [mdc-agent] ARMED＝修補已啟用；[mdc-agent] DISARMED（附原因）＝修補自己停用、照原版跑。
+- 遊戲執行中不得移除修補，安裝器會拒絕（代碼 4）。
+
+資料僅保存本機：Zomboid/Lua/MinidoracatDevProfiler/captures/。
+本包不含自動 log 上傳、正式服監控或玩家回報收集。
+"@
+Write-Utf8 "$pkgMac\README-INSTALL.txt" $instructionsMacEn
+Write-Utf8 "$pkgMac\README-INSTALL.zh-TW.txt" $instructionsMacZh
+
+# 啟動腳本：假的 HOME、Steam 資料庫與 .app（路徑含空白、括號、中文），假 java 記下收到的參數
+& $BASH "$R\patcher\tests-installer-mac\command-test.sh" $pkgMac (Join-Path $R 'work/mac-command-test')
+Assert-Ok 'command-test.sh'
+
+# 端到端：Mac 版面的遊戲（42.22.2 原版 Info.plist＋建置基準 jar）上安裝 → 照啟動器的方式（工作目錄 Contents/Java、
+# 用 plist 裡的相對路徑參數）載入 agent 必須 ARMED → 遊戲裡的 MdcPatchRuntime 認得安裝紀錄 → 全部移除後 plist 逐位元組回原樣
+$macApp = Join-Path $R 'work/mac-layout-game/Project Zomboid.app'
+if (Test-Path -LiteralPath (Split-Path $macApp)) { Remove-Item -LiteralPath (Split-Path $macApp) -Recurse -Force }
+$macRoot = Join-Path $macApp 'Contents/Java'
+New-Item -ItemType Directory -Path $macRoot, (Join-Path $macApp 'Contents/MacOS') -Force | Out-Null
+Copy-Item -LiteralPath $JAR -Destination "$macRoot\projectzomboid.jar"
+[System.IO.File]::WriteAllBytes((Join-Path $macApp 'Contents/MacOS/JavaAppLauncher'), [byte[]]@(0))
+$vanillaPlist = "$R\patcher\tests-installer-mac\Info.plist.42.22.2"
+Copy-Item -LiteralPath $vanillaPlist -Destination (Join-Path $macApp 'Contents/Info.plist')
+$e2eModules = @('core', 'profiler', 'client-fixes-standard')
+& $JAVA -jar $macInstallerJar install --non-interactive --lang en --app $macApp --package-dir $pkgMac --modules 'profiler,client-fixes-standard'
+Assert-Ok 'mac installer install (e2e)'
+$plistText = [System.IO.File]::ReadAllText((Join-Path $macApp 'Contents/Info.plist'))
+$agentOptions = @([regex]::Matches($plistText, '<string>(-javaagent:[^<]*)</string>') | ForEach-Object { $_.Groups[1].Value })
+if ($agentOptions.Count -ne 1 -or $agentOptions[0] -ne "-javaagent:.mdc-patches/$AGENT_JAR_NAME=modules=$($e2eModules -join ',')") {
+    throw "macOS 安裝器寫的啟動參數不對：$($agentOptions -join ' | ')"
+}
+$merged = Join-Path $DIST 'agentcheck-mac-layout.txt'
+$mergedLines = @()
+foreach ($m in $e2eModules) { $mergedLines += $moduleManifests[$m] }
+Write-Utf8 $merged (($mergedLines -join "`n") + "`n")
+Push-Location -LiteralPath $macRoot
+try { & $JAVA -Xverify:all $agentOptions[0] -cp "$AGENT_CHECK;projectzomboid.jar" AgentLoadCheck $merged armed }
+finally { Pop-Location }
+Assert-Ok 'AgentLoadCheck armed (mac layout, relative -javaagent)'
+& $JAVA -cp "$OUT;$DIST\checks\profiler;$TJ" zombie.mdc.MdcStateAcceptCheck $macRoot "$macRoot\.mdc-patches\$AGENT_JAR_NAME" ($e2eModules -join ',')
+Assert-Ok 'MdcStateAcceptCheck (mac layout)'
+& $JAVA -jar $macInstallerJar uninstall --non-interactive --all --lang en --app $macApp --package-dir $pkgMac
+Assert-Ok 'mac installer uninstall (e2e)'
+if ((Get-FileHash -LiteralPath (Join-Path $macApp 'Contents/Info.plist')).Hash -ne (Get-FileHash -LiteralPath $vanillaPlist).Hash -or (Test-Path -LiteralPath "$macRoot\.mdc-patches")) {
+    throw 'macOS 全部移除後 Info.plist 沒有回到原檔，或 .mdc-patches 還在'
+}
+Write-Host 'macOS 端到端 OK：安裝 → 相對路徑 -javaagent ARMED → runtime 認得安裝紀錄 → 移除後 Info.plist 逐位元組相同'
+
 Write-Host '[8/8] 打包（不發布、不安裝）'
 $outDir = Join-Path $R 'output'
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $zip = Join-Path $outDir "MinidoracatClientPatches-$GAME_VERSION-$PACKAGE_VERSION.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path "$pkg\*" -DestinationPath $zip
+$zipMac = Join-Path $outDir $zipNameMac
+& $JAVA -cp $OUT UnixZip $pkgMac $zipMac
+Assert-Ok 'UnixZip macOS'
 Write-Host "完成：$zip"
-Write-Host "未壓縮套件：$pkg"
+Write-Host "完成：$zipMac"
+Write-Host "未壓縮套件：$pkg、$pkgMac"

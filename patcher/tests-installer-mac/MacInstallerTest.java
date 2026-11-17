@@ -1,0 +1,504 @@
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.SocketAddress;
+import java.net.URI;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+/**
+ * Mac 安裝器在假的 .app 樹上跑（路徑含空白、括號、中文）：安裝、切換、部分與全部移除（plist 逐位元組回原樣）、
+ * 版本不符、外來 class 衝突與相容版建議、變造、中斷後重跑收斂、Steam 換回原版 plist、重複與其他 agent、
+ * 各種不可編輯的 plist、互動選單與記憶體推薦。用法：java -cp <installer classes>:<test classes> MacInstallerTest <work dir>
+ */
+public final class MacInstallerTest {
+    static final String VANILLA = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+            \t<key>CFBundleExecutable</key>
+            \t<string>JavaAppLauncher</string>
+            \t<key>NSHumanReadableCopyright</key>
+            \t<string></string>
+            \t<key>WorkingDirectory</key>
+            \t<string>$APP_ROOT/Contents/Java</string>
+            \t<key>JVMRuntime</key>
+            \t<string>jre-$JRE_ARCH</string>
+            \t<key>JVMMainClassName</key>
+            \t<string>zombie.gameStates.MainScreenState</string>
+            \t<key>JVMOptions</key>
+            \t<array>
+            \t\t<string>-Djava.awt.headless=true</string>
+            \t\t<string>--enable-native-access=ALL-UNNAMED</string>
+            \t\t<string>-XstartOnFirstThread</string>
+            \t\t<string>-Xmx3072m</string>
+            \t\t<string>-XX:+UseZGC</string>
+            \t</array>
+            \t<key>JVMArguments</key>
+            \t<array/>
+            </dict>
+            </plist>
+            """;
+    static final String STD = "client-fixes-standard", LOW = "client-fixes-lowmem", COMPAT = "client-fixes-compat";
+
+    static Path work, app, contents, root, plist, pkg;
+    static String out;
+    static int checks;
+
+    public static void main(String[] args) throws Exception {
+        work = Path.of(args[0]).toAbsolutePath();
+        eq(MacInstaller.checkProcesses, true, "process check on by default");
+        MacInstaller.checkProcesses = false;
+        jsonUnit();
+        processRule();
+        // 解析 plist 不得連網（DOCTYPE 指向 apple.com）
+        ProxySelector.setDefault(new ProxySelector() {
+            @Override public List<Proxy> select(URI uri) { throw new AssertionError("network access: " + uri); }
+            @Override public void connectFailed(URI uri, SocketAddress sa, IOException e) {}
+        });
+
+        fresh();
+        expect(0, "status");
+        has("no modules installed");
+        expect(2, "install", "--bogus");
+        expect(2, "install", "--non-interactive");
+        expect(2, "menu", "--non-interactive");
+        expect(2, "uninstall", "--non-interactive");
+
+        // 裝 profiler 自動帶 core
+        expect(0, "install", "--non-interactive", "--modules", "profiler");
+        Map<String, Object> st = state();
+        eq(List.of("core", "profiler"), MacInstaller.moduleIds(st), "state modules");
+        eq(MacInstaller.AGENT_REL, ((Map<?, ?>) st.get("agent")).get("path"), "agent path");
+        eq(first(), MacInstaller.agentArg(List.of("core", "profiler")), "first JVMOption");
+        eq(Files.readAllBytes(root.resolve(MacInstaller.AGENT_REL)).length, Files.readAllBytes(pkg.resolve(MacInstaller.AGENT_NAME)).length, "agent copied");
+        expect(0, "install", "--non-interactive", "--modules", "profiler");
+        has("Already up to date");
+        expect(0, "status");
+        has("Active: yes");
+
+        // 加裝標準版、換省記憶體版；--all 沿用已裝的變體
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        eq(List.of("core", "profiler", STD), MacInstaller.moduleIds(state()), "add standard");
+        expect(0, "install", "--non-interactive", "--modules", LOW);
+        eq(List.of("core", "profiler", LOW), MacInstaller.moduleIds(state()), "switch to lowmem");
+        has("Replacing");
+        expect(2, "install", "--non-interactive", "--modules", STD + "," + LOW);
+        expect(0, "install", "--non-interactive", "--all");
+        eq(List.of("core", "profiler", LOW), MacInstaller.moduleIds(state()), "--all keeps lowmem");
+        eq(first(), MacInstaller.agentArg(List.of("core", "profiler", LOW)), "plist after --all");
+
+        // 部分移除；core 仍被需要就保留
+        expect(0, "uninstall", "--non-interactive", "--modules", "profiler");
+        eq(List.of("core", LOW), MacInstaller.moduleIds(state()), "remove profiler");
+        eq(first(), MacInstaller.agentArg(List.of("core", LOW)), "plist after partial");
+        expect(0, "uninstall", "--non-interactive", "--modules", "core");
+        has("still needed");
+        eq(List.of("core", LOW), MacInstaller.moduleIds(state()), "core kept");
+        expect(2, "uninstall", "--non-interactive", "--modules", "profiler");
+
+        // 全部移除：plist 逐位元組回原樣、.mdc-patches 不在
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+        expect(0, "uninstall", "--non-interactive", "--all");
+        has("Nothing is installed");
+
+        // 遊戲版本不符：不寫任何東西
+        fresh();
+        writeJar(root.resolve("projectzomboid.jar"), "zombie/iso/IsoChunk.class", "zombie/Other.class");
+        expect(5, "install", "--non-interactive", "--modules", STD);
+        vanilla();
+
+        // 安裝包壞掉
+        fresh();
+        Files.write(pkg.resolve(MacInstaller.AGENT_NAME), new byte[] {9});
+        expect(6, "install", "--non-interactive", "--modules", STD);
+        fresh();
+        Files.writeString(pkg.resolve("manifest.json"), "{\"schemaVersion\": 1}");
+        expect(6, "install", "--non-interactive", "--modules", STD);
+        Files.writeString(pkg.resolve("manifest.json"), "{oops");
+        expect(6, "status");
+        vanilla();
+
+        // 外來 class 蓋到要修補的（含巢狀、大小寫不同）→ 7 並指向相容版；相容版裝得上，其他外來 class 只警告
+        fresh();
+        Files.createDirectories(root.resolve("zombie/iso"));
+        Files.write(root.resolve("zombie/iso/isochunk$Inner.class"), new byte[] {1});
+        expect(7, "install", "--non-interactive", "--modules", STD);
+        has("--modules " + COMPAT);
+        vanilla();
+        expect(0, "install", "--non-interactive", "--modules", COMPAT);
+        has("not from this package");
+        // 互動選單：有衝突時預設推薦相容版
+        expect(0, "uninstall", "--non-interactive", "--all");
+        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "32");
+        eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "menu recommends compat on conflict");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        // zombie/mdc 底下的外來 class 連相容版都擋
+        Files.createDirectories(root.resolve("zombie/mdc"));
+        Files.write(root.resolve("zombie/mdc/PatchInfo.class"), new byte[] {1});
+        expect(7, "install", "--non-interactive", "--modules", COMPAT);
+        vanilla();
+
+        // 互動選單：記憶體推薦、[L] 切換語言
+        fresh();
+        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "32", "--lang", "en");
+        eq(List.of("core", STD), MacInstaller.moduleIds(state()), "32 GB -> standard");
+        expectIn(0, "1\n1\n\nY\n\n0\n", "menu", "--ram-gb", "16", "--lang", "en");
+        eq(List.of("core", LOW), MacInstaller.moduleIds(state()), "16 GB -> lowmem");
+        expectIn(0, "L\n4\n\n0\n", "menu", "--lang", "en");
+        has("安裝狀態");
+        expectIn(0, "3\nY\n\n0\n", "menu", "--lang", "zh");
+        has("已全部移除");
+        vanilla();
+        expectIn(0, "1\n0\n0\n", "menu", "--lang", "en");
+        vanilla();
+
+        // 修補檔被變造：不刪；換回包內那份就能刪
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        Path agent = root.resolve(MacInstaller.AGENT_REL);
+        Files.write(agent, new byte[] {7, 7});
+        expect(8, "uninstall", "--non-interactive", "--all");
+        expect(8, "install", "--non-interactive", "--modules", STD);
+        expect(0, "status");
+        has("PROBLEM");
+        Files.copy(pkg.resolve(MacInstaller.AGENT_NAME), agent, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+
+        // 中斷在各步驟：重跑收斂，暫存檔被清
+        for (String step : List.of("jar", "state", "plist")) {
+            fresh();
+            MacInstaller.failAt = step;
+            expect(12, "install", "--non-interactive", "--modules", STD);
+            noDanglingArg("install interrupted at " + step);
+            MacInstaller.failAt = null;
+            if (!step.equals("jar")) {
+                expect(0, "status");
+                if (step.equals("plist")) has("Installed but not active");
+            }
+            expect(0, "install", "--non-interactive", "--modules", STD);
+            eq(first(), MacInstaller.agentArg(List.of("core", STD)), "converged after " + step);
+            noLeftovers();
+            MacInstaller.failAt = step;
+            expect(12, "uninstall", "--non-interactive", "--all");
+            noDanglingArg("uninstall interrupted at " + step);
+            MacInstaller.failAt = null;
+            expect(0, "uninstall", "--non-interactive", "--all");
+            vanilla();
+            noLeftovers();
+        }
+
+        // Steam 換回原版 plist：status 說沒啟用；部分移除不替玩家加回；重裝補回；全部移除不碰 plist
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", "profiler," + STD);
+        Files.writeString(plist, VANILLA);
+        expect(0, "status");
+        has("Installed but not active");
+        expect(0, "uninstall", "--non-interactive", "--modules", "profiler");
+        eq(Files.readString(plist), VANILLA, "partial uninstall keeps vanilla plist");
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        eq(first(), MacInstaller.agentArg(List.of("core", STD)), "reinstall restores option");
+        Files.writeString(plist, VANILLA);
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+
+        // 沒有紀錄但 plist 有自家參數：status 提醒、全部移除拿掉
+        fresh();
+        Files.writeString(plist, VANILLA.replace("\t<array>\n", "\t<array>\n\t\t<string>-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=core</string>\n"));
+        expect(0, "status");
+        has("no install record");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+
+        // 自家參數兩條（含絕對路徑）＋別人的 agent：裝完自家剩一條在最前，別人的保留並列出；全部移除回到玩家的版本
+        fresh();
+        String user = VANILLA.replace("\t\t<string>-Xmx3072m</string>\n",
+                "\t\t<string>-javaagent:/x/y/.mdc-patches/MinidoracatClientPatches.jar=modules=core</string>\n"
+                        + "\t\t<string>-javaagent:/opt/other.jar</string>\n"
+                        + "\t\t<string>-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=core,profiler</string>\n"
+                        + "\t\t<string>-Xmx3072m</string>\n");
+        Files.writeString(plist, user);
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        has("other Java agents");
+        List<String> opts = InfoPlist.parse(Files.readAllBytes(plist)).options;
+        eq(opts.get(0), MacInstaller.agentArg(List.of("core", STD)), "ours first");
+        eq(opts.stream().filter(MacInstaller::isOurArg).count(), 1L, "duplicates collapsed");
+        eq(opts.contains("-javaagent:/opt/other.jar"), true, "other agent kept");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        eq(Files.readString(plist), VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-javaagent:/opt/other.jar</string>\n\t\t<string>-Xmx3072m</string>\n"),
+                "uninstall keeps the other agent and drops ours");
+
+        // CRLF、空白縮排、BOM：往返逐位元組
+        for (String variant : List.of("crlf", "spaces", "bom")) {
+            fresh();
+            byte[] orig = switch (variant) {
+                case "crlf" -> VANILLA.replace("\n", "\r\n").getBytes(StandardCharsets.UTF_8);
+                case "spaces" -> VANILLA.replace("\t", "    ").getBytes(StandardCharsets.UTF_8);
+                default -> concat(new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF}, VANILLA.getBytes(StandardCharsets.UTF_8));
+            };
+            Files.write(plist, orig);
+            expect(0, "install", "--non-interactive", "--modules", STD);
+            eq(first(), MacInstaller.agentArg(List.of("core", STD)), variant + " install");
+            if (variant.equals("crlf")) eq(new String(Files.readAllBytes(plist), StandardCharsets.UTF_8).replace("\r\n", "").contains("\n"), false, "crlf kept");
+            expect(0, "uninstall", "--non-interactive", "--all");
+            eq(Arrays.equals(Files.readAllBytes(plist), orig), true, variant + " round trip");
+        }
+
+        // 不可編輯的 plist：安裝 7；全部移除時文字裡有自家參數 → 7，沒有就照常刪檔
+        for (String bad : List.of(
+                VANILLA.replace("<dict>", "<dict>\n<!-- c -->"),
+                VANILLA.replace("\t<array>\n\t\t<string>-Djava", "\t<array><string>-Djava"),
+                VANILLA.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<integer>1</integer>\n"),
+                VANILLA.replace("<key>JVMOptions</key>", "<key>JVMOptions</key><key>JVMOptions</key>"),
+                VANILLA.replaceAll("(?s)\t<key>JVMOptions</key>.*?</array>\n", "\t<key>JVMOptions</key>\n\t<array/>\n"),
+                "bplist00\u0000\u00ff")) {
+            fresh();
+            Files.write(plist, bad.getBytes(bad.startsWith("bplist") ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8));
+            byte[] before = Files.readAllBytes(plist);
+            expect(7, "install", "--non-interactive", "--modules", STD);
+            eq(Arrays.equals(before, Files.readAllBytes(plist)), true, "not touched");
+        }
+        fresh();
+        String commented = VANILLA.replace("<dict>", "<dict>\n<!-- c -->");
+        Files.writeString(plist, commented);
+        Files.createDirectories(root.resolve(".mdc-patches"));
+        Files.writeString(root.resolve(".mdc-patches/x.txt"), "x");
+        expect(0, "uninstall", "--non-interactive", "--all");
+        has("still has files");
+        Files.writeString(plist, commented.replace("\t\t<string>-Xmx3072m</string>\n", "\t\t<string>-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=core</string>\n\t\t<string>-Xmx3072m</string>\n"));
+        expect(7, "uninstall", "--non-interactive", "--all");
+        // binary plist 讀不出文字：全部移除不得刪 jar 而留下啟動參數
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        Files.write(plist, "bplist00\u0000\u00ff".getBytes(StandardCharsets.ISO_8859_1));
+        expect(7, "uninstall", "--non-interactive", "--all");
+        eq(Files.isRegularFile(root.resolve(MacInstaller.AGENT_REL)), true, "jar kept when plist unreadable");
+        expect(0, "status");
+        has("cannot tell whether active");
+        // state 記的修補檔位置不對 → 7，不寫任何東西
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        Path statePath = root.resolve(MacInstaller.STATE_REL);
+        Files.writeString(statePath, Files.readString(statePath).replace(MacInstaller.AGENT_REL, ".mdc-patches/other.jar"));
+        byte[] plistBefore = Files.readAllBytes(plist);
+        expect(7, "install", "--non-interactive", "--modules", LOW);
+        eq(Arrays.equals(plistBefore, Files.readAllBytes(plist)), true, "plist untouched on bad state path");
+
+        // 啟動器前提不符
+        fresh();
+        Files.writeString(plist, VANILLA.replace("$APP_ROOT/Contents/Java</string>", "$APP_ROOT/Contents</string>"));
+        expect(7, "install", "--non-interactive", "--modules", STD);
+        Files.writeString(plist, VANILLA.replace("<key>JVMArguments</key>", "<key>JVMClassPath</key>\n\t<string>x</string>\n\t<key>JVMArguments</key>"));
+        expect(7, "install", "--non-interactive", "--modules", STD);
+        Files.writeString(plist, VANILLA);
+        Files.write(root.resolve("aaa.jar"), new byte[] {1});
+        expect(7, "install", "--non-interactive", "--modules", STD);
+        Files.delete(root.resolve("aaa.jar"));
+        expect(0, "install", "--non-interactive", "--modules", STD);
+
+        // 另一個管理器持鎖 → 4
+        try (FileChannel ch = FileChannel.open(root.resolve(".mdc-patches.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                FileLock l = ch.lock()) {
+            expect(4, "uninstall", "--non-interactive", "--all");
+        }
+        expect(0, "uninstall", "--non-interactive", "--all");
+        vanilla();
+
+        // .mdc-patches 是符號連結 → 7（建不了就略過）
+        fresh();
+        Path target = Files.createDirectories(work.resolve("elsewhere"));
+        try {
+            Files.createSymbolicLink(root.resolve(".mdc-patches"), target);
+            expect(7, "install", "--non-interactive", "--modules", STD);
+            Files.delete(root.resolve(".mdc-patches"));
+        } catch (UnsupportedOperationException | IOException e) {
+            System.out.println("SKIP symlink case: " + e);
+        }
+
+        // Info.plist 的 POSIX 權限保留（只在 POSIX 檔案系統）
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            fresh();
+            Files.setPosixFilePermissions(plist, PosixFilePermissions.fromString("rwxr-xr-x"));
+            expect(0, "install", "--non-interactive", "--modules", STD);
+            eq(PosixFilePermissions.toString(Files.getPosixFilePermissions(plist)), "rwxr-xr-x", "plist mode kept");
+            expect(0, "uninstall", "--non-interactive", "--all");
+            eq(PosixFilePermissions.toString(Files.getPosixFilePermissions(plist)), "rwxr-xr-x", "plist mode kept after uninstall");
+        } else {
+            System.out.println("SKIP posix permission case");
+        }
+
+        // 遊戲資料夾（不是 .app）也接受；不是遊戲 → 3
+        fresh();
+        expect(0, "status", "--app-dir-mode");
+        eq(run(new String[] {"status", "--app", work.resolve("nothing").toString(), "--package-dir", pkg.toString()}, ""), 3, "not a game");
+        System.out.println("MacInstallerTest OK (" + checks + " checks)");
+    }
+
+    // ------------------------------------------------------------------ fixtures
+    static void fresh() throws IOException {
+        if (Files.exists(work)) {
+            try (Stream<Path> s = Files.walk(work)) {
+                for (Path p : s.sorted(Comparator.reverseOrder()).toList()) Files.delete(p);
+            }
+        }
+        Path game = work.resolve("Steam 遊戲 (test)/ProjectZomboid");
+        app = game.resolve("Project Zomboid.app");
+        contents = app.resolve("Contents");
+        root = contents.resolve("Java");
+        plist = contents.resolve("Info.plist");
+        Files.createDirectories(root);
+        Files.createDirectories(contents.resolve("MacOS"));
+        Files.write(contents.resolve("MacOS/JavaAppLauncher"), new byte[] {1});
+        Files.writeString(plist, VANILLA);
+        writeJar(root.resolve("projectzomboid.jar"), "zombie/iso/IsoChunk.class", "zombie/vehicles/BaseVehicle.class", "zombie/core/Core.class");
+        pkg = work.resolve("pkg dir");
+        Files.createDirectories(pkg);
+        byte[] agent = "fake agent jar".getBytes(StandardCharsets.UTF_8);
+        Files.write(pkg.resolve(MacInstaller.AGENT_NAME), agent);
+        String jarSha = MacInstaller.sha256(root.resolve("projectzomboid.jar"));
+        Files.writeString(pkg.resolve("manifest.json"), """
+                {"schemaVersion": 2, "gameVersion": "42.22.2", "packageVersion": "9.9.9", "jarSha256": "%s",
+                 "agent": {"source": "MinidoracatClientPatches.jar", "sha256": "%s"},
+                 "modules": [
+                  {"id": "core", "name": "核心", "nameEn": "Core", "version": "c1", "requires": [], "patchedClasses": ["zombie/core/Core"]},
+                  {"id": "profiler", "name": "P", "nameEn": "P", "version": "p1", "requires": ["core"], "patchedClasses": []},
+                  {"id": "client-fixes-standard", "name": "S", "nameEn": "S", "version": "s1", "requires": ["core"], "exclusiveGroup": "client-fixes",
+                   "patchedClasses": ["zombie/iso/IsoChunk", "zombie/vehicles/BaseVehicle"]},
+                  {"id": "client-fixes-lowmem", "name": "L", "nameEn": "L", "version": "l1", "requires": ["core"], "exclusiveGroup": "client-fixes",
+                   "patchedClasses": ["zombie/iso/IsoChunk", "zombie/vehicles/BaseVehicle"]},
+                  {"id": "client-fixes-compat", "name": "C", "nameEn": "C", "version": "x1", "requires": ["core"], "exclusiveGroup": "client-fixes",
+                   "patchedClasses": ["zombie/vehicles/BaseVehicle"]}
+                 ]}
+                """.formatted(jarSha, MacInstaller.sha256(agent)));
+    }
+
+    static void writeJar(Path jar, String... entries) throws IOException {
+        try (ZipOutputStream z = new ZipOutputStream(Files.newOutputStream(jar))) {
+            for (String e : entries) {
+                z.putNextEntry(new ZipEntry(e));
+                z.write(e.getBytes(StandardCharsets.UTF_8));
+                z.closeEntry();
+            }
+        }
+    }
+
+    static int run(String[] args, String input) {
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        int code = MacInstaller.run(args, new ByteArrayInputStream(input.getBytes(StandardCharsets.UTF_8)), new PrintStream(b, true, StandardCharsets.UTF_8));
+        out = b.toString(StandardCharsets.UTF_8);
+        return code;
+    }
+
+    static void expectIn(int code, String input, String... args) {
+        String[] full = Arrays.copyOf(args, args.length + 4);
+        boolean appDir = Arrays.asList(args).contains("--app-dir-mode");
+        if (appDir) full = Arrays.stream(args).filter(a -> !a.equals("--app-dir-mode")).toArray(n -> new String[n + 4]);
+        int n = appDir ? args.length - 1 : args.length;
+        full[n] = "--app";
+        full[n + 1] = (appDir ? app.getParent() : app).toString();
+        full[n + 2] = "--package-dir";
+        full[n + 3] = pkg.toString();
+        if (!Arrays.asList(full).contains("--lang")) {
+            full = Arrays.copyOf(full, full.length + 2);
+            full[full.length - 2] = "--lang";
+            full[full.length - 1] = "en";
+        }
+        int got = run(full, input);
+        if (got != code) throw new AssertionError("exit " + got + " != " + code + " for " + Arrays.toString(args) + "\n" + out);
+        checks++;
+    }
+
+    static void expect(int code, String... args) {
+        expectIn(code, "", args);
+    }
+
+    static void has(String text) {
+        if (!out.contains(text)) throw new AssertionError("output lacks \"" + text + "\":\n" + out);
+        checks++;
+    }
+
+    static void eq(Object a, Object b, String what) {
+        if (!a.equals(b)) throw new AssertionError(what + ": " + a + " != " + b + "\n" + out);
+        checks++;
+    }
+
+    static Map<String, Object> state() throws IOException {
+        return Json.obj(Json.parse(Files.readString(root.resolve(MacInstaller.STATE_REL))), "state");
+    }
+
+    static String first() throws IOException {
+        InfoPlist p = InfoPlist.parse(Files.readAllBytes(plist));
+        if (p.problem != null) throw new AssertionError("plist problem: " + p.problem);
+        return p.options.get(0);
+    }
+
+    static void vanilla() throws IOException {
+        eq(Files.readString(plist), VANILLA, "plist back to vanilla bytes");
+        eq(Files.exists(root.resolve(".mdc-patches")), false, ".mdc-patches removed");
+        eq(Files.exists(root.resolve(".mdc-patches.lock")), false, "lock file removed");
+    }
+
+    /** 不做 journal 的安全論證：任何中斷點上，plist 有本包參數時 jar 一定在。 */
+    static void noDanglingArg(String where) throws IOException {
+        if (new String(Files.readAllBytes(plist), StandardCharsets.UTF_8).contains(MacInstaller.AGENT_NAME)) {
+            eq(Files.isRegularFile(root.resolve(MacInstaller.AGENT_REL)), true, "plist points at an existing jar (" + where + ")");
+        }
+    }
+
+    static void noLeftovers() {
+        for (Path p : List.of(contents.resolve("Info.plist.mdc-new"), root.resolve(MacInstaller.AGENT_REL + ".mdc-new"), root.resolve(MacInstaller.STATE_REL + ".mdc-new"))) {
+            eq(Files.exists(p), false, "leftover " + p.getFileName());
+        }
+    }
+
+    static byte[] concat(byte[] a, byte[] b) {
+        byte[] r = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, r, a.length, b.length);
+        return r;
+    }
+
+    // ------------------------------------------------------------------ units
+    static void jsonUnit() {
+        String text = "{\"a\": [1, 2.5, true, null, \"x\\\"\\u00e9\\n\"], \"b\": {}}";
+        Object v = Json.parse(text);
+        eq(Json.parse(Json.write(v)), v, "json round trip");
+        eq(((List<?>) Json.obj(v, "v").get("a")).get(4), "x\"é\n", "json escapes");
+        for (String bad : List.of("{", "{\"a\":1,}", "[1 2]", "{\"a\":1}x", "{\"a\":1,\"a\":2}", "\"\\q\"", "[" .repeat(100) + "]".repeat(100))) {
+            try {
+                Json.parse(bad);
+                throw new AssertionError("accepted bad JSON " + bad);
+            } catch (IllegalArgumentException expected) {
+                checks++;
+            }
+        }
+    }
+
+    static void processRule() {
+        Path a = Path.of("/Users/x/Steam/ProjectZomboid/Project Zomboid.app");
+        eq(MacInstaller.isGameProcess(a + "/Contents/MacOS/JavaAppLauncher", "", a), true, "launcher");
+        eq(MacInstaller.isGameProcess(a + "/Contents/PlugIns/jre-aarch64/Contents/Home/bin/java", "", a), true, "game JRE");
+        eq(MacInstaller.isGameProcess("/usr/bin/java", "java -cp x zombie.network.GameServer", a), true, "server cmdline");
+        eq(MacInstaller.isGameProcess("/usr/bin/java", "java zombie.gameStates.MainScreenState", a), true, "client cmdline");
+        eq(MacInstaller.isGameProcess("/Applications/Safari.app/Contents/MacOS/Safari", "Safari", a), false, "other app");
+        eq(MacInstaller.isGameProcess("", "", a), false, "unknown");
+    }
+}

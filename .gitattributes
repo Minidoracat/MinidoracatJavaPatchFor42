@@ -4,3 +4,5 @@
 *.ps1 text
 *.java text
 *.md text
+*.command text eol=lf
+patcher/tests-installer-mac/Info.plist.* -text

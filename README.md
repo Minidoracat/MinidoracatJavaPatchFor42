@@ -367,7 +367,9 @@ their authors (inference: PZ_Optimization itself was not tested).
 
 **Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, run `Uninstall-Patches.bat` and remove everything. We do not ask you to change that Windows setting.
 
-Build the package yourself with `build-client.ps1` (it also needs MinGW-w64 gcc, for the small agent loader DLL); installer tests:
+**macOS.** Download `MinidoracatClientPatches-<game version>-<package version>-macOS.zip` instead (check it with `shasum -a 256`). Quit the game and double-click the zip to extract it, open Terminal, type `bash ` (with a space), drag `Install-Patches.command` from the extracted folder into the window and press Return; the menus are the same as on Windows. Double-clicking `Install-Patches.command` does not work because macOS blocks scripts that are not notarized. The installer runs with the Java that comes with the game, finds `Project Zomboid.app` through Steam (or asks you to drag it in, or reads `PZ_APP`), copies the same `MinidoracatClientPatches.jar` into `Project Zomboid.app/Contents/Java/.mdc-patches` and adds one `-javaagent:` option to `JVMOptions` in `Project Zomboid.app/Contents/Info.plist`. The Mac launcher loads a Java agent directly, so there is no loader DLL. Only that one line of `Info.plist` changes, and removing everything (menu `3`) gives back the original file byte for byte. A Steam update or "Verify integrity of game files" may put back the original `Info.plist`; the status then shows "installed but not active" and installing again turns the patches back on. Tested on an Apple silicon Mac, natively and as the Intel (x86_64) build under Rosetta 2; not yet on an Intel Mac.
+
+Build the package yourself with `build-client.ps1` (it also needs MinGW-w64 gcc, for the small agent loader DLL, and Git for Windows' bash, to test the macOS launcher script); installer tests:
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
 (do not run them while a Project Zomboid JVM is running).
 
@@ -400,7 +402,8 @@ patcher/game-client*/          client fix helpers and the shared client core
 patcher/game-profiler/         DevProfiler runtime
 patcher/tests*/                behavior tests (server, client, installer, profiler)
 deploy/                        server install.sh / uninstall.sh and gate tests
-deploy-client/                 client installer (Manage-Patches.ps1 and .bat launchers)
+deploy-client/                 client installers (Manage-Patches.ps1 and .bat launchers; mac/Install-Patches.command)
+patcher/installer-mac/         macOS client installer (mdc-mac-installer.jar, run with the game's own Java)
 native-observer/               LD_PRELOAD / LD_AUDIT native guards, startup wrapper, tests
 scripts/                       optional tools listed above
 docs/                          detailed patch documentation, design notes, reports to TIS

@@ -510,6 +510,40 @@ current jar: installing removes a leftover one in the same transaction and unins
 0.2.4). Unrecognized leftovers are still refused. Never install or uninstall while the JVM is running. Binaries are
 for local use by legal game owners only and are not committed or redistributed.
 
+**macOS package**: the same build also produces `dist-client-modular/pkg-mac` and
+`output/MinidoracatClientPatches-<game>-<package>-macOS.zip` (packed by `UnixZip`: folders and `.command` 755, the
+rest 644, checked by reading the central directory back). The agent jar is the same file as in the Windows package
+(the build asserts equal SHAs); the manifest drops `loader` and `legacyPackages`. The Mac launcher
+`Contents/MacOS/JavaAppLauncher` reads `JVMOptions` from `Contents/Info.plist`, changes to `WorkingDirectory`
+(`$APP_ROOT/Contents/Java`) and creates the JVM through `JLI_Launch` in `libjli`, so `-javaagent` works directly and no
+loader DLL is needed (42.22.2 on an Apple M2 Pro with macOS 27: `[mdc-agent] ARMED: 18 patched classes`,
+`compatible=true`). The game root is `Project Zomboid.app/Contents/Java` (classpath
+`Contents/Java/:Contents/Java/projectzomboid.jar`), which is also where `MdcPatchRuntime` finds `projectzomboid.jar`.
+The installer is a Java program, `mdc-mac-installer.jar` (`patcher/installer-mac/`, run with the game's own JRE),
+started by `deploy-client/mac/Install-Patches.command` (bash 3.2), which finds the app (`PZ_APP`, the default Steam
+library, `libraryfolders.vdf`, then asks the player to drag it in) and a Java that runs (`jre-aarch64`, then
+`jre-x86_64`). It only touches the agent jar and `state.json` in `Contents/Java/.mdc-patches/` (schema 2, the same
+format as on Windows, without a loader) and the first `JVMOptions` entry of `Info.plist`,
+`-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<modules>`. The plist is located as text and
+cross-checked with a DOM parse that never touches the network; only whole lines are added or removed, BOM, CRLF and
+indentation stay, and removing everything gives back the original file byte for byte. A plist that is not in the
+game's own shape, a `WorkingDirectory` other than `$APP_ROOT/Contents/Java`, a `JVMClassPath` key or another jar in
+`Contents/Java` is refused with code 7; when the plist cannot be read as text (a binary plist, for example), removing
+everything also stops with code 7 and keeps the jar. There is no journal: new content is written to a temporary file
+in the same folder, checked by SHA and renamed atomically, in the order jar, state, plist when enabling and plist,
+state, jar when disabling, so no interruption leaves the plist pointing at a missing jar (`MacInstallerTest` asserts
+this at every interruption point); running it again converges. Exit codes are the Windows ones (0–8) plus 12 (cannot
+write into the app). Double-clicking the `.command` is blocked by Gatekeeper (not notarized; `spctl` reports
+`rejected`), so the instructions say to type `bash ` in Terminal and drag the file in. Both Steam launch options
+("Play Project Zomboid" and Compatibility Mode, which adds `-safemode`) start the same `.app`; `open` (also with
+`--args -safemode`) and running `JavaAppLauncher` directly from another working directory were both ARMED.
+Build checks: `MacInstallerTest` (a fake .app whose path has spaces, parentheses and Chinese),
+`command-test.sh` (a fake HOME and Steam library) and an end-to-end run on a Mac layout (install, then
+`AgentLoadCheck` in `Contents/Java` with the relative `-javaagent` from the plist must be `armed`,
+`MdcStateAcceptCheck` reads the record with the runtime's own `readInstallation`, and after removing everything the
+plist equals the original byte for byte). On the M2 Pro the x86_64 path (`arch -x86_64` with `jre-x86_64` and the x86_64
+slice of `JavaAppLauncher`, `os.arch=x86_64`) was also ARMED with `compatible=true`; real Intel hardware has not been tested.
+
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,
 `WorldStreamer`, `IsoChunk`, `RoomDef` and `FBORenderCutaways` (the version subscribed locally on 2026-10-29 also

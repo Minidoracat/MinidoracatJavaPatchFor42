@@ -289,7 +289,9 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
 
-也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
+**macOS。** 改下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`（可用 `shasum -a 256` 比對）。結束遊戲、雙擊 zip 解壓縮，打開「終端機」，輸入 `bash `（後面有一個空格），把解壓出來的 `Install-Patches.command` 拖進視窗再按 Return；之後的選單和 Windows 版相同。直接雙擊 `Install-Patches.command` 不行，macOS 會擋下沒有經過公證的腳本。安裝器用遊戲自帶的 Java 執行，會透過 Steam 找到 `Project Zomboid.app`（找不到時請你拖進視窗，也可以用 `PZ_APP` 指定），把同一個 `MinidoracatClientPatches.jar` 放進 `Project Zomboid.app/Contents/Java/.mdc-patches`，並在 `Project Zomboid.app/Contents/Info.plist` 的 `JVMOptions` 加一條 `-javaagent:` 啟動參數。Mac 的啟動器可以直接載入 Java agent，所以不需要載入器 DLL。`Info.plist` 只會多那一行，全部移除（選單 `3`）後逐位元組回到原本的檔案。Steam 更新或「驗證遊戲檔案的完整性」可能把 `Info.plist` 換回原版，這時狀態會顯示「已安裝但沒有啟用」，再安裝一次就會恢復。在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；還沒有在 Intel Mac 上實測。
+
+也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL；以及 Git for Windows 的 bash，用來測 macOS 的啟動腳本）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
 ## 建議的伺服器設定
 
@@ -316,7 +318,8 @@ patcher/game-client*/          客戶端修復 helper 與共用客戶端核心
 patcher/game-profiler/         DevProfiler runtime
 patcher/tests*/                行為測試（伺服器、客戶端、安裝器、profiler）
 deploy/                        伺服器 install.sh／uninstall.sh 與閘門測試
-deploy-client/                 客戶端安裝器（Manage-Patches.ps1 與 .bat 啟動檔）
+deploy-client/                 客戶端安裝器（Manage-Patches.ps1 與 .bat 啟動檔；mac/Install-Patches.command）
+patcher/installer-mac/         macOS 客戶端安裝器（mdc-mac-installer.jar，用遊戲自帶的 Java 執行）
 native-observer/               LD_PRELOAD／LD_AUDIT native 防護、啟動 wrapper、測試
 scripts/                       上面列出的選用工具
 docs/                          詳細修補文件、設計筆記、給 TIS 的回報
