@@ -421,6 +421,32 @@ Build the package yourself with `build-client.ps1` (it also needs MinGW-w64 gcc,
 `powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`
 (do not run them while a Project Zomboid JVM is running).
 
+### Native Linux Steam client (manual install)
+
+Tested with client 0.3.7 on x86-64 Linux and Project Zomboid 42.22.2. Quit the game. In Steam, choose **Manage → Browse local files**, then open the lowercase `projectzomboid` folder containing `ProjectZomboid64.json`. Run `sha256sum projectzomboid.jar` there. Continue only if the result is `3c4a7c5f149d784758c6fb5f8fa85f3a21d572e38bc081400e89035f8120d287`.
+
+1. Download `MinidoracatClientPatches-42.22.2-0.3.7-macOS.zip` and `SHA256SUMS.txt` from the [0.3.7 release](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/tag/client-v0.3.7). Run `sha256sum MinidoracatClientPatches-42.22.2-0.3.7-macOS.zip` and compare it with the ZIP's entry before extracting. The archive contains the Java agent and its manifest.
+2. In the extracted folder, use `jq` to generate the installation record for the modules you will load. For less than 32 GB of RAM, use `client-fixes-lowmem` in **both** the command and the launcher option below. For vehicle fixes only, use `client-fixes-compat` in both places.
+
+```sh
+jq -e --arg variant client-fixes-standard '{
+  schemaVersion, packageVersion, jarSha256,
+  agent: {path: ".mdc-patches/MinidoracatClientPatches.jar", sha256: .agent.sha256},
+  modules: [.modules[] | select(.id == "core" or .id == $variant) | {id, name, version, requires}]
+} | select(.schemaVersion == 2 and (.modules | length) == 2)' manifest.json > state.json
+```
+
+3. After the command succeeds, create `.mdc-patches` inside the lowercase game folder. Copy `MinidoracatClientPatches.jar` and the generated `state.json` into it. These steps assume a fresh install.
+4. Back up `ProjectZomboid64.json`. Add this line immediately after the opening `[` of its top-level `"vmArgs"` array, before the existing options.
+
+```json
+"-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=core,client-fixes-standard",
+```
+
+Start the game from Steam. The main-menu overlay should list `core` and your client fixes. In `~/Zomboid/console.txt`, look for `[MinidoracatPatches]` with `compatible=true` and the two `installed=` lines. If the agent reports `ARMED` but the menu says `CHECK FAILED`, the next line in the overlay gives the reason.
+
+To uninstall, quit the game and remove the added launcher line **first**, then remove the two files you copied into `.mdc-patches`. A Steam update or file verification can reset the launcher JSON. Check the game JAR hash again before re-enabling the patch.
+
 ## Recommended server settings
 
 Not patches, but part of the same work on a busy server:
