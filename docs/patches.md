@@ -5688,6 +5688,98 @@ console（`refused`、`anomaly` 合計每 10 秒最多 20 行）：
 
 **退場**：官方在伺服器端驗證換型的目標種類（兩條路都要），或 SmokeCheck 的上游指紋／SHA 鎖轉紅時重估。
 
+<a id="2dm"></a>
+## 2dm. 非主執行緒的 engine 登記／移除排回主執行緒（W105，server，預設 on）
+
+**問題**：2026-11-22 正式服主迴圈從某個 tick 起每個 tick 都在 `GameEntityManager.Update` 拋 `IllegalArgumentException: key cannot be null`（`ObjectSet.remove` ← `EngineEntityManager.removeEntityInternal` ← `processPendingOperations`），`IngameState.updateInternal` 接住後略過那個 tick 剩下的工作，搬物品與各種動作全部卡住，直到重啟。原版 42.22.2 的 `GameEntityManager.UnregisterEntity(GameEntity, boolean)` 開頭不看這個 entity 是否登記過，一律呼叫 `engine.removeEntity`（42.21 先看 `addedToEntityManager`）。`ServerPlayersVehicles` 執行緒載車時把存檔裡的拖車動物放進車廂（`BaseVehicle.load → addAnimalInTrailer → removeFromWorld`），就在背景執行緒寫 `EngineEntityManager`：主執行緒正在 `Engine.update` 時寫待處理佇列 `pendingOperations` 與操作物件池，否則直接寫 entity 集合。操作物件池是非執行緒安全的 `SingleThreadPool`，`free` 先把物件放回池、再 `reset`；背景執行緒在兩步之間拿到同一個物件，主執行緒的 `reset` 就把它的 entity 清成 null，佇列從此留著一筆 entity 為 null 的 Remove。`processPendingOperations` 在 `pendingOperations.clear()` 之前拋例外，那筆永遠留著、每個 tick 重拋（W106 處理這一段）。
+
+**做法**：只延後 engine 那一步。非主執行緒的 `Engine.addEntity`／`Engine.removeEntity` 照呼叫順序排進 FIFO（`addEntity` 照原版回 `true`），主執行緒在三個點依序呼叫原版：主執行緒自己每次直接呼叫 engine 之前、每個 tick `engine.update()` 之前、`GameEntityManager.Save` 開頭。主執行緒呼叫一律先排空再執行，結果等於原版循序執行；背景移除入列時取消佇列裡同一個 entity 的待加入（原版延遲路徑同樣是移除取消待加入）。`idToEntityMap`、`addedToEntityManager` 照原版即時處理：整段 Register／Unregister 延後的話，排空時 entity 的 ID 可能已經變了，ID 表會漏刪。`GameServer.mainThread` 還沒設定時照原版。排空時某一筆拋 `RuntimeException` 只記錄、下一筆照做（這筆原本是背景呼叫端該收的例外，不轉給不相干的主執行緒呼叫者）。佇列上限 100,000 筆，超過時照原版直接執行並記 `overflow`。
+
+**手術**：新 ClassPatch `GameEntityManager`，命中 4：`RegisterEntity` 的 `Engine.addEntity`（javap offset 305）、`UnregisterEntity(GameEntity,Z)` 的 `Engine.removeEntity`（offset 9）、`Update` 的 `Engine.update`（offset 15）同形改道 `MdcEntityEngineGuard`（receiver 前置的 `INVOKESTATIC`），`Save` 頭部無參數 `beforeSave()`。其餘指令與 frames 不變。
+
+console：
+
+```text
+[MinidoracatJavaPatch][EntityEngineGuard] 首次生效 defer=on guard=on raw=null/null（…）
+[MinidoracatJavaPatch][EntityEngineGuard] deferred remove n=<n> [live] thread=<執行緒> entity=<類別@id> via=<呼叫鏈>
+[MinidoracatJavaPatch][EntityEngineGuard] beat defer=on guard=on deferred=<加入>/<移除> live=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> drainFailed=<n> nullOps=<加入>/<移除> opFailed=<加入>/<移除> anomalies=<n> sources=[<次數>×<呼叫鏈> | …]
+```
+
+`deferred` 行前 20 筆與之後每 1000 筆記一行；`live` 是背景移除時那個 entity 當下在 engine 裡（或排隊加入），代表背景執行緒還在動已登記的 entity，前 20 筆每筆都記。心跳每 5 分鐘一行（W106 的計數也在這一行）。
+
+**開關**：`-Dmdc.entityEngineDefer=on|off`（`0`／`off` 純委派原版），預設 `on`，需重啟。
+
+**上線驗收**：(a) 該輪 DebugLog 沒有連續的 `updateInternal> Exception thrown`；(b) 心跳 `overflow`、`drainFailed`、`anomalies` 為 0，`live=0`；(c) W107 上線後背景來源消失，`deferred` 應維持 0/0，不是 0 就看 `sources` 是哪條新路徑；(d) 沒有 `Getting bucketBits while no Component data`。
+
+**守門與驗證**：
+- SmokeCheck：存在理由——原版 `UnregisterEntity` 先呼叫 `Engine.removeEntity`、之後才讀 `addedToEntityManager`；呼叫點清冊——`Engine.addEntity`／`removeEntity`／`update` 全 jar 各只有 `GameEntityManager` 一處；原版 `UnregisterEntity`、`RegisterEntity`、`Engine.addEntity`／`removeEntity`、`EngineEntityManager.addEntity`／`removeEntity`／`processPendingOperations`／`addEntityInternal`／`removeEntityInternal`、`EntityOperation.reset`、`SingleThreadPool.obtain`／`free` 本體 SHA 鎖（各配負對照）；手術後只有那 3 個呼叫換成 helper、`Save` 頭部恰一個 `beforeSave`，`GameEntityManager` 其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`，每個 `DebugLog.log` 都在含兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
+- `MdcEntityEngineGuardTest`（`build.ps1` [9zzp/10]，on、off、defer-off、guard-off 四個 JVM，自驗 argv）：真 `UnregisterEntity`、真 `Engine`、真 `processPendingOperations`。事故重現——主執行緒 `free` 做到一半（已放回池、還沒 `reset`）時背景執行緒 Unregister 一個從沒進過 engine 的 entity，之後主執行緒 `reset`：off 佇列留下 entity 為 null 的 Remove，連續三次 `processPendingOperations` 都拋 `key cannot be null`、那筆一直留著（負對照）；on 背景沒碰操作池與佇列、entity 旗標沒被背景寫，下一個 tick 排空。背景在 engine 處理中與不在處理中各 Unregister 一個已登記的 entity：回來時還在 engine、記一筆 `live`，排空後離開；背景三筆依 FIFO 套用；背景先加後移取消待加入、排空後不在 engine 與 bucket；背景移除在佇列時主執行緒加回同一個 entity 不撞 `Entity is already registered`、只在 engine 一次；排空時 `already registered` 不外拋、下一筆照做；`beforeSave` 只在主執行緒排空；`mainThread` 為 null 照原版；計數恆等式 `deferred = drained + cancelled + pending`。
+
+**部署**：manifest 新增 `zombie/entity/MdcEntityEngineGuard.class`、`zombie/entity/MdcEntityEngineGuard$Entry.class` 與 `zombie/entity/GameEntityManager.class`（W105–W107 合計見 2do）。
+
+**退場**：官方讓背景執行緒不再碰 engine（`UnregisterEntity` 回到先看是否登記過，或載車改在主執行緒），或 SmokeCheck 的存在理由、SHA 鎖轉紅時重估。
+
+<a id="2dn"></a>
+## 2dn. 待處理佇列單筆壞資料不再卡死主迴圈（W106，server，預設 on）
+
+**問題**：見 2dm。原版 `EngineEntityManager.processPendingOperations` 逐筆處理待處理的加入／移除，任一筆拋例外時，例外在 `pendingOperations.clear()` 之前外拋，那筆與後面所有筆都留在佇列，下一個 tick 從頭重來、再拋一次。一筆壞資料（entity 為 null、已登記又被加入、listener 拋例外）就讓主迴圈每個 tick 都中斷。W105 擋住已知的來源，這一刀讓「佇列卡死」本身不再發生。
+
+**做法**：三個 `addEntityInternal`／`removeEntityInternal` 改道 `MdcEntityEngineGuard.applyAdd`／`applyRemove`。entity 為 null 時略過並記錄；單筆拋 `RuntimeException` 時收好那個 entity 的旗標、記錄後繼續：加入失敗清掉 `scheduledDelayedAddToEngine`（不清的話，之後的移除會走取消分支、不真的移除），移除失敗且 `removingFromEngine` 還是 true 時補完原版尾段（清元件操作處理器、`removingFromEngine`、`addedToEngine`）。迴圈照原版 `free` 與 `clear`，壞的那筆不再留在佇列。`Error` 照常外拋。entity 為 null 的那筆代表背景執行緒寫過操作池，那個 entity 的旗標可能卡住，log 會建議在下個重啟窗口重啟。
+
+**手術**：掛在既有的 `EngineEntityManager` ClassPatch（同一 class 只能有一個 ClassPatch）。`processPendingOperations` 的 `addEntityInternal`（offset 65）、`removeEntityInternal`（offset 76、103）同形改道，命中 3。offset 103 在 `RemoveAll` 分支，原版沒有任何呼叫者會產生這種操作（SmokeCheck 死碼鎖），改道後的行為與另兩處相同。
+
+console：
+
+```text
+[MinidoracatJavaPatch][EntityEngineGuard] skipped null remove n=<n> thread=<執行緒>（佇列裡的操作 entity 為 null：…）
+[MinidoracatJavaPatch][EntityEngineGuard] add failed n=<n> thread=<執行緒> entity=<類別@id> ex=<例外> at <堆疊前 8 層>
+```
+
+每種前 20 筆與之後每 1000 筆記一行；計數在 2dm 的心跳（`nullOps`、`opFailed`）。
+
+**開關**：`-Dmdc.entityOpGuard=on|off`（`0`／`off` 純委派原版），預設 `on`，需重啟；與 W105 各自獨立。
+
+**上線驗收**：心跳 `nullOps=0/0`、`opFailed=0/0`。不是 0 時那一輪沒有卡死，但要找出來源。
+
+**守門與驗證**：
+- SmokeCheck：死碼鎖——`Engine.removeAllEntities` 全 jar 沒有呼叫者，`EngineEntityManager.removeAllEntities` 兩個多載只由它串接；手術後 `processPendingOperations` 只有那 3 個呼叫換成 helper，`EngineEntityManager` 其餘方法不變（`add`／`removeEntityInternal` 另有既有的 `FastIdentityArrayRemoval` 手術）；`applyAdd`／`applyRemove`／`drain` 包原版呼叫的 try 只接 `RuntimeException`。
+- `MdcEntityEngineGuardTest`（同 2dm 四個 JVM）：佇列 [移除 A、entity 為 null 的移除、加入 B]——guard on 一次處理不拋、A 移除、B 加入、佇列清空；off 每次都拋、佇列 3 筆不動、B 永遠沒加入（負對照）。entity 為 null 的加入；已登記的 entity 被加入（旗標清掉、後一筆照加、之後的移除真的把它移出 engine）；移除時 listener 拋 `RuntimeException`（旗標收好、後一筆照加）；listener 拋 `AssertionError` 時照常外拋。
+
+**部署**：manifest 的 `zombie/entity/EngineEntityManager.class` 內容更新（W105–W107 合計見 2do）。
+
+**退場**：官方讓 `processPendingOperations` 單筆失敗不卡住佇列，或 SmokeCheck 的 SHA 鎖轉紅時重估。
+
+<a id="2do"></a>
+## 2do. 背景載車時把拖車動物放進車廂排回主執行緒（W107，server，預設 on）
+
+**問題**：`ServerPlayersVehicles` 執行緒載車（`VehiclesDB2$QueueLoadChunk.processWorldStreamer → BaseVehicle.load`）時，對存檔裡每隻拖車動物呼叫 `addAnimalInTrailer`：它在背景執行緒把動物移出世界（engine、cell 的移除清單、雞舍、動物區域、每幀更新清單）並 `sendExtraUpdateToClients`（`AnimalInstanceManager` 與 `AnimalSynchronizationManager` 的 HashMap），主迴圈同時在讀寫這些結構。這是 W105 唯一已知的背景 engine 呼叫來源；同一天 `AnimalSynchronizationManager.update` 的 `ConcurrentModificationException` 推測也來自這裡（推測：沒有重現）。原版在這一段拋例外時，`vehicleLoaded` 會把整台車當讀檔失敗。
+
+**做法**：`BaseVehicle.load` 裡的兩個 `addAnimalInTrailer(IsoAnimal)` 在非主執行緒時照順序排進 FIFO；`VehiclesDB2$QueueLoadChunk.processMain` 頭部在主執行緒依序呼叫原版。背景執行緒載完一個 chunk 才把它的 `QueueLoadChunk` 放進主執行緒佇列，所以它的動物一定在它的 `processMain` 之前放進車廂，車加進世界時動物已經在車廂裡，與原版相同。動物的建構與讀存檔仍在背景執行緒。主執行緒呼叫或 `mainThread` 還沒設定時照原版。排空時某一筆拋 `RuntimeException` 只記錄、下一筆照做（不會因此刪車）。動物移出世界因此改在主執行緒，W75、W105 看到的是主執行緒呼叫。
+
+**手術**：`BaseVehicle.load(ByteBuffer,int,boolean)` 兩個 `addAnimalInTrailer(IsoAnimal)`（offset 908、969）同形改道 `TrailerAnimalDefer`，掛在既有的 `BaseVehicle` ClassPatch，命中 2；新 ClassPatch `VehiclesDB2$QueueLoadChunk`，`processMain` 頭部無參數 `beforeLoadChunkMain()`，命中 1。其餘指令與 frames 不變。
+
+console：
+
+```text
+[MinidoracatJavaPatch][TrailerAnimalDefer] 首次生效 raw=null（…）
+[MinidoracatJavaPatch][TrailerAnimalDefer] deferred n=<n> thread=<執行緒> via=<呼叫鏈>
+[MinidoracatJavaPatch][TrailerAnimalDefer] beat deferred=<n> drained=<n> pending=<n> maxPending=<n> failed=<n> overflow=<n> anomalies=<n> sources=[…]
+```
+
+`deferred` 行前 20 筆與之後每 1000 筆記一行；心跳最多每 5 分鐘一行，只在有車輛 chunk 載入時。
+
+**開關**：`-Dmdc.trailerAnimalDefer=on|off`（`0`／`off` 純委派原版），預設 `on`，需重啟。
+
+**上線驗收**：(a) 心跳 `failed`、`overflow`、`anomalies` 為 0、`pending=0`；(b) W105 的 `deferred` 降到 0/0；(c) 有動物的拖車在玩家靠近載入後，動物照常在車廂裡（打開拖車的動物清單）。
+
+**守門與驗證**：
+- SmokeCheck：原版 `BaseVehicle.addAnimalInTrailer(IsoAnimal)`、`VehiclesDB2$MainThread.update`、`VehiclesDB2$WorldStreamerThread.update`（背景載完才放進主執行緒佇列）本體 SHA 鎖（各配負對照）；呼叫者清冊——`BaseVehicle.load(ByteBuffer,int)` 只有 `VehicleFullUpdatePacket.parse`（主執行緒）、`QueueLoadChunk`（伺服器背景載車，排空點就在它的 `processMain`）、`QueueLoadVehiclesInMeta` 與 `WorldStreamerThread`（後兩條只在單機／客戶端：前者只由 `IngameState.enter` 排、後者只由客戶端 `WorldStreamer` 呼叫，也一起鎖），清冊變了就重估排空點；手術後 `load` 只有那 2 個呼叫換成 helper、`processMain` 頭部恰一個 `beforeLoadChunkMain`，`QueueLoadChunk` 其餘方法不變；helper 的 catch 契約同 2dm。
+- `TrailerAnimalDeferTest`（`build.ps1` [9zzq/10]，on、off 兩個 JVM，自驗 argv）：沒跑建構子的真 `BaseVehicle` 與真原版 `addAnimalInTrailer`。on 背景三筆只排隊、原版沒跑、不拋；背景呼叫排空點不排空；主執行緒排空依 FIFO、每筆的例外吞掉、下一筆照做；主執行緒與 `mainThread` 為 null 照原版當下執行；off 背景當下執行、第一筆的例外拋回背景呼叫端、後面沒跑（負對照）。
+
+**部署**：manifest 新增 `zombie/mdc/TrailerAnimalDefer.class`、`zombie/mdc/TrailerAnimalDefer$Entry.class` 與 `zombie/vehicles/VehiclesDB2$QueueLoadChunk.class`，`zombie/vehicles/BaseVehicle.class` 內容更新。W105–W107 合計（192 → 198 個 class：88 個 patched class、264 個命中點、110 個 helper）。
+
+**退場**：官方把拖車動物的放入改在主執行緒，或 SmokeCheck 的 SHA 鎖轉紅時重估。
+
 ---
 
 <a id="3"></a>

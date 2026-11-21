@@ -6327,6 +6327,98 @@ The first-activation line only appears with the first variant swap on either pat
 
 **Retirement**: when TIS validates the target type of a variant swap on the server (on both paths), or re-evaluate when the SmokeCheck upstream fingerprint or SHA lock turns red.
 
+<a id="2dm"></a>
+## 2dm. Engine register / remove from other threads moved to the main thread (W105, server, default on)
+
+**Problem**: on 2026-11-22 the production server's main loop threw `IllegalArgumentException: key cannot be null` in `GameEntityManager.Update` on every tick from one tick on (`ObjectSet.remove` ← `EngineEntityManager.removeEntityInternal` ← `processPendingOperations`). `IngameState.updateInternal` caught it and skipped the rest of each tick, so moving items and every action got stuck until the restart. In vanilla 42.22.2, `GameEntityManager.UnregisterEntity(GameEntity, boolean)` calls `engine.removeEntity` first without checking whether the entity was ever registered (42.21 checked `addedToEntityManager` first). When the `ServerPlayersVehicles` thread loads a vehicle it puts the saved trailer animals into the trailer (`BaseVehicle.load → addAnimalInTrailer → removeFromWorld`), and so writes `EngineEntityManager` from a background thread: the pending queue `pendingOperations` and the operation pool while the main thread is inside `Engine.update`, and the entity set otherwise. The operation pool is a `SingleThreadPool`, which is not thread-safe, and `free` puts the object back into the pool before it calls `reset`. When the background thread takes the same object between those two steps, the main thread's `reset` clears its entity to null, and the queue keeps a Remove whose entity is null. `processPendingOperations` throws before `pendingOperations.clear()`, so that entry stays and throws again on every tick (W106 handles this part).
+
+**Approach**: only the engine step is deferred. `Engine.addEntity` / `Engine.removeEntity` calls from other threads go into a FIFO in call order (`addEntity` returns `true` as vanilla does), and the main thread applies them through vanilla at three points: before each of its own direct engine calls, before `engine.update()` on every tick, and at the start of `GameEntityManager.Save`. A main-thread call always drains first, so the result equals vanilla run in sequence; a background remove cancels a pending add of the same entity in the queue (vanilla's delayed path also lets a remove cancel a pending add). `idToEntityMap` and `addedToEntityManager` are still handled at once as in vanilla: deferring the whole Register / Unregister would let the entity's ID change before the drain, and the ID map would miss the removal. While `GameServer.mainThread` is not set, vanilla runs. A `RuntimeException` from one entry during the drain is logged and the next entry still runs (the exception belonged to the background caller, so it is not passed to an unrelated main-thread caller). The queue holds at most 100,000 entries; above that vanilla runs directly and `overflow` is counted.
+
+**Surgery**: new ClassPatch `GameEntityManager`, 4 hits: `Engine.addEntity` in `RegisterEntity` (javap offset 305), `Engine.removeEntity` in `UnregisterEntity(GameEntity,Z)` (offset 9) and `Engine.update` in `Update` (offset 15) are redirected same-shape to `MdcEntityEngineGuard` (`INVOKESTATIC` with the receiver first), plus a no-argument `beforeSave()` at the head of `Save`. All other instructions and frames are unchanged.
+
+Console:
+
+```text
+[MinidoracatJavaPatch][EntityEngineGuard] 首次生效 defer=on guard=on raw=null/null（…）
+[MinidoracatJavaPatch][EntityEngineGuard] deferred remove n=<n> [live] thread=<thread> entity=<class@id> via=<call chain>
+[MinidoracatJavaPatch][EntityEngineGuard] beat defer=on guard=on deferred=<add>/<remove> live=<n> drained=<n> cancelled=<n> pending=<n> maxPending=<n> overflow=<n> drainFailed=<n> nullOps=<add>/<remove> opFailed=<add>/<remove> anomalies=<n> sources=[<count>×<call chain> | …]
+```
+
+A `deferred` line is written for the first 20 entries and every 1000th after that. `live` means the entity was in the engine (or queued to be added) when the background remove came in, that is, a background thread is still touching a registered entity; each of the first 20 is logged. The heartbeat is one line every 5 minutes (W106's counts are on the same line).
+
+**Switch**: `-Dmdc.entityEngineDefer=on|off` (`0` / `off` delegates straight to vanilla), default `on`, restart required.
+
+**Acceptance after deployment**: (a) no consecutive `updateInternal> Exception thrown` lines in that round's DebugLog; (b) heartbeat `overflow`, `drainFailed` and `anomalies` are 0 and `live=0`; (c) after W107 goes live the background source is gone and `deferred` stays at 0/0; if it does not, `sources` shows the new path; (d) no `Getting bucketBits while no Component data`.
+
+**Guards and verification**:
+- SmokeCheck: reason to exist: vanilla `UnregisterEntity` calls `Engine.removeEntity` before it reads `addedToEntityManager`; call-site inventory: `Engine.addEntity` / `removeEntity` / `update` each have exactly one caller in the whole jar, in `GameEntityManager`; SHA locks on vanilla's `UnregisterEntity`, `RegisterEntity`, `Engine.addEntity` / `removeEntity`, `EngineEntityManager.addEntity` / `removeEntity` / `processPendingOperations` / `addEntityInternal` / `removeEntityInternal`, `EntityOperation.reset` and `SingleThreadPool.obtain` / `free` (each with a negative control); after surgery only those 3 calls point at the helper, `Save` starts with exactly one `beforeSave`, and the other methods of `GameEntityManager` are unchanged; the helper only catches `RuntimeException` and `LinkageError`, and every `DebugLog.log` is inside a try that catches both (with two negative controls: the catch widened to `Throwable`, the try removed).
+- `MdcEntityEngineGuardTest` (`build.ps1` [9zzp/10]; four JVMs: on, off, defer-off, guard-off; argv self-checked): real `UnregisterEntity`, real `Engine`, real `processPendingOperations`. Incident replay: the main thread's `free` is half done (back in the pool, not yet `reset`) when a background thread unregisters an entity that was never in the engine, and then the main thread runs `reset`. Off leaves a Remove with a null entity, three `processPendingOperations` calls in a row all throw `key cannot be null` and the entry stays (negative control); on leaves the pool and the queue untouched, the background thread does not write the entity's flags, and the next tick drains it. A registered entity unregistered from a background thread, both inside and outside engine processing, is still in the engine when the call returns, one `live` is counted, and it leaves after the drain; three background calls apply in FIFO order; a background add followed by a remove cancels the add, and the entity is in neither the engine nor a bucket after the drain; a main-thread add of an entity whose background remove is queued does not hit `Entity is already registered` and the entity is in the engine once; an `already registered` during the drain does not propagate and the next entry still runs; `beforeSave` only drains on the main thread; a null `mainThread` behaves as vanilla; the counters keep `deferred = drained + cancelled + pending`.
+
+**Deployment**: the manifest gains `zombie/entity/MdcEntityEngineGuard.class`, `zombie/entity/MdcEntityEngineGuard$Entry.class` and `zombie/entity/GameEntityManager.class` (totals for W105–W107 in 2do).
+
+**Retirement**: when TIS stops background threads from touching the engine (`UnregisterEntity` checks registration first again, or vehicles load on the main thread), or re-evaluate when the SmokeCheck reason to exist or a SHA lock turns red.
+
+<a id="2dn"></a>
+## 2dn. One bad pending entry no longer stalls the main loop (W106, server, default on)
+
+**Problem**: see 2dm. Vanilla `EngineEntityManager.processPendingOperations` processes pending adds and removes one by one. When one entry throws, the exception leaves before `pendingOperations.clear()`, so that entry and all after it stay in the queue, and the next tick starts over and throws again. One bad entry (a null entity, an add of an entity that is already registered, a listener that throws) stops the main loop on every tick. W105 blocks the known source; this patch keeps the queue itself from getting stuck.
+
+**Approach**: the three `addEntityInternal` / `removeEntityInternal` calls are redirected to `MdcEntityEngineGuard.applyAdd` / `applyRemove`. A null entity is skipped and logged. When one entry throws a `RuntimeException`, the entity's flags are put right, it is logged and the loop continues: a failed add clears `scheduledDelayedAddToEngine` (otherwise a later remove takes the cancel branch and never really removes it); a failed remove whose `removingFromEngine` is still true finishes vanilla's tail (clears the component operation handler, `removingFromEngine` and `addedToEngine`). The loop runs vanilla's `free` and `clear`, so the bad entry does not stay in the queue. An `Error` still propagates. A null entity means a background thread wrote the operation pool and that entity's flags may be stuck; the log line recommends a restart in the next restart window.
+
+**Surgery**: on the existing `EngineEntityManager` ClassPatch (only one ClassPatch per class). In `processPendingOperations`, `addEntityInternal` (offset 65) and `removeEntityInternal` (offsets 76 and 103) are redirected same-shape, 3 hits. Offset 103 is in the `RemoveAll` branch, which no vanilla caller can produce (SmokeCheck dead-code lock); the redirect behaves the same as at the other two.
+
+Console:
+
+```text
+[MinidoracatJavaPatch][EntityEngineGuard] skipped null remove n=<n> thread=<thread>（佇列裡的操作 entity 為 null：…）
+[MinidoracatJavaPatch][EntityEngineGuard] add failed n=<n> thread=<thread> entity=<class@id> ex=<exception> at <first 8 frames>
+```
+
+Each kind is logged for the first 20 and every 1000th after that; the counts are on the 2dm heartbeat (`nullOps`, `opFailed`).
+
+**Switch**: `-Dmdc.entityOpGuard=on|off` (`0` / `off` delegates straight to vanilla), default `on`, restart required; independent of W105.
+
+**Acceptance after deployment**: heartbeat `nullOps=0/0` and `opFailed=0/0`. Anything else means that round did not stall, but the source still has to be found.
+
+**Guards and verification**:
+- SmokeCheck: dead-code lock: `Engine.removeAllEntities` has no caller in the whole jar, and the two `EngineEntityManager.removeAllEntities` overloads are only chained from it; after surgery only those 3 calls in `processPendingOperations` point at the helper and the other methods of `EngineEntityManager` are unchanged (`add` / `removeEntityInternal` carry the existing `FastIdentityArrayRemoval` surgery); the tries around the vanilla calls in `applyAdd` / `applyRemove` / `drain` only catch `RuntimeException`.
+- `MdcEntityEngineGuardTest` (the same four JVMs as 2dm): queue [remove A, remove with a null entity, add B]: with the guard on, one pass does not throw, removes A, adds B and empties the queue; off throws every time, the 3 entries stay and B is never added (negative control). An add with a null entity; an add of an entity that is already registered (the flag is cleared, the next entry is added, and a later remove really takes it out of the engine); a listener that throws a `RuntimeException` on remove (flags put right, the next entry is added); a listener that throws an `AssertionError` still propagates.
+
+**Deployment**: `zombie/entity/EngineEntityManager.class` in the manifest changes (totals for W105–W107 in 2do).
+
+**Retirement**: when TIS keeps one failing entry from blocking `processPendingOperations`, or re-evaluate when a SmokeCheck SHA lock turns red.
+
+<a id="2do"></a>
+## 2do. Trailer animals from background vehicle loading moved to the main thread (W107, server, default on)
+
+**Problem**: when the `ServerPlayersVehicles` thread loads a vehicle (`VehiclesDB2$QueueLoadChunk.processWorldStreamer → BaseVehicle.load`), it calls `addAnimalInTrailer` for each saved trailer animal. That removes the animal from the world on the background thread (engine, the cell's remove list, hutches, animal zones, the per-frame update lists) and calls `sendExtraUpdateToClients` (the HashMaps of `AnimalInstanceManager` and `AnimalSynchronizationManager`), while the main loop reads and writes the same structures. It is the only known background source of W105's engine calls; the `ConcurrentModificationException` in `AnimalSynchronizationManager.update` on the same day probably comes from here too (inference: not reproduced). When vanilla throws in this step, `vehicleLoaded` treats the whole vehicle as a failed load.
+
+**Approach**: the two `addAnimalInTrailer(IsoAnimal)` calls in `BaseVehicle.load` go into a FIFO in order when they run off the main thread, and the head of `VehiclesDB2$QueueLoadChunk.processMain` applies them through vanilla on the main thread. The background thread only puts a chunk's `QueueLoadChunk` into the main-thread queue after it has loaded the whole chunk, so that chunk's animals are always in their trailers before its `processMain` runs and before the vehicle is added to the world, as in vanilla. Constructing the animal and reading the save still happen on the background thread. A main-thread call, or a call while `mainThread` is not set, runs vanilla. A `RuntimeException` from one entry during the drain is logged and the next entry still runs (the vehicle is not deleted). Removing the animal from the world now happens on the main thread, so W75 and W105 see main-thread calls.
+
+**Surgery**: the two `addAnimalInTrailer(IsoAnimal)` calls in `BaseVehicle.load(ByteBuffer,int,boolean)` (offsets 908 and 969) are redirected same-shape to `TrailerAnimalDefer`, on the existing `BaseVehicle` ClassPatch, 2 hits; new ClassPatch `VehiclesDB2$QueueLoadChunk` with a no-argument `beforeLoadChunkMain()` at the head of `processMain`, 1 hit. All other instructions and frames are unchanged.
+
+Console:
+
+```text
+[MinidoracatJavaPatch][TrailerAnimalDefer] 首次生效 raw=null（…）
+[MinidoracatJavaPatch][TrailerAnimalDefer] deferred n=<n> thread=<thread> via=<call chain>
+[MinidoracatJavaPatch][TrailerAnimalDefer] beat deferred=<n> drained=<n> pending=<n> maxPending=<n> failed=<n> overflow=<n> anomalies=<n> sources=[…]
+```
+
+A `deferred` line is written for the first 20 entries and every 1000th after that; the heartbeat is at most one line every 5 minutes, and only while vehicle chunks load.
+
+**Switch**: `-Dmdc.trailerAnimalDefer=on|off` (`0` / `off` delegates straight to vanilla), default `on`, restart required.
+
+**Acceptance after deployment**: (a) heartbeat `failed`, `overflow` and `anomalies` are 0 and `pending=0`; (b) W105's `deferred` drops to 0/0; (c) a trailer with animals still has them inside after a player comes near and it loads (open the trailer's animal list).
+
+**Guards and verification**:
+- SmokeCheck: SHA locks on vanilla's `BaseVehicle.addAnimalInTrailer(IsoAnimal)`, `VehiclesDB2$MainThread.update` and `VehiclesDB2$WorldStreamerThread.update` (the item only reaches the main-thread queue after the background load) (each with a negative control); caller inventory: `BaseVehicle.load(ByteBuffer,int)` is only called by `VehicleFullUpdatePacket.parse` (main thread), `QueueLoadChunk` (background vehicle loading on the server; the drain point is its own `processMain`), `QueueLoadVehiclesInMeta` and `WorldStreamerThread` (the last two are single-player / client only: the first is only queued by `IngameState.enter`, the second only called by the client `WorldStreamer`; both are locked too), and a change to this inventory means the drain point has to be re-evaluated; after surgery only those 2 calls in `load` point at the helper, `processMain` starts with exactly one `beforeLoadChunkMain`, and the other methods of `QueueLoadChunk` are unchanged; the helper's catch contract is the same as in 2dm.
+- `TrailerAnimalDeferTest` (`build.ps1` [9zzq/10]; two JVMs: on, off; argv self-checked): a real `BaseVehicle` allocated without running its constructor, and vanilla's real `addAnimalInTrailer`. On: three background calls are only queued, vanilla does not run and nothing is thrown; the drain point called from a background thread does not drain; the main thread drains in FIFO order, each entry's exception is swallowed and the next entry still runs; a main-thread call and a null `mainThread` run vanilla at once. Off: the background call runs at once, the first entry's exception goes back to the background caller and the rest do not run (negative control).
+
+**Deployment**: the manifest gains `zombie/mdc/TrailerAnimalDefer.class`, `zombie/mdc/TrailerAnimalDefer$Entry.class` and `zombie/vehicles/VehiclesDB2$QueueLoadChunk.class`, and `zombie/vehicles/BaseVehicle.class` changes. Totals for W105–W107: 192 → 198 classes: 88 patched classes, 264 patch sites, 110 helpers.
+
+**Retirement**: when TIS puts the trailer animals in on the main thread, or re-evaluate when a SmokeCheck SHA lock turns red.
+
 ---
 
 <a id="3"></a>

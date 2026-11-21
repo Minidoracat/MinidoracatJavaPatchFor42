@@ -143,7 +143,41 @@ public final class PatchConfig {
         entityRemove.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, ENTITY_ARRAY, "removeValue",
                 "(Ljava/lang/Object;Z)Z", FAST_ARRAY_REMOVAL, "remove"));
         entityRemove.expectedHits = 1;
+        // W106：processPendingOperations 單筆壞資料不再卡死主迴圈（docs/patches.md 2dn）。原版處理到 entity 為 null 的操作
+        // （背景執行緒寫過操作池）或某筆拋例外時，例外在 pendingOperations.clear() 之前外拋，那筆永遠留在佇列、每 tick 重拋。
+        // 三個 add/removeEntityInternal（javap offset 65、76、103；103 是 RemoveAll 死碼分支，SmokeCheck 鎖沒有呼叫者）
+        // 同形改道 MdcEntityEngineGuard：null 略過、RuntimeException 收旗標後繼續，free 與 clear 照原版跑。-Dmdc.entityOpGuard=0|off。
+        String engineGuard = "zombie/entity/MdcEntityEngineGuard";
+        String geDesc = "(Lzombie/entity/GameEntity;)V";
+        Patcher.MethodOps pendingOps = entityManager.method("processPendingOperations", "()V");
+        pendingOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/EngineEntityManager",
+                "addEntityInternal", geDesc, engineGuard, "applyAdd"));
+        pendingOps.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/EngineEntityManager",
+                "removeEntityInternal", geDesc, engineGuard, "applyRemove"));
+        pendingOps.expectedHits = 3;
         patches.add(entityManager);
+
+        // W105：非主執行緒的 engine 登記／移除排回主執行緒（docs/patches.md 2dm）。42.22.2 的 UnregisterEntity 不看是否登記過、
+        // 一律 Engine.removeEntity，ServerPlayersVehicles 載車時就在背景執行緒寫 EngineEntityManager 的佇列與操作池。
+        // RegisterEntity 的 Engine.addEntity（offset 305）、UnregisterEntity(GameEntity,Z) 的 Engine.removeEntity（offset 9）、
+        // Update 的 Engine.update（offset 15）同形改道，Save 頭部排空。-Dmdc.entityEngineDefer=0|off。
+        Patcher.ClassPatch entityMgr = new Patcher.ClassPatch("zombie/entity/GameEntityManager");
+        Patcher.MethodOps mgrRegister = entityMgr.method("RegisterEntity", geDesc);
+        mgrRegister.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/Engine", "addEntity",
+                "(Lzombie/entity/GameEntity;)Z", engineGuard, "addEntity"));
+        mgrRegister.expectedHits = 1;
+        Patcher.MethodOps mgrUnregister = entityMgr.method("UnregisterEntity", "(Lzombie/entity/GameEntity;Z)V");
+        mgrUnregister.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/Engine", "removeEntity",
+                geDesc, engineGuard, "removeEntity"));
+        mgrUnregister.expectedHits = 1;
+        Patcher.MethodOps mgrUpdate = entityMgr.method("Update", "()V");
+        mgrUpdate.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/entity/Engine", "update", "()V",
+                engineGuard, "update"));
+        mgrUpdate.expectedHits = 1;
+        Patcher.MethodOps mgrSave = entityMgr.method("Save", "()V");
+        mgrSave.headCall = new Patcher.HeadCall(engineGuard, "beforeSave", "()V", new int[0]);
+        mgrSave.expectedHits = 1;
+        patches.add(entityMgr);
 
         Patcher.ClassPatch entityBucket = new Patcher.ClassPatch("zombie/entity/EntityBucket");
         Patcher.MethodOps bucketMembership = entityBucket.method("updateMembership",
@@ -366,7 +400,19 @@ public final class PatchConfig {
         Patcher.MethodOps vehRemoveWorld = baseVeh.method("removeFromWorld", "()V");
         vehRemoveWorld.redirects.add(scopeRemove);
         vehRemoveWorld.expectedHits = 1;
+        // W107：背景載車時把拖車動物放進車廂的整段排回主執行緒（docs/patches.md 2do）。load(ByteBuffer,int,boolean) 兩個
+        // addAnimalInTrailer(IsoAnimal)（javap offset 908、969）同形改道 TrailerAnimalDefer；排空點是 VehiclesDB2$QueueLoadChunk.processMain
+        // 頭部（下方獨立 ClassPatch）。-Dmdc.trailerAnimalDefer=0|off。
+        Patcher.MethodOps vehLoad = baseVeh.method("load", "(Ljava/nio/ByteBuffer;IZ)V");
+        vehLoad.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "addAnimalInTrailer",
+                "(Lzombie/characters/animals/IsoAnimal;)V", "zombie/mdc/TrailerAnimalDefer", "addAnimalInTrailer"));
+        vehLoad.expectedHits = 2;
         patches.add(baseVeh);
+        Patcher.ClassPatch loadChunkItem = new Patcher.ClassPatch("zombie/vehicles/VehiclesDB2$QueueLoadChunk");
+        Patcher.MethodOps loadChunkMain = loadChunkItem.method("processMain", "()V");
+        loadChunkMain.headCall = new Patcher.HeadCall("zombie/mdc/TrailerAnimalDefer", "beforeLoadChunkMain", "()V", new int[0]);
+        loadChunkMain.expectedHits = 1;
+        patches.add(loadChunkItem);
 
         // 退役（2026-11-10，42.22.2 官方已修）：W12 車輛 DB chunk 索引守衛（VehicleBuffer.set）。
         // 42.22.2 的 set 不再讀 vehicle.chunk：x/y 存入後 `wx = PZMath.fastfloor(x / 8.0F)`、`wy` 同理
