@@ -5695,6 +5695,8 @@ console（`refused`、`anomaly` 合計每 10 秒最多 20 行）：
 
 **做法**：只延後 engine 那一步。非主執行緒的 `Engine.addEntity`／`Engine.removeEntity` 照呼叫順序排進 FIFO（`addEntity` 照原版回 `true`），主執行緒在三個點依序呼叫原版：主執行緒自己每次直接呼叫 engine 之前、每個 tick `engine.update()` 之前、`GameEntityManager.Save` 開頭。主執行緒呼叫一律先排空再執行，結果等於原版循序執行；背景移除入列時取消佇列裡同一個 entity 的待加入（原版延遲路徑同樣是移除取消待加入）。`idToEntityMap`、`addedToEntityManager` 照原版即時處理：整段 Register／Unregister 延後的話，排空時 entity 的 ID 可能已經變了，ID 表會漏刪。`GameServer.mainThread` 還沒設定時照原版。排空時某一筆拋 `RuntimeException` 只記錄、下一筆照做（這筆原本是背景呼叫端該收的例外，不轉給不相干的主執行緒呼叫者）。佇列上限 100,000 筆，超過時照原版直接執行並記 `overflow`。
 
+**關服存檔不排空**：正常關服時，主執行緒在 `ServerMap.preupdate` 呼叫 `System.exit`，最後一次 `GameEntityManager.Save` 由 shutdown hook 執行緒跑（`QueuedQuit → QueuedSaveAll`），不是主執行緒，`beforeSave` 不排空。刻意不在 hook 排空：SIGTERM 時主執行緒可能還在跑 `Engine.update`，hook 去寫 engine 就是這刀要擋的競爭。目前沒有影響：`Save` 只存 MetaEntity 的 bucket，MetaEntity 只在主執行緒的 chunk 卸載與載入時進出 engine，`QueuedQuit` 也不卸載 cell。之後出現背景的 MetaEntity 來源時要重估。
+
 **手術**：新 ClassPatch `GameEntityManager`，命中 4：`RegisterEntity` 的 `Engine.addEntity`（javap offset 305）、`UnregisterEntity(GameEntity,Z)` 的 `Engine.removeEntity`（offset 9）、`Update` 的 `Engine.update`（offset 15）同形改道 `MdcEntityEngineGuard`（receiver 前置的 `INVOKESTATIC`），`Save` 頭部無參數 `beforeSave()`。其餘指令與 frames 不變。
 
 console：
@@ -5709,11 +5711,11 @@ console：
 
 **開關**：`-Dmdc.entityEngineDefer=on|off`（`0`／`off` 純委派原版），預設 `on`，需重啟。
 
-**上線驗收**：(a) 該輪 DebugLog 沒有連續的 `updateInternal> Exception thrown`；(b) 心跳 `overflow`、`drainFailed`、`anomalies` 為 0，`live=0`；(c) W107 上線後背景來源消失，`deferred` 應維持 0/0，不是 0 就看 `sources` 是哪條新路徑；(d) 沒有 `Getting bucketBits while no Component data`。
+**上線驗收**：(a) 該輪 DebugLog 沒有連續的 `updateInternal> Exception thrown`；(b) 心跳 `overflow`、`drainFailed`、`anomalies` 為 0，`live=0`；(c) W107 上線後背景來源消失，`deferred` 應維持 0/0，不是 0 就看 `sources` 是哪條新路徑（`sources` 的次數是有記明細的那幾筆，總數看 `deferred`）；(d) 沒有 `Getting bucketBits while no Component data`。`live>0` 或 (d) 出現時，代表有背景執行緒在 reset 已登記的 entity（伺服器上只有 WorldReuser 會這樣做，推論）：延後的移除排空時元件已釋放，bucket 可能留下殘留，要排重啟並回報。
 
 **守門與驗證**：
 - SmokeCheck：存在理由——原版 `UnregisterEntity` 先呼叫 `Engine.removeEntity`、之後才讀 `addedToEntityManager`；呼叫點清冊——`Engine.addEntity`／`removeEntity`／`update` 全 jar 各只有 `GameEntityManager` 一處；原版 `UnregisterEntity`、`RegisterEntity`、`Engine.addEntity`／`removeEntity`、`EngineEntityManager.addEntity`／`removeEntity`／`processPendingOperations`／`addEntityInternal`／`removeEntityInternal`、`EntityOperation.reset`、`SingleThreadPool.obtain`／`free` 本體 SHA 鎖（各配負對照）；手術後只有那 3 個呼叫換成 helper、`Save` 頭部恰一個 `beforeSave`，`GameEntityManager` 其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`，每個 `DebugLog.log` 都在含兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）。
-- `MdcEntityEngineGuardTest`（`build.ps1` [9zzp/10]，on、off、defer-off、guard-off 四個 JVM，自驗 argv）：真 `UnregisterEntity`、真 `Engine`、真 `processPendingOperations`。事故重現——主執行緒 `free` 做到一半（已放回池、還沒 `reset`）時背景執行緒 Unregister 一個從沒進過 engine 的 entity，之後主執行緒 `reset`：off 佇列留下 entity 為 null 的 Remove，連續三次 `processPendingOperations` 都拋 `key cannot be null`、那筆一直留著（負對照）；on 背景沒碰操作池與佇列、entity 旗標沒被背景寫，下一個 tick 排空。背景在 engine 處理中與不在處理中各 Unregister 一個已登記的 entity：回來時還在 engine、記一筆 `live`，排空後離開；背景三筆依 FIFO 套用；背景先加後移取消待加入、排空後不在 engine 與 bucket；背景移除在佇列時主執行緒加回同一個 entity 不撞 `Entity is already registered`、只在 engine 一次；排空時 `already registered` 不外拋、下一筆照做；`beforeSave` 只在主執行緒排空；`mainThread` 為 null 照原版；計數恆等式 `deferred = drained + cancelled + pending`。
+- `MdcEntityEngineGuardTest`（`build.ps1` [9zzp/10]，on、off、defer-off、guard-off 四個 JVM，自驗 argv）：真 `UnregisterEntity`、真 `Engine`、真 `processPendingOperations`。事故重現——主執行緒 `free` 做到一半（已放回池、還沒 `reset`）時背景執行緒 Unregister 一個從沒進過 engine 的 entity，之後主執行緒 `reset`：off 佇列留下 entity 為 null 的 Remove，連續三次 `processPendingOperations` 都拋 `key cannot be null`、那筆一直留著（負對照）；on 背景沒碰操作池與佇列、entity 旗標沒被背景寫，下一個 tick 排空。背景在 engine 處理中與不在處理中各 Unregister 一個已登記的 entity：回來時還在 engine、記一筆 `live`，排空後離開；背景三筆依 FIFO 套用；背景先加後移取消待加入、排空後不在 engine 與 bucket；背景移除在佇列時主執行緒加回同一個 entity 不撞 `Entity is already registered`、只在 engine 一次；排空時 `already registered` 不外拋、下一筆照做；`beforeSave` 只在主執行緒排空；`mainThread` 為 null 照原版；計數恆等式 `deferred = drained + cancelled + pending`。真併發（D9）：3 條背景執行緒各對自己的 40 個 entity 交替加入／移除共 6 萬筆，主執行緒同時不停 `update`；最後每個 entity 的狀態等於它最後一次呼叫、engine 沒有重複、計數守恆、排空零失敗。
 
 **部署**：manifest 新增 `zombie/entity/MdcEntityEngineGuard.class`、`zombie/entity/MdcEntityEngineGuard$Entry.class` 與 `zombie/entity/GameEntityManager.class`（W105–W107 合計見 2do）。
 

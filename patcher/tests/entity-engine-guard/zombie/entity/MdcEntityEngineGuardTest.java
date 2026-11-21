@@ -4,6 +4,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import zombie.entity.util.Array;
 import zombie.entity.util.SingleThreadPool;
@@ -359,6 +360,83 @@ public final class MdcEntityEngineGuardTest {
         expect("D8：背景呼叫 beforeSave 不排空", MdcEntityEngineGuard.pendingForTest() == 1 && y.addedToEngine);
         MdcEntityEngineGuard.beforeSave();
         expect("D8：主執行緒 beforeSave 排空", MdcEntityEngineGuard.pendingForTest() == 0 && !y.addedToEngine);
+
+        // D9：真併發——3 條背景執行緒各對自己的 40 個 entity 交替 add／remove（偶爾連兩次 remove＝原版 no-op），
+        // 主執行緒同時不停 update；最後每個 entity 的狀態＝它最後一次呼叫、engine 無重複、計數守恆、排空零失敗
+        int threads = 3, perThread = 40, iters = 20_000;
+        GameEntity[][] es = new GameEntity[threads][perThread];
+        boolean[][] last = new boolean[threads][perThread];
+        for (int t = 0; t < threads; t++) {
+            for (int i = 0; i < perThread; i++) {
+                es[t][i] = entity("S" + t + "." + i);
+            }
+        }
+        long def0 = MdcEntityEngineGuard.deferredAddForTest() + MdcEntityEngineGuard.deferredRemoveForTest();
+        long acc0 = MdcEntityEngineGuard.drainedForTest() + MdcEntityEngineGuard.cancelledForTest();
+        long fail0 = MdcEntityEngineGuard.drainFailedForTest();
+        AtomicReference<Throwable> bgErr = new AtomicReference<>();
+        Thread[] bg = new Thread[threads];
+        for (int t = 0; t < threads; t++) {
+            final int tt = t;
+            bg[t] = new Thread(() -> {
+                java.util.Random rnd = new java.util.Random(1234 + tt);
+                try {
+                    for (int k = 0; k < iters; k++) {
+                        int i = rnd.nextInt(perThread);
+                        if (last[tt][i] || rnd.nextInt(8) == 0) {
+                            MdcEntityEngineGuard.removeEntity(engine, es[tt][i]);
+                            last[tt][i] = false;
+                        } else {
+                            MdcEntityEngineGuard.addEntity(engine, es[tt][i]);
+                            last[tt][i] = true;
+                        }
+                    }
+                } catch (Throwable ex) {
+                    bgErr.compareAndSet(null, ex);
+                }
+            }, "stress-" + t);
+        }
+        for (Thread t : bg) {
+            t.start();
+        }
+        boolean alive = true;
+        while (alive) {
+            alive = false;
+            for (Thread t : bg) {
+                alive |= t.isAlive();
+            }
+            MdcEntityEngineGuard.update(engine);
+        }
+        for (Thread t : bg) {
+            t.join();
+        }
+        MdcEntityEngineGuard.drain();
+        java.util.IdentityHashMap<GameEntity, Integer> seen = new java.util.IdentityHashMap<>();
+        int dup = 0;
+        for (GameEntity e : engine.getEntities()) {
+            if (seen.merge(e, 1, Integer::sum) > 1) {
+                dup++;
+            }
+        }
+        int bad = 0;
+        for (int t = 0; t < threads; t++) {
+            for (int i = 0; i < perThread; i++) {
+                GameEntity e = es[t][i];
+                if (seen.containsKey(e) != last[t][i] || e.addedToEngine != last[t][i] || e.scheduledDelayedAddToEngine
+                        || e.scheduledForEngineRemoval || e.removingFromEngine) {
+                    bad++;
+                }
+            }
+        }
+        long def = MdcEntityEngineGuard.deferredAddForTest() + MdcEntityEngineGuard.deferredRemoveForTest() - def0;
+        long acc = MdcEntityEngineGuard.drainedForTest() + MdcEntityEngineGuard.cancelledForTest() - acc0;
+        expect("D9：真併發 " + threads + "×" + iters + " 筆，最終狀態＝最後一次呼叫（bad=" + bad + " dup=" + dup + "）、計數守恆（deferred="
+                        + def + " drained+cancelled=" + acc + "）、排空零失敗、背景零例外",
+                bad == 0 && dup == 0 && def > 0 && def == acc && MdcEntityEngineGuard.pendingForTest() == 0
+                        && MdcEntityEngineGuard.drainFailedForTest() == fail0 && bgErr.get() == null && pendingOps.size == 0);
+        for (GameEntity[] row : es) {
+            cleanup(row);
+        }
     }
 
     /** defer off（off／defer-off）：背景直接動 engine（原版）。 */
