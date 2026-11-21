@@ -143,6 +143,8 @@ $helperEntries = @(
     'zombie/mdc/ZoneDeleteGuard.class',
     'zombie/network/packets/MdcSyncZoneLog.class',
     'zombie/entity/MdcEntityIdGuard.class',
+    'zombie/entity/MdcEntityEngineGuard.class',
+    'zombie/entity/MdcEntityEngineGuard$Entry.class',
     'zombie/mdc/BanditRaidLoopGuard.class',
     'zombie/mdc/HutchEggRegion.class',
     'zombie/mdc/IsoObjectUpdateGate.class',
@@ -154,6 +156,8 @@ $helperEntries = @(
     'zombie/mdc/IsoObjectRemoveDefer.class',
     'zombie/mdc/IsoObjectRemoveDefer$Entry.class',
     'zombie/mdc/IsoObjectRemoveDefer$Stats.class',
+    'zombie/mdc/TrailerAnimalDefer.class',
+    'zombie/mdc/TrailerAnimalDefer$Entry.class',
     'zombie/core/MdcBuildActionGuard.class',
     'zombie/mdc/SpriteUpdateGuard.class',
     'zombie/mdc/ZombieReuseOwner.class',
@@ -1000,6 +1004,22 @@ java -Xverify:all "-Dmdc.unseatedVehicleWatch=off" -cp $uvwCp zombie.network.pac
 Assert-Ok "MdcUnseatedVehicleWatchTest（off，kill switch）"
 java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest logthrow
 Assert-Ok "MdcUnseatedVehicleWatchTest（logthrow observe，日誌拋例外照原版完成、Error 照常外拋）"
+
+Write-Host "[9zzp/10] 非主執行緒的 engine 登記／移除排回主執行緒（W105）＋待處理佇列單筆壞資料不卡主迴圈（W106）：真 UnregisterEntity＋真 Engine＋真 processPendingOperations；事故重現（free 做到一半時背景 obtain、主執行緒 reset）原版每次都拋 key cannot be null 且那筆留在佇列（負對照），W106 略過那筆、W105 背景碰不到池與佇列；null Add、already registered、listener 拋 RuntimeException 時後一筆照做且旗標收好，Error 照常外拋；背景呼叫排隊、主執行緒排空依 FIFO、先加後移取消、背景移除後主執行緒加回不撞、排空例外不外拋、Save 頭部只在主執行緒排空、mainThread 為 null 照原版..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityEngineGuardTest on
+Assert-Ok "MdcEntityEngineGuardTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.entityEngineDefer=off" "-Dmdc.entityOpGuard=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityEngineGuardTest off
+Assert-Ok "MdcEntityEngineGuardTest（off，兩個 kill switch，原版負對照）"
+java -Xverify:all "-Dmdc.entityEngineDefer=OFF" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityEngineGuardTest defer-off
+Assert-Ok "MdcEntityEngineGuardTest（defer-off，只有 W106）"
+java -Xverify:all "-Dmdc.entityOpGuard=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.entity.MdcEntityEngineGuardTest guard-off
+Assert-Ok "MdcEntityEngineGuardTest（guard-off，只有 W105）"
+
+Write-Host "[9zzq/10] 背景載車時把拖車動物放進車廂排回主執行緒（W107）：背景呼叫只排隊、QueueLoadChunk.processMain 頭部在主執行緒依 FIFO 呼叫原版、背景呼叫排空點不排空、某筆拋例外時下一筆照做；主執行緒與 mainThread 為 null 照原版；off 背景當下執行（負對照）..."
+java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.TrailerAnimalDeferTest on
+Assert-Ok "TrailerAnimalDeferTest（on，出貨組態）"
+java -Xverify:all "-Dmdc.trailerAnimalDefer=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.TrailerAnimalDeferTest off
+Assert-Ok "TrailerAnimalDeferTest（off，kill switch，原版負對照）"
 
 Write-Host "[10/10] entity removal 尺度 benchmark（時間只報告，不設機器相依閾值）..."
 java -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.FastIdentityArrayRemovalBenchmark

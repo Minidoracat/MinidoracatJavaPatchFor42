@@ -3989,6 +3989,7 @@ public final class SmokeCheck {
         failed += checkActionValidation(jar, distJava);
         failed += checkZombieReuseOwner(jar, distJava);
         failed += checkLightSettings(jar, distJava);
+        failed += checkEntityEngineGuard(jar, distJava);
         failed += checkPlayerLosFilter(jar, distJava);
         failed += checkVehicleScope(jar, distJava);
         failed += checkWorldMapVisibilityIndex(jar, distJava);
@@ -7482,6 +7483,169 @@ public final class SmokeCheck {
         return failed;
     }
 
+    /** methodText 的一行（Textifier 縮排 4 格）。 */
+    static String insnLine(String insn) {
+        return "    " + insn + "\n";
+    }
+
+    /** 手術後的方法＝原版把 from 恰 n 處換成 to，其餘逐指令相同。 */
+    static boolean onlyRedirected(Path jar, Path distJava, String cls, String name, String desc, String from, String to, int n)
+            throws Exception {
+        String v = methodText(methodFromJar(jar, cls, name, desc));
+        int count = 0;
+        for (int at = v.indexOf(insnLine(from)); at >= 0; at = v.indexOf(insnLine(from), at + 1)) {
+            count++;
+        }
+        return count == n && methodText(method(distJava, cls, name, desc)).equals(v.replace(insnLine(from), insnLine(to)));
+    }
+
+    /** W105–W107：42.22.2 原版本體。helper 靠這些方法的呼叫順序與執行緒假設（見 checkEntityEngineGuard）。 */
+    static final String[][] ENTITY_ENGINE_LOCKED = {
+            {"zombie/entity/GameEntityManager", "UnregisterEntity", "(Lzombie/entity/GameEntity;Z)V",
+                    "87b74d9c23e4bc3193441f1c9c2f666a1842085fd03984456bc42d6ae32b0215"},
+            {"zombie/entity/GameEntityManager", "RegisterEntity", "(Lzombie/entity/GameEntity;)V",
+                    "5f035fff3c574343781e504520cda28913edcf18f5eccefe3febb37729577377"},
+            {"zombie/entity/Engine", "addEntity", "(Lzombie/entity/GameEntity;)Z",
+                    "cab93f888754632e1692cad8763199ced375a639f4326aafed2926c573d98c0f"},
+            {"zombie/entity/Engine", "removeEntity", "(Lzombie/entity/GameEntity;)V",
+                    "cb3279c9880af0a68d1f3a1cdd5a508db59b0146447f2ae98bb604fa9c1ce065"},
+            {"zombie/entity/EngineEntityManager", "addEntity", "(Lzombie/entity/GameEntity;)V",
+                    "e76fa1496ffd57cdb23d8f668deec3ec4f6d47458cccd1ddb258e95f9b66530b"},
+            {"zombie/entity/EngineEntityManager", "removeEntity", "(Lzombie/entity/GameEntity;)V",
+                    "0d4af4dcaac76b59a1ec98309e69d15cc903a3548b716c0a52f1f69cb2eb8eef"},
+            {"zombie/entity/EngineEntityManager", "processPendingOperations", "()V",
+                    "d77d6df098770bfc7457f5cdae7492d2aa14974911b5c17b3fa353b5a0857d64"},
+            {"zombie/entity/EngineEntityManager", "addEntityInternal", "(Lzombie/entity/GameEntity;)V",
+                    "ab0a738e6eff0fa53f9ded233117354264cbb57a77600f7320040d71da94a3d9"},
+            {"zombie/entity/EngineEntityManager", "removeEntityInternal", "(Lzombie/entity/GameEntity;)V",
+                    "68fc71db498d9b9f4da701f2a59165068aee2985df38b4e31b02cf9b8cfc17ed"},
+            {"zombie/entity/EngineEntityManager$EntityOperation", "reset", "()V",
+                    "0b7fe192bdeccf359ac7ba0e3fbe9c3935b66deeae2c0a9b8030b2448ce81c68"},
+            {"zombie/entity/util/SingleThreadPool", "obtain", "()Ljava/lang/Object;",
+                    "026e6f8d76efccea533adfc7b99afbcec683931c56fb9990f84133f320328f47"},
+            {"zombie/entity/util/SingleThreadPool", "free", "(Ljava/lang/Object;)V",
+                    "2f01c6cd984cc4c4005cdfa8b4292b8150f65eb55a5b12b838afd87b0b77028d"},
+            {"zombie/vehicles/BaseVehicle", "addAnimalInTrailer", "(Lzombie/characters/animals/IsoAnimal;)V",
+                    "6453efbb72750d9271a172d37bcb22db0b57118b21e76a80a8ecdb0a237f59c0"},
+            {"zombie/vehicles/VehiclesDB2$MainThread", "update", "()V",
+                    "6644e3ed9954c614a9f7c4e7ebb7d1de38f09625833879c32f2d8fcbe6127b81"},
+            {"zombie/vehicles/VehiclesDB2$WorldStreamerThread", "update", "()V",
+                    "e1b7a599a0192898d6871a59ebdf6c0139e703516f21fa227aab05aff552ebed"},
+    };
+
+    /**
+     * W105 非主執行緒的 engine 登記／移除排回主執行緒、W106 待處理佇列單筆壞資料不卡主迴圈、W107 背景載車的拖車動物排回主執行緒
+     * （docs/patches.md 2dm、2dn、2do）：存在理由（任一項變紅＝官方行為變了，先重估撤刀，不改斷言）、呼叫點清冊、同形手術、helper 契約。
+     */
+    static int checkEntityEngineGuard(Path jar, Path distJava) throws Exception {
+        int failed = 0;
+        String eng = "zombie/entity/Engine";
+        String eem = "zombie/entity/EngineEntityManager";
+        String mgr = "zombie/entity/GameEntityManager";
+        String g = "zombie/entity/MdcEntityEngineGuard";
+        String t = "zombie/mdc/TrailerAnimalDefer";
+        String veh = "zombie/vehicles/BaseVehicle";
+        String item = "zombie/vehicles/VehiclesDB2$QueueLoadChunk";
+        String ge = "Lzombie/entity/GameEntity;";
+        String unregDesc = "(" + ge + "Z)V";
+        String unreg = methodText(methodFromJar(jar, mgr, "UnregisterEntity", unregDesc));
+        int engRemoveAt = unreg.indexOf(insnLine("INVOKEVIRTUAL " + eng + ".removeEntity (" + ge + ")V"));
+        failed += check("W105 存在理由：原版 UnregisterEntity 先呼叫 Engine.removeEntity、之後才讀 addedToEntityManager（不看是否登記過）",
+                engRemoveAt >= 0 && engRemoveAt < unreg.indexOf("GETFIELD zombie/entity/GameEntity.addedToEntityManager"));
+        failed += shaLocks(jar, "W105–W107", ENTITY_ENGINE_LOCKED);
+        failed += check("W105 呼叫點清冊：Engine.addEntity／removeEntity／update 各只有 GameEntityManager 一處（改道點就是全部入口）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eng, "addEntity", "(" + ge + ")Z").equals(List.of(mgr + ".RegisterEntity(" + ge + ")V"))
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eng, "removeEntity", "(" + ge + ")V").equals(List.of(mgr + ".UnregisterEntity" + unregDesc))
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eng, "update", "()V").equals(List.of(mgr + ".Update()V")));
+        failed += check("W106 死碼鎖：Engine.removeAllEntities 全 jar 沒有呼叫者（processPendingOperations 的 RemoveAll 分支不會跑）",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eng, "removeAllEntities", "()V").isEmpty()
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eem, "removeAllEntities", "()V").equals(List.of(eng + ".removeAllEntities()V"))
+                && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, eem, "removeAllEntities", "(Lzombie/entity/util/ImmutableArray;)V")
+                        .equals(List.of(eem + ".removeAllEntities()V")));
+        String loadDesc = "(Ljava/nio/ByteBuffer;IZ)V";
+        // 背景載車只有 QueueLoadChunk（伺服器）一條會在之後跑到 processMain 排空點；另兩條背景路徑只在單機／客戶端：
+        // QueueLoadVehiclesInMeta 由 IngameState.enter 在 !GameServer.server 時排、WorldStreamerThread 由客戶端 WorldStreamer 呼叫；
+        // VehicleFullUpdatePacket.parse 在主執行緒（照原版當下執行）。清冊變了就重估排空點。
+        List<String> loaders = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, veh, "load", "(Ljava/nio/ByteBuffer;I)V");
+        List<String> metaLoaders = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehiclesDB2", "loadVehiclesInMeta", "()V");
+        List<String> streamLoaders = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/VehiclesDB2", "loadChunk", "(Lzombie/iso/IsoChunk;)V");
+        String fullUpdate = "zombie/network/packets/vehicle/VehicleFullUpdatePacket.parse(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
+        String db2 = "zombie/vehicles/VehiclesDB2$";
+        failed += check("W107 呼叫點清冊：BaseVehicle.load(ByteBuffer,int) 的呼叫者 " + loaders + "；loadVehiclesInMeta 的呼叫者 " + metaLoaders
+                        + "；VehiclesDB2.loadChunk(IsoChunk) 的呼叫者 " + streamLoaders,
+                loaders.equals(List.of(fullUpdate, fullUpdate, db2 + "QueueLoadChunk.vehicleLoaded(L" + db2 + "VehicleBuffer;)V",
+                        db2 + "QueueLoadVehiclesInMeta.vehicleLoaded(L" + db2 + "VehicleBuffer;)V",
+                        db2 + "WorldStreamerThread.vehicleLoaded(Lzombie/iso/IsoChunk;L" + db2 + "VehicleBuffer;)V"))
+                && metaLoaders.equals(List.of("zombie/gameStates/IngameState.enter()V"))
+                && !streamLoaders.isEmpty() && streamLoaders.stream().allMatch(c -> c.startsWith("zombie/iso/WorldStreamer.")));
+
+        String mgrSave = methodText(methodFromJar(jar, mgr, "Save", "()V"));
+        failed += check("W105 手術後：RegisterEntity 的 Engine.addEntity 改道，其餘指令不變",
+                onlyRedirected(jar, distJava, mgr, "RegisterEntity", "(" + ge + ")V", "INVOKEVIRTUAL " + eng + ".addEntity (" + ge + ")Z",
+                        "INVOKESTATIC " + g + ".addEntity (L" + eng + ";" + ge + ")Z", 1));
+        failed += check("W105 手術後：UnregisterEntity 的 Engine.removeEntity 改道，其餘指令不變",
+                onlyRedirected(jar, distJava, mgr, "UnregisterEntity", unregDesc, "INVOKEVIRTUAL " + eng + ".removeEntity (" + ge + ")V",
+                        "INVOKESTATIC " + g + ".removeEntity (L" + eng + ";" + ge + ")V", 1));
+        failed += check("W105 手術後：Update 的 Engine.update 改道，其餘指令不變",
+                onlyRedirected(jar, distJava, mgr, "Update", "()V", "INVOKEVIRTUAL " + eng + ".update ()V",
+                        "INVOKESTATIC " + g + ".update (L" + eng + ";)V", 1));
+        failed += check("W105 手術後：Save 頭部恰一個 beforeSave，其餘指令不變；GameEntityManager 其餘方法不變",
+                headCallSlotsOk(method(distJava, mgr, "Save", "()V"), g, "beforeSave", "()V")
+                // Save 有 try-catch，methodText 開頭是 TRYCATCHBLOCK 列、頭部呼叫排在它們之後：拿掉那一行後與原版相同
+                && methodText(method(distJava, mgr, "Save", "()V")).replace(insnLine("INVOKESTATIC " + g + ".beforeSave ()V"), "").equals(mgrSave)
+                && otherMethodsSame(jar, distJava, mgr, "RegisterEntity", "(" + ge + ")V", "UnregisterEntity", unregDesc,
+                        "Update", "()V", "Save", "()V"));
+        String pending = methodText(methodFromJar(jar, eem, "processPendingOperations", "()V"));
+        String applyDesc = "(L" + eem + ";" + ge + ")V";
+        failed += check("W106 手術後：processPendingOperations 的 addEntityInternal 1 處、removeEntityInternal 2 處改道，其餘指令不變；"
+                        + "EngineEntityManager 其餘方法不變（add/removeEntityInternal 另有 FastIdentityArrayRemoval 手術）",
+                methodText(method(distJava, eem, "processPendingOperations", "()V")).equals(pending
+                        .replace(insnLine("INVOKEVIRTUAL " + eem + ".addEntityInternal (" + ge + ")V"), insnLine("INVOKESTATIC " + g + ".applyAdd " + applyDesc))
+                        .replace(insnLine("INVOKEVIRTUAL " + eem + ".removeEntityInternal (" + ge + ")V"), insnLine("INVOKESTATIC " + g + ".applyRemove " + applyDesc)))
+                && countExactCalls(methodFromJar(jar, eem, "processPendingOperations", "()V"), Opcodes.INVOKEVIRTUAL, eem, "addEntityInternal", "(" + ge + ")V") == 1
+                && countExactCalls(methodFromJar(jar, eem, "processPendingOperations", "()V"), Opcodes.INVOKEVIRTUAL, eem, "removeEntityInternal", "(" + ge + ")V") == 2
+                && otherMethodsSame(jar, distJava, eem, "processPendingOperations", "()V", "addEntityInternal", "(" + ge + ")V",
+                        "removeEntityInternal", "(" + ge + ")V"));
+        String itemMain = methodText(methodFromJar(jar, item, "processMain", "()V"));
+        failed += check("W107 手術後：BaseVehicle.load 的 2 個 addAnimalInTrailer(IsoAnimal) 改道、QueueLoadChunk.processMain 頭部 beforeLoadChunkMain，"
+                        + "其餘指令不變；QueueLoadChunk 其餘方法不變",
+                onlyRedirected(jar, distJava, veh, "load", loadDesc, "INVOKEVIRTUAL " + veh + ".addAnimalInTrailer (Lzombie/characters/animals/IsoAnimal;)V",
+                        "INVOKESTATIC " + t + ".addAnimalInTrailer (L" + veh + ";Lzombie/characters/animals/IsoAnimal;)V", 2)
+                && headCallSlotsOk(method(distJava, item, "processMain", "()V"), t, "beforeLoadChunkMain", "()V")
+                && methodText(method(distJava, item, "processMain", "()V")).equals(insnLine("INVOKESTATIC " + t + ".beforeLoadChunkMain ()V") + itemMain)
+                && otherMethodsSame(jar, distJava, item, "processMain", "()V"));
+
+        for (String helper : new String[] {g, t}) {
+            ClassNode hn = classNode(distJava, helper);
+            String bad = logHandlerViolations(hn);
+            failed += check(helper + " helper 契約：catch 只有 RuntimeException／LinkageError（沒有 Throwable、Error、catch-all），"
+                    + "每個 DebugLog.log 都在 RuntimeException＋LinkageError 的 try 內" + bad, bad.isEmpty());
+        }
+        ClassNode gn = classNode(distJava, g);
+        boolean onlyRte = true;
+        for (String[] m : new String[][] {{"applyAdd", applyDesc}, {"applyRemove", applyDesc}, {"drain", "()V"}}) {
+            MethodNode mn = declaredMethod(gn, m[0], m[1]);
+            onlyRte &= mn != null && !mn.tryCatchBlocks.isEmpty()
+                    && mn.tryCatchBlocks.stream().allMatch(tc -> "java/lang/RuntimeException".equals(tc.type));
+        }
+        MethodNode tDrain = declaredMethod(classNode(distJava, t), "drain", "()V");
+        failed += check("W106／W107 包原版呼叫的 try 只接 RuntimeException（Error、LinkageError 照常外拋）",
+                onlyRte && tDrain != null && tDrain.tryCatchBlocks.stream()
+                        .filter(tc -> !"java/lang/LinkageError".equals(tc.type)).allMatch(tc -> "java/lang/RuntimeException".equals(tc.type)));
+        ClassNode widened = classNode(distJava, g);
+        ClassNode unguarded = classNode(distJava, g);
+        MethodNode wApply = declaredMethod(widened, "applyRemove", applyDesc);
+        MethodNode uBeat = declaredMethod(unguarded, "beat", "()V");
+        boolean mutable = wApply != null && !wApply.tryCatchBlocks.isEmpty() && uBeat != null && !uBeat.tryCatchBlocks.isEmpty();
+        if (mutable) {
+            wApply.tryCatchBlocks.get(0).type = "java/lang/Throwable";
+            uBeat.tryCatchBlocks.clear();
+        }
+        failed += check("W105／W106 例外型別鎖負對照：applyRemove 的 catch 放寬成 Throwable、beat 的 log 拿掉 try 都會紅",
+                mutable && !logHandlerViolations(widened).isEmpty() && !logHandlerViolations(unguarded).isEmpty());
+        return failed;
+    }
+
     /**
      * W82 燈具設定同步驗證（docs/patches.md 2cq）：存在理由（原版 parse 照收全部欄位、轉發與 switchLight 讀封包的
      * activated、客戶端送出點只有打掉燈泡；任一項變紅＝官方行為變了，先重估撤刀或重驗合法來源，不改斷言）、同形手術、helper 契約。
@@ -8105,9 +8269,10 @@ public final class SmokeCheck {
                 drift.add(pfn + "." + v.name + v.desc);
             }
         }
-        // 同一個 BaseVehicle ClassPatch 上的其他刀：W3-4 update、W19 permanentlyRemove 頭部、W64 setNetPlayerAuthorization 頭部
+        // 同一個 BaseVehicle ClassPatch 上的其他刀：W3-4 update、W19 permanentlyRemove 頭部、W64 setNetPlayerAuthorization 頭部、
+        // W107 load(ByteBuffer,int,boolean) 的 addAnimalInTrailer（checkEntityEngineGuard 驗）
         Set<String> touched = Set.of(veh + ".scriptReloaded(Z)V", veh + ".addToWorld(Z)V", veh + ".removeFromWorld()V",
-                veh + ".update()V", veh + ".permanentlyRemove()V",
+                veh + ".update()V", veh + ".permanentlyRemove()V", veh + ".load(Ljava/nio/ByteBuffer;IZ)V",
                 veh + ".setNetPlayerAuthorization(L" + veh + "$Authorization;I)V",
                 pfn + ".checkUseNativeCode()V", pfn + ".updateMain()V");
         for (String cls : List.of(veh, pfn)) {

@@ -69,6 +69,9 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W70 Bandit Raid 劇情無限迴圈（[2cf](docs/patches.md#2cf)） | 死亡倖存者劇情 Bandit Raid 的內層放屍體迴圈重用外層的計數器，沒探索過、50–100 間房的建築抽到時外層永遠跑不完：主執行緒卡在載入那個 cell，一直生殭屍和屍體直到 heap 用盡（本服加新地圖後凍結 10 分鐘，關機存檔存下數萬隻殭屍和大量屍體）。 | 輪數上限改成 4（原版迴圈會結束的最大值），這些建築改照 40–49 間房的方式跑；更小的建築行為不變。 | 未回報 |
 | W75 非主執行緒的每幀更新清單移除（[2cj](docs/patches.md#2cj)） | 拖車裡有動物的車在 `ServerPlayersVehicles` 執行緒載入時，`IsoObject.removeFromWorld` 在那條執行緒呼叫 `IsoCell.addToProcessIsoObjectRemove`，讀寫主執行緒每幀在 `ProcessIsoObject` 改動的兩個 `HashSet`（本服 50 分鐘 20 次）。 | 把這些呼叫排隊，下一次 `ProcessIsoObject` 頭部在主執行緒、原版移除步驟之前執行，移除在同一輪生效；主執行緒加回同一物件時取消待移除，與原版加入時的行為相同。 | 未回報 |
 | W75-2 非主執行緒的每幀更新清單加入（[2ck](docs/patches.md#2ck)） | `LoadChunk` 執行緒讀 chunk 檔時，屠宰鉤的建構子在那條執行緒呼叫 `IsoCell.addToProcessIsoObject`，寫入主執行緒每幀使用的清單與集合（本服重啟後 50 分鐘 81 次）。 | 與 W75 共用同一條 FIFO 佇列（加入與移除保留先後），下一次 `ProcessIsoObject` 頭部在主執行緒執行；直接移除同一物件時取消待加入，任何先後順序的結果都與原版相同。 | 未回報 |
+| W105 非主執行緒的 engine 登記／移除（[2dm](docs/patches.md#2dm)） | 42.22.2 的 `GameEntityManager.UnregisterEntity` 不看是否登記過就呼叫 `engine.removeEntity`，拖車裡有動物的車在 `ServerPlayersVehicles` 執行緒載入時，就在那條執行緒寫 engine 的待處理佇列與非執行緒安全的操作物件池。池的 `free` 先放回再 reset，兩條執行緒交錯時佇列留下 entity 為 null 的移除，之後每個 tick 都在 `GameEntityManager.Update` 拋 `key cannot be null`、略過那個 tick 剩下的工作（搬物品與各種動作全部卡住，直到重啟；本服一次）。 | 非主執行緒的 engine 加入／移除排進 FIFO，主執行緒在自己呼叫 engine 之前、每個 tick `engine.update()` 之前、`Save` 之前依序執行；只延後 engine 那一步，ID 表照原版即時處理。 | 未回報 |
+| W106 待處理佇列單筆壞資料不再卡死主迴圈（[2dn](docs/patches.md#2dn)） | `EngineEntityManager.processPendingOperations` 在清空佇列之前拋例外，一筆壞資料（entity 為 null、已登記又被加入、listener 拋例外）就一直留著、每個 tick 重拋。 | entity 為 null 的那筆略過並記錄；單筆拋 `RuntimeException` 時收好那個 entity 的旗標、記錄後繼續，迴圈照原版清空佇列。`Error` 照常外拋。 | 未回報 |
+| W107 背景載車時的拖車動物（[2do](docs/patches.md#2do)） | 車在 `ServerPlayersVehicles` 執行緒載入時，在那條執行緒把存檔裡的動物放進拖車：把動物移出世界（engine、cell 清單、雞舍、動物區域），並寫主迴圈在用的動物同步表。這是 W105 背景呼叫的已知來源。 | `BaseVehicle.load` 的兩個 `addAnimalInTrailer` 在非主執行緒時排隊，在主執行緒、那個 chunk 的 `processMain` 開頭（車加進世界之前）執行，結果與原版相同。 | 未回報 |
 
 ### 資料完整性：chunk、動物與車輛遺失
 
