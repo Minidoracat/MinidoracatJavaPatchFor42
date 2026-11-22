@@ -5,7 +5,7 @@
 **Project Zomboid Build 42**（目前對應 **42.22.2**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
-- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 83 個 patched class、248 個命中點、103 個 helper class。
+- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 85 個 patched class、258 個命中點、107 個 helper class。
 - **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡；地上一件沒有模型的物品讓客戶端不停跳錯誤），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。

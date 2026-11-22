@@ -8,7 +8,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
 - **Server patches**: a Java agent swaps official classes for patched versions as the dedicated server
   starts (the official jar and its signature stay untouched). They address main-loop freezes and livelocks,
   lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed actions and log
-  noise. 83 patched classes, 248 patch sites and 103 helper classes on 42.22.2.
+  noise. 85 patched classes, 258 patch sites and 107 helper classes on 42.22.2.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two disconnects while
   chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate; a ground item without a model flooding the client with errors), loaded as a Java agent without changing game files. Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
