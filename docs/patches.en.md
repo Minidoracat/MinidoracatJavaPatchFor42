@@ -465,7 +465,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.2.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.7.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -495,7 +495,8 @@ write access to one of those folders; the path stays relative so that moving the
 the loader; `Uninstall-Patches.bat` removes per module (rewriting that one entry), and removing everything drops the
 entry and both files. Only our entry changes: the installer replaces just the text span of the top-level `vmArgs` array and
 re-parses the result, every other byte (BOM and line endings included) is kept, and uninstalling restores the file
-byte for byte. Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
+byte for byte (the one exception is an `-Xmx` the player agreed to raise; see "Windows memory limit" below).
+Duplicate entries of ours collapse into one; other Java agents are left alone and listed. The
 transaction writes before it deletes and can be rolled back from the state backup, so the json never points at a
 deleted jar: with the agent jar missing the JVM does not start at all (`Error opening zip file or JAR manifest
 missing`, tested on the game's Zulu 25 JRE). A Steam update or file verification restores the vanilla json; status
@@ -509,6 +510,166 @@ builds, `deploy-client/legacy-packages.json`) are identified by their full set o
 current jar: installing removes a leftover one in the same transaction and uninstalling removes it as a whole (since
 0.2.4). Unrecognized leftovers are still refused. Never install or uninstall while the JVM is running. Binaries are
 for local use by legal game owners only and are not committed or redistributed.
+
+**macOS package**: the same build also produces `dist-client-modular/pkg-mac` and
+`output/MinidoracatClientPatches-<game>-<package>-macOS.zip` (packed by `UnixZip`: folders and `.command` 755, the
+rest 644, checked by reading the central directory back). The agent jar is the same file as in the Windows package
+(the build asserts equal SHAs); the manifest drops `loader` and `legacyPackages`. The Mac launcher
+`Contents/MacOS/JavaAppLauncher` reads `JVMOptions` from `Contents/Info.plist`, changes to `WorkingDirectory`
+(`$APP_ROOT/Contents/Java`) and creates the JVM through `JLI_Launch` in `libjli`, so `-javaagent` works directly and no
+loader DLL is needed (42.22.2 on an Apple M2 Pro with macOS 27: `[mdc-agent] ARMED: 18 patched classes`,
+`compatible=true`). The game root is `Project Zomboid.app/Contents/Java` (classpath
+`Contents/Java/:Contents/Java/projectzomboid.jar`), which is also where `MdcPatchRuntime` finds `projectzomboid.jar`.
+The installer is a Java program, `mdc-mac-installer.jar` (`patcher/installer-mac/`, run with the game's own JRE),
+started by `deploy-client/mac/Install-Patches.command` (bash 3.2), which finds the app (`PZ_APP`, the default Steam
+library, `libraryfolders.vdf`, then asks the player to drag it in) and a Java that runs (`jre-aarch64`, then
+`jre-x86_64`). It only touches the agent jar and `state.json` in `Contents/Java/.mdc-patches/` (schema 2, the same
+format as on Windows, without a loader) and the first `JVMOptions` entry of `Info.plist`,
+`-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=<modules>`. The plist is located as text and
+cross-checked with a DOM parse that never touches the network; only whole lines are added or removed, BOM, CRLF and
+indentation stay, and removing everything gives back the original file byte for byte. A plist that is not in the
+game's own shape, a `WorkingDirectory` other than `$APP_ROOT/Contents/Java`, a `JVMClassPath` key or another jar in
+`Contents/Java` is refused with code 7; when the plist cannot be read as text (a binary plist, for example), removing
+everything also stops with code 7 and keeps the jar. There is no journal: new content is written to a temporary file
+in the same folder, checked by SHA and renamed atomically, in the order jar, state, plist when enabling and plist,
+state, jar when disabling, so no interruption leaves the plist pointing at a missing jar (`MacInstallerTest` asserts
+this at every interruption point); running it again converges. Exit codes are the Windows ones (0–8) plus 12 (cannot
+write into the app). Double-clicking the `.command` is blocked by Gatekeeper (not notarized; `spctl` reports
+`rejected`), so the instructions say to type `bash ` in Terminal and drag the file in. Both Steam launch options
+("Play Project Zomboid" and Compatibility Mode, which adds `-safemode`) start the same `.app`; `open` (also with
+`--args -safemode`) and running `JavaAppLauncher` directly from another working directory were both ARMED.
+Build checks: `MacInstallerTest` (a fake .app whose path has spaces, parentheses and Chinese),
+`command-test.sh` (a fake HOME and Steam library) and an end-to-end run on a Mac layout (install, then
+`AgentLoadCheck` in `Contents/Java` with the relative `-javaagent` from the plist must be `armed`,
+`MdcStateAcceptCheck` reads the record with the runtime's own `readInstallation`, and after removing everything the
+plist equals the original byte for byte). On the M2 Pro the x86_64 path (`arch -x86_64` with `jre-x86_64` and the x86_64
+slice of `JavaAppLauncher`, `os.arch=x86_64`) was also ARMED with `compatible=true`; real Intel hardware has not been tested.
+
+**One-line install and memory limit (from 0.3.3)**: every client release also carries `install-mac.sh`, built from
+`deploy-client/mac/install-online.sh` with the version, the macOS zip name and its SHA-256 filled in (zip and script
+come from the same build and must be uploaded together, in the same `gh release create`). Players paste
+`/bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"`;
+the script downloads `releases/download/client-v<package>/<zip>` into `mktemp -d`, compares the SHA-256 (an empty
+result is refused), extracts it with `unzip` and runs `Install-Patches.command quick` (or the words given after the
+line, such as `menu`), then deletes the temporary folder. Everything sits inside `main`, called on the last line, so
+a download cut off halfway runs nothing. `quick` keeps the installed modules (updating them to this package), adds the
+recommended variant when no `client-fixes-*` is installed, and switches to the compatible variant when a foreign class
+blocks the full one. The game's `Info.plist` has `-Xmx3072m`, which ran out of heap about three minutes after joining
+the production server on a 32 GB Mac (`OutOfMemoryError: Java heap space`) and stayed up with `-Xmx8192m`. When there
+is exactly one `-Xmx<number>[mMgG]` and it is below the recommendation (8192 MB with 32 GB of RAM or more, 6144 with
+16 GB, 4096 with 12 GB; the last two are not measured), every interactive install asks; Return or `Y` replaces that one
+value in place in the same plist write, and `--memory-mb N` (at least 3072) sets it non-interactively. This is the only
+exception to "only the launch-option line changes": removing everything keeps the raised value, because removing the
+patches should not bring the crash back, and the original value could not be recorded reliably anyway (a Steam
+verification puts 3072 back behind the installer's back). `MacInstallerTest` covers the variants, the questions,
+unknown `-Xmx` forms and an interruption while writing the plist; `command-test.sh` drives the built `install-mac.sh`
+with a fake `curl` (URL, arguments, temporary folder removed, truncated zip and failed download stop with code 6 before
+the installer runs, half a script runs nothing).
+
+**Windows memory limit (from 0.3.4)**: the vanilla `ProjectZomboid64.json` has `-Xmx3072m` with ZGC, like the Mac
+`Info.plist`, so the Windows installer follows the Mac rules and the same recommendation table (8192 MB with 32 GB of
+RAM or more, 6144 with 16 GB, 4096 with 12 GB; `Get-RecommendedMb` and `MacInstaller.recommendedMb` must change
+together). The launcher orders the options as top-level `vmArgs`, then the command line, then the `windows` section,
+and the JVM takes the last `-Xmx`/`-XX:MaxHeapSize` (measured: a command-line `-Xmx8g` beat the json's `-Xmx32072m`).
+So the value is only recognized when the whole json, `windows` section included, has exactly one, in the top level,
+written as `-Xmx<1-7 digits>[mM]` or `-Xmx<1-5 digits>[gG]`; anything else means no question and a normal install.
+The question comes after the conflict and tamper checks and before the "already up to date" check, so both the menu
+and `-Action install` ask, and only when the current value is below the recommendation (Enter or `Y` raises it). The
+new value replaces that one element in the same write (the third parameter of `New-LauncherBytes`), and the existing
+check that only `vmArgs` changed to the expected list still runs. `-MemoryMb N` (at least 3072, otherwise code 2)
+applies a value without asking; it stops with code 7 and writes nothing when there is no `-Xmx` it can change, or when
+an `-Xms`, `-XX:InitialHeapSize` or `-XX:MinHeapSize` is not a recognized `-Xms` no larger than the target (measured:
+`-Xms4096m -Xmx3072m` does not start). Removing the patches keeps the value and says how to get 3072 back; status shows
+the current limit. On Windows the reason is the 2026-10-08 observation on the production server's mod set (2.55-2.9 GB
+after collection, peaks of 5.0-6.2 GB with a 12 GB limit), not a crash, so the question says "may not be enough". On
+real Windows hardware only the json value taking effect was checked (`max: 8192 Mb` in the console); of the three
+recommendations only 8192 has run in the game, on macOS.
+Known limit: an `-Xmx` the player put in the Steam launch options wins over the json (documented, not detected).
+Installer tests 71-80 cover the question at three RAM sizes, changing only the memory on an existing install, the cases
+that must not ask, six unrecognized forms, `-MemoryMb`, the English UI, removal with BOM/CRLF and other agents
+differing only in `-Xmx`, the menu, and the removal note without an install record; the environment variable
+`MDC_PATCHES_TEST_RAM_GB` fixes the RAM size for them.
+
+**Windows one-line command (from 0.3.5)**: every client release also carries `install-windows.ps1`, made from
+`deploy-client/install-online.ps1` with the version, the Windows zip name and its SHA-256 filled in (it comes from the
+same build as the zip and must be uploaded in the same `gh release create`, or
+`releases/latest/download/install-windows.ps1` returns 404). Players paste
+`irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex` into
+PowerShell; the menu is `& ([scriptblock]::Create((irm <same URL>))) menu`, and the trailing arguments go to
+`Manage-Patches.ps1` unchanged (`status`, `uninstall -All`, `-Lang en`; `-Lang zh`/`-Lang en` also sets the language
+of the bootstrap's own lines). Neither form has quotes. Windows PowerShell
+5.1's `irm` decodes a download without a charset as Latin-1 (measured: Chinese turns into mojibake; pwsh 7 is fine),
+so the build turns every non-ASCII character of the template into `\uXXXX`, the result must be pure ASCII with LF
+(checked by the build), and Chinese text may only be the first argument of `L`, restored at run time with
+`[regex]::Unescape`. Everything is one script block that only the last line closes and calls, so a script cut off
+halfway runs nothing; `irm | iex` runs in the player's own window, so the script never calls `exit`, leaves no
+variables behind and reports the exit code in `$LASTEXITCODE` (also with pwsh 7.4+'s
+`$PSNativeCommandUseErrorActionPreference` on). It downloads the zip into a new folder under `%TEMP%`,
+computes the SHA-256 with .NET and extracts with `ZipFile` (`Get-FileHash` and `Expand-Archive` fail in a 5.1 that
+inherited pwsh 7's module path, measured), clears `PSModulePath` and runs the installer as a child process,
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File Manage-Patches.ps1 quick` (its `exit` only ends the child),
+then deletes the folder and restores `PSModulePath`; it does not change the console code page.
+`Manage-Patches.ps1 -Action quick` follows the Mac quick rules: an installed client-fixes variant stays, otherwise the
+variant follows the RAM size (standard from 32 GB), and the compatible variant replaces a full one that another mod
+blocks when the compatible one fits. The target is worked out inside `Invoke-Install` after an unfinished transaction
+has been restored; everything else (plan, memory question, `Y`, "already up to date", the 0.2.x upgrade) is a normal
+install. The menu command is printed whenever the installer ran, not only on success, because its error messages may
+tell the player to remove everything; those messages now name both `Uninstall-Patches.bat` and the menu command. From
+the same version `-Lang auto` picks Chinese when either the display language or the regional format is Chinese: when
+the console code page is switched to UTF-8 (`chcp 65001` in `Install-Patches.bat`), 5.1 reports `CurrentUICulture` as
+en-US. The build runs `patcher/tests-client-installer/bootstrap-test.ps1` under both Windows PowerShell 5.1 and
+pwsh 7: same-named functions replace `Invoke-WebRequest` and `powershell.exe` to test `irm | iex`, the scriptblock
+form with arguments, argument pass-through and `-Lang en`, an installer failure code, a truncated zip and a failed
+download (code 6, installer not run, temporary folder removed) and a script cut off at every sixteenth (nothing runs),
+then a real child process runs `status` against a fake game folder, and once more with
+`$PSNativeCommandUseErrorActionPreference` on to check that the installer's exit code comes back unchanged. Installer
+tests 81-86 cover quick (two RAM sizes, keeping
+the variant, switching to compatible, 0.2.x and the old v3.0 package, an unfinished transaction, non-interactive) and
+the four `-Lang auto` combinations.
+
+**The one-line commands open the menu (from 0.3.6)**: where the Mac and Windows one-line sections above say the
+command runs `quick` and a second line opens the menu, that is the behavior up to 0.3.5. The user asked for both
+one-line commands to always open the menu, with the language picked from the system first and a way to switch it, so
+`install-windows.ps1` and `install-mac.sh` without arguments now run `menu` (the Mac from 0.3.3 to 0.3.5 and Windows
+0.3.5 ran `quick`) and no longer print a second "paste this to remove" line: installing, updating, removing and status
+all use the same line. Both main menus already had `[L]` to switch between Chinese and English, and the automatic
+choice is unchanged: on Windows the display language or regional format, on the Mac the first preferred language as
+Java reads it (on the M2 Pro with `AppleLanguages` `zh-Hant-TW`, Java reported `user.language=zh` with
+`LANG=en_US.UTF-8`, with `LANG=C` and with an empty environment). The Mac one-line command's own lines used to be
+printed in both languages; they now follow the same source (Chinese when the first entry of
+`defaults read -g AppleLanguages` starts with `zh`), and a trailing `--lang zh`/`--lang en` wins. `command-test.sh`
+uses a fake `defaults` to test no preferred language, `zh-Hant-TW`, English first with Chinese second, and both
+`--lang` values; `bootstrap-test.ps1` also tests a Chinese regional format alone. Arguments still go to the installer
+unchanged (Windows: `& ([scriptblock]::Create((irm <URL>))) status`; Mac: `status` after the same line). The
+installer's "remove everything" messages now say to paste the line again and choose `[3]`. The `quick` action stays
+and only runs when asked for by name. When updating, the menu picks the recommended variant (memory and conflicts)
+instead of keeping the installed one as `quick` did.
+
+**Main menu item [5] changes the game memory limit (from 0.3.7)**: the user asked to see the current limit and the
+recommended value in the menu and to pick the recommended value, a custom value or the default; the question at install
+time stays. Item `[5]` of both main menus shows the current limit and the recommendation (`unknown` when the `-Xmx` is
+not understood); the submenu is `[1]` recommended (left out when there is none), `[2]` custom, `[3]` restore the
+default 3072 MB, `[0]` back. Only the `-Xmx` entry changes: Windows uses `New-LauncherBytes -KeepOurs` (our own
+entries stay as they are and where they are, unlike install, which merges them into one at the front), the Mac uses
+`InfoPlist.replace` in place. It needs no package and no install record, so it works without the patches and does not
+create `.mdc-patches`. The write is one file replacement outside the transaction: a transaction always writes
+state.json (`-NewState $null` deletes it). On the Mac it is an atomic rename; on Windows `ReplaceFile` can fail after
+moving the old file away (errors 1176/1177), so `Publish-File` moves the temporary file into place on its next try,
+and [5] reports a missing json as such instead of "nothing was changed". The order is
+the same as install: take the game-folder lock, check the game is not running, restore an unfinished transaction (its
+journal holds the before/after SHA of the json; changing the json first would make it impossible to restore), then
+read the launch settings. It only needs editable launch settings and a recognized `-Xmx`; a classpath that does not
+match (including the PZ_Optimization AOT cache) and the Mac `plistGate` (WorkingDirectory, JVMClassPath, extra jars)
+are preconditions of the agent and do not block a memory change. A custom value is whole MB, at least 3072, at most
+the physical RAM when it is known, with a warning above half of it (half is a rule of thumb, not measured). All three
+paths go through the same `-Xms`/`InitialHeapSize`/`MinHeapSize` check (`Get-MemoryBlocker`/`memoryBlocker`, shared
+with `-MemoryMb`), so restoring 3072 with an `-Xms` above it stops with code 7 and leaves `-Xms` alone. The default
+is the constant 3072, not the value before install (state does not record it). Nothing is written when the target
+equals the current value (`-Xmx3g` keeps its spelling when restoring the default). On Windows a line warns when
+PZ_Optimization is present: it rewrites the json's `-Xmx` itself when the game starts (2026-10-20 log:
+`gcHeap=auto … -> 4096 MB … (launcher JSON updated)`). No CLI action was added; non-interactive use is still
+`install -MemoryMb`/`--memory-mb`. Tests: `Run-InstallerTests.ps1` 87–93 and the "main menu [5]" part of
+`MacInstallerTest` (interrupted write code 12, lock code 4, a WorkingDirectory mismatch still allowed).
 
 **Coexisting with other mods that replace game classes (client package 0.2.10 on; agent since 0.3.0)**:
 PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageData`, `TextureID`, `TextureIDAssetManager`,

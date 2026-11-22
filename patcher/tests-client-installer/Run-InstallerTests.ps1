@@ -298,6 +298,8 @@ function Set-PendingTransaction {
 # ---------------------------------------------------------------- 準備
 New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
 Write-Host "測試沙箱：$TempRoot" -ForegroundColor Yellow
+# 記憶體詢問依實體記憶體決定問不問：固定成 8 GB（不問），只有 71 起的案例改大小
+$env:MDC_PATCHES_TEST_RAM_GB = '8'
 $script:JarGood = Join-Path $TempRoot 'jar-good.jar'
 $script:JarOther = Join-Path $TempRoot 'jar-other.jar'
 New-FakeJar $script:JarGood 'build-42.22.2'
@@ -1279,9 +1281,405 @@ try {
         $r = Invoke-Install @('profiler') $PkgV1
         Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'profiler')) -and $r.Out.Contains('Uninstall-Patches.bat')) '評估模式：照常安裝並警告之後可能被擋'
     } finally { Remove-Item Env:MDC_PATCHES_TEST_SAC -ErrorAction SilentlyContinue }
+
+    # ------------------------------------------------------------ 遊戲記憶體上限（-Xmx）
+    $Interact = { param([string[]]$extra, [string[]]$lines, [string]$lang = 'zh') Invoke-Installer (@('-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgV1) + $extra) $lang $lines }
+    $JsonWith = { param([string]$xmx) $ORIG_JSON.Replace('"-Xmx3072m"', "`"$xmx`"") }
+    $MemInstall = { param([string]$mb) Invoke-Installer @('-NonInteractive', '-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgV1, '-Modules', 'profiler', '-MemoryMb', $mb) }
+    $Mem8192 = $ORIG_JSON.Replace('-Xmx3072m', '-Xmx8192m')
+    # stdin 轉向時 Read-Host 的提示文字不會出現在輸出裡，用說明行判斷有沒有問
+    $AskZh = '建議調到'
+
+    Start-Case '71. 32 GB 互動安裝：建議 8192 MB，按 Enter 就調高；status 顯示、全部移除時保留並說明'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Interact @() @('1', '2', '', 'Y')
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '安裝成功'
+        Check ($r.Out.Contains('建議調到 8192 MB') -and $r.Out.Contains('3072 → 8192 MB')) '說明建議值與變更'
+        $top = @(Get-TopVmArgs)
+        Check ($top[0] -like "$ARG_PREFIX*" -and $top -ccontains '-Xmx8192m' -and -not ($top -ccontains '-Xmx3072m')) '頂層改成 -Xmx8192m，自己那條仍在最前面'
+        $r = Invoke-Status $PkgV1
+        Check ($r.Out.Contains('遊戲記憶體上限：8192 MB')) 'status 顯示 8192 MB'
+        $r = Invoke-UninstallAll
+        Check ($r.Code -eq 0 -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192) '全部移除後只差 -Xmx（不改回）'
+        Check ($r.Out.Contains('維持 8192 MB')) '移除時說明記憶體上限維持不變'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '72. 16 GB 建議 6144、輸入 N 不調；12 GB 建議 4096'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '16'
+    try {
+        $r = & $Interact @() @('1', '2', 'N', 'Y')
+        Check ($r.Code -eq 0 -and $r.Out.Contains('建議調到 6144 MB') -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '問了 6144，照常安裝'
+        Check (@(Get-TopVmArgs) -ccontains '-Xmx3072m') '輸入 N：仍是 3072'
+        $env:MDC_PATCHES_TEST_RAM_GB = '12'
+        $r = & $Interact @('-Modules', 'client-fixes-lowmem') @('N', 'N')
+        Check ($r.Code -eq 0 -and $r.Out.Contains('建議調到 4096 MB') -and $r.Out.Contains('不需要任何變更')) '12 GB 問 4096；不調時不需要任何變更'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '73. 已安裝後再跑一次互動安裝：只改記憶體，修補檔與紀錄不變；調過之後不再問'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    $stateSha = Get-GameBytesSha '.mdc-patches/state.json'
+    $agentSha = Get-GameBytesSha $AGENT_REL
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Interact @('-Modules', 'profiler') @('', 'Y')
+        Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx8192m' -and (Test-ArgModules 'core,profiler')) '只改記憶體也會寫入'
+        Check ((Get-GameBytesSha '.mdc-patches/state.json') -eq $stateSha -and (Get-GameBytesSha $AGENT_REL) -eq $agentSha) 'state.json 與 agent jar 不變'
+        $r = & $Interact @('-Modules', 'profiler') @('N', 'N')
+        Check ($r.Code -eq 0 -and -not $r.Out.Contains($AskZh) -and $r.Out.Contains('不需要任何變更')) '已是建議值：不問、不需要任何變更'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '74. 不該問的情況：已經夠大、非互動、裝不上；-Xmx3g 會問並寫成 MB'
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        Reset-GameDir
+        Write-TextFile (GameFile $LAUNCHER_REL) (& $JsonWith '-Xmx12288m')
+        $r = & $Interact @('-Modules', 'profiler') @('Y', 'N')
+        Check ($r.Code -eq 0 -and -not $r.Out.Contains($AskZh) -and (Test-ModuleSet @('core', 'profiler')) -and @(Get-TopVmArgs) -ccontains '-Xmx12288m') '已經比建議值大：不問、照常安裝、值不動'
+        Reset-GameDir
+        $r = Invoke-Install @('profiler') $PkgV1
+        Check ($r.Code -eq 0 -and -not $r.Out.Contains($AskZh) -and @(Get-TopVmArgs) -ccontains '-Xmx3072m') '-NonInteractive：不問、不動'
+        Reset-GameDir
+        Write-TextFile (GameFile 'zombie/mdc/MdcPatchRuntime.class') 'stale-helper'
+        $r = & $Interact @('-Modules', 'profiler') @('N', 'N')
+        Check ($r.Code -eq 7 -and -not $r.Out.Contains($AskZh) -and (Test-JsonIsOriginal)) '有衝突裝不上：代碼 7，不問、啟動設定原樣'
+        Reset-GameDir
+        Write-TextFile (GameFile $LAUNCHER_REL) (& $JsonWith '-Xmx3g')
+        $r = & $Interact @('-Modules', 'profiler') @('', 'Y')
+        Check ($r.Code -eq 0 -and $r.Out.Contains($AskZh) -and (Get-GameText $LAUNCHER_REL).Contains('"-Xmx8192m"') -and -not (Get-GameText $LAUNCHER_REL).Contains('-Xmx3g')) '-Xmx3g 當成 3072 MB，調高後寫成 -Xmx8192m'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '75. 認不得的記憶體設定：互動時不問、照常安裝；-MemoryMb 拒絕；status 說無法判斷'
+    $weird = [ordered]@{
+        '沒有 -Xmx'             = $ORIG_JSON.Replace("`t`t`"-Xmx3072m`",`n", '')
+        '兩條 -Xmx'             = $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xmx3072m`",`n`t`t`"-Xmx4096m`",")
+        'k 單位'                = & $JsonWith '-Xmx3145728k'
+        '數字太長'              = & $JsonWith '-Xmx3000000g'
+        '另有 -XX:MaxHeapSize'  = $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xmx3072m`",`n`t`t`"-XX:MaxHeapSize=4g`",")
+        'windows 區段另有 -Xmx' = $ORIG_JSON.Replace('"-XX:+UseZGC"', "`"-XX:+UseZGC`",`n`t`t`t`t`"-Xmx4g`"")
+    }
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        foreach ($k in $weird.Keys) {
+            Reset-GameDir
+            Write-TextFile (GameFile $LAUNCHER_REL) $weird[$k]
+            $r = & $MemInstall '8192'
+            Check ($r.Code -eq 7 -and (Get-GameText $LAUNCHER_REL) -ceq $weird[$k] -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) "$k：-MemoryMb 代碼 7，什麼都沒寫"
+            $r = & $Interact @('-Modules', 'profiler') @('Y')
+            Check ($r.Code -eq 0 -and -not $r.Out.Contains($AskZh) -and (Test-ModuleSet @('core', 'profiler'))) "$k：互動時不問、照常安裝"
+            $r = Invoke-Status $PkgV1
+            Check ($r.Out.Contains('遊戲記憶體上限：無法判斷')) "$k：status 說無法判斷"
+            $r = Invoke-UninstallAll
+            Check ($r.Code -eq 0 -and (Get-GameText $LAUNCHER_REL) -ceq $weird[$k]) "$k：移除後逐字回到原樣"
+        }
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '76. -MemoryMb：非互動照做、可調低、不合法的值代碼 2、會讓遊戲起不來時代碼 7'
+    Reset-GameDir
+    $r = & $MemInstall '6144'
+    Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx6144m' -and (Test-ArgModules 'core,profiler')) '6144：套用並加上自己那條'
+    $r = & $MemInstall '6144'
+    Check ($r.Code -eq 0 -and $r.Out.Contains('不需要任何變更')) '等於目前值：不需要任何變更'
+    $r = & $MemInstall '4096'
+    Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx4096m') '可以調低'
+    $r = & $MemInstall '100'
+    Check ($r.Code -eq 2) '小於 3072：代碼 2'
+    $r = & $MemInstall 'abc'
+    Check ($r.Code -eq 2) '不是數字：代碼 2'
+    Reset-GameDir
+    $xms = $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xms4096m`",`n`t`t`"-Xmx3072m`",")
+    Write-TextFile (GameFile $LAUNCHER_REL) $xms
+    $r = & $MemInstall '3072'
+    Check ($r.Code -eq 7 -and (Get-GameText $LAUNCHER_REL) -ceq $xms) '-Xms4096m 時目標 3072：代碼 7、不寫'
+    $r = & $MemInstall '4096'
+    Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx4096m') '-Xms4096m 時目標 4096：可以'
+    Reset-GameDir
+    Write-TextFile (GameFile $LAUNCHER_REL) $ORIG_JSON.Replace('"-Xmx3072m",', "`"-XX:InitialHeapSize=1g`",`n`t`t`"-Xmx3072m`",")
+    $r = & $MemInstall '8192'
+    Check ($r.Code -eq 7) '-XX:InitialHeapSize 認不得：代碼 7'
+    Reset-GameDir
+    Write-TextFile (GameFile $LAUNCHER_REL) $ORIG_JSON.Replace('"-XX:+UseZGC"', "`"-XX:+UseZGC`",`n`t`t`t`t`"-Xms6g`"")
+    $r = & $MemInstall '4096'
+    Check ($r.Code -eq 7) 'windows 區段 -Xms6g 大於目標：代碼 7'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Interact @('-Modules', 'profiler', '-MemoryMb', '8192') @('Y', 'N')
+        Check ($r.Code -eq 0 -and -not $r.Out.Contains($AskZh) -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '互動時帶 -MemoryMb：不問，照指定值'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '77. 英文介面'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Interact @('-Modules', 'profiler') @('', 'Y') 'en'
+        Check ($r.Code -eq 0 -and $r.Out.Contains('8192 MB is recommended') -and $r.Out.Contains('3072 -> 8192 MB') -and -not $r.Out.Contains($AskZh)) '英文詢問'
+        $mem = @($r.Out -split "`n" | Where-Object { $_ -match 'memory|recommended' })
+        Check ($mem.Count -ge 3 -and -not (($mem -join '') -match '[\u3000-\u9fff\uff00-\uffef]')) '記憶體段沒有中文字'
+        $r = Invoke-Installer @('-NonInteractive', '-Action', 'uninstall', '-GameDir', $GameDir, '-All') 'en'
+        Check ($r.Code -eq 0 -and $r.Out.Contains('stays at 8192 MB')) '英文移除說明'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '78. BOM、CRLF、使用者參數與其他 agent：調記憶體後全部移除，只差 -Xmx'
+    Reset-GameDir
+    $user78 = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"-javaagent:ZombieBuddy.jar`",`n`t`t`"-Duser.language=CH`"`n").Replace('"-XX:+UseZGC"', "`"-XX:+UseZGC`",`n`t`t`t`t`"-agentlib:zbNative`"").Replace("`n", "`r`n")
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText((GameFile $LAUNCHER_REL), $user78, $utf8Bom)
+    $r = & $MemInstall '8192'
+    Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '安裝並調高'
+    $r = Invoke-UninstallAll
+    $want = $utf8Bom.GetPreamble() + $utf8Bom.GetBytes($user78.Replace('-Xmx3072m', '-Xmx8192m'))
+    $got = [System.IO.File]::ReadAllBytes((GameFile $LAUNCHER_REL))
+    Check ($r.Code -eq 0 -and [Convert]::ToBase64String($got) -ceq [Convert]::ToBase64String([byte[]]$want)) '位元組等於原檔只把 3072 換成 8192'
+
+    Start-Case '79. 選單安裝也會問'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = Invoke-Installer @('-GameDir', $GameDir, '-PackageDir', $PkgV1) 'zh' @('1', '1', '2', '', 'Y', '', '0')
+        Check ($r.Code -eq 0 -and $r.Out.Contains($AskZh) -and @(Get-TopVmArgs) -ccontains '-Xmx8192m' -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '選單：問了並調到 8192'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '80. 安裝紀錄被刪掉後的移除：也說明記憶體上限維持不變'
+    Reset-GameDir
+    $r = & $MemInstall '8192'
+    Remove-Item -LiteralPath (GameFile '.mdc-patches') -Recurse -Force
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 0 -and $r.Out.Contains('維持 8192 MB') -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192) '拿掉啟動參數、保留 8192，並說明'
+
+    $Quick = { param([string[]]$lines, [string]$pkg = $PkgV1, [string]$lang = 'zh') Invoke-Installer @('-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $pkg) $lang $lines }
+
+    Start-Case '81. quick 乾淨目錄：8 GB 裝省記憶體版；32 GB 裝標準版並問記憶體；再跑一次不需要變更'
+    Reset-GameDir
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem')) -and (Test-ArgModules 'core,client-fixes-lowmem')) '8 GB：core + lowmem'
+    Check ($r.Out.Contains('安裝計畫') -and -not $r.Out.Contains('要安裝什麼') -and -not $r.Out.Contains('要用哪個版本')) '直接顯示安裝計畫，不問要裝什麼、哪個版本'
+    Reset-GameDir
+    $r = & $Quick @('N')
+    Check ($r.Code -eq 0 -and $r.Out.Contains('已取消') -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and (Test-JsonIsOriginal)) '確認時輸入 N：取消，沒有寫入'
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('', 'Y')
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-standard')) -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '32 GB：core + standard，Enter 調到 8192'
+        $r = & $Quick @('N', 'N')
+        Check ($r.Code -eq 0 -and $r.Out.Contains('不需要任何變更')) '再跑一次：不需要任何變更'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '82. quick 沿用已裝的變體與其他模組，更新到新包（32 GB 也不換成標準版）'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler', 'client-fixes-lowmem') $PkgV1
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('N', 'Y') $PkgV2
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'profiler', 'client-fixes-lowmem')) -and (Test-ArgModules 'core,profiler,client-fixes-lowmem')) '模組照舊'
+        Check ((Test-GameFileIs $AGENT_REL $C_AGENT_V2) -and (Get-InstalledState).packageVersion -eq 'v4.1') 'agent jar 與紀錄更新到新包'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '83. quick 遇到別的 MOD 蓋掉完整版的 class：改裝相容版；相容版也裝不上時代碼 7'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat')) -and $r.Out.Contains('改裝相容版')) '改裝相容版並說明'
+    Check (Test-GameFileIs $P_FIX_TIDAM 'pzopt-tidam') '別的 MOD 的檔案沒被動'
+    Reset-GameDir
+    $r = Invoke-Install @('client-fixes-standard') $PkgV1
+    Write-TextFile (GameFile $P_FIX_TIDAM) 'pzopt-tidam'
+    $r = & $Quick @('Y') $PkgV2
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat')) -and $r.Out.Contains('取代變體')) '已裝標準版後才出現衝突：換成相容版'
+    Reset-GameDir
+    Write-TextFile (GameFile $P_VEH) 'pzopt-vehicle'
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 7 -and -not $r.Out.Contains('改裝相容版') -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '相容版也裝不上：代碼 7，不寫入'
+
+    Start-Case '84. quick 從 0.2.x 升級、接管舊 v3.0 包：沿用原來的變體'
+    Reset-GameDir
+    Set-V1Install
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Quick @('N', 'Y')
+        Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem')) -and (Get-InstalledState).schemaVersion -eq 2 -and -not (Test-Path -LiteralPath (GameFile 'zombie'))) '0.2.x lowmem：32 GB 仍是 lowmem，舊 loose class 刪掉'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+    Reset-GameDir
+    Write-TextFile (GameFile $P_LEGACY_GUARD) $C_LEGACY_GUARD
+    Write-TextFile (GameFile $P_FIX_TIDAM) $C_LEGACY_TIDAM_STD
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-standard')) -and $r.Out.Contains('接管舊版包') -and -not (Test-Path -LiteralPath (GameFile 'zombie'))) '舊 v3.0 標準版：8 GB 仍是 standard，舊檔接管後刪掉'
+
+    Start-Case '85. quick 非互動、未完成交易、英文、沒有變體、沒有安裝包、位置參數'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '-NonInteractive：不問直接裝'
+    Reset-GameDir
+    Set-PendingTransaction
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and $r.Out -match '復原' -and (Test-GameFileIs $AGENT_REL $C_AGENT_V1) -and -not (Test-GameFile '.mdc-patches/journal.json') -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '未完成交易：先復原再照常'
+    $r = Invoke-Installer @('quick', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'en' @('N', 'N')
+    Check ($r.Code -eq 0 -and $r.Out.Contains('Already up to date')) '英文：已是目標狀態'
+    Reset-GameDir
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir, '-PackageDir', $PkgSolo)
+    Check ($r.Code -eq 2) '包裡沒有客戶端修復變體：代碼 2'
+    $r = Invoke-Installer @('-NonInteractive', '-Action', 'quick', '-GameDir', $GameDir)
+    Check ($r.Code -eq 6) '沒有 manifest.json：代碼 6'
+    $r = Invoke-Installer @('quick', '-NonInteractive', '-GameDir', $GameDir, '-PackageDir', $PkgV1)
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-lowmem'))) '位置參數 quick（一行指令後面加 quick 就是這樣傳）'
+
+    Start-Case '86. -Lang auto：顯示語言或地區格式任一是中文就用中文（UTF-8 主控台下 5.1 的顯示語言會變 en-US）'
+    Reset-GameDir
+    $ErrorActionPreference = 'Continue'
+    foreach ($pair in @(@('en-US', 'zh-TW', $true), @('zh-TW', 'en-US', $true), @('en-US', 'en-US', $false), @('ja-JP', 'ja-JP', $false))) {
+        $cmd = "[Threading.Thread]::CurrentThread.CurrentUICulture = '$($pair[0])'; [Threading.Thread]::CurrentThread.CurrentCulture = '$($pair[1])'; & '$Installer' -NonInteractive -Action status -GameDir '$GameDir' -PackageDir '$PkgV1'; exit `$LASTEXITCODE"
+        $out = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1 | Out-String)
+        Check ($LASTEXITCODE -eq 0 -and $out.Contains('安裝狀態') -eq $pair[2] -and $out.Contains('Install status') -ne $pair[2]) "顯示語言 $($pair[0])、地區格式 $($pair[1])：$(if ($pair[2]) { '中文' } else { '英文' })"
+    }
+    $ErrorActionPreference = 'Stop'
+
+    # ------------------------------------------------------------ 87–93 主選單 [5] 調整記憶體上限
+    # 選單吞掉動作的錯誤、行程仍 exit 0：錯誤看輸出裡的「（代碼 N）」。每個動作後多餵一個 '' 回主選單，再 '0' 離開。
+    $Menu = { param([string[]]$lines, [string]$lang = 'zh', [string]$pkg = $PkgV1)
+        $a = @('-GameDir', $GameDir); if ($pkg) { $a += @('-PackageDir', $pkg) }
+        Invoke-Installer $a $lang $lines }
+    $NoTmp = { @(Get-ChildItem -LiteralPath $GameDir -Filter '*.tmp' -Force).Count -eq 0 }
+
+    Start-Case '87. 主選單顯示目前值與建議值（唯讀）；認不得時選 [5] 代碼 7'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Menu @('0')
+        Check ($r.Code -eq 0 -and $r.Out.Contains('[5] 調整遊戲記憶體上限（目前 3072 MB，建議 8192 MB）')) '32 GB：目前 3072、建議 8192'
+        $env:MDC_PATCHES_TEST_RAM_GB = '8'
+        $r = & $Menu @('0')
+        Check ($r.Out.Contains('（目前 3072 MB）')) '8 GB：只有目前值'
+        $two = $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xmx3072m`",`n`t`t`"-Xmx4096m`",")
+        Write-TextFile (GameFile $LAUNCHER_REL) $two
+        $r = & $Menu @('5', '', '0')
+        Check ($r.Out.Contains('（目前：無法判斷）') -and $r.Out.Contains('（代碼 7）') -and (Get-GameText $LAUNCHER_REL) -ceq $two) '兩條 -Xmx：無法判斷，選 [5] 代碼 7、不寫'
+        Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches'))) '全程沒有建立 .mdc-patches'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '88. 沒裝修補選 [1] 建議值：只改 -Xmx；相同時不需要變更；N 取消；沒有建議值時不能選 1'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Menu @('5', '1', 'Y', '', '0') 'zh' ''
+        Check ($r.Code -eq 0 -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192 -and $r.Out.Contains('3072 → 8192 MB') -and $r.Out.Contains('下次啟動遊戲生效')) '不帶安裝包也能改成 8192，其餘逐字不變'
+        Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and (& $NoTmp)) '沒有建立 .mdc-patches、沒有暫存檔'
+        $r = & $Menu @('5', '1', '', '0')
+        Check ($r.Out.Contains('目前已經是 8192 MB，不需要變更') -and $r.Out.Contains('（目前 8192 MB，建議 8192 MB）')) '已是建議值：不需要變更'
+        $r = & $Menu @('5', '3', 'N', '', '0')
+        Check ($r.Out.Contains('已取消') -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192) '確認輸入 N：已取消、不寫'
+        $env:MDC_PATCHES_TEST_RAM_GB = '8'
+        $r = & $Menu @('5', '1', '0', '', '0')
+        Check ($r.Out.Contains('請輸入：0 / 2 / 3') -and -not $r.Out.Contains('[1] 改成建議值')) '8 GB：沒有 [1]，輸入 1 被拒'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '89. 已裝修補：自己的參數原樣原位，state 與 agent jar 不變；BOM、CRLF、重複與別的 agent 也只差 -Xmx'
+    Reset-GameDir
+    $r = Invoke-Install @('profiler') $PkgV1
+    $stateSha = Get-GameBytesSha '.mdc-patches/state.json'
+    $agentSha = Get-GameBytesSha $AGENT_REL
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Menu @('5', '1', 'Y', '', '0')
+        Check ($r.Code -eq 0 -and (Test-ArgModules 'core,profiler') -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '改成 8192，自己那條仍在最前面'
+        Check ((Get-GameBytesSha '.mdc-patches/state.json') -eq $stateSha -and (Get-GameBytesSha $AGENT_REL) -eq $agentSha) 'state.json 與 agent jar 不變'
+        $r = Invoke-Status $PkgV1
+        Check ($r.Out.Contains('遊戲記憶體上限：8192 MB') -and $r.Out.Contains('已啟用')) 'status：已啟用、8192 MB'
+        $r = Invoke-UninstallAll
+        Check ($r.Code -eq 0 -and (Get-GameText $LAUNCHER_REL) -ceq $Mem8192) '全部移除後只差 -Xmx'
+        # 負對照：安裝會把自己那條收成一條放最前；[5] 只改記憶體，不該順手動它們
+        Reset-GameDir
+        $mixed = $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"-javaagent:ZombieBuddy.jar`",`n`t`t`"$($ARG_PREFIX)core`",`n`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"$($ARG_PREFIX)core,profiler`"`n").Replace("`n", "`r`n")
+        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText((GameFile $LAUNCHER_REL), $mixed, $utf8Bom)
+        $r = & $Menu @('5', '1', 'Y', '', '0')
+        $want = $utf8Bom.GetPreamble() + $utf8Bom.GetBytes($mixed.Replace('-Xmx3072m', '-Xmx8192m'))
+        $got = [System.IO.File]::ReadAllBytes((GameFile $LAUNCHER_REL))
+        Check ($r.Code -eq 0 -and [Convert]::ToBase64String($got) -ceq [Convert]::ToBase64String([byte[]]$want)) '位元組等於原檔只把 3072 換成 8192（BOM、CRLF、兩條自己的、別的 agent 都原位）'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '90. [3] 恢復預設 3072：移除後逐字回原版；已是 3072 不需要變更；-Xms 大於 3072 時代碼 7'
+    Reset-GameDir
+    $r = & $MemInstall '8192'
+    $r = & $Menu @('5', '3', 'Y', '', '0')
+    Check ($r.Code -eq 0 -and $r.Out.Contains('8192 → 3072 MB') -and (Test-ArgModules 'core,profiler')) '恢復 3072，自己那條還在'
+    $r = Invoke-UninstallAll
+    Check ($r.Code -eq 0 -and (Test-JsonIsOriginal)) '全部移除後逐字回到原版'
+    $r = & $Menu @('5', '3', '', '0')
+    Check ($r.Out.Contains('目前已經是 3072 MB，不需要變更')) '已是 3072：不需要變更'
+    Write-TextFile (GameFile $LAUNCHER_REL) (& $JsonWith '-Xmx3g')
+    $r = & $Menu @('5', '3', '', '0')
+    Check ($r.Out.Contains('不需要變更') -and (Get-GameText $LAUNCHER_REL) -ceq (& $JsonWith '-Xmx3g')) '-Xmx3g 選恢復預設：字面不變'
+    $xms = $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xms4096m`",`n`t`t`"-Xmx8192m`",")
+    Write-TextFile (GameFile $LAUNCHER_REL) $xms
+    $r = & $Menu @('5', '3', '', '0')
+    Check ($r.Out.Contains('（代碼 7）') -and $r.Out.Contains('-Xms4096m') -and (Get-GameText $LAUNCHER_REL) -ceq $xms) '-Xms4096m 時恢復 3072：代碼 7、指出 -Xms、不寫'
+
+    Start-Case '91. [2] 自訂：格式、下限、RAM 上限、過半警告、-Xms、Enter 取消、可調低'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Menu @('5', '2', 'abc', '100', '3071', '40000', '8g', '10240', 'Y', '', '0')
+        Check ($r.Code -eq 0 -and @(Get-TopVmArgs) -ccontains '-Xmx10240m') '前五個重問，10240 套用'
+        Check (@([regex]::Matches($r.Out, '請輸入 3072 以上的整數')).Count -eq 4 -and $r.Out.Contains('上限不能比它大') -and -not $r.Out.Contains('超過這台電腦記憶體')) '格式與下限錯四次、超過 RAM 一次；10240 不到一半不警告'
+        $r = & $Menu @('5', '2', '4096', 'Y', '', '0')
+        Check (@(Get-TopVmArgs) -ccontains '-Xmx4096m') '可以調低'
+        $r = & $Menu @('5', '2', '', '', '0')
+        Check ($r.Out.Contains('已取消') -and @(Get-TopVmArgs) -ccontains '-Xmx4096m') '直接 Enter：取消、不寫'
+        $env:MDC_PATCHES_TEST_RAM_GB = '16'
+        $r = & $Menu @('5', '2', '12288', 'Y', '', '0')
+        Check ($r.Out.Contains('超過這台電腦記憶體（約 16 GB）的一半') -and @(Get-TopVmArgs) -ccontains '-Xmx12288m') '16 GB 設 12288：警告但套用'
+        $env:MDC_PATCHES_TEST_RAM_GB = '0'
+        $r = & $Menu @('5', '2', '65536', 'Y', '', '0')
+        Check (@(Get-TopVmArgs) -ccontains '-Xmx65536m' -and -not $r.Out.Contains('[1] 改成建議值')) '偵測不到 RAM：不設上限、沒有建議值'
+        $env:MDC_PATCHES_TEST_RAM_GB = '32'
+        Write-TextFile (GameFile $LAUNCHER_REL) $ORIG_JSON.Replace('"-Xmx3072m",', "`"-Xms4096m`",`n`t`t`"-Xmx4096m`",")
+        $r = & $Menu @('5', '2', '3500', '4096', '', '0')
+        Check ($r.Out.Contains('-Xms4096m 大於 3500 MB') -and $r.Out.Contains('目前已經是 4096 MB')) '-Xms4096m：3500 重問，4096 等於目前值'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '92. 鎖、未完成交易、寫入失敗、PZ_Optimization'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $exeLock = [System.IO.File]::Open((GameFile 'ProjectZomboid64.exe'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        try { $r = & $Menu @('5', '', '0') } finally { $exeLock.Dispose() }
+        Check ($r.Out.Contains('（代碼 4）') -and (Test-JsonIsOriginal)) '另一個管理器持鎖：代碼 4、不寫'
+        # 未完成交易的佈景要在沒安裝過的目錄上做（state.json 交易前不存在）
+        Set-PendingTransaction
+        $r = & $Menu @('5', '1', 'Y', '', '0')
+        Check ($r.Out.Contains('已復原到上一次動作前的狀態') -and -not (Test-Path -LiteralPath (GameFile '.mdc-patches/journal.json'))) '先復原未完成交易、journal 清掉'
+        Check ((Test-GameFileIs $AGENT_REL $C_AGENT_V1) -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') 'agent 回 v1，再改成 8192'
+        $before = Get-GameText $LAUNCHER_REL
+        $held = [System.IO.File]::Open((GameFile $LAUNCHER_REL), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try { $r = & $Menu @('5', '3', 'Y', '', '0') } finally { $held.Dispose() }
+        Check ($r.Out.Contains('寫不進 ProjectZomboid64.json') -and $r.Out.Contains('（代碼 1）') -and (Get-GameText $LAUNCHER_REL) -ceq $before -and (& $NoTmp)) '寫入被擋：代碼 1、原檔不變、沒有暫存檔'
+        Reset-GameDir
+        Write-TextFile (GameFile $LAUNCHER_REL) $JSON_AOT
+        $r = & $Menu @('5', '1', 'Y', '', '0')
+        $aot = Get-GameText $LAUNCHER_REL | ConvertFrom-Json
+        Check ($r.Out.Contains('偵測到 PZ_Optimization') -and (@($aot.vmArgs) -join '|') -ceq '-Xmx8192m|-XX:AOTCacheOutput=pzopt/aot/pzopt.aot' -and (@($aot.classpath) -join '|') -ceq 'pzopt/aot/pzopt.jar|projectzomboid.jar') 'AOT 快取開著也能改，多一行警告、classpath 不動'
+        Reset-GameDir
+        Write-TextFile (GameFile $LAUNCHER_REL) '{"mainClass":"zombie/gameStates/MainScreenState","classpath":["projectzomboid.jar"],"vmArgs":["-Xmx3072m","-Dpzopt.heap=3072m,none,0"]}'
+        $r = & $Menu @('5', '1', 'Y', '', '0')
+        Check ($r.Out.Contains('偵測到 PZ_Optimization') -and @(Get-TopVmArgs) -ccontains '-Xmx8192m' -and @(Get-TopVmArgs) -ccontains '-Dpzopt.heap=3072m,none,0') 'AOT 關掉只剩 -Dpzopt.* 也警告'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    Start-Case '93. 英文介面'
+    Reset-GameDir
+    $env:MDC_PATCHES_TEST_RAM_GB = '32'
+    try {
+        $r = & $Menu @('5', '1', 'Y', '', '0') 'en'
+        Check ($r.Out.Contains('(now 3072 MB, recommended 8192 MB)') -and $r.Out.Contains('3072 -> 8192 MB') -and @(Get-TopVmArgs) -ccontains '-Xmx8192m') '英文選單與變更'
+        $mem = @($r.Out -split "`n" | Where-Object { $_ -cmatch 'memory| MB' })
+        Check ($mem.Count -ge 4 -and -not (($mem -join '') -match '[\u3000-\u9fff\uff00-\uffef]')) '記憶體相關行沒有中文字'
+    } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
 }
 finally {
     Write-Host ''
+    Remove-Item Env:MDC_PATCHES_TEST_RAM_GB -ErrorAction SilentlyContinue
     if ($KeepTemp) {
         Write-Host "保留測試沙箱：$TempRoot" -ForegroundColor Yellow
     } else {

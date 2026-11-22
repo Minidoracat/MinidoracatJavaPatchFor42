@@ -53,8 +53,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>kill switch：{@code -Dmdc.agent=off|0}（下次開服生效）。
  *
  * <p>client 包的 agent jar 有多個模組（index 有 {@code module} 行；同一個 class 在三個 client-fixes 變體各有一份），
- * 由 agent 參數 {@code modules=<id>,<id>} 選（{@code -javaagent:<jar>=modules=…}；client 包經載入器，寫成
- * {@code -agentpath:<載入器>=<jar>=modules=…}）：沒選、選了不存在的、同一組選兩個、缺依賴，一律不啟用。多模組的
+ * 由 agent 參數 {@code modules=<id>,<id>} 選（{@code -javaagent:<jar>=modules=…}，macOS 的 client 包也是；Windows client 包經載入器，
+ * 寫成 {@code -agentpath:<載入器>=<jar>=modules=…}）：沒選、選了不存在的、同一組選兩個、缺依賴，一律不啟用。多模組的
  * helper 全部以 Lookup 定義（我方 package {@code zombie.mdc} 以本 class 為錨），jar 裡沒有一般 entry 的 helper，
  * 沒選的模組就一個 class 都不會出現。伺服器的 jar 沒有 {@code module} 行，參數不用給。
  */
