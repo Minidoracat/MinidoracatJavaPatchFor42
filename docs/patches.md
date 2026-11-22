@@ -5766,7 +5766,7 @@ console：
 <a id="2do"></a>
 ## 2do. 背景載車時把拖車動物放進車廂排回主執行緒（W107，server，預設 on）
 
-**問題**：`ServerPlayersVehicles` 執行緒載車（`VehiclesDB2$QueueLoadChunk.processWorldStreamer → BaseVehicle.load`）時，對存檔裡每隻拖車動物呼叫 `addAnimalInTrailer`：它在背景執行緒把動物移出世界（engine、cell 的移除清單、雞舍、動物區域、每幀更新清單）並 `sendExtraUpdateToClients`（`AnimalInstanceManager` 與 `AnimalSynchronizationManager` 的 HashMap），主迴圈同時在讀寫這些結構。這是 W105 唯一已知的背景 engine 呼叫來源；同一天 `AnimalSynchronizationManager.update` 的 `ConcurrentModificationException` 推測也來自這裡（推測：沒有重現）。原版在這一段拋例外時，`vehicleLoaded` 會把整台車當讀檔失敗。
+**問題**：`ServerPlayersVehicles` 執行緒載車（`VehiclesDB2$QueueLoadChunk.processWorldStreamer → BaseVehicle.load`）時，對存檔裡每隻拖車動物呼叫 `addAnimalInTrailer`：它在背景執行緒把動物移出世界（engine、cell 的移除清單、雞舍、動物區域、每幀更新清單）並 `sendExtraUpdateToClients`（`AnimalInstanceManager` 與 `AnimalSynchronizationManager` 的 HashMap），主迴圈同時在讀寫這些結構。這是 W105 唯一已知的背景 engine 呼叫來源。同一天 `AnimalSynchronizationManager.update` 的 `ConcurrentModificationException` 原本推測也來自這裡；這一刀上線後它照樣出現、次數與之前相當，所以不是這條路造成的，來源沒查。原版在這一段拋例外時，`vehicleLoaded` 會把整台車當讀檔失敗。
 
 **做法**：`BaseVehicle.load` 裡的兩個 `addAnimalInTrailer(IsoAnimal)` 在非主執行緒時照順序排進 FIFO；`VehiclesDB2$QueueLoadChunk.processMain` 頭部在主執行緒依序呼叫原版。背景執行緒載完一個 chunk 才把它的 `QueueLoadChunk` 放進主執行緒佇列，所以它的動物一定在它的 `processMain` 之前放進車廂，車加進世界時動物已經在車廂裡，與原版相同。動物的建構與讀存檔仍在背景執行緒。主執行緒呼叫或 `mainThread` 還沒設定時照原版。排空時某一筆拋 `RuntimeException` 只記錄、下一筆照做（不會因此刪車）。動物移出世界因此改在主執行緒，W75、W105 看到的是主執行緒呼叫。
 

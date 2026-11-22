@@ -4,7 +4,8 @@
 - 事件：2026-11-22 本服主迴圈從某個 tick 起每個 tick 都拋同一個例外，搬物品與各種動作全部卡住，直到重啟。
 - 資料來源：42.22.2 jar（sha256 `3c4a7c5f…`）的 javap、42.21／42.22.2 反編譯快照（下文只寫類別與方法名稱，不貼原始碼）、本服 DebugLog、JavaPatch 的行為測試（真 `GameEntityManager.UnregisterEntity`、真 `Engine`、真 `processPendingOperations`，以兩條執行緒照事故的先後順序呼叫）。
 - 已確認：(1) javap：42.22.2 的 `GameEntityManager.UnregisterEntity(GameEntity, boolean)` 第一步就是 `engine.removeEntity(entity)`，之後才讀 `addedToEntityManager`；42.21 先看 `addedToEntityManager`。(2) javap：`BaseVehicle.load(ByteBuffer,int,boolean)` 對存檔裡的拖車動物呼叫 `addAnimalInTrailer(IsoAnimal)`，它呼叫 `animal.removeFromWorld()`，經 `GameEntity.removeFromWorld(boolean)` 走到 `UnregisterEntity`；`VehiclesDB2$QueueLoadChunk.processWorldStreamer` 在 `ServerPlayersVehicles` 執行緒呼叫 `load`。(3) javap：`EngineEntityManager.removeEntity` 在 `Engine.processing` 為 true 時從 `SingleThreadPool` 取一個操作物件放進 `pendingOperations`；`SingleThreadPool.free` 先把物件放回池、再 `reset`，兩者都沒有同步。(4) 行為測試：主執行緒 `free` 做到一半（已放回池、還沒 `reset`）時，另一條執行緒 Unregister 一個從沒進過 engine 的 entity，之後主執行緒 `reset`；佇列留下 entity 為 null 的 Remove，之後每次 `processPendingOperations` 都拋 `IllegalArgumentException: key cannot be null`，那筆一直留在佇列。(5) 本服 DebugLog：第一個堆疊與 (4) 相同（`ObjectSet.remove` ← `EngineEntityManager.removeEntityInternal` ← `processPendingOperations` ← `updateOperations` ← `Engine.updateSimulation` ← `GameEntityManager.Update` ← `IngameState.updateInternal`），之後每個 tick 重複。
-- 未確認：正式服那一次是 (4) 的時序，還是兩條執行緒同時從池裡 `pop` 同一個物件（另一個可能的交錯）；兩者的結果相同，我們沒有辦法從 log 分辨。同一天 00:41 有一個 `AnimalSynchronizationManager.update` 的 `ConcurrentModificationException`，推測也來自同一條背景路徑（`addAnimalInTrailer` 呼叫 `sendExtraUpdateToClients`），沒有重現。
+- 未確認：正式服那一次是 (4) 的時序，還是兩條執行緒同時從池裡 `pop` 同一個物件（另一個可能的交錯）；兩者的結果相同，我們沒有辦法從 log 分辨。
+- 不寫進回報的另一件事：同一天 00:41 有一個 `AnimalSynchronizationManager.update` 的 `ConcurrentModificationException`，原本推測也來自同一條背景路徑（`addAnimalInTrailer` 呼叫 `sendExtraUpdateToClients`）。W107 上線後它照樣出現（部署後兩場各 1 次、4 次，之前每場 1–4 次），第一次出現時 W107 還沒排過任何一筆，所以不是這條路造成的；來源沒查。
 - 玩家可用的避開方法：沒有。發生後只能重啟。
 
 **Bug Reports** — https://theindiestone.com/forums/forum/85-bug-reports/?do=add
@@ -60,7 +61,7 @@ Evidence
 
 Not confirmed
 -----
-We cannot tell from the log whether our case was the free/obtain overlap above or two threads popping the same object from freeObjects; both leave a null entity in the queue. We also saw a ConcurrentModificationException in AnimalSynchronizationManager.update() earlier the same day and think it comes from the same background path (addAnimalInTrailer() calls sendExtraUpdateToClients()), but we did not reproduce it.
+We cannot tell from the log whether our case was the free/obtain overlap above or two threads popping the same object from freeObjects; both leave a null entity in the queue.
 
 Suggested fix
 -----
