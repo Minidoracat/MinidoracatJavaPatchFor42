@@ -2,7 +2,7 @@ package zombie.network.packets;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 
 import zombie.characters.BodyDamage.BodyPartType;
 import zombie.characters.CharacterGender;
@@ -14,6 +14,7 @@ import zombie.debug.DebugLog;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.network.fields.character.Player;
+import zombie.scripting.objects.ItemBodyLocation;
 
 /**
  * W103 穿戴同步的伺服器端驗證（docs/patches.md 2dk）。
@@ -22,9 +23,10 @@ import zombie.network.fields.character.Player;
  * 的那幾項（下稱無對應項）各記一行；{@code enforce} 另把它們從封包的清單拿掉，原版就不會處理、也不會轉發。只看背包、
  * 不看穿戴欄：原版處理一包的途中會改穿戴欄，背包不會變，事先查到的結果和原版輪到那一項時查到的一樣。
  *
- * <p>傷口與繃帶的顯示用物品是例外的一類：原版客戶端在本機建立它們，伺服器的背包本來就沒有，正常遊玩就會出現。種類屬於
- * {@link #BODY_MODELS} 的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘各記一行 {@code bodyModels}；兩種模式都留在
- * 清單、照原版處理（拿掉的話原版會把這些模型卸下，客戶端就看不到傷口與繃帶）。
+ * <p>傷口與繃帶的顯示用物品是例外的一類：原版客戶端在本機建立它們，伺服器的背包本來就沒有，正常遊玩就會出現。種類在
+ * {@link #BODY_MODELS} 表內、封包的位置也是原版穿它的那個位置的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘各記
+ * 一行 {@code bodyModels}；兩種模式都留在清單、照原版處理（拿掉的話原版會把這些模型卸下，客戶端就看不到傷口與繃帶）。
+ * 位置不對的不算這一類：原版照封包的位置穿，會動到別的穿戴欄。
  *
  * <p>開關：{@code -Dmdc.wornItemGuard=observe|enforce|off}，預設 observe（只記），要重啟。整包判斷完才動清單；判斷途中出
  * 例外時清單原封不動、這一包照原版處理（兩種模式都是），記 {@code anomaly} 行。
@@ -42,8 +44,11 @@ public final class MdcWornItemGuard {
     private static final int TEXT_CAP = 64;
     private static final long BEAT_NS = 600_000_000_000L;
 
-    /** 原版替各身體部位的繃帶（乾淨、帶血）與咬傷、抓傷、割傷（各性別）建的顯示用物品種類；列不出來就是空的（全部逐項記）。 */
-    private static final HashSet<String> BODY_MODELS = bodyModelTypes();
+    /**
+     * 原版替各身體部位的繃帶（乾淨、帶血）與咬傷、抓傷、割傷（各性別）建的顯示用物品種類 → 原版穿它的位置（物品腳本的
+     * BodyLocation：繃帶 base:bandage、傷口 base:wound；腳本不在 jar 裡，換版時用實機 E2E 重驗）。列不出來就是空的（全部逐項記）。
+     */
+    private static final HashMap<String, ItemBodyLocation> BODY_MODELS = bodyModelTypes();
 
     /** {@code player}、{@code items} 是 private final；任一個找不到就整刀不動（首次生效行寫 reflect=missing）。 */
     private static final Field PLAYER = field("player");
@@ -88,20 +93,24 @@ public final class MdcWornItemGuard {
             if (found == null) {
                 return;
             }
-            // 顯示用物品：封包報的種類在表內；那個 ID 已經穿著時，穿著的那件也要是表內的種類（穿著非顯示用物品時，原版留著它或照封包重建，都不算顯示用物品）
+            // 顯示用物品：封包報的種類在表內、位置是原版穿它的位置；那個 ID 已經穿著時，穿著的那件也要是表內的種類
+            //（穿著非顯示用物品時，原版留著它或照封包重建，都不算顯示用物品）
             boolean[] worn = new boolean[found.size()];
             boolean[] model = new boolean[found.size()];
-            ArrayList<SyncClothingPacket.ItemDescription> refused = new ArrayList<>(found.size());
+            ArrayList<SyncClothingPacket.ItemDescription> refused = MODE == ENFORCE ? new ArrayList<>(found.size()) : null;
             for (int i = 0; i < worn.length; i++) {
-                InventoryItem wornNow = wornItems.getItemById(found.get(i).itemId);
+                SyncClothingPacket.ItemDescription d = found.get(i);
+                InventoryItem wornNow = wornItems.getItemById(d.itemId);
+                ItemBodyLocation home = BODY_MODELS.get(d.itemType);
                 worn[i] = wornNow != null;
-                model[i] = BODY_MODELS.contains(found.get(i).itemType) && (wornNow == null || BODY_MODELS.contains(wornNow.getFullType()));
-                if (!model[i]) {
-                    refused.add(found.get(i));
+                // 位置物件是登錄表的單例（封包 parse 用 ItemBodyLocation.get 取），所以用 == 比
+                model[i] = home != null && home == d.location && (wornNow == null || BODY_MODELS.containsKey(wornNow.getFullType()));
+                if (!model[i] && refused != null) {
+                    refused.add(d);
                 }
             }
             // 判斷到這裡都沒出例外才動清單與計數。顯示用物品不拿掉：少了它原版會把傷口與繃帶的模型卸下
-            if (MODE == ENFORCE) {
+            if (refused != null) {
                 items.removeAll(refused);
             }
             for (int i = 0; i < worn.length; i++) {
@@ -166,19 +175,19 @@ public final class MdcWornItemGuard {
         }
     }
 
-    private static HashSet<String> bodyModelTypes() {
-        HashSet<String> out = new HashSet<>();
+    private static HashMap<String, ItemBodyLocation> bodyModelTypes() {
+        HashMap<String, ItemBodyLocation> out = new HashMap<>();
         try {
             for (BodyPartType part : BodyPartType.values()) {
                 String bandage = part.getBandageModel();
                 if (bandage != null && !bandage.isBlank()) {
-                    out.add(bandage);
-                    out.add(bandage + "_Blood");
+                    out.put(bandage, ItemBodyLocation.BANDAGE);
+                    out.put(bandage + "_Blood", ItemBodyLocation.BANDAGE);
                 }
                 for (CharacterGender gender : CharacterGender.values()) {
                     for (String wound : new String[] {part.getBiteWoundModel(gender), part.getScratchWoundModel(gender), part.getCutWoundModel(gender)}) {
                         if (wound != null && !wound.isBlank()) {
-                            out.add(wound);
+                            out.put(wound, ItemBodyLocation.WOUND);
                         }
                     }
                 }
@@ -260,6 +269,6 @@ public final class MdcWornItemGuard {
     }
 
     static boolean isBodyModelForTest(String type) {
-        return BODY_MODELS.contains(type);
+        return BODY_MODELS.containsKey(type);
     }
 }

@@ -142,7 +142,7 @@ public final class WornItemGuardTest {
             model.items.add(desc(97, "Base.Bandage_RightHand_Blood", ItemBodyLocation.BANDAGE));
             model.packet.processServer(null, model.conn);
             World model2 = world();
-            model2.items.add(desc(97, "Base.Wound_RHand_Bite_Female", ItemBodyLocation.BANDAGE));
+            model2.items.add(desc(97, "Base.Wound_RHand_Bite_Female", ItemBodyLocation.WOUND));
             model2.packet.processServer(null, model2.conn);
             List<String> beats = rows(log, TAG + " bodyModels total=");
             expect("顯示用物品：兩包各 1 項只累計（" + guardLong("bodyModelsForTest") + "）、unbacked 行只多另外 4＋4 行、bodyModels 行恰 1 行（" + beats + "）"
@@ -173,6 +173,34 @@ public final class WornItemGuardTest {
                             && (!enforce || fake.ids().equals("[10, 11, 14]"))
                             && fakeRows.subList(fakeBefore, fakeRows.size()).stream()
                                     .anyMatch(r -> r.contains(" unbacked type=Base.Bandage_RightHand id=16 ") && r.contains(" worn=1 ")));
+
+            // 已經穿著的顯示用物品（97，背包沒有；種類與位置都對）下一包照樣列出：留在清單、穿戴欄還是原本那一件
+            long keptBefore = guardLong("bodyModelsForTest");
+            long keptUnbacked = guardLong("unbackedForTest");
+            int keptMiss = rows(log, VANILLA_MISS).size();
+            World kept = world();
+            StubClothing wornModel = (StubClothing) clothing(97, ItemBodyLocation.WOUND);
+            wornModel.fullType = "Base.Wound_RHand_Bite_Female";
+            kept.player.getWornItems().setItem(ItemBodyLocation.WOUND, wornModel);
+            kept.items.add(desc(97, "Base.Wound_RHand_Bite_Female", ItemBodyLocation.WOUND));
+            kept.packet.processServer(null, kept.conn);
+            List<String> keptMissed = rows(log, VANILLA_MISS);
+            expect("已經穿著的顯示用物品再同步一次：算顯示用物品、不算無對應項，留在清單（" + kept.ids() + "）、穿戴欄還是原本那一件（" + kept.worn() + "）、原版沒有重建它",
+                    guardLong("bodyModelsForTest") == keptBefore + 1 && guardLong("unbackedForTest") == keptUnbacked + 4
+                            && kept.ids().equals(enforce ? "[10, 11, 14, 97]" : "[10, 11, 14, 15, 16, 99, 98, 97]")
+                            && kept.player.getWornItems().getItem(ItemBodyLocation.WOUND) == wornModel
+                            && kept.worn().equals(enforce ? "[10, 11, 14, 97]" : "[10, 11, 14, 15, 16, 97]")
+                            && !types(keptMissed.subList(keptMiss, keptMissed.size()), true).contains("Base.Wound_RHand_Bite_Female"));
+
+            // 顯示用物品的種類報在別的位置（帽子 11 穿著的位置）：不算顯示用物品，enforce 照樣拿掉
+            long misplacedModels = guardLong("bodyModelsForTest");
+            long misplacedUnbacked = guardLong("unbackedForTest");
+            World misplaced = world();
+            misplaced.items.add(desc(96, "Base.Bandage_RightHand", ItemBodyLocation.EARS));
+            misplaced.packet.processServer(null, misplaced.conn);
+            expect("顯示用物品的種類報在別的位置：不算顯示用物品、算無對應項" + (enforce ? "、enforce 照樣拿掉（" + misplaced.ids() + "）" : ""),
+                    guardLong("bodyModelsForTest") == misplacedModels && guardLong("unbackedForTest") == misplacedUnbacked + 5
+                            && (!enforce || misplaced.ids().equals("[10, 11, 14]")));
         }
 
         if (failed > 0) {
@@ -263,7 +291,7 @@ public final class WornItemGuardTest {
         World w = new World();
         BodyLocationGroup group = new BodyLocationGroup("Test");
         ItemBodyLocation[] used = {ItemBodyLocation.EYES, ItemBodyLocation.BACK, ItemBodyLocation.BELT, ItemBodyLocation.EARS,
-                ItemBodyLocation.BANDAGE, ItemBodyLocation.DRESS, ItemBodyLocation.CUIRASS};
+                ItemBodyLocation.BANDAGE, ItemBodyLocation.WOUND, ItemBodyLocation.DRESS, ItemBodyLocation.CUIRASS};
         for (ItemBodyLocation loc : used) {
             group.getOrCreateLocation(loc);
         }
@@ -313,15 +341,18 @@ public final class WornItemGuardTest {
         return d;
     }
 
-    /** Unsafe 配置的衣物沒有 script：位置由測試給。 */
+    /** Unsafe 配置的衣物沒有 script：位置（與需要時的種類）由測試給。 */
     public static class StubClothing extends Clothing {
         public ItemBodyLocation loc;
+        public String fullType;
 
         public StubClothing() {
             super(null, null, null, (String) null, null, null);
         }
 
         @Override public ItemBodyLocation getBodyLocation() { return loc; }
+
+        @Override public String getFullType() { return fullType != null ? fullType : super.getFullType(); }
     }
 
     public static class StubItem extends InventoryItem {
