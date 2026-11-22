@@ -5640,7 +5640,7 @@ console（`kept`、`dropped` 合計每 10 秒最多 20 行）：
 
 強化伺服器端的 `SyncClothing` 驗證：封包列的穿戴物要在伺服器那位玩家的背包裡找得到。缺口細節不在公開文件描述。
 
-**檢查**：逐項看封包列的穿戴物，背包裡找不到 ID 的那幾項（無對應項）各記一行。`observe` 只記；`enforce` 另把無對應項從封包的清單拿掉，之後原版流程照跑：伺服器不處理那幾項，轉發給其他客戶端的清單也沒有它們，其餘各項照穿。封包只指得到送出連線自己的玩家（原版）。傷口與繃帶的顯示用物品正常遊玩就不在背包裡：種類屬於這一類的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘最多各記一行 `bodyModels`；那個 ID 當下已經穿著別種物品時不算這一類，照樣逐項記。
+**檢查**：逐項看封包列的穿戴物，背包裡找不到 ID 的那幾項（無對應項）各記一行。`observe` 只記；`enforce` 另把無對應項從封包的清單拿掉，之後原版流程照跑：伺服器不處理那幾項，轉發給其他客戶端的清單也沒有它們，其餘各項照穿。封包只指得到送出連線自己的玩家（原版）。傷口與繃帶的顯示用物品正常遊玩就不在背包裡：種類屬於這一類的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘最多各記一行 `bodyModels`，`enforce` 也把它們留在清單、照原版處理；那個 ID 當下已經穿著別種物品時不算這一類，照樣逐項記，`enforce` 照樣拿掉。
 
 **手術**：`SyncClothingPacket.processServer` 頭部 `MdcWornItemGuard.begin(packet, connection)`（HeadCall slots 0、2；新 ClassPatch，命中 1），原版指令一條都不改。整包判斷完才動清單；判斷途中出例外時清單原封不動、這一包照原版處理（兩種模式都是），記一行 `anomaly`；`LinkageError` 以外的 `Error` 照常外拋。客戶端給的種類字串進 log 前截成 64 字元、只留英數與 `._-:`。W20 (b) 退役後 `SyncClothingPacket` 原本不出貨，這一刀讓它重新出貨，改的只有 `processServer` 頭部。
 
@@ -5649,7 +5649,7 @@ console（`unbacked`、`anomaly` 合計每 10 秒最多 20 行）：
 ```text
 [MinidoracatJavaPatch][WornItemGuard] 首次生效 mode=observe bodyModelTypes=<顯示用物品種類數> reflect=ok.
 [MinidoracatJavaPatch][WornItemGuard] unbacked type=<種類> id=<id> loc=<位置> worn=0|1 action=logged|removed connectionPlayers=<…> unbacked=<n> suppressed=<n> anomalies=<n>.
-[MinidoracatJavaPatch][WornItemGuard] bodyModels total=<n> action=counted|removed unbacked=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][WornItemGuard] bodyModels total=<n> action=counted unbacked=<n> suppressed=<n> anomalies=<n>.
 [MinidoracatJavaPatch][WornItemGuard] anomaly reason=<例外類別> suppressed=<n> anomalies=<n>.
 ```
 
@@ -5660,9 +5660,9 @@ console（`unbacked`、`anomaly` 合計每 10 秒最多 20 行）：
 **守門與驗證**：
 - SmokeCheck：上游指紋——`processServer` 恰呼叫 `process` 1 次、在轉發之前，轉發用的 `write` 讀封包的 `items`；原版 `process`、它開頭卸下段用到的兩個方法、`parse`、`parseClothing` 與 `WornItems.setItem`／`remove` 本體 SHA 鎖（各配負對照）；手術後頭部 `aload_0; aload_2; begin`，其餘指令與 frames 不變、其餘方法不變；helper 的 catch 只有 `RuntimeException`／`LinkageError`／`ReflectiveOperationException`，每個 `DebugLog.log` 都在含前兩者的 try 內（配放寬成 `Throwable`、拿掉 try 兩個負對照）；`begin` 恰 1 次 `ArrayList.removeAll`，沒有 `Iterator.remove`／`clear`／`remove`／`set`。
 - `WornItemGuardTest`（`build.ps1` [9zzn/10]，observe、enforce、off、jar 原版、logthrow 五個 JVM，自驗 argv）：真 `WornItems`、走真 `processServer` 與它呼叫的真 `process`。一包七項（背包裡的衣物、已穿的衣物、背包裡不是衣物的穿戴物，加四項無對應項，其中兩項已在穿戴欄）：observe 記四行、清單不動，背包查不到的項目沒有漏記；enforce 清單少四項、背包裡有的照穿；off 與 jar 原版不記（負對照）。同一包裡前面的項目改變穿戴欄的情況另測一包，結果相同。種類字串帶空白、等號、換行或超過 64 字元時 log 裡清成 `?` 並截短；清單尾端有壞項目時記 `anomaly`、不外拋、清單一項都不動。logthrow：日誌串流一寫就拋例外時照做、原版照常跑完，改拋 `OutOfMemoryError` 時照常外拋。
-- 顯示用物品種類表在 helper 載入時照原版列各身體部位的繃帶（乾淨、帶血）與咬傷、抓傷、割傷（各性別）的種類；產生這些種類名的原版方法（`BodyPartType` 四個取名方法、`CharacterGender.toString`、`IsoGameCharacter$Bandages` 的 `getBloodBandageType`／`addBandageModel`）有 SHA 鎖。`WornItemGuardTest` 另測：表內有繃帶與各性別的傷口、沒有一般衣物；兩包各帶一項這類種類時 `unbacked` 行不增加、只累計 2，`bodyModels` 行恰 1 行；enforce 連它一起拿掉；已經穿著的一般衣物被封包改報成這類種類時不算這一類、照樣逐項記。
+- 顯示用物品種類表在 helper 載入時照原版列各身體部位的繃帶（乾淨、帶血）與咬傷、抓傷、割傷（各性別）的種類；產生這些種類名的原版方法（`BodyPartType` 四個取名方法、`CharacterGender.toString`、`IsoGameCharacter$Bandages` 的 `getBloodBandageType`／`addBandageModel`）有 SHA 鎖。`WornItemGuardTest` 另測：表內有繃帶與各性別的傷口、沒有一般衣物；兩包各帶一項這類種類時 `unbacked` 行不增加、只累計 2，`bodyModels` 行恰 1 行；enforce 把它留在清單、原版照常處理它，另外四項照樣拿掉；已經穿著的一般衣物被封包改報成這類種類時不算這一類、照樣逐項記，enforce 照樣拿掉。
 - 實機 E2E（2026-11-15，9950X3D，42.22.2 專用伺服器，一般權限的客戶端；情境不公開）：observe（`w103-obs-1115b`）`RESULT PASS`，伺服器的結果與 off 輪（`w103-off-1115b`）相同，console 有首次生效行與 `unbacked … action=logged` 行；enforce（`w103-enf-1115b`）`RESULT PASS`，console 兩行 `action=removed`，背包裡的物品照常穿上。三輪都是 `[mdc-agent] ARMED: 85 patched classes`、零連結錯誤；登入與穿上背包裡的物品沒有產生 `unbacked` 行。只測了登入與換穿，沒有涵蓋受傷、包紮等其他會同步穿戴的情況。
-- 實機 E2E 補測（2026-11-15，同一台，agent jar `43c48f5e`，`[mdc-agent] ARMED: 86 patched classes`、零連結錯誤）：受傷（`w103w-obs-1115e`）`RESULT PASS`——角色受傷後客戶端同步的傷口顯示用物品只累計（`bodyModels total=1 action=counted`）、零 `unbacked` 行，首次生效行 `bodyModelTypes=94`；登入與換穿重跑（`w103-obs-1115e`）`RESULT PASS`，逐項 `unbacked` 行照記。enforce 在加分類之前的包（`w103w-enf-1115a`）會把傷口的顯示用物品拿掉、客戶端等不到傷口模型，所以 enforce 現在不要開。繃帶的顯示用物品沒有實機驗到（情境沒走到）。
+- 實機 E2E 補測（2026-11-15，同一台，agent jar `43c48f5e`，`[mdc-agent] ARMED: 86 patched classes`、零連結錯誤）：受傷（`w103w-obs-1115e`）`RESULT PASS`——角色受傷後客戶端同步的傷口顯示用物品只累計（`bodyModels total=1 action=counted`）、零 `unbacked` 行，首次生效行 `bodyModelTypes=94`；登入與換穿重跑（`w103-obs-1115e`）`RESULT PASS`，逐項 `unbacked` 行照記。enforce 在加分類之前的包（`w103w-enf-1115a`）會把傷口的顯示用物品拿掉、客戶端等不到傷口模型；當時的 enforce 連這一類一起拿掉，之後改成放行（見下一條）。繃帶的顯示用物品這一次沒有實機驗到（情境沒走到）。
 
 **部署**：manifest 新增 `zombie/network/packets/MdcWornItemGuard.class` 與 `zombie/network/packets/SyncClothingPacket.class`（188 → 190 個 class：85 個 patched class、250 個命中點、105 個 helper）。
 

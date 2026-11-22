@@ -146,11 +146,18 @@ public final class WornItemGuardTest {
             model2.packet.processServer(null, model2.conn);
             List<String> beats = rows(log, TAG + " bodyModels total=");
             expect("顯示用物品：兩包各 1 項只累計（" + guardLong("bodyModelsForTest") + "）、unbacked 行只多另外 4＋4 行、bodyModels 行恰 1 行（" + beats + "）"
-                            + (enforce ? "、enforce 連它一起拿掉（" + model.ids() + "）" : "、清單不動"),
+                            + (enforce ? "、enforce 只拿掉另外 4 項、顯示用物品留在清單（" + model.ids() + "、" + model2.ids() + "）" : "、清單不動"),
                     guardLong("bodyModelsForTest") == 2 && rows(log, TAG + " unbacked ").size() == rowsBefore + 8 && beats.size() == 1
-                            && beats.get(0).contains(" bodyModels total=1 action=" + (enforce ? "removed" : "counted") + " unbacked=")
+                            && beats.get(0).contains(" bodyModels total=1 action=counted unbacked=")
                             && guardLong("unbackedForTest") == 16
-                            && model.ids().equals(enforce ? "[10, 11, 14]" : "[10, 11, 14, 15, 16, 99, 98, 97]"));
+                            && model.ids().equals(enforce ? "[10, 11, 14, 97]" : "[10, 11, 14, 15, 16, 99, 98, 97]")
+                            && model2.ids().equals(enforce ? "[10, 11, 14, 97]" : "[10, 11, 14, 15, 16, 99, 98, 97]"));
+            if (enforce) {
+                // 放行＝原版真的輪到它：測試環境沒有物品腳本，原版去建立時印 Couldn't find item；其餘無對應項都拿掉了，所以只會有這兩種
+                var built = types(rows(log, VANILLA_MISS), true);
+                expect("enforce：留在清單的顯示用物品照原版處理（原版走到建立的種類 " + built + "）",
+                        built.size() == 2 && built.containsAll(List.of("Base.Bandage_RightHand_Blood", "Base.Wound_RHand_Bite_Female")));
+            }
 
             // 已經穿著的普通衣物（16，背包沒有）被封包改報成顯示用物品的種類：穿著的不是顯示用物品，所以照樣逐項記、不算顯示用物品。
             //（這個 JVM 到這裡已接近每 10 秒 20 行的上限，行數不一定滿 4；計數才是準的）
@@ -161,8 +168,9 @@ public final class WornItemGuardTest {
             fake.items.get(4).itemType = "Base.Bandage_RightHand";
             fake.packet.processServer(null, fake.conn);
             List<String> fakeRows = rows(log, TAG + " unbacked ");
-            expect("穿著的普通衣物假報顯示用物品的種類：不算顯示用物品、照樣算無對應項並逐項記",
+            expect("穿著的普通衣物假報顯示用物品的種類：不算顯示用物品、照樣算無對應項並逐項記" + (enforce ? "、enforce 照樣拿掉（" + fake.ids() + "）" : ""),
                     guardLong("bodyModelsForTest") == modelsBefore && guardLong("unbackedForTest") == unbackedCountBefore + 4
+                            && (!enforce || fake.ids().equals("[10, 11, 14]"))
                             && fakeRows.subList(fakeBefore, fakeRows.size()).stream()
                                     .anyMatch(r -> r.contains(" unbacked type=Base.Bandage_RightHand id=16 ") && r.contains(" worn=1 ")));
         }

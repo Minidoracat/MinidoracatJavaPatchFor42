@@ -23,10 +23,11 @@ import zombie.network.fields.character.Player;
  * 不看穿戴欄：原版處理一包的途中會改穿戴欄，背包不會變，事先查到的結果和原版輪到那一項時查到的一樣。
  *
  * <p>傷口與繃帶的顯示用物品是例外的一類：原版客戶端在本機建立它們，伺服器的背包本來就沒有，正常遊玩就會出現。種類屬於
- * {@link #BODY_MODELS} 的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘各記一行 {@code bodyModels}。
+ * {@link #BODY_MODELS} 的無對應項不逐項記，只累計，第一次出現與之後每 10 分鐘各記一行 {@code bodyModels}；兩種模式都留在
+ * 清單、照原版處理（拿掉的話原版會把這些模型卸下，客戶端就看不到傷口與繃帶）。
  *
  * <p>開關：{@code -Dmdc.wornItemGuard=observe|enforce|off}，預設 observe（只記），要重啟。整包判斷完才動清單；判斷途中出
- * 例外時清單原封不動、這一包照原版處理（兩種模式都是），記 {@code anomaly} 行。{@code enforce} 目前連顯示用物品一起拿掉。
+ * 例外時清單原封不動、這一包照原版處理（兩種模式都是），記 {@code anomaly} 行。
  */
 public final class MdcWornItemGuard {
     private static final String TAG = "[MinidoracatJavaPatch][WornItemGuard]";
@@ -90,14 +91,18 @@ public final class MdcWornItemGuard {
             // 顯示用物品：封包報的種類在表內；那個 ID 已經穿著時，穿著的那件也要是表內的種類（穿著非顯示用物品時，原版留著它或照封包重建，都不算顯示用物品）
             boolean[] worn = new boolean[found.size()];
             boolean[] model = new boolean[found.size()];
+            ArrayList<SyncClothingPacket.ItemDescription> refused = new ArrayList<>(found.size());
             for (int i = 0; i < worn.length; i++) {
                 InventoryItem wornNow = wornItems.getItemById(found.get(i).itemId);
                 worn[i] = wornNow != null;
                 model[i] = BODY_MODELS.contains(found.get(i).itemType) && (wornNow == null || BODY_MODELS.contains(wornNow.getFullType()));
+                if (!model[i]) {
+                    refused.add(found.get(i));
+                }
             }
-            // 判斷到這裡都沒出例外才動清單與計數
+            // 判斷到這裡都沒出例外才動清單與計數。顯示用物品不拿掉：少了它原版會把傷口與繃帶的模型卸下
             if (MODE == ENFORCE) {
-                items.removeAll(found);
+                items.removeAll(refused);
             }
             for (int i = 0; i < worn.length; i++) {
                 if (model[i]) {
@@ -154,7 +159,7 @@ public final class MdcWornItemGuard {
         beatNs = now;
         bodyModelsAtBeat = bodyModels;
         try {
-            DebugLog.log(TAG + " bodyModels total=" + bodyModels + " action=" + (MODE == ENFORCE ? "removed" : "counted")
+            DebugLog.log(TAG + " bodyModels total=" + bodyModels + " action=counted"
                     + " unbacked=" + unbacked + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
