@@ -7560,7 +7560,8 @@ public final class SmokeCheck {
                     "e63fbbeb1d5a4d0564db89b5af1cb2486a95cb15c80b2a0e2f7ce251e1bcf051"},
             {"zombie/characters/WornItems/WornItems", "remove", "(Lzombie/inventory/InventoryItem;)V",
                     "4ef1d26a82d1672e080b80ce420834c0d4ff408526ed4aea15bc86786658dc22"},
-            // 顯示用物品種類表（MdcWornItemGuard.BODY_MODELS）照這幾個方法列：客戶端替傷口與繃帶建的物品種類
+            // 顯示用物品種類表（MdcWornItemGuard.BODY_MODELS）的傷口與繃帶照這幾個方法列：客戶端替傷口與繃帶建的物品種類
+            //（化妝品的種類名寫在 helper 裡，來源是物品腳本，這裡鎖不到）
             {"zombie/characters/BodyDamage/BodyPartType", "getBandageModel", "()Ljava/lang/String;",
                     "bded60f15796847faddbcd7b7c7616412858de0f4f88569017081fb4a0941b95"},
             {"zombie/characters/BodyDamage/BodyPartType", "getBiteWoundModel", "(Lzombie/characters/CharacterGender;)Ljava/lang/String;",

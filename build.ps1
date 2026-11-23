@@ -1020,7 +1020,7 @@ Assert-Ok "ItemModDataGuardTest（vanilla，jar 原版負對照）"
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest logthrow
 Assert-Ok "ItemModDataGuardTest（logthrow on，日誌拋例外時保護照做、Error 照常外拋）"
 
-Write-Host "[9zzn/10] 穿戴同步驗證（W103）：真 processServer；封包列的穿戴物在伺服器背包裡找不到時，observe 各記一行、清單不動，背包查不到的項目沒有漏記；enforce 整包判斷完才從清單拿掉、背包裡有的照穿，傷口與繃帶的顯示用物品（種類與位置都對）留在清單照原版處理、已經穿著的再同步一次也留著，位置不對或假報成這類種類的照樣拿掉；同一包前面的項目改變穿戴欄時結果相同；off 與 jar 原版不記（負對照）；客戶端給的種類字串進 log 前清過；判斷途中出例外時清單不動；logthrow：日誌拋例外時照做、Error 照常外拋..."
+Write-Host "[9zzn/10] 穿戴同步驗證（W103）：真 processServer；封包列的穿戴物在伺服器背包裡找不到時，observe 各記一行、清單不動，背包查不到的項目沒有漏記；enforce 整包判斷完才從清單拿掉、背包裡有的照穿，顯示用物品（傷口與繃帶的模型、原版化妝品；種類與位置都對）留在清單照原版處理、已經穿著的再同步一次也留著，位置不對、假報成這類種類或表外的化妝品種類照樣拿掉；同一包前面的項目改變穿戴欄時結果相同；off 與 jar 原版不記（負對照）；客戶端給的種類字串進 log 前清過；判斷途中出例外時清單不動；logthrow：日誌拋例外時照做、Error 照常外拋..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest observe
 Assert-Ok "WornItemGuardTest（observe，出貨組態）"
 java -Xverify:all "-Dmdc.wornItemGuard=enforce" -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.WornItemGuardTest enforce

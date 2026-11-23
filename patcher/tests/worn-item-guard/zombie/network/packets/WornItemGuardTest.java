@@ -201,6 +201,28 @@ public final class WornItemGuardTest {
             expect("顯示用物品的種類報在別的位置：不算顯示用物品、算無對應項" + (enforce ? "、enforce 照樣拿掉（" + misplaced.ids() + "）" : ""),
                     guardLong("bodyModelsForTest") == misplacedModels && guardLong("unbackedForTest") == misplacedUnbacked + 5
                             && (!enforce || misplaced.ids().equals("[10, 11, 14]")));
+
+            // 化妝品（化妝介面的預覽，背包沒有）：種類在表內、位置是腳本的位置才算顯示用物品；位置錯的、表內沒有的種類照樣算無對應項
+            expect("顯示用物品種類表：原版化妝品在表內，表內沒有的化妝品種類不在",
+                    (boolean) isModel.invoke(null, "Base.MakeUp_LipsRed") && (boolean) isModel.invoke(null, "Base.MakeUp_SkullFace2")
+                            && (boolean) isModel.invoke(null, "Base.MakeUp_EyesShadowBlue") && (boolean) isModel.invoke(null, "Base.MakeUp_Crow")
+                            && !(boolean) isModel.invoke(null, "Base.MakeUp_Fake"));
+            long makeUpModels = guardLong("bodyModelsForTest");
+            long makeUpUnbacked = guardLong("unbackedForTest");
+            int makeUpMiss = rows(log, VANILLA_MISS).size();
+            World makeUp = world();
+            makeUp.items.add(desc(95, "Base.MakeUp_LipsRed", ItemBodyLocation.MAKE_UP_LIPS));
+            makeUp.items.add(desc(94, "Base.MakeUp_LipsBlue", ItemBodyLocation.MAKE_UP_EYES));
+            makeUp.items.add(desc(93, "Base.MakeUp_Fake", ItemBodyLocation.MAKE_UP_FULL_FACE));
+            makeUp.packet.processServer(null, makeUp.conn);
+            List<String> makeUpMissed = rows(log, VANILLA_MISS);
+            TreeSet<String> makeUpBuilt = types(makeUpMissed.subList(makeUpMiss, makeUpMissed.size()), true);
+            expect("化妝品：種類與位置都對的 1 項算顯示用物品，位置錯的與表內沒有的種類算無對應項（另外 4＋2 項）"
+                            + (enforce ? "、enforce 只留對的那一項（" + makeUp.ids() + "）、原版只走到建立它（" + makeUpBuilt + "）" : "、清單不動、原版三項都處理（" + makeUpBuilt + "）"),
+                    guardLong("bodyModelsForTest") == makeUpModels + 1 && guardLong("unbackedForTest") == makeUpUnbacked + 6
+                            && makeUp.ids().equals(enforce ? "[10, 11, 14, 95]" : "[10, 11, 14, 15, 16, 99, 98, 95, 94, 93]")
+                            && (enforce ? makeUpBuilt.equals(new TreeSet<>(List.of("Base.MakeUp_LipsRed")))
+                                    : makeUpBuilt.containsAll(List.of("Base.MakeUp_LipsRed", "Base.MakeUp_LipsBlue", "Base.MakeUp_Fake"))));
         }
 
         if (failed > 0) {
@@ -291,7 +313,8 @@ public final class WornItemGuardTest {
         World w = new World();
         BodyLocationGroup group = new BodyLocationGroup("Test");
         ItemBodyLocation[] used = {ItemBodyLocation.EYES, ItemBodyLocation.BACK, ItemBodyLocation.BELT, ItemBodyLocation.EARS,
-                ItemBodyLocation.BANDAGE, ItemBodyLocation.WOUND, ItemBodyLocation.DRESS, ItemBodyLocation.CUIRASS};
+                ItemBodyLocation.BANDAGE, ItemBodyLocation.WOUND, ItemBodyLocation.DRESS, ItemBodyLocation.CUIRASS,
+                ItemBodyLocation.MAKE_UP_LIPS, ItemBodyLocation.MAKE_UP_EYES, ItemBodyLocation.MAKE_UP_FULL_FACE};
         for (ItemBodyLocation loc : used) {
             group.getOrCreateLocation(loc);
         }
