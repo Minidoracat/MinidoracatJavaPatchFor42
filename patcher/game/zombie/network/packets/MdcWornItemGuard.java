@@ -110,7 +110,7 @@ public final class MdcWornItemGuard {
                     refused.add(d);
                 }
             }
-            // 判斷到這裡都沒出例外才動清單與計數。顯示用物品不拿掉：少了它原版會把傷口與繃帶的模型卸下
+            // 判斷到這裡都沒出例外才動清單與計數。顯示用物品不拿掉：少了它原版會把傷口、繃帶的模型與化妝預覽卸下
             if (refused != null) {
                 items.removeAll(refused);
             }
