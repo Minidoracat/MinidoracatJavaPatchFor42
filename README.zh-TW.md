@@ -322,6 +322,32 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 
 也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL；以及 Git for Windows 的 bash，用來測 macOS 的啟動腳本）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
 
+### Linux 原生 Steam 客戶端（手動安裝）
+
+已在 x86-64 Linux 上以客戶端修補包 0.3.7 和 Project Zomboid 42.22.2 測試。先結束遊戲，在 Steam 選「管理 → 瀏覽本機檔案」，再開啟含有 `ProjectZomboid64.json` 的小寫 `projectzomboid` 資料夾。在這裡執行 `sha256sum projectzomboid.jar`，確認結果為 `3c4a7c5f149d784758c6fb5f8fa85f3a21d572e38bc081400e89035f8120d287` 才繼續。
+
+1. 從 [0.3.7 發布頁](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/tag/client-v0.3.7)下載 `MinidoracatClientPatches-42.22.2-0.3.7-macOS.zip` 和 `SHA256SUMS.txt`。執行 `sha256sum MinidoracatClientPatches-42.22.2-0.3.7-macOS.zip`，與校驗檔中這個 ZIP 的值比對，相符後解壓縮。壓縮檔內含 Java agent 和套件清單。
+2. 在解壓縮的資料夾內，用 `jq` 依照要載入的模組產生安裝紀錄。記憶體少於 32 GB 時，請將下方指令和啟動參數中的 `client-fixes-standard` **都改成** `client-fixes-lowmem`。只需要車輛修補時，兩處都改用 `client-fixes-compat`。
+
+```sh
+jq -e --arg variant client-fixes-standard '{
+  schemaVersion, packageVersion, jarSha256,
+  agent: {path: ".mdc-patches/MinidoracatClientPatches.jar", sha256: .agent.sha256},
+  modules: [.modules[] | select(.id == "core" or .id == $variant) | {id, name, version, requires}]
+} | select(.schemaVersion == 2 and (.modules | length) == 2)' manifest.json > state.json
+```
+
+3. 指令成功後，在小寫的遊戲資料夾內建立 `.mdc-patches`，將 `MinidoracatClientPatches.jar` 和剛產生的 `state.json` 複製進去。這些步驟適用於首次安裝。
+4. 備份 `ProjectZomboid64.json`。在最外層的 `"vmArgs"` 陣列中，緊接著開頭的 `[` 加入以下這行，排在原有參數之前。
+
+```json
+"-javaagent:.mdc-patches/MinidoracatClientPatches.jar=modules=core,client-fixes-standard",
+```
+
+從 Steam 啟動遊戲。主選單的狀態框應列出 `core` 和所選的客戶端修補。也可以在 `~/Zomboid/console.txt` 找到含有 `compatible=true` 的 `[MinidoracatPatches]` 訊息，以及兩行 `installed=`。若 agent 顯示 `ARMED`，主選單卻出現 `CHECK FAILED`，狀態框下一行會指出原因。
+
+要移除時，結束遊戲，**先移除剛加入的啟動參數**，再刪除複製到 `.mdc-patches` 的兩個檔案。Steam 更新或驗證遊戲檔案可能會還原啟動設定；重新啟用前請再次核對遊戲 JAR 的 SHA-256。
+
 ## 建議的伺服器設定
 
 不是修補，但屬於同一條調校線：
