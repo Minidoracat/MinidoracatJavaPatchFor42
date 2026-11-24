@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $JAVAC)) { throw '找不到 JDK 25' }
 $JAR = Join-Path $R 'work/projectzomboid.jar'
 if (-not (Test-Path -LiteralPath $JAR)) { throw '缺 work/projectzomboid.jar' }
 $GAME_VERSION = '42.22.2'
-$PACKAGE_VERSION = '0.3.7'
+$PACKAGE_VERSION = '0.3.8'
 $DIST = Join-Path $R 'dist-client-modular'
 $OUT = Join-Path $R 'work/out-client-modular'
 $GEN = Join-Path $R 'work/gen-client-modular'
@@ -91,12 +91,13 @@ Write-Host '[3/8] 產生各模組 payload 與逐方法守門'
 $recipes = @(
     @{ id='core'; mode='client-core'; name='核心元件（自動安裝）'; nameEn='Core components (installed automatically)'; version=$coreVersion; requires=@() },
     @{ id='profiler'; mode='client-profiler'; name='DevProfiler 效能分析工具（模組開發者用）'; nameEn='DevProfiler performance tool (for mod developers)'; version=$coreVersion; requires=@('core') },
-    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.9($sourceRef)"; requires=@('core'); group='client-fixes' },
-    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.9-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-standard'; mode='client'; name='客戶端修復・標準版（記憶體 32GB 以上）'; nameEn='Client fixes - standard (32 GB RAM or more)'; version="v3.10($sourceRef)"; requires=@('core'); group='client-fixes' },
+    @{ id='client-fixes-lowmem'; mode='client-lowmem'; name='客戶端修復・省記憶體版（記憶體 32GB 以下）'; nameEn='Client fixes - low memory (less than 32 GB RAM)'; version="v3.10-lowmem($sourceRef)"; requires=@('core'); group='client-fixes' },
     # 相容版：只裝 PZ_Optimization 這類 MOD 不替換的 class（PatchConfig.clientCompat），helper 只帶這幾刀用到的
-    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛修補）'; nameEn='Client fixes - compatible (vehicle fixes only)'; version="v3.9-compat($sourceRef)"; requires=@('core'); group='client-fixes';
+    @{ id='client-fixes-compat'; mode='client-compat'; name='客戶端修復・相容版（只含車輛修補）'; nameEn='Client fixes - compatible (vehicle fixes only)'; version="v3.10-compat($sourceRef)"; requires=@('core'); group='client-fixes';
        helpers=@('zombie/mdc/PatchInfo.class', 'zombie/mdc/VehicleAnimGate.class', 'zombie/mdc/VehicleAnimGate$PoseState.class',
-                 'zombie/mdc/VehicleClampGuard.class', 'zombie/mdc/VehicleOrphanGuard.class', 'zombie/vehicles/MdcVehicleSinkGuard.class') }
+                 'zombie/mdc/VehicleClampGuard.class', 'zombie/mdc/VehicleOrphanGuard.class', 'zombie/vehicles/MdcVehicleSinkGuard.class',
+                 'zombie/mdc/VehicleModelRebind.class') }
 )
 $modules = @()
 $moduleManifests = @{}
@@ -223,6 +224,12 @@ foreach ($id in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-
         & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.vehicles.MdcVehicleSinkGuardBehaviorTest $run[0]
         Assert-Ok "MdcVehicleSinkGuardBehaviorTest $($run[0]) $id"
     }
+    # W108：on 與 off 各跑一次（off＝kill switch 實跑，收養後 ModelInfo.part 仍指舊零件＝原版負對照）
+    foreach ($run in @(@('on', @()), @('off', @('-Dmdc.vehicleModelRebind=off')))) {
+        $jvmArgs = @($run[1])
+        & $JAVA --enable-native-access=ALL-UNNAMED @jvmArgs -cp $cp zombie.mdc.VehicleModelRebindBehaviorTest $run[0]
+        Assert-Ok "VehicleModelRebindBehaviorTest $($run[0]) $id"
+    }
     if ($full) {
         # W68：on 與 off 各跑一次（off＝kill switch 實跑，重建與查房間照原版不互斥＝原版負對照）
         foreach ($run in @(@('on', @()), @('off', @('-Dmdc.metaGridLock=off')))) {
@@ -289,6 +296,18 @@ foreach ($variant in @('client-fixes-standard', 'client-fixes-lowmem', 'client-f
     Invoke-AgentLoadCheck "core,$variant" @('core', $variant) 'armed'
 }
 Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'armed'
+# 本包 premain 只能載入葉 class（錨點、helper 與 helper 的父型別）：排在後面的 agent（PZ_Optimization）看到它要換的 class
+# 已被載入就以原版執行。PreloadAgent 排在本包後面、不帶 class 名稱，只用來讀已載入的 class
+$preloadDir = Join-Path $R 'work/agentcheck-client-preload'
+New-Item -ItemType Directory -Force $preloadDir | Out-Null
+Copy-Item "$OUT\PreloadAgent.class" $preloadDir -Force
+Write-Utf8 "$preloadDir\manifest.mf" "Premain-Class: PreloadAgent`nCan-Retransform-Classes: true`n"
+& (Join-Path $JDK 'bin/jar.exe') --create --file "$preloadDir\preload-agent.jar" --manifest "$preloadDir\manifest.mf" -C $preloadDir PreloadAgent.class
+Assert-Ok 'jar preload-agent.jar'
+foreach ($variant in @('client-fixes-standard', 'client-fixes-lowmem', 'client-fixes-compat')) {
+    Invoke-AgentLoadCheck "core,$variant" @('core', $variant) 'armed' -JvmArgs @("-javaagent:$preloadDir\preload-agent.jar", '-Dmdc.check.preload=1')
+}
+Invoke-AgentLoadCheck 'core,profiler,client-fixes-standard' @('core', 'profiler', 'client-fixes-standard') 'armed' -JvmArgs @("-javaagent:$preloadDir\preload-agent.jar", '-Dmdc.check.preload=1')
 Invoke-AgentLoadCheck 'core,client-fixes-standard' @('core', 'client-fixes-standard') 'off' -JvmArgs @('-Dmdc.agent=off')
 # helper 定義失敗（故障注入）：不啟用、要換的 class 以原版載入。client 包定義 helper 的期間沒有 class 被換上（實測還原 0 個）；
 # 換上後再還原的路徑由 build.ps1 [5b] 的 restored 驗（伺服器包定義 helper 時會先換上父型別）
@@ -382,6 +401,9 @@ $fixListEn = @"
   chunk is redrawn, the game scans the whole blood list of each of its 8 neighbours to
   find the few splats near the shared edge. The neighbours' splats are now looked up by
   which edge they are near (the picture stays the same).
+- Single player: leave a car with the engine running and walk away; when you come back
+  its doors and hood are out of place and will not open. The door and hood models now
+  follow the car's current parts.
 If you have never seen these problems, you do not need this package.
 "@
 $modulesEn = @"
@@ -409,15 +431,17 @@ $modulesEn = @"
   a floor blood speed-up that keeps the picture identical: drawing a chunk only looks at
   the splats of its neighbours that lie near the shared edge instead of scanning their
   whole lists (checked against a full scan now and then; any difference switches it off
-  for the session).
+  for the session). Both also include the car door fix: in single player, after you walk away
+  from a car with the engine running and come back, the door and hood models are rebound
+  to the car's current parts so they line up and open again.
   JVM flags -Dmdc.staleRoomHeal=off, -Dmdc.vehAnimSkip=off,
   -Dmdc.boneReparentFast=off, -Dmdc.vehicleClampGuard=off, -Dmdc.vehicleOrphanUpdate=off,
-  -Dmdc.driverRecallGuard=off, -Dmdc.metaGridLock=off and -Dmdc.bloodSplatIndex=off turn
-  them off; -Dmdc.agent=off turns the whole package off (add them to vmArgs in
+  -Dmdc.driverRecallGuard=off, -Dmdc.metaGridLock=off, -Dmdc.bloodSplatIndex=off and
+  -Dmdc.vehicleModelRebind=off turn them off; -Dmdc.agent=off turns the whole package off (add them to vmArgs in
   ProjectZomboid64.json).
 - Client fixes, compatible version: only the fixes in classes that mods such as
   PZ_Optimization leave alone: the vehicle fixes (unchanged pose skip, teleport, vehicle
-  left on an unloaded chunk, vehicle under the floor). The texture, room-disconnect,
+  left on an unloaded chunk, vehicle under the floor, car doors after walking away). The texture, room-disconnect,
   room-table, floor blood and chunk-streaming fixes are not in it. Choose it only when
   you use such a mod.
 - DevProfiler: performance tool for mod developers; its interface is the separate mod
@@ -436,6 +460,8 @@ $fixListZh = @"
   改成照遊戲原意拉回旁邊已載入的地方。
 - 大戰之後地上滿是血跡、畫面變卡：每重畫一個 chunk，遊戲就把 8 個鄰居的血跡清單整份掃一遍，
   只為了找出靠近交界的那幾筆；改成直接查靠那一邊的血跡（畫面不變）。
+- 單機時引擎沒熄火就下車走遠，回來後車門、引擎蓋位置跑掉而且打不開；
+  改成讓門與引擎蓋的模型跟著車上現在的零件。
 沒遇過這些問題的人可以不用裝。
 "@
 $modulesZh = @"
@@ -453,12 +479,13 @@ $modulesZh = @"
   （原版會跳出「isoRoom is null」這類錯誤並斷線）。
   兩版也含地上血跡加速，畫面與原版相同：畫一個 chunk 時，鄰居的血跡只看靠交界那一邊的，不再整份掃過
   （不定期抽查一次整份掃描，不一致就本次遊戲停用）。
+  兩版也含車門修補：單機時引擎沒熄火下車走遠再回來，門與引擎蓋的模型改綁到車上現在的零件，位置對得上、也打得開。
   JVM 參數 -Dmdc.staleRoomHeal=off、-Dmdc.vehAnimSkip=off、-Dmdc.boneReparentFast=off、
   -Dmdc.vehicleClampGuard=off、-Dmdc.vehicleOrphanUpdate=off、-Dmdc.driverRecallGuard=off、
-  -Dmdc.metaGridLock=off、-Dmdc.bloodSplatIndex=off 可分別關閉；-Dmdc.agent=off 關掉整包
+  -Dmdc.metaGridLock=off、-Dmdc.bloodSplatIndex=off、-Dmdc.vehicleModelRebind=off 可分別關閉；-Dmdc.agent=off 關掉整包
   （加在 ProjectZomboid64.json 的 vmArgs）。
 - 客戶端修復・相容版：只含 PZ_Optimization 這類 MOD 不替換的 class 裡的修補：車輛修補
-  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下）；沒有貼圖、自建房斷線、房間表、地上血跡與串流紀錄這幾項。
+  （靜止姿勢跳過、開車瞬移、車留在已卸載的 chunk、車掉到地板下、下車走遠後車門打不開）；沒有貼圖、自建房斷線、房間表、地上血跡與串流紀錄這幾項。
   只在和這類 MOD 一起用時選它。
 - DevProfiler：效能分析工具，介面需另在遊戲 MOD 管理器啟用 MinidoracatDevProfilerFor42。
   installed 只代表檔案驗證通過；hook observed 才代表本次 JVM 走到該掛點。
@@ -555,6 +582,12 @@ package patches, the installer stops with code 7 and changes nothing.
   game closes when you join a server.
 - To keep that mod, install the compatible version (vehicle fixes only). The installer
   recommends it when another mod is in the way.
+- PZ_Optimization for 42.22 is a Java agent (pzopt\agent\pzopt-agent.jar, replacing
+  the classes in pzopt\overrides). The installer checks those too. The compatible
+  version works next to it in either launch order; with 0.3.7 or older, PZ_Optimization
+  ran stock, so update. If you installed a full version first and PZ_Optimization
+  later, this package switches itself off; the status check tells you to install the
+  compatible version.
 - For the full version, remove that mod with its own uninstaller first
   (PZ_Optimization: Uninstall-PZ-Optimization.cmd in the game folder), then install.
 - With PZ_Optimization's "Warm-start cache (Java AOT)" option on, the game loads classes
@@ -675,6 +708,9 @@ $fixListZh
 （有沒有裝本包都一樣），安裝器看到時會提醒。它替換的 class 正好是本包要修補的時，安裝器會以 code 7 停止，不改任何檔案。
 - 不要只刪除它列出的檔案。那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉。
 - 要保留那個 MOD，就裝相容版（只含車輛的修補）；有別的 MOD 擋著時，安裝器會建議你選它。
+- 42.22 版的 PZ_Optimization 是 Java agent（pzopt\agent\pzopt-agent.jar，換掉 pzopt\overrides 裡的 class），
+  安裝器一樣會檢查。相容版可以和它一起用，啟動順序誰前誰後都可以；0.3.7 以前的本包會讓它以原版執行，請更新。
+  先裝完整版、之後才裝 PZ_Optimization 時，本包會自己停用，查狀態時會提醒你改裝相容版。
 - 要完整版，先用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的
   Uninstall-PZ-Optimization.cmd），再安裝本包。
 - PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲會先從它自己的 jar 載入 class，

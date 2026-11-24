@@ -1676,6 +1676,61 @@ try {
         $mem = @($r.Out -split "`n" | Where-Object { $_ -cmatch 'memory| MB' })
         Check ($mem.Count -ge 4 -and -not (($mem -join '') -match '[\u3000-\u9fff\uff00-\uffef]')) '記憶體相關行沒有中文字'
     } finally { $env:MDC_PATCHES_TEST_RAM_GB = '8' }
+
+    # ------------------------------------------------------------ 94-99：PZ_Optimization 的 agent 形態（pzopt/agent/pzopt-agent.jar＋pzopt/overrides/）
+    $PzoptArg = '-javaagent:pzopt/agent/pzopt-agent.jar'
+    $SetPzopt = { param([string]$cls) Write-TextFile (GameFile 'pzopt/agent/pzopt-agent.jar') 'pzopt-agent'; Write-TextFile (GameFile "pzopt/overrides/$cls.class") 'pzopt-override' }
+
+    Start-Case '94. pzopt/overrides 換了完整版要修補的 class：完整版拒裝、指向相容版、什麼都不寫'
+    Reset-GameDir
+    & $SetPzopt 'zombie/iso/IsoChunk'
+    $r = Invoke-Install @('client-fixes-standard') $PkgV1
+    Check ($r.Code -eq 7) '結束代碼 7'
+    Check ($r.Out.Contains('pzopt/overrides/zombie/iso/IsoChunk.class') -and $r.Out -match 'client-fixes-compat') '列出 pzopt 的檔案並指向相容版'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and (Test-JsonIsOriginal)) '沒有寫入任何東西'
+
+    Start-Case '95. 同一個目錄裝相容版：可以裝，自己排第一、pzopt 的參數原樣保留'
+    Reset-GameDir
+    & $SetPzopt 'zombie/iso/IsoChunk'
+    Write-TextFile (GameFile $LAUNCHER_REL) $ORIG_JSON.Replace("`t`t`"-Djava.library.path=win64/;.`"`n", "`t`t`"-Djava.library.path=win64/;.`",`n`t`t`"$PzoptArg`"`n")
+    $r = Invoke-Install @('client-fixes-compat') $PkgV1
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat'))) '結束代碼 0，裝的是相容版'
+    $args95 = @(Get-TopVmArgs)
+    Check ($args95[0].StartsWith($ARG_PREFIX) -and @($args95 | Where-Object { $_ -ceq $PzoptArg }).Count -eq 1) '自己那條排第一，pzopt 那條原樣保留'
+    Check ($r.Out.Contains('PZ_Optimization：相容版可以和它一起用')) '說明相容版可以和 PZ_Optimization 一起用'
+    Check (Test-GameFileIs 'pzopt/overrides/zombie/iso/IsoChunk.class' 'pzopt-override') 'pzopt 的檔案沒被動'
+
+    Start-Case '96. quick 與互動選單遇到 pzopt：直接改裝相容版'
+    Reset-GameDir
+    & $SetPzopt 'zombie/iso/IsoChunk'
+    $r = & $Quick @('Y')
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-compat'))) 'quick 裝到相容版'
+    Reset-GameDir
+    & $SetPzopt 'zombie/iso/IsoChunk'
+    $r = Invoke-Installer @('-Action', 'install', '-GameDir', $GameDir, '-PackageDir', $PkgV1) 'zh' @('1', '', 'Y')
+    Check ($r.Code -eq 0 -and $r.Out -match '建議選 \[3\] 相容版' -and (Test-ModuleSet @('core', 'client-fixes-compat'))) '選單預設推薦相容版，按 Enter 裝到相容版'
+
+    Start-Case '97. 只有 pzopt/overrides、沒有 pzopt agent jar（卸載殘留）：不算衝突'
+    Reset-GameDir
+    Write-TextFile (GameFile 'pzopt/overrides/zombie/iso/IsoChunk.class') 'pzopt-override'
+    $r = Invoke-Install @('client-fixes-standard') $PkgV1
+    Check ($r.Code -eq 0 -and (Test-ModuleSet @('core', 'client-fixes-standard'))) '完整版照裝'
+
+    Start-Case '98. 先裝完整版、之後才裝 pzopt：status 警告並請玩家改裝相容版'
+    Reset-GameDir
+    $r = Invoke-Install @('client-fixes-standard') $PkgV1
+    & $SetPzopt 'zombie/iso/IsoChunk'
+    $r = Invoke-Status $PkgV1
+    Check ($r.Code -eq 0 -and $r.Out.Contains('PZ_Optimization 也換已安裝的修補要換的 class') -and $r.Out.Contains('改裝相容版')) 'status 警告、結束代碼 0'
+    $r = Invoke-Status $PkgV1 'en'
+    Check ($r.Code -eq 0 -and $r.Out.Contains('install the compatible version instead')) '英文警告'
+
+    Start-Case '99. pzopt/overrides 換了 profiler 的 LuaCaller：profiler 拒裝'
+    Reset-GameDir
+    & $SetPzopt 'se/krka/kahlua/integration/LuaCaller'
+    $r = Invoke-Install @('profiler') $PkgV1
+    Check ($r.Code -eq 7 -and $r.Out.Contains('pzopt/overrides/se/krka/kahlua/integration/LuaCaller.class')) '結束代碼 7，列出 pzopt 的檔案'
+    Check (-not (Test-Path -LiteralPath (GameFile '.mdc-patches')) -and (Test-JsonIsOriginal)) '沒有寫入任何東西'
 }
 finally {
     Write-Host ''

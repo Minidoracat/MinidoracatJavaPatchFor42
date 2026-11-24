@@ -2009,6 +2009,18 @@ public final class PatchConfig {
         vehicleUpdate.expectedHits = 6;   // W61 setWorldTransform 1＋W62 contains 4＋W65 updateTransform 1
         patches.add(vehicle);
 
+        // ---- W108 車在 meta 期間收養零件後門與引擎蓋模型綁著舊零件（docs/patches.md 2dp）----
+        // 引擎運轉／警報／警笛時車進 meta，玩家回來時 chunk 新建的 BaseVehicle 已照自己的零件建好 models，removeFromMeta 才用
+        // adoptParts（javap offset 17，全 jar 唯一呼叫點）換上 meta 期間的零件，ModelInfo.part 仍指舊零件，門開不了、姿勢錯。
+        // 1:1 改道 VehicleModelRebind.adoptParts：先照原版收養，再把每個 ModelInfo.part 改指同 id 的現在零件。
+        Patcher.ClassPatch virtualVehicle = new Patcher.ClassPatch("zombie/vehicles/VirtualVehicle");
+        Patcher.MethodOps fromMeta = virtualVehicle.method("removeFromMeta", "(Lzombie/vehicles/BaseVehicle;)V");
+        fromMeta.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "zombie/vehicles/BaseVehicle", "adoptParts", "(Lzombie/vehicles/VehicleParts;)V",
+                "zombie/mdc/VehicleModelRebind", "adoptParts"));
+        fromMeta.expectedHits = 1;
+        patches.add(virtualVehicle);
+
         // ---- W63 doRemove 把本機模擬的車的駕駛移到伺服器舊位置（docs/patches.md 2bz）----
         // VehiclePacket.doRemove 在客戶端沒有伺服器位置的格子、車上有本機玩家時 player.setPosition(伺服器 x, y, 0)
         // （javap offset 75，方法內唯一）。1:1 改道 VehicleOrphanGuard.setPosition：車由本機模擬（Local／LocalCollide）時不移動，
@@ -2147,12 +2159,13 @@ public final class PatchConfig {
 
     /**
      * client-fixes-compat：client() 裡不碰 PZ_Optimization 這類替換遊戲 class 的 MOD 所換 class 的幾刀——BaseVehicle（W54、W61、
-     * W62、W65）、VehiclePacket（W63）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
+     * W62、W65）、VehiclePacket（W63）、VirtualVehicle（W108）。它也換的貼圖三個 class、WorldStreamer、AnimationPlayer（W55）、
      * IsoChunk、RoomDef、FBORenderCutaways（W57、W68）與 FBORenderCell（W84，另含 IsoChunk 建構子）不裝；W68 要鎖住全部呼叫點，所以 IsoBuilding、DataRoot、MetaGridPacket
      * 也不裝。ClassPatch 直接取自 client(false)，手術與完整版逐位相同。
      */
     public static List<Patcher.ClassPatch> clientCompat() {
-        List<String> compat = List.of("zombie/vehicles/BaseVehicle", "zombie/network/packets/vehicle/VehiclePacket");
+        List<String> compat = List.of("zombie/vehicles/BaseVehicle", "zombie/network/packets/vehicle/VehiclePacket",
+                "zombie/vehicles/VirtualVehicle");
         return client(false).stream().filter(p -> compat.contains(p.internalName)).toList();
     }
 

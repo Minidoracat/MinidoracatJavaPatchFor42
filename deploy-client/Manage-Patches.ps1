@@ -616,6 +616,8 @@ function Read-Launcher([string]$gameRoot) {
 # 就來不及在本包檢查之前載入要換的 class（那樣本包會整包不啟用，DISARMED）。和別的 agent 同改一個 class 的組合不支援：
 # retransformation incapable 的 transformer（不論它的 agent 排在哪裡）與排在本包之前的 capable transformer 改過的 class
 # 本包不換（NOT APPLIED）；排在之後的 capable transformer（Java 或 native agent 的）改的是修補版，本包看不到。
+# 本包 premain 只載入錨點與 helper 的父型別（都是不連帶載入別的遊戲 class 的葉 class），排第一也不會讓後面的 agent
+# 以為它要換的 class 已被載入；建置期 AgentLoadCheck 的 -Dmdc.check.preload 驗這件事。
 function New-LauncherBytes($launcher, [string]$newArg, [int]$xmxMb = 0, [switch]$KeepOurs) {
     $kept = @(if ($KeepOurs) { $launcher.VmArgs } else { $launcher.VmArgs | Where-Object { -not (Test-OurAgentArg $_) } })
     if ($xmxMb) { $kept = @($kept | ForEach-Object { if ($_ -ceq $launcher.Xmx) { "-Xmx${xmxMb}m" } else { $_ } }) }
@@ -689,6 +691,22 @@ function Get-LooseClasses([string]$gameRoot, $jarPackages) {
         foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.class' -Force -ErrorAction SilentlyContinue)) {
             $found += $f.FullName.Substring($rootFull.Length + 1).Replace('\', '/')
         }
+    }
+    return @($found | Sort-Object)
+}
+
+# PZ_Optimization（42.22 起是 Java agent：pzopt/agent/pzopt-agent.jar 換掉 pzopt/overrides/ 底下的 class）。
+# 它換的 class（X.class／X$*.class，大小寫不分）落在本包要修補的 class 上＝衝突：兩個一起載入時本包整包不啟用或部分換不上。
+# agent jar 不在（卸載殘留）就不算。回傳帶 pzopt/overrides/ 前綴的路徑。
+function Get-PzoptOverlaps([string]$gameRoot, $patched) {
+    $rootFull = [System.IO.Path]::GetFullPath($gameRoot).TrimEnd('\')
+    $dir = Join-Path $rootFull 'pzopt\overrides'
+    if (-not (Test-Path -LiteralPath (Join-Path $rootFull 'pzopt\agent\pzopt-agent.jar') -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $dir -PathType Container)) { return @() }
+    $found = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.class' -Force -ErrorAction SilentlyContinue)) {
+        $cls = $f.FullName.Substring($dir.Length + 1).Replace('\', '/') -replace '\.class$', ''
+        if ($patched.ContainsKey($cls.Split('$')[0])) { $found += "pzopt/overrides/$cls.class" }
     }
     return @($found | Sort-Object)
 }
@@ -1410,6 +1428,10 @@ function Get-InstallPlan($manifest, [string]$packageDir, [string]$gameRoot, [str
             if ($slash -gt 0 -and $jarPackages.ContainsKey($cls.Substring(0, $slash))) { $warnings += $p }
         }
     }
+    foreach ($p in @(Get-PzoptOverlaps $gameRoot $patched)) {
+        $outer = ($p.Substring('pzopt/overrides/'.Length) -replace '\.class$', '').Split('$')[0]
+        $conflicts += @{ Path = $p; Text = (L "${p}：PZ_Optimization 也換本包要修補的 class（$outer），而且它先換，本包換不上。" "${p}: PZ_Optimization also replaces a class this package patches ($outer), and it does so first, so the patch cannot be applied.") }
+    }
 
     return @{
         Writes    = $writes
@@ -1429,7 +1451,10 @@ function Write-ForeignLooseWarning([string[]]$paths) {
 function Write-OtherAgentsNote([string[]]$agents) {
     if (@($agents).Count -eq 0) { return }
     Write-Info ((L '  啟動設定裡另有其他 Java agent（本包不動它們）：' '  The launch settings also load other Java agents (this package leaves them alone): ') + (@($agents) -join ' '))
-    Write-Info (L '  本包的啟動參數排在最前面，先啟動。本包不支援和別的 agent 修改同一個 class：某個 class 在本包之前就被改過時，那個 class 不換（console 印 [mdc-agent] NOT APPLIED，遊戲內狀態顯示 CHECK FAILED）；別的 agent 在本包之後才改的，本包偵測不到。本包啟動時發現要修補的 class 已經被載入，就整包不啟用（印 [mdc-agent] DISARMED）。' '  This package''s launch option goes first, so it starts first. Changing the same class as another agent is not supported: a class that was changed before this package sees it is skipped (the console prints [mdc-agent] NOT APPLIED and the in-game status shows CHECK FAILED); changes another agent makes after this package cannot be detected. If a class to patch is already loaded when this package starts, the whole package stays off (it prints [mdc-agent] DISARMED).')
+    if (@($agents | Where-Object { $_ -match 'pzopt-agent\.jar' }).Count -gt 0) {
+        Write-Info (L '  PZ_Optimization：相容版可以和它一起用，誰排前面都可以；完整版（標準版、省記憶體版）和它換同一批 class，不能一起用。' '  PZ_Optimization: the compatible version works with it, in either order; the full versions (standard, low memory) replace the same classes as it does and cannot be used with it.')
+    }
+    Write-Info (L '  本包不支援和別的 agent 修改同一個 class：console 印 [mdc-agent] NOT APPLIED（遊戲內狀態顯示 CHECK FAILED）＝那個 class 已被別人改過、本包沒換；印 [mdc-agent] DISARMED＝本包啟動時要修補的 class 已經被載入，整包照原版跑；別的 agent 在本包之後才改的，本包偵測不到。' '  Changing the same class as another agent is not supported: [mdc-agent] NOT APPLIED in the console (CHECK FAILED in the in-game status) means another agent changed that class first and this package skipped it; [mdc-agent] DISARMED means a class to patch was already loaded when this package started, so the whole package stays off; changes another agent makes after this package cannot be detected.')
 }
 
 function New-StateModuleEntries($manifest, [string[]]$targetIds) {
@@ -1622,7 +1647,7 @@ function Invoke-Install {
         if ($plan.Conflicts.Count -gt 0) {
             Write-Head (L '偵測到衝突，已中止（沒有任何檔案被更動）' 'Conflict found; stopped (no files were changed)')
             foreach ($c in $plan.Conflicts) { Write-Bad $c.Text }
-            $why = L '遊戲資料夾裡有不是本安裝器裝的 class 檔，通常來自另一個替換遊戲 class 的 MOD（例如 PZ_Optimization）。不要只刪除上面列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉。' 'The game folder has class files this installer did not install, usually from another mod that replaces game classes (for example PZ_Optimization). Do not delete just the files listed above: that mod''s other files still need them, and the game closes when you join a server. '
+            $why = L '遊戲資料夾裡有不是本安裝器裝的 class 檔（直接放在遊戲資料夾，或在 PZ_Optimization 的 pzopt/overrides 裡），通常來自另一個替換遊戲 class 的 MOD（例如 PZ_Optimization）。不要只刪除上面列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉。' 'The game folder has class files this installer did not install (directly in the game folder, or in PZ_Optimization''s pzopt/overrides), usually from another mod that replaces game classes (for example PZ_Optimization). Do not delete just the files listed above: that mod''s other files still need them, and the game closes when you join a server. '
             if (Test-CompatFits $Manifest $PackageDir $GameRoot $installed $Requested $state $legacy $jarPackages) {
                 Fail $EXIT_CONFLICT ($why + (L '要和它一起用，請改裝相容版（只含車輛的修補，不換這些 class）：在安裝選單選相容版，或用 -Modules client-fixes-compat。要完整版，請先用那個 MOD 自己的卸載器把它完整移除。若是舊版 Minidoracat patch，請用舊版的 uninstall.bat 移除。' 'To use both, install the compatible version instead (vehicle fixes only; it does not replace these classes): choose it in the install menu, or use -Modules client-fixes-compat. For the full version, first remove that mod completely with its own uninstaller. If they are from an old Minidoracat patch, remove them with that version''s uninstall.bat.'))
             }
@@ -1968,6 +1993,10 @@ function Invoke-Status {
     if ($Manifest) {
         # 0.2.x 的舊版安裝不是這個包裝的，清單裡不標成已安裝
         $installed = if ($state -and -not (Test-LegacyState $state)) { @(Get-StateModuleIds $state) } else { @() }
+        $pzopt = @(if ($installed.Count -gt 0) { Get-PzoptOverlaps $GameRoot (Get-PatchedClassSet $Manifest $installed) })
+        if ($pzopt.Count -gt 0) {
+            Write-Warn2 (L "PZ_Optimization 也換已安裝的修補要換的 class（例如 $($pzopt[0])）：兩個一起用時本包會整包不啟用或部分換不上。請重新執行安裝器，改裝相容版（只含車輛的修補，可以和它一起用）。" "PZ_Optimization also replaces classes the installed patches replace (for example $($pzopt[0])): with both, this package stays off or is only partly applied. Run the installer again and install the compatible version instead (vehicle fixes only; it works with PZ_Optimization).")
+        }
         Write-Info (L "  安裝包可提供：$(Get-Prop $Manifest 'packageVersion' '(未標示)')（遊戲 $(Get-Prop $Manifest 'gameVersion' '?')）" "  This package offers: $(Get-Prop $Manifest 'packageVersion' '(not specified)') (game $(Get-Prop $Manifest 'gameVersion' '?'))")
         foreach ($m in (ConvertTo-Array (Get-Prop $Manifest 'modules'))) {
             $id = Get-Prop $m 'id'

@@ -20,6 +20,9 @@ import java.util.Set;
  *   <li>{@code restored}：{@code -Dmdc.agent.testFailDefine=1} 讓 helper 定義完才失敗 → 已換上的 class（至少 1 個）
  *       全部還原，狀態 disarmed、換上數 0，手術 class 都還載得起來、連結不出錯。</li>
  *   <li>{@code off}：{@code -Dmdc.agent=off} → 同 disarmed。</li>
+ *   <li>{@code -Dmdc.check.preload=1}（另帶排在後面的 PreloadAgent，不帶 class 名稱）：在本工具載入任何遊戲 class 之前，
+ *       本包 premain 載入的遊戲 class 只能是錨點、helper 與 helper 的直接父型別，而且它們的父型別與介面都不是遊戲 class
+ *       （排在後面的 agent，例如 PZ_Optimization，看到它要換的 class 已被載入就以原版執行）。</li>
  * </ul>
  *
  * <p>用法：{@code java -Xverify:all -javaagent:<agent jar>[=modules=...] -cp <本工具>;<jar> AgentLoadCheck <manifest> armed|disarmed|restored|off}
@@ -46,6 +49,7 @@ public final class AgentLoadCheck {
         // （client 包連我方 package 的 helper 也用 Lookup 定義，錨點是 MdcAgent，ProtectionDomain 是 agent jar）
         Set<String> defines = new HashSet<>();
         Set<String> signedPackages = new HashSet<>();
+        Set<String> anchors = new HashSet<>();
         try (var in = app.getResourceAsStream("mdc/agent-index.tsv")) {
             if (in == null) {
                 throw new AssertionError("agent jar 沒有 mdc/agent-index.tsv");
@@ -54,10 +58,58 @@ public final class AgentLoadCheck {
                 String[] f = l.split("\t");
                 if (f[0].equals("define")) {
                     defines.add(f[1].replace('/', '.'));
-                } else if (f[0].equals("anchor") && !f[2].equals("zombie/mdc/MdcAgent")) {
-                    signedPackages.add(f[1].replace('/', '.'));
+                } else if (f[0].equals("anchor")) {
+                    anchors.add(f[2].replace('/', '.'));
+                    if (!f[2].equals("zombie/mdc/MdcAgent")) {
+                        signedPackages.add(f[1].replace('/', '.'));
+                    }
                 }
             }
+        }
+
+        // 要在下面第一次 Class.forName 遊戲 class 之前看：此刻已載入的遊戲 class 全是本包 premain 載入的
+        boolean preload = System.getProperty("mdc.check.preload") != null;
+        if (preload) {
+            // helper 不分 package（zombie/mdc 的以 MdcAgent 為錨、ProtectionDomain 是 agent jar），它的直接父型別都允許
+            List<Class<?>> game = new java.util.ArrayList<>();
+            Set<String> allowed = new HashSet<>(anchors);
+            for (Class<?> c : (Class<?>[]) Class.forName("PreloadAgent", true, app).getMethod("loaded").invoke(null)) {
+                if (c.getClassLoader() == app && defines.contains(c.getName())) {
+                    if (c.getSuperclass() != null) {
+                        allowed.add(c.getSuperclass().getName());
+                    }
+                    for (Class<?> i : c.getInterfaces()) {
+                        allowed.add(i.getName());
+                    }
+                } else if (isGameClass(c, app)) {
+                    game.add(c);
+                }
+            }
+            Set<String> bad = new java.util.TreeSet<>();
+            for (Class<?> c : game) {
+                if (!allowed.contains(c.getName())) {
+                    bad.add(c.getName() + "（不是錨點、helper 或 helper 的父型別）");
+                }
+                List<Class<?>> parents = new java.util.ArrayList<>(List.of(c.getInterfaces()));
+                if (c.getSuperclass() != null) {
+                    parents.add(c.getSuperclass());
+                }
+                for (Class<?> p : parents) {
+                    if (p.getClassLoader() == app) {
+                        bad.add(c.getName() + "（父型別或介面 " + p.getName() + " 是 app loader 的 class，不是葉 class）");
+                    }
+                }
+            }
+            if (!bad.isEmpty()) {
+                throw new AssertionError("本包 premain 載入了不該載入的遊戲 class（排在後面的 agent 會以為它要換的 class 已被載入）："
+                        + String.join("、", bad));
+            }
+            List<String> names = new java.util.ArrayList<>();
+            for (Class<?> c : game) {
+                names.add(c.getName());
+            }
+            names.sort(null);
+            System.out.println("preload 檢查通過：本包 premain 載入的遊戲 class " + names.size() + " 個：" + String.join(" ", names));
         }
 
         List<String> lines = Files.readAllLines(manifest, StandardCharsets.UTF_8);
@@ -130,7 +182,7 @@ public final class AgentLoadCheck {
             System.out.println("retransform " + patchedClasses.size() + " 個已換上的 class：觀測到每一個這次換上的都是修補版（SHA 相符）");
         }
 
-        if (expect.equals("armed") && !retransform) {   // retransform 情境多帶一個測試 agent，agents 不是 1
+        if (expect.equals("armed") && !retransform && !preload) {   // retransform／preload 情境多帶一個測試 agent，agents 不是 1
             // 官方 IntegrityReport（只讀不改）：照 collectInBackground 的順序 locateJar → new → 讀結果
             Class<?> ir = Class.forName("zombie.core.IntegrityReport", false, app);
             Method locate = ir.getDeclaredMethod("locateJar");
@@ -151,6 +203,15 @@ public final class AgentLoadCheck {
                     + "（官方檢查照常運作，版本字串只多 agents=1）");
         }
         System.out.println("AgentLoadCheck " + expect + " OK：載入並連結 " + loaded + " 個 class；" + after);
+    }
+
+    /** 由 app loader 從遊戲 jar（projectzomboid.jar）定義、或以它的 ProtectionDomain 定義（原版 package 的 helper）。 */
+    private static boolean isGameClass(Class<?> c, ClassLoader app) {
+        if (c.getClassLoader() != app) {
+            return false;
+        }
+        var cs = c.getProtectionDomain().getCodeSource();
+        return cs != null && cs.getLocation() != null && cs.getLocation().getPath().endsWith("/projectzomboid.jar");
     }
 
     private AgentLoadCheck() {

@@ -10,7 +10,7 @@ hot spots we found while running a busy multiplayer server, plus an optional cli
   lost chunks, animals and vehicles, main-thread hot spots, bandwidth loops, stuck timed actions and log
   noise. 88 patched classes, 264 patch sites and 110 helper classes on 42.22.2.
 - **Client patches**: an optional package for players (invisible players/zombies/vehicles; two disconnects while
-  chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate; a ground item without a model flooding the client with errors), loaded as a Java agent without changing game files. Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
+  chunks load near player-built buildings; mod vehicles re-animated every frame while parked; vehicles thrown tens or hundreds of tiles away when driving into an area that has not loaded; a vehicle pushed under the floor in a collision, which blacks out the screen; floor blood after a horde slowing the frame rate; a ground item without a model flooding the client with errors; in single player, doors and hood out of place and impossible to open after walking away from a car with the engine running), loaded as a Java agent without changing game files. Download it from [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases).
 - **Native guards**: `LD_PRELOAD`/`LD_AUDIT` shims for two native crashes on the Linux dedicated server.
 
 Every patch targets a specific vanilla defect or a measured hot spot and has a written root-cause analysis:
@@ -216,6 +216,7 @@ They write rate-limited heartbeat lines to the console and are how most of the i
 | W84 Neighbour chunks' blood scanned splat by splat ([2cs](docs/patches.en.md#2cs)) | Each time a chunk level is redrawn, `FBORenderCell.renderOneLevel` draws its own blood and then calls `renderOneLevel_Blood` once for each of the 8 neighbours: the neighbour's whole `floorBloodSplats` (up to 1000) and `floorBloodSplatsFade` lists are scanned to keep the few splats within 1 tile of the shared edge. After a horde every chunk holds over a thousand; on the production server (about 48 players, after a horde) this method took 4.6–9.4% of a client's main thread without `-debug`. | The two lists become the same implementations that also count structural changes and keep an index of which edge each splat is near; a neighbour call only walks the candidates for that edge and the vanilla check still runs on each one, so the splats kept, their order, colour and fading are identical to vanilla. One call in 256 also scans the whole list the vanilla way and compares; any difference switches it off for the session. | not reported |
 | W100 Weapon item without a model throws on every redraw ([2dh](docs/patches.en.md#2dh)) | `ItemModelRenderer.itemHasModel` looks up `getModelScript(item.getStaticModel())` for a weapon without checking the name. A weapon item with no `WorldStaticModel`, `StaticModel` or `WeaponSprite` (vanilla's leftover developer item `Base.FISH_DEV_ITEM`) gives null, and `ScriptBucketCollection.getScript` throws a `NullPointerException`. One such item on the ground throws on every redraw for every player who has it in view: the error counter keeps climbing (401 in 83 seconds in a player's log). | A null name is treated as "no model": the item is drawn as its icon, as vanilla does for other items without a model. Everything else is vanilla. | not reported |
 | W101 Holding a weapon item without a model throws every frame ([2di](docs/patches.en.md#2di)) | `ModelManager.addEquippedModelInstance` passes a weapon's `getStaticModel()` to `addStatic` unchecked; for the same kind of item as W100 the name is null and `ScriptManager.getItemName` throws. `GameWindow.frameStep` catches it, the rest of that frame's update is skipped, and it repeats on the next frame (1959 exceptions in 8 seconds in a vanilla test). | A weapon without a model name takes vanilla's non-weapon path: no model in the hand, as for other items without a model. Everything else is vanilla. | not reported |
+| W108 Car doors will not open after walking away with the engine running ([2dp](docs/patches.en.md#2dp)) | Single player: leave a car with the engine running (presumably also with the alarm or siren on) and walk away, and the car moves into meta simulation. When you come back the game creates a new car, builds the door and hood models from that car's own parts, and only then `VirtualVehicle.removeFromMeta` hands it the parts from meta through `adoptParts`. The models stay bound to the replaced parts: the doors and hood are out of place and cannot be opened. | After the parts are adopted, each part model is rebound to the car's current part with the same id; no model is added, removed or rebuilt. Everything else is vanilla. Multiplayer never takes this path. | [#99519](https://theindiestone.com/forums/topic/99519/) |
 
 ### Native guards (Linux dedicated server)
 
@@ -389,23 +390,30 @@ package (the one that only came with `uninstall.bat`).
 | Module | Purpose |
 |---|---|
 | `core` | Shared Lua bridge, installation fingerprint check and startup status; installed automatically |
-| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, player-built room disconnect fixes (two), vehicle animation speed-ups, vehicle teleport fixes (three), vehicle-under-the-floor fix, floor blood speed-up, fix for ground items without a model (32 GB RAM or more) |
+| `client-fixes-standard` | Texture leak fixes, 4 GiB texture wait limit, chunk streaming log, player-built room disconnect fixes (two), vehicle animation speed-ups, vehicle teleport fixes (three), vehicle-under-the-floor fix, floor blood speed-up, fix for ground items without a model, fix for car doors that will not open after walking away with the engine running (32 GB RAM or more) |
 | `client-fixes-lowmem` | The same fixes with the vanilla 50 MiB texture limit; excludes the other variants |
-| `client-fixes-compat` | Only the vehicle fixes (vehicle animation speed-up, the three teleport fixes, vehicle under the floor), for use next to mods that replace the other classes (for example PZ_Optimization); excludes the other variants |
+| `client-fixes-compat` | Only the vehicle fixes (vehicle animation speed-up, the three teleport fixes, vehicle under the floor, car doors that will not open after walking away with the engine running), for use next to mods that replace the other classes (for example PZ_Optimization); excludes the other variants |
 | `profiler` | DevProfiler for mod developers (Java → Lua call timing, CSV/JFR export); its UI is the separate mod `MinidoracatDevProfilerFor42` |
 
-**Mods that replace game classes.** Some mods, such as PZ_Optimization, put `.class` files into the game folder.
-If one of them replaces a class this package patches, our patch for that class would not take effect, so the
-installer stops with code 7 and changes nothing. Do not delete just the files it lists: the rest of that mod still
-needs them, and the game closes when you join a server
+**Mods that replace game classes.** Some mods replace game classes: they put `.class` files into the game folder, or,
+like PZ_Optimization from 42.22 on, use a Java agent (launch option `-javaagent:pzopt/agent/pzopt-agent.jar`, which
+replaces the classes under `pzopt/overrides/`). If one of them replaces a class this package patches, our patch for
+that class would not take effect, so the installer stops with code 7 and changes nothing. Do not delete just the files
+it lists: the rest of that mod still needs them, and the game closes when you join a server
 ([issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)). Either keep that mod and install
 `client-fixes-compat` (the installer recommends it), or remove that mod with its own uninstaller (PZ_Optimization:
-`Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. While PZ_Optimization's
-"Warm-start cache (Java AOT)" option is on, the game loads classes from that cache and the installer refuses to
-install; turn it off first (it takes effect at the next start, so start the game once more to the main menu and close
-it). Also, from 42.22 on, a `.class` file in the same package as an official class makes Java throw
-`SecurityException` by itself (the installer warns about these), so such mods built for 42.21 need an update from
-their authors (inference: PZ_Optimization itself was not tested).
+`Uninstall-PZ-Optimization.cmd` in the game folder) and install a full variant. The compatible version works next to
+the PZ_Optimization agent; both installers put their own agent first, and either order works (from 0.3.8; both orders
+tested at the Java class-loading level with PZ_Optimization revision 3d39148846, and the order with this package first
+also run in single-player in the game). Up to 0.3.7, this package
+placed before it made PZ_Optimization run entirely stock (its `agent.log` says
+`already loaded … zombie.ai.State … the game runs stock`), so update to 0.3.8. If you installed a full variant first
+and PZ_Optimization after it, this package switches itself off and the game runs unpatched; the installer's status
+check tells you to install the compatible version. While PZ_Optimization's "Warm-start cache (Java AOT)" option is on,
+the game loads classes from that cache and the installer refuses to install; turn it off first (it takes effect at the
+next start, so start the game once more to the main menu and close it). Also, from 42.22 on, a `.class` file in the
+same package as an official class makes Java throw `SecurityException` by itself (the installer warns about these),
+so such mods built for 42.21 need an update from their authors.
 
 **Windows Smart App Control.** The patches load through a small DLL (`mdc-agent-loader.dll`) that is not code-signed. On a PC where Windows 11 Smart App Control is enforcing, Windows blocks it and the game does not start at all (seen with 0.3.1 on one such PC). From 0.3.2 the installer checks this and stops with code 11 without changing anything; in evaluation mode it installs and warns. If the game stopped starting after Smart App Control switched to enforcing, remove everything by pasting the command again and choosing `3`, or with `Uninstall-Patches.bat`. We do not ask you to change that Windows setting.
 

@@ -48,6 +48,11 @@ public final class PreloadAgent implements ClassFileTransformer {   // 自己當
         return new HashMap<>(SEEN);
     }
 
+    /** 目前 JVM 已載入的全部 class（AgentLoadCheck 的 -Dmdc.check.preload 用：看本包 premain 載入了哪些遊戲 class）。 */
+    public static Class<?>[] loaded() {
+        return inst.getAllLoadedClasses();
+    }
+
     private PreloadAgent() {
     }
 }

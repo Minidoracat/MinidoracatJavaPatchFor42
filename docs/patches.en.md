@@ -65,8 +65,16 @@ other helpers live in our own packages (e.g. `zombie.mdc`) and load from the age
   a class this agent replaced and the bytes handed to this agent are still the original ones, it gets the same
   patched bytes again; when they are not (a transformer listed earlier changed them, or someone redefined the class
   with other content), this agent does not overwrite them and prints `NOT APPLIED`. Listed first, this agent's
-  premain also runs first, so no other agent can load a class to patch before the check. The production server has
-  no other agents; this mainly matters for the client package.
+  premain also runs first, so no other agent can load a class to patch before the check. The other way round, the
+  game classes this agent's premain loads count as "already loaded" for agents listed after it: from 0.3.8 the client
+  package only picks leaf classes as Lookup anchors (superclass and interfaces are not game classes; the build fails
+  if a package has none), so premain loads only the anchors, the helpers and the helpers' direct supertypes. The
+  0.3.7 anchor `AttackVehicleState` also loaded `zombie.ai.State`, and the PZ_Optimization agent, seeing a class it
+  replaces already loaded, ran entirely stock. The build-time `AgentLoadCheck` with `-Dmdc.check.preload` and a
+  `PreloadAgent` listed after this agent checks which game classes are loaded after premain. The server package keeps
+  the old anchor rule (three of its packages have no leaf class, and the `build.ps1` restored check relies on the
+  supertypes being patched while helpers are defined). The production server has no other agents; this mainly
+  matters for the client package.
 - **The official integrity check works as designed**: 42.22's `IntegrityReport` appends `agents=1` to the version
   string (console, `statistics`, Prometheus `pz_info`) and still reports the jar as original. We do not modify the
   jar or `IntegrityReport`, and do not hide the agent; the build-time `AgentLoadCheck` asserts both results.
@@ -465,7 +473,7 @@ at least one 20 ms wait (alone it does not prove sustained starvation; consecuti
 `aboveVanillaMs` do); `patchedStallSamples > 0` means the floor reached even the 4 GB ceiling.
 
 **Packaging, isolated from the server**: `build-client.ps1` builds a separate client package
-(currently `MinidoracatClientPatches-42.22.2-0.3.7.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
+(currently `MinidoracatClientPatches-42.22.2-0.3.8.zip`; `-42.21.0-0.2.11` on 42.21.0) and never touches the server
 manifest. **Since 0.3.0 the patches load through a Java agent** (the official jar is signed from 42.22 on, see the top
 of this document): the package holds one `MinidoracatClientPatches.jar` (built by `AgentJarBuilder --modules`, one
 set of patched classes and helpers per module) and an agent loader, `mdc-agent-loader.dll`. The installer puts both
@@ -676,7 +684,7 @@ PZ_Optimization (Workshop 3805285544) also replaces `AnimationPlayer`, `ImageDat
 `WorldStreamer`, `IsoChunk`, `RoomDef` and `FBORenderCutaways` (the version subscribed locally on 2026-10-29 also
 replaces `FBORenderCell`), and only one copy of a class can load. A third mutually exclusive variant,
 `client-fixes-compat` (`PatchConfig.clientCompat()`; the Patcher/LoadCheck/SmokeCheck mode is `client-compat`),
-carries only the BaseVehicle and VehiclePacket surgery (W54, W61–W63, W65; the XL tree room fix was retired on
+carries only the BaseVehicle, VehiclePacket and VirtualVehicle surgery (W54, W61–W63, W65, W108; the XL tree room fix was retired on
 42.22.2, see [§2bl](#2bl)). Its ClassPatches are taken from `client(false)`, so the surgery is byte-identical to the
 full variants. The texture, streaming, W55, W57 and W84 patches are not in it, and because W68 must lock every call
 site, IsoBuilding, DataRoot and MetaGridPacket are left out too. The agent only transforms classes loaded from the
@@ -695,6 +703,22 @@ install is refused with instructions for turning it off; uninstall only needs an
 `MdcPatchRuntime` only accepts state `schemaVersion` 2: the agent jar path and SHA, the jar the helpers came from, and
 the installed module set must match the `modules=` reported by `MdcAgent.status()`, otherwise it reports
 `compatible=false`.
+
+**PZ_Optimization as an agent (client package 0.3.8 on)**: from 42.22, PZ_Optimization is a Java agent
+(`-javaagent:pzopt/agent/pzopt-agent.jar`, replacing the classes under `pzopt/overrides/` instead of loose classes),
+and its installer also puts itself first in `vmArgs`, so both orders have to work. When
+`pzopt/agent/pzopt-agent.jar` exists, the installers (Windows `Get-PzoptOverlaps`, Mac `pzoptOverrides()`) treat a
+class in `pzopt/overrides/` whose outer name is in the `patchedClasses` of a module being installed as a conflict
+(code 7; the menu and quick switch to the compatible variant; profiler hits `LuaCaller` too). Without the agent jar
+(uninstall leftovers) it does not count; status runs the same comparison for the installed modules and warns on an
+overlap. `-Dpzopt.*` is not used: those are memory flags the old form had too. Tested at the Java class-loading level
+(game JRE, PZ_Optimization revision 3d39148846, 42.22.2 jar): with the compatible variant both agents are active in
+either order; with the standard variant listed first this package is ARMED but prints `NOT APPLIED` for all 10
+classes PZ_Optimization also replaces (`mismatched=10`; it loads `FBORenderCell` and `FBORenderCutaways` in its
+premain), so W68 would be half applied (`IsoChunk.getRoom` bypasses `MetaGridLock`) and the installer blocks this
+combination; with PZ_Optimization first this package is `DISARMED` (`FBORenderCutaways` is already loaded). Listed
+first, 0.3.7 made PZ_Optimization run entirely stock with any variant, see "Running next to other Java agents"
+above.
 
 Four of the paths the old v3.0 packages registered are vanilla classes (`TextureIDAssetManager`, `ImageData`,
 `TextureID`, `WorldStreamer`), and PZ_Optimization replaces them too. Files at those paths count as an
@@ -6584,6 +6608,32 @@ A `deferred` line is written for the first 20 entries and every 1000th after tha
 **Deployment**: the manifest gains `zombie/mdc/TrailerAnimalDefer.class`, `zombie/mdc/TrailerAnimalDefer$Entry.class` and `zombie/vehicles/VehiclesDB2$QueueLoadChunk.class`, and `zombie/vehicles/BaseVehicle.class` changes. Totals for W105–W107: 192 → 198 classes: 88 patched classes, 264 patch sites, 110 helpers.
 
 **Retirement**: when TIS puts the trailer animals in on the main thread, or re-evaluate when a SmokeCheck SHA lock turns red.
+
+---
+
+<a id="2dp"></a>
+## 2dp. Door and hood models bound to stale parts after walking away from a running car (W108, client, default on; client package 0.3.8)
+
+**Symptom** (single player; TIS [#99519](https://theindiestone.com/forums/topic/99519/)): leave a car with the engine running and walk away; when you come back the doors and hood are out of place and cannot be opened. Vanilla `BaseVehicle.shouldUpdateInMeta` is "alarm sounding, siren on or engine running", so the alarm and siren presumably cause the same; not tested.
+
+**Root cause** (javap on the 42.22.2 jar `3c4a7c5f`): when the car leaves the loaded area in that state, a `VirtualVehicle` simulates it in meta and takes its parts (`VehicleParts`) along. When the player comes back, chunk loading creates a new `BaseVehicle` and builds `models` from that car's own saved parts (each `ModelInfo.part` points at that set); only then does `VirtualVehicleManager.removeFromMeta` call `VirtualVehicle.removeFromMeta(new car)`, whose `BaseVehicle.adoptParts(meta parts)` at offset 17 swaps `parts`, calls `setOwner` and `addToWorld` again, and never touches `models`. `ModelInfo.part` still points at the replaced parts: `playPartAnim` returns early because the part is not on the car, and neither the open/close animations nor the poses `postupdate` replays from the part state reach the current parts. `adoptParts` has no other caller in the jar; the meta enter/leave code in `BaseVehicle.addToWorld` and `IsoChunk.removeFromWorld` is guarded by `!GameServer.server && !GameClient.client`, so neither multiplayer clients nor servers take this path.
+
+**Surgery**: the only `invokevirtual BaseVehicle.adoptParts` in `VirtualVehicle.removeFromMeta` is redirected 1:1 to `VehicleModelRebind.adoptParts(BaseVehicle, VehicleParts)`: it calls vanilla `adoptParts` first (outside any try, so exceptions propagate as in vanilla), then points each `ModelInfo.part` in `models` at the car's current part with the same id (`getPartById`). No model is added or removed and no model instance is rebuilt; `modelScript` keeps the value computed before adoption (it only differs if the item installed on a part changed while in meta). When nothing is adopted (vanilla's three early returns: null parts, a different script, owner already a `BaseVehicle`) the lookup returns the original parts and nothing changes. A `RuntimeException`/`LinkageError` in the rebinding loop is swallowed and logged once per occurrence; adoption has already finished, which is the vanilla state. New ClassPatch `VirtualVehicle`, 1 patch site; stack shape and instruction length are unchanged and the frames are kept. All three variants (standard, lowmem, compat) include it (PZ_Optimization does not replace anything in `zombie/vehicles/`); the three recipes move to v3.10.
+
+**Kill switch**: `-Dmdc.vehicleModelRebind=off` (or `0`) is vanilla; needs a restart. The first time it actually rebinds something (count above 0), console.txt gets one line `[MinidoracatJavaPatch][VehicleModelRebind] rebound N part model(s) of <script> to the parts adopted from meta (thread <thread>)`; it is not repeated. `VirtualVehicle.stopUpdatingInMeta` (the old car taking its own parts back) also goes through this call, rebinds 0 and logs nothing.
+
+**Not handled**:
+- Adopted parts go through `addToWorld` twice (once inside `adoptParts`, once at `BaseVehicle.addToWorld` offsets 87–91): vanilla behaviour; whether it does harm was not checked.
+- Another mod replacing the item on a part while the car is in meta: the model script from before adoption stays until the next `setModelVisible`.
+
+**Gates and verification**:
+- Patcher: 1 patch site in `VirtualVehicle.removeFromMeta`.
+- SmokeCheck (standard, lowmem, compat): reason to exist — `VirtualVehicle.removeFromMeta` is the only caller of `adoptParts` in the jar; `adoptParts` does not touch `models`; `ModelInfo.part` is public, not final and of type `VehiclePart` (a new caller or TIS rebuilding `models` on adoption turns it red: re-evaluate retiring the patch); after surgery the text of `removeFromMeta` differs only in the one redirect; the other methods of `VirtualVehicle` are unchanged; the helper has exactly one `adoptParts` call and it is outside every try range.
+- LoadCheck: the helper's signature.
+- `VehicleModelRebindBehaviorTest` (each of the three variants, on and off; bare JVM, real classes only): on, after adoption every `ModelInfo.part` is the car's current part with the same id, `models` holds the same objects, a real `setModelVisible(current door, door model, true)` returns the existing info, a second adoption rebinds 0, and `setModelVisible(current door, door model, false)` removes the door model; off (the kill switch actually run, which is the vanilla negative control) the parts are adopted but every `ModelInfo.part` is still the old part. Both modes check that a different script adopts and rebinds nothing, and that a null entry in `models` does not leak an exception and adoption still completes.
+- In-game E2E (2026-11-24, 9950X3D, client package 0.3.8 `3b03949+dirty`, scenario `vehicle-rebind-sp`: leave a `Base.SportsCar_ez` with the engine running, teleport to 14322,4969 and wait 15 s after the car unloads, teleport back, open three doors, then remove the front-left door the vanilla way with `setInventoryItem(nil)`): standard on (`jpw108-1124a-on`), front-right door left open before leaving (`-door`, also with `-Dmdc.vehAnimSkip=verify`) and front-left window half open (`-window`) all `RESULT PASS`: after coming back stale=0, each of the three doors has exactly one ModelInfo bound to its current part, the door stays open, the window openDelta is still 0.5, and the removed door's model disappears; console has one line `rebound 7 part model(s) of Base.SportsCar_ez … (thread MainThread)`. The engine-off control (`-engoff`) passes without that line. The same jar with `-Dmdc.vehicleModelRebind=off` (`-off`) reproduces vanilla: stale=7, 5 checks FAIL (doors and hood have no ModelInfo bound to the current part, the removed door's model stays), and the screenshot shows the hood missing and the doors out of place. Compatible version + PZ_Optimization (ours listed first), 5 rounds: 4 PASS; 1 (`jpw108-1124a-compat`) threw an NPE at `this.chunk.vehicles.remove` in `BaseVehicle.update` (`this.chunk` is null) in its second frame inside PZ_Optimization's `MovingObjectUpdateScheduler` and fell back to the main menu before W108 ran. That bytecode is the same as vanilla and this package does not cause it: W61 reads `this.chunk.refs` first (a null chunk would throw there), W62's `contains` is inside the vanilla `chunk != null` guard, W65 runs after that line, and the vehicle helpers only read `chunk`. Inference (from bytecode, not reproduced): PZ_Optimization enters the world once the chunks at the center are in, so other chunks run their first `IsoChunk.update()` before `doLoadGridsquare` spawns their cars; vanilla sets `vehicle.chunk` only on that first `update()`, so those cars keep a null `chunk`. It did not occur in 4 rounds of PZ_Optimization + `-Dmdc.agent=off` or in 5 standard rounds. The compatible kill-switch round and all 4 PZ_Optimization + `-Dmdc.agent=off` rounds show stale=7. No `pose mismatch` (W54) line in any round.
+
+**Retirement**: when TIS rebinds or rebuilds `models` on adoption; retire when the SmokeCheck reason to exist turns red.
 
 ---
 

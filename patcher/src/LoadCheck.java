@@ -59,7 +59,7 @@ public final class LoadCheck {
             }
 
 
-            // client-compat 只含 BaseVehicle、VehiclePacket 的修補（PatchConfig.clientCompat），只驗它們的 helper
+            // client-compat 只含 BaseVehicle、VehiclePacket、VirtualVehicle 的修補（PatchConfig.clientCompat），只驗它們的 helper
             boolean compat = args.length == 4 && args[3].equals("client-compat");
             boolean clientMode = args.length == 4
                     && (args[3].equals("client") || args[3].equals("client-lowmem") || compat);
@@ -140,6 +140,13 @@ public final class LoadCheck {
                 }
                 System.out.println("vehicle orphan guard OK VehicleOrphanGuard.contains(ArrayList,Object)、"
                         + "setPosition(IsoPlayer,float,float,float) 簽名一致");
+                var modelRebind = Class.forName("zombie.mdc.VehicleModelRebind", false, cl).getDeclaredMethod(
+                        "adoptParts", Class.forName("zombie.vehicles.BaseVehicle", false, cl),
+                        Class.forName("zombie.vehicles.VehicleParts", false, cl));
+                if (modelRebind.getReturnType() != void.class || (modelRebind.getModifiers() & psf) != psf) {
+                    throw new NoSuchMethodException("VehicleModelRebind.adoptParts signature");
+                }
+                System.out.println("vehicle model rebind OK VehicleModelRebind.adoptParts(BaseVehicle,VehicleParts) 簽名一致");
                 if (!compat) {
                     Class<?> gridLock = Class.forName("zombie.mdc.MetaGridLock", false, cl);
                     var lockedRoom = gridLock.getDeclaredMethod("getRoomByID",

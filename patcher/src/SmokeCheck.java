@@ -4307,7 +4307,7 @@ public final class SmokeCheck {
         return failed;
     }
 
-    /** 車輛（W54、W61–W63、W65）：完整版與相容版都有；W55、W57 只在完整版。 */
+    /** 車輛（W54、W61–W63、W65、W108）：完整版與相容版都有；W55、W57 只在完整版。 */
     static int vehicleChecks(Path distJava, Path jar, boolean compat) throws Exception {
         int failed = 0;
         String playerCls = "zombie/characters/IsoPlayer";
@@ -4660,6 +4660,55 @@ public final class SmokeCheck {
                         .equals(methodText(methodFromJar(jar, vehiclePacketCls, "doRequest", doRemoveDesc)))
                 && methodText(method(distJava, vehiclePacketCls, "parse", vehiclePacketParseDesc))
                         .equals(methodText(methodFromJar(jar, vehiclePacketCls, "parse", vehiclePacketParseDesc))));
+
+        // ---- W108 車在 meta 期間收養零件後門與引擎蓋模型綁著舊零件（docs/patches.md 2dp）----
+        // 存在理由：adoptParts 換掉 parts 卻不碰 models，ModelInfo.part 仍指舊零件。全 jar 多一個 adoptParts 呼叫點、
+        // 或原版開始在收養時重建／重綁 models＝轉紅、重估這刀。
+        String virtualCls = "zombie/vehicles/VirtualVehicle";
+        String rebindCls = "zombie/mdc/VehicleModelRebind";
+        String adoptDesc = "(Lzombie/vehicles/VehicleParts;)V";
+        String fromMetaDesc = "(L" + vehCls + ";)V";
+        failed += check("W108 vanilla 前提：全 jar 呼叫 BaseVehicle.adoptParts 的只有 VirtualVehicle.removeFromMeta",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, vehCls, "adoptParts", adoptDesc)
+                        .equals(List.of(virtualCls + ".removeFromMeta" + fromMetaDesc)));
+        var modelPart = classNodeFromJar(jar, vehCls + "$ModelInfo").fields.stream()
+                .filter(f -> f.name.equals("part")).findFirst().orElseThrow();
+        failed += check("W108 vanilla 前提：adoptParts 不碰 models；ModelInfo.part 是 public、非 final、型別 VehiclePart",
+                countFieldTouches(methodFromJar(jar, vehCls, "adoptParts", adoptDesc), vehCls, "models") == 0
+                && (modelPart.access & Opcodes.ACC_PUBLIC) != 0 && (modelPart.access & Opcodes.ACC_FINAL) == 0
+                && modelPart.desc.equals("Lzombie/vehicles/VehiclePart;"));
+        MethodNode vFromMeta = methodFromJar(jar, virtualCls, "removeFromMeta", fromMetaDesc);
+        MethodNode pFromMeta = method(distJava, virtualCls, "removeFromMeta", fromMetaDesc);
+        failed += check("W108 removeFromMeta 唯一的 adoptParts 同形改道 VehicleModelRebind.adoptParts，其餘指令與 frames 保留",
+                countExactCalls(pFromMeta, Opcodes.INVOKEVIRTUAL, vehCls, "adoptParts", adoptDesc) == 0
+                && methodText(vFromMeta).replace("INVOKEVIRTUAL " + vehCls + ".adoptParts " + adoptDesc,
+                        "INVOKESTATIC " + rebindCls + ".adoptParts (L" + vehCls + ";" + adoptDesc.substring(1))
+                        .equals(methodText(pFromMeta)));
+        int virtualChanged = 0;
+        ClassNode vVirtual = classNodeFromJar(jar, virtualCls);
+        for (MethodNode m : classNode(distJava, virtualCls).methods) {
+            if (m.name.equals("removeFromMeta")) {
+                continue;
+            }
+            MethodNode v = vVirtual.methods.stream().filter(x -> x.name.equals(m.name) && x.desc.equals(m.desc))
+                    .findFirst().orElseThrow();
+            if (!methodText(v).equals(methodText(m))) {
+                virtualChanged++;
+            }
+        }
+        failed += check("W108 負對照：VirtualVehicle 其他方法（set、save、stopUpdatingInMeta…）未改動", virtualChanged == 0);
+        MethodNode rebind = method(distJava, rebindCls, "adoptParts", "(L" + vehCls + ";" + adoptDesc.substring(1));
+        boolean adoptOutsideTry = countExactCalls(rebind, Opcodes.INVOKEVIRTUAL, vehCls, "adoptParts", adoptDesc) == 1;
+        for (AbstractInsnNode in : rebind.instructions) {
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, vehCls, "adoptParts", adoptDesc)) {
+                int adoptAt = rebind.instructions.indexOf(in);
+                for (TryCatchBlockNode t : rebind.tryCatchBlocks) {
+                    adoptOutsideTry &= adoptAt < rebind.instructions.indexOf(t.start) || adoptAt >= rebind.instructions.indexOf(t.end);
+                }
+            }
+        }
+        failed += check("W108 helper：恰一個 BaseVehicle.adoptParts，而且不在任何 try 範圍內（原版收養一定做完、例外照原版外拋）",
+                adoptOutsideTry);
         return failed;
     }
 

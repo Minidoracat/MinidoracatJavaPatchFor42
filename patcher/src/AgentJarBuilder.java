@@ -49,6 +49,9 @@ import java.util.zip.ZipOutputStream;
  *
  * <p>原版 package 的 helper 依父型別排序（父型別先定義）。錨點挑同 package 的原版頂層 class（不挑被修補的，少載一個
  * 大 class）；agent 先註冊 transformer 才定義 helper，所以錨點與 helper 的父型別就算是被修補的 class 也換得到。
+ * client 包的錨點還必須是葉 class（父型別與介面都不是遊戲 class）：載入錨點會連帶載入它的父型別，排在後面的 agent
+ * （PZ_Optimization 看到它要換的 {@code zombie.ai.State} 已被載入）就會以原版執行；找不到葉 class 時建置失敗。
+ * 建置期 AgentLoadCheck 的 {@code -Dmdc.check.preload} 驗 premain 實際載入的 class。
  * jar 內容排序、時間戳固定，同樣輸入產生同樣的 jar（SHA 可重現）。
  */
 public final class AgentJarBuilder {
@@ -112,7 +115,7 @@ public final class AgentJarBuilder {
             (jarPackages.containsKey(packageOf(helper)) ? defineSet : ownSet).add(helper);
         }
         List<String> defineOrder = topoOrder(defineSet, all);
-        Map<String, String> anchors = anchors(defineSet, jarPackages, patched);
+        Map<String, String> anchors = anchors(defineSet, jarPackages, patched, null);
 
         Map<String, byte[]> entries = agentEntries(agentClasses);
         for (String own : ownSet) {
@@ -210,7 +213,7 @@ public final class AgentJarBuilder {
                 }
             }
         }
-        Map<String, String> anchors = anchors(helpersAnywhere, jarPackages, patchedAnywhere);
+        Map<String, String> anchors = anchors(helpersAnywhere, jarPackages, patchedAnywhere, jarHeaders);
         for (Mod m : mods) {
             for (String helper : m.helperSha.keySet()) {
                 if (packageOf(helper).equals(OWN_PACKAGE)) {
@@ -370,9 +373,12 @@ public final class AgentJarBuilder {
                 + " methods" + methods + " " + attrs;
     }
 
-    /** 錨點：同 package 的原版 class，先挑沒被修補的頂層 class。 */
+    /**
+     * 錨點：同 package 的原版 class，先挑沒被修補的頂層 class。{@code jarHeaders} 不是 null 時（client 包）只挑葉 class：
+     * 父型別與介面都不在遊戲 jar 裡，載入它不會連帶載入別的遊戲 class；找不到就丟例外。
+     */
     static Map<String, String> anchors(Set<String> vanillaPackageHelpers, Map<String, Set<String>> jarPackages,
-                                       Set<String> patched) {
+                                       Set<String> patched, Map<String, Header> jarHeaders) {
         Map<String, String> anchors = new TreeMap<>();
         for (String helper : vanillaPackageHelpers) {
             String pkg = packageOf(helper);
@@ -381,10 +387,17 @@ public final class AgentJarBuilder {
             }
             String anchor = null;
             for (String candidate : jarPackages.get(pkg)) {
-                if (!patched.contains(candidate) && !candidate.contains("$") && !candidate.endsWith("/package-info")) {
+                Header h = jarHeaders == null ? null : jarHeaders.get(candidate);
+                if (!patched.contains(candidate) && !candidate.contains("$") && !candidate.endsWith("/package-info")
+                        && (jarHeaders == null || h != null && !jarHeaders.containsKey(h.superName())
+                                && java.util.Arrays.stream(h.interfaces()).noneMatch(jarHeaders::containsKey))) {
                     anchor = candidate;
                     break;
                 }
+            }
+            if (anchor == null && jarHeaders != null) {
+                throw new IllegalStateException("package " + pkg + " 找不到可當錨點的葉 class（沒被修補、頂層、父型別與介面都不是遊戲 class）："
+                        + "載入非葉錨點會連帶載入它的父型別，排在後面的 agent 會以原版執行");
             }
             anchors.put(pkg, anchor != null ? anchor : jarPackages.get(pkg).iterator().next());
         }

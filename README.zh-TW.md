@@ -6,7 +6,7 @@
 bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 
 - **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 88 個 patched class、264 個命中點、110 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡；地上一件沒有模型的物品讓客戶端不停跳錯誤），以 Java agent 載入、不改遊戲檔案，從
+- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡；地上一件沒有模型的物品讓客戶端不停跳錯誤；單機沒熄火就下車走遠，回來後車門與引擎蓋錯位、打不開），以 Java agent 載入、不改遊戲檔案，從
   [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
 - **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
 
@@ -192,6 +192,7 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | W84 鄰居 chunk 的血跡逐筆掃描（[2cs](docs/patches.md#2cs)） | 每重畫一個 chunk 的一層，`FBORenderCell.renderOneLevel` 先畫自己的血跡，再對 8 個鄰居各呼叫一次 `renderOneLevel_Blood`：鄰居整份 `floorBloodSplats`（最多 1000 筆）與 `floorBloodSplatsFade` 逐筆掃過，只留下離交界 1 格內的。屍潮後每個 chunk 都有上千筆；正式服約 48 人、屍潮打完後，不開 `-debug` 的 client 這個方法佔主執行緒 4.6–9.4%。 | 兩份清單換成同一實作、只多記結構變動並帶「靠哪一邊」的索引；鄰居呼叫只走那一邊的候選，原版的判斷照樣逐筆再做，留下的血跡、順序、顏色與淡出都與原版相同。每 256 次抽 1 次照原版整份掃描比對，不一致就本次停用。 | 未回報 |
 | W100 沒有模型的武器類物品每次重畫都丟例外（[2dh](docs/patches.md#2dh)） | `ItemModelRenderer.itemHasModel` 對武器直接查 `getModelScript(item.getStaticModel())`，不檢查名稱。沒有 `WorldStaticModel`、`StaticModel`、`WeaponSprite` 的武器類物品（原版留下的開發用物品 `Base.FISH_DEV_ITEM`）名稱是 null，`ScriptBucketCollection.getScript` 丟 `NullPointerException`。地上只要有一件，視野內有它的每位玩家每次重畫都丟一次，錯誤數字一直跳（玩家 log 83 秒 401 筆）。 | 名稱是 null 時當成「沒有模型」，照原版對其他沒有模型的物品的做法改畫圖示；其餘照原版。 | 未回報 |
 | W101 沒有模型的武器類物品拿在手上每幀丟例外（[2di](docs/patches.md#2di)） | `ModelManager.addEquippedModelInstance` 把武器的 `getStaticModel()` 不經檢查交給 `addStatic`；和 W100 同一種物品名稱是 null，`ScriptManager.getItemName` 丟例外。`GameWindow.frameStep` 接住，那一幀後面的更新沒有執行，下一幀再來一次（原版實測 8 秒 1959 筆）。 | 沒有模型名稱的武器改走原版的非武器分支：手上不掛模型，和其他沒有模型的物品相同；其餘照原版。 | 未回報 |
+| W108 引擎沒熄火就下車走遠，回來後車門打不開（[2dp](docs/patches.md#2dp)） | 單機：引擎發動中（推測警報響或警笛開著也一樣）下車走遠，車改由 meta 模擬；走回來時遊戲新建一台車，先照它自己的零件建好門與引擎蓋的模型，`VirtualVehicle.removeFromMeta` 才用 `adoptParts` 換上 meta 期間的零件。模型仍綁著被換掉的舊零件：車門、引擎蓋的位置跑掉，而且打不開。 | 收養後把每個零件模型改綁到車上現在同一個 id 的零件，模型不增減、不重建；其餘照原版。多人遊戲不會走到這條路。 | [#99519](https://theindiestone.com/forums/topic/99519/) |
 
 ### Native 防護（Linux dedicated server）
 
@@ -297,12 +298,12 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 | 模組 | 用途 |
 |---|---|
 | `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速、沒有模型的地上物品修正（32GB 以上 RAM） |
+| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速、沒有模型的地上物品修正、沒熄火下車走遠後車門打不開修正（32GB 以上 RAM） |
 | `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與其他版本互斥 |
-| `client-fixes-compat` | 只含車輛修正（車輛動畫加速、開車瞬移三項、車被推到地板下），給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
+| `client-fixes-compat` | 只含車輛修正（車輛動畫加速、開車瞬移三項、車被推到地板下、沒熄火下車走遠後車門打不開），給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
 | `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
 
-**和替換遊戲 class 的 MOD 一起用。** 有些 MOD（例如 PZ_Optimization）會把 `.class` 檔放進遊戲資料夾。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新（推測：沒有實測 PZ_Optimization 本身）。
+**和替換遊戲 class 的 MOD 一起用。** 有些 MOD 會替換遊戲的 class：把 `.class` 檔放進遊戲資料夾，或像 PZ_Optimization 在 42.22 起改用 Java agent（啟動參數 `-javaagent:pzopt/agent/pzopt-agent.jar`，換掉 `pzopt/overrides/` 底下的 class）。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。相容版和 PZ_Optimization 的 agent 可以一起用，兩邊的安裝器都把自己排在最前面，誰排前面都可以（0.3.8 起；用 PZ_Optimization revision 3d39148846 在 Java 載入層實測兩種順序，本包排前面的順序另在單機實機跑過）。0.3.7 以前的本包排在它前面時，會讓它整個以原版執行（它的 `agent.log` 寫 `already loaded … zombie.ai.State … the game runs stock`），請更新到 0.3.8。先裝完整版、之後才裝 PZ_Optimization 時，本包會整包不啟用、照原版跑，安裝器的狀態查詢會提醒改裝相容版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新。
 
 **Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，再貼一次一行指令選 `3`，或執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
 

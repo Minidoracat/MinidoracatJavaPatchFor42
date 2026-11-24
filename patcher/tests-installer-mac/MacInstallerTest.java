@@ -157,6 +157,44 @@ public final class MacInstallerTest {
         expect(7, "install", "--non-interactive", "--modules", COMPAT);
         vanilla();
 
+        // PZ_Optimization 的 agent 形態（pzopt/agent/pzopt-agent.jar＋pzopt/overrides/；Mac 上它的 -javaagent 在 JAVA_TOOL_OPTIONS，只能看檔案）
+        fresh();
+        pzopt("zombie/iso/IsoChunk");
+        expect(7, "install", "--non-interactive", "--modules", STD);
+        has("pzopt/overrides/zombie/iso/IsoChunk.class");
+        has("--modules " + COMPAT);
+        vanilla();
+        expect(0, "install", "--non-interactive", "--modules", COMPAT);
+        eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "pzopt: compat installs");
+        eq(first(), MacInstaller.agentArg(List.of("core", COMPAT)), "pzopt: ours first");
+        eq(Files.readAllBytes(root.resolve("pzopt/overrides/zombie/iso/IsoChunk.class")).length, 1, "pzopt file untouched");
+        fresh();
+        pzopt("zombie/iso/IsoChunk");
+        expectIn(0, "N\nY\n", "quick", "--ram-gb", "32");
+        eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "pzopt: quick falls back to compat");
+        fresh();
+        pzopt("zombie/iso/IsoChunk");
+        expectIn(0, "1\n1\n\nN\nY\n\n0\n", "menu", "--ram-gb", "32");
+        eq(List.of("core", COMPAT), MacInstaller.moduleIds(state()), "pzopt: menu recommends compat");
+        // 只有 overrides、沒有 agent jar（卸載殘留）不算衝突
+        fresh();
+        pzopt("zombie/iso/IsoChunk");
+        Files.delete(root.resolve("pzopt/agent/pzopt-agent.jar"));
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        eq(List.of("core", STD), MacInstaller.moduleIds(state()), "pzopt leftovers do not block");
+        // 先裝完整版、之後才裝 pzopt：status 警告
+        fresh();
+        expect(0, "install", "--non-interactive", "--modules", STD);
+        pzopt("zombie/iso/IsoChunk");
+        expect(0, "status");
+        has("PZ_Optimization also replaces classes the installed patches replace");
+        // profiler 的 LuaCaller 也算
+        fresh();
+        pzopt("se/krka/kahlua/integration/LuaCaller");
+        expect(7, "install", "--non-interactive", "--modules", "profiler");
+        has("pzopt/overrides/se/krka/kahlua/integration/LuaCaller.class");
+        vanilla();
+
         // 互動選單：記憶體推薦、[L] 切換語言
         fresh();
         expectIn(0, "1\n1\n\nN\nY\n\n0\n", "menu", "--ram-gb", "32", "--lang", "en");
@@ -584,7 +622,7 @@ public final class MacInstallerTest {
                  "agent": {"source": "MinidoracatClientPatches.jar", "sha256": "%s"},
                  "modules": [
                   {"id": "core", "name": "核心", "nameEn": "Core", "version": "c1", "requires": [], "patchedClasses": ["zombie/core/Core"]},
-                  {"id": "profiler", "name": "P", "nameEn": "P", "version": "p1", "requires": ["core"], "patchedClasses": []},
+                  {"id": "profiler", "name": "P", "nameEn": "P", "version": "p1", "requires": ["core"], "patchedClasses": ["se/krka/kahlua/integration/LuaCaller"]},
                   {"id": "client-fixes-standard", "name": "S", "nameEn": "S", "version": "s1", "requires": ["core"], "exclusiveGroup": "client-fixes",
                    "patchedClasses": ["zombie/iso/IsoChunk", "zombie/vehicles/BaseVehicle"]},
                   {"id": "client-fixes-lowmem", "name": "L", "nameEn": "L", "version": "l1", "requires": ["core"], "exclusiveGroup": "client-fixes",
@@ -593,6 +631,15 @@ public final class MacInstallerTest {
                    "patchedClasses": ["zombie/vehicles/BaseVehicle"]}
                  ]}
                 """.formatted(jarSha, MacInstaller.sha256(agent)));
+    }
+
+    /** 放 PZ_Optimization agent 形態的檔案：agent jar＋pzopt/overrides/ 底下的 cls.class（內容 1 byte）。 */
+    static void pzopt(String cls) throws IOException {
+        Path agent = root.resolve("pzopt/agent/pzopt-agent.jar"), over = root.resolve("pzopt/overrides/" + cls + ".class");
+        Files.createDirectories(agent.getParent());
+        Files.createDirectories(over.getParent());
+        Files.write(agent, new byte[] {1});
+        Files.write(over, new byte[] {1});
     }
 
     static void writeJar(Path jar, String... entries) throws IOException {

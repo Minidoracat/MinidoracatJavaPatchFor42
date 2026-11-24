@@ -508,8 +508,23 @@ public final class MacInstaller {
         return found;
     }
 
-    /** 蓋到這些模組要換的 class（X.class、X$*.class，大小寫不分）或落在 zombie/mdc/ 的外來 class。 */
-    private List<String> conflicts(List<String> loose, List<String> targetIds) {
+    /** PZ_Optimization（42.22 起是 Java agent）換掉的 class：agent jar 在場時 pzopt/overrides/ 底下的 .class（遊戲根相對、正斜線）；agent jar 不在就當沒有。 */
+    private List<String> pzoptOverrides() throws IOException {
+        Path d = root.resolve(PZOPT_OVERRIDES);
+        if (!Files.isRegularFile(root.resolve("pzopt/agent/pzopt-agent.jar"), LinkOption.NOFOLLOW_LINKS) || !Files.isDirectory(d, LinkOption.NOFOLLOW_LINKS)) return List.of();
+        List<String> found = new ArrayList<>();
+        try (Stream<Path> s = Files.walk(d)) {
+            s.filter(f -> f.toString().endsWith(".class") && Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS))
+                    .forEach(f -> found.add(root.relativize(f).toString().replace('\\', '/')));
+        }
+        found.sort(null);
+        return found;
+    }
+
+    static final String PZOPT_OVERRIDES = "pzopt/overrides/";
+
+    /** 蓋到這些模組要換的 class（X.class、X$*.class，大小寫不分）或落在 zombie/mdc/ 的外來 class，加上 PZ_Optimization 也換的這類 class。 */
+    private List<String> conflicts(List<String> loose, List<String> targetIds) throws IOException {
         Set<String> patched = new TreeSet<>();
         for (String id : targetIds) {
             for (Object c : Json.arr(manifestModule(id).get("patchedClasses"), "patchedClasses")) {
@@ -521,6 +536,10 @@ public final class MacInstaller {
             String lower = f.toLowerCase(Locale.ROOT);
             String outer = lower.substring(0, lower.length() - ".class".length()).split("\\$")[0];
             if (lower.startsWith("zombie/mdc/") || patched.contains(outer)) r.add(f);
+        }
+        for (String f : pzoptOverrides()) {
+            String lower = f.substring(PZOPT_OVERRIDES.length()).toLowerCase(Locale.ROOT);
+            if (patched.contains(lower.substring(0, lower.length() - ".class".length()).split("\\$")[0])) r.add(f);
         }
         return r;
     }
@@ -796,9 +815,11 @@ public final class MacInstaller {
             otherAgentsNote(otherAgents(plist.options));
             if (!conflicts.isEmpty()) {
                 head(L("偵測到衝突，已中止（沒有任何檔案被更動）", "Conflict found; stopped (no files were changed)"));
-                for (String c : conflicts) bad(L("外來的 class 檔會蓋掉本包要修補的 class：", "A class file from elsewhere would replace a class this package patches: ") + c);
-                String why = L("Contents/Java 裡有不是本安裝器裝的 class 檔，通常來自另一個替換遊戲 class 的 MOD。不要只刪除上面列出的檔案：那個 MOD 的其他檔案還需要它們。",
-                        "Contents/Java has class files this installer did not install, usually from another mod that replaces game classes. Do not delete just the files listed above: that mod's other files still need them. ");
+                for (String c : conflicts) bad(c.startsWith(PZOPT_OVERRIDES)
+                        ? L("PZ_Optimization 也換本包要修補的 class，而且它先換，本包換不上：", "PZ_Optimization also replaces a class this package patches, and it does so first, so the patch cannot be applied: ") + c
+                        : L("外來的 class 檔會蓋掉本包要修補的 class：", "A class file from elsewhere would replace a class this package patches: ") + c);
+                String why = L("Contents/Java 裡有不是本安裝器裝的 class 檔（直接放在 Contents/Java，或在 PZ_Optimization 的 pzopt/overrides 裡），通常來自另一個替換遊戲 class 的 MOD。不要只刪除上面列出的檔案：那個 MOD 的其他檔案還需要它們。",
+                        "Contents/Java has class files this installer did not install (directly in Contents/Java, or in PZ_Optimization's pzopt/overrides), usually from another mod that replaces game classes. Do not delete just the files listed above: that mod's other files still need them. ");
                 if (compatFits(installed, req, loose)) {
                     throw new Fail(CONFLICT, why + L("要和它一起用，請改裝相容版（只含車輛的修補）：在安裝選單選相容版，或用 --modules " + COMPAT + "。要完整版，請先用那個 MOD 自己的方式把它完整移除。",
                             "To use both, install the compatible version instead (vehicle fixes only): choose it in the install menu, or use --modules " + COMPAT + ". For the full version, remove that mod completely first."));
@@ -853,7 +874,7 @@ public final class MacInstaller {
         }
     }
 
-    private boolean compatFits(List<String> installed, List<String> requested, List<String> loose) {
+    private boolean compatFits(List<String> installed, List<String> requested, List<String> loose) throws IOException {
         if (manifestModule(COMPAT) == null) return false;
         if (requested.stream().noneMatch(r -> r.startsWith("client-fixes-") && !r.equals(COMPAT))) return false;
         List<String> swapped = new ArrayList<>();
@@ -1032,6 +1053,9 @@ public final class MacInstaller {
         if (!loose.isEmpty()) foreignWarning(loose);
         otherAgentsNote(otherAgents(plist.options));
         if (manifest != null) {
+            List<String> pzopt = conflicts(List.of(), ids.stream().filter(id -> manifestModule(id) != null).toList());
+            if (!pzopt.isEmpty()) warn(L("PZ_Optimization 也換已安裝的修補要換的 class（例如 " + pzopt.get(0) + "）：兩個一起用時本包會整包不啟用或部分換不上。請重新執行安裝器，改裝相容版（只含車輛的修補，可以和它一起用）。",
+                    "PZ_Optimization also replaces classes the installed patches replace (for example " + pzopt.get(0) + "): with both, this package stays off or is only partly applied. Run the installer again and install the compatible version instead (vehicle fixes only; it works with PZ_Optimization)."));
             info(L("  安裝包可提供：", "  This package offers: ") + Json.str(manifest, "packageVersion", "?") + L("（遊戲 ", " (game ") + Json.str(manifest, "gameVersion", "?") + L("）", ")"));
             for (Map<String, Object> m : manifestModules()) {
                 String id = (String) m.get("id");
