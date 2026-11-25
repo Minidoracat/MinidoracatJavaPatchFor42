@@ -53,7 +53,7 @@ irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/dow
 - **主執行緒耗時**：動物視線與聽覺、物品登記、玩家視線、停著的車、車輛聲音、尋路重建都大幅變便宜（例：動物聽覺每幀 4.34 → 0.69 ms）。多數項目的結果與原版相同；風險較高的預設是只量測的 observe 模式。（[效能](docs/catalog.md#效能主執行緒耗時)）
 - **頻寬**：動物完整快照重送（佔出向流量 38–40%）、製作站廣播（17.5%）、`VehicleCollide` 迴圈（單一 client 每秒 239 包）。（[網路](docs/catalog.md#網路頻寬與重送迴圈)）
 - **多人同步 bug**：讀條卡在 100%、殭屍隱形、隊友不在地圖上、車卡在地板下、動物區域消失或重複、PVE 死亡被公告成擊殺。（[多人同步正確性](docs/catalog.md#多人同步正確性)）
-- **帳號與濫用**：伺服器端多驗證幾種 client 請求（建造、物件圖、燈光設定、物品資料、衣物），Steam 模式也擋 IP 封鎖，每個 Steam ID 的帳號數上限，並記下步行瞬移和不在駕駛座的人移動車輛。（[帳號與濫用](docs/catalog.md#帳號與濫用)）
+- **帳號與濫用**：伺服器端多驗證幾種 client 請求（建造、物件圖、燈光設定、物品資料、衣物、車輛碰撞授權），Steam 模式也擋 IP 封鎖，每個 Steam ID 的帳號數上限，並記下步行瞬移和不在駕駛座的人移動車輛。（[帳號與濫用](docs/catalog.md#帳號與濫用)）
 - **log 噪音**：已知的洗版訊息不再印出，反作弊與未知警告照常輸出。（[log 噪音](docs/catalog.md#log-噪音)）
 - **Linux native 崩潰**：尋路函式庫的崩潰與記憶體洩漏、Steam 網路函式庫的越界讀取。（[Native 防護](docs/catalog.md#native-防護linux-dedicated-server)）
 

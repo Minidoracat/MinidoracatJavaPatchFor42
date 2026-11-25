@@ -152,9 +152,13 @@ public final class MdcUnseatedVehicleWatch {
         return !v.equals("0") && !v.equals("off");
     }
 
-    /** 未設、{@code enforce}、未知值→擋；{@code observe} 與 {@code 0|off} 不擋。 */
+    /** 未設、{@code enforce}、未知值→擋；{@code observe|2}（2＝其他刀的 observe 慣例）與 {@code 0|off} 不擋。 */
     static boolean enforce(String raw) {
-        return enabled(raw) && (raw == null || !raw.trim().toLowerCase(Locale.ROOT).equals("observe"));
+        if (raw == null) {
+            return true;
+        }
+        String v = raw.trim().toLowerCase(Locale.ROOT);
+        return enabled(raw) && !v.equals("observe") && !v.equals("2");
     }
 
     static float parseTiles(String raw) {

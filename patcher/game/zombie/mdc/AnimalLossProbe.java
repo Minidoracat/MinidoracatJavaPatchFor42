@@ -213,6 +213,7 @@ public final class AnimalLossProbe {
      */
     private static boolean spare(IsoAnimal parent, IsoAnimal newAnimal) {
         IsoAnimal twin = null;
+        boolean wet;
         try {
             IsoGridSquare sq = parent.getSquare();
             if (sq == null) {
@@ -237,12 +238,16 @@ public final class AnimalLossProbe {
                     }
                 }
             }
+            wet = twin != null && parent.checkForWater();
         } catch (RuntimeException | LinkageError e) {
             anomalies.incrementAndGet();
             return false;
         }
         if (twin == null) {
             return false;
+        }
+        if (wet) {
+            return true;   // 站在水格：原版 grow 接著因 checkForWater 作廢、下一幀重試；放行但不計不記，免得每幀一行
         }
         long n = growSpared.incrementAndGet();
         try {

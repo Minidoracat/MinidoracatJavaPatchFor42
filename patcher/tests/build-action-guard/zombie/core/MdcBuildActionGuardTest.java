@@ -120,17 +120,17 @@ public final class MdcBuildActionGuardTest {
         String entity = "ES_Makeshift_Electric_Blower_Forge_II";   // 原版最長的 entity 名（37 字，超過舊上限 32）
         BuildActionPacket far = expectRangeCase(wantRange, "B42 建造選單的實體（建構參數帶 ObjectInfo）、x 差 9 格", OWNER_ID,
                 "ISBuildIsoEntity", "carpentry_01_24", objectInfo(entity), 109.5F, 200, 0);
-        expectRangeCase(wantRange, "sprite 帶換行與欄位分隔符、超過 64 字", OWNER_ID,
-                "ISWoodenWall", "evil\n[FAKE] x" + "y".repeat(80), null, 9000, 9000, 0);
+        expectRangeCase(wantRange, "sprite 帶換行、欄位分隔符與雙向顯示控制字元、超過 64 字", OWNER_ID,
+                "ISWoodenWall", "evil\n[FAKE] x\u202E" + "y".repeat(80), null, 9000, 9000, 0);
         if (wantRange) {
             expect("W77 計數再 +2", MdcBuildActionGuard.rangeRefusedForTest() == range1 + 2);
             expect("W77 log：object= 是 ObjectInfo 的名字（37 字不截斷）",
                     rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=range type=ISBuildIsoEntity object=" + entity
                             + " sprite=carpentry_01_24 owner=3:builder")));
-            String cleaned = "evil__FAKE__x" + "y".repeat(51) + "...";
-            expect("W77 log：sprite 清洗、截在 64 字，一行沒被拆開",
+            String cleaned = "evil__FAKE__x_" + "y".repeat(50) + "...";
+            expect("W77 log：sprite 清洗（含雙向顯示控制字元）、保留前 64 字再接 ...，一行沒被拆開",
                     rows(log).stream().anyMatch(r -> r.contains(" object=? sprite=" + cleaned + " owner=3:builder at="))
-                            && log.toString(StandardCharsets.UTF_8).lines().noneMatch(l -> l.contains("[FAKE]")));
+                            && log.toString(StandardCharsets.UTF_8).lines().noneMatch(l -> l.contains("[FAKE]") || l.indexOf('\u202E') >= 0));
             expectReject("帶 ObjectInfo 的遠距請求", far);
         } else {
             expect("range-off：零計數", MdcBuildActionGuard.rangeRefusedForTest() == range1);

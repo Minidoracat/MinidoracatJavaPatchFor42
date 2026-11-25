@@ -1001,7 +1001,7 @@ Assert-Ok "MdcSteamIpBanTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.steamIpBan=off" -cp $sibCp zombie.network.MdcSteamIpBanTest off
 Assert-Ok "MdcSteamIpBanTest（off，kill switch）"
 
-Write-Host "[9zzl/10] 沒人開的車被客戶端搬動的觀測與擋兩種授權申請（W99）：改道點原樣呼叫原版 setClientForce、沒經過 begin 或對不上車只計 anomalies；搬 20 格記 moving 與 moved kind=unseated；經真 VehicleCollidePacket.processServer（W46 helper 轉來、authorizationServerCollide 改道）的可疑申請記一行（每個帳號 5 秒一行）、之後由同一位玩家授權的搬動記 grant=collide；enforce：申請指名的玩家不屬於送出的連線（含查不到）不交授權、送出連線的既有快取失效，歸還指名非駕駛當成不指名的歸還（車與夥伴收回伺服器），沒在開車與太遠的申請照交，判定拋例外照原版；observe 與 off 照原版交授權（負對照）；pushed 只算開的車在旁邊；拖車只計數；分段搬累計起點（vid 換車、拖走不延續）；拖車夥伴；歸還讓舊申請作廢；帳號清洗；每帳號每類額度；日誌拋例外照擋、Error 照常外拋"
+Write-Host "[9zzl/10] 沒人開的車被客戶端搬動的觀測與擋兩種授權申請（W99）：改道點原樣呼叫原版 setClientForce、沒經過 begin 或對不上車只計 anomalies；搬 20 格記 moving 與 moved kind=unseated；經真 VehicleCollidePacket.processServer（W46 helper 轉來、authorizationServerCollide 改道）的可疑申請記一行（每個帳號 5 秒一行）、之後由同一位玩家授權的搬動記 grant=collide；enforce：申請指名的玩家不屬於送出的連線（含查不到、不指名）不交授權、送出連線的既有快取失效，歸還指名非駕駛（含查不到）當成不指名的歸還（車與夥伴收回伺服器），兩項檢查以外的申請與歸還（含別條連線歸還、指名真正的駕駛）照原版，判定拋例外照原版；observe 與 off 照原版處理（負對照）；pushed 只算開的車在旁邊；拖車只計數；分段搬累計起點（vid 換車、拖走不延續）；拖車夥伴；歸還讓舊申請作廢；帳號清洗；每帳號每類額度；日誌拋例外照擋、Error 照常外拋"
 $uvwCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest enforce
 Assert-Ok "MdcUnseatedVehicleWatchTest（enforce，出貨組態）"

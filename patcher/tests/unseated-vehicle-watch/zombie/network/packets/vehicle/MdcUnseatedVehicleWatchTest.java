@@ -45,12 +45,13 @@ public final class MdcUnseatedVehicleWatchTest {
         boolean enf = "enforce".equals(args[0]);
         expect("自驗：argv=" + args[0] + " 與 -Dmdc.unseatedVehicleWatch=" + System.getProperty("mdc.unseatedVehicleWatch") + " 相符",
                 MdcUnseatedVehicleWatch.ENABLED == on && MdcUnseatedVehicleWatch.ENFORCE == enf);
-        expect("enabled：null／observe／亂寫→開、0／off→關；enforce：null／enforce／亂寫→擋、observe／off→不擋；parseTiles：預設 5、≤0／Inf／亂寫回 5、12 照用",
+        expect("enabled：null／observe／亂寫→開、0／off→關；enforce：null／enforce／亂寫→擋、observe／2／off→不擋；parseTiles：預設 5、≤0／Inf／亂寫回 5、12 照用",
                 MdcUnseatedVehicleWatch.enabled(null) && MdcUnseatedVehicleWatch.enabled("observe")
                         && MdcUnseatedVehicleWatch.enabled("x") && !MdcUnseatedVehicleWatch.enabled(" OFF ")
                         && !MdcUnseatedVehicleWatch.enabled("0")
                         && MdcUnseatedVehicleWatch.enforce(null) && MdcUnseatedVehicleWatch.enforce("enforce") && MdcUnseatedVehicleWatch.enforce("x")
-                        && !MdcUnseatedVehicleWatch.enforce(" Observe ") && !MdcUnseatedVehicleWatch.enforce("off") && !MdcUnseatedVehicleWatch.enforce("0")
+                        && !MdcUnseatedVehicleWatch.enforce(" Observe ") && !MdcUnseatedVehicleWatch.enforce("2")
+                        && !MdcUnseatedVehicleWatch.enforce("off") && !MdcUnseatedVehicleWatch.enforce("0")
                         && MdcUnseatedVehicleWatch.parseTiles(null) == 5F
                         && MdcUnseatedVehicleWatch.parseTiles("-1") == 5F && MdcUnseatedVehicleWatch.parseTiles("Infinity") == 5F
                         && MdcUnseatedVehicleWatch.parseTiles("abc") == 5F && MdcUnseatedVehicleWatch.parseTiles("12") == 12F);
@@ -103,7 +104,7 @@ public final class MdcUnseatedVehicleWatchTest {
         // 3. 經真 VehicleCollidePacket.processServer（W46 helper 轉來）的申請：沒在開車 → 可疑申請一行；測試設定授權後搬 30 格，記 grant=collide
         BaseVehicle beetle = vehicle(50, 3047, "Base.63beetle", 200F, 200F, Authorization.Server, -1);
         collide(beetle, attacker, attackerConn, true);
-        expect("自己的玩家沒在開車的申請（C）不擋：照原版交 LocalCollide/5", auth(beetle, Authorization.LocalCollide, 5));
+        expect("不在兩項檢查內的申請：照原版處理（LocalCollide/5）", auth(beetle, Authorization.LocalCollide, 5));
         String req = line(log, "collide-request suspect=notDriving");
         expect(on ? "可疑申請（沒在開車）：一行，帶帳號、SteamID、車、位置、授權、requester=none、action=logged" : "off：沒有行",
                 on ? req != null && req.contains("user=\"attacker\" steamid=76561190000000005 pid=5")
@@ -171,7 +172,7 @@ public final class MdcUnseatedVehicleWatchTest {
                         : pushLine == null);
         BaseVehicle farCar = vehicle(63, 8003, "Base.SmallCar", 340F, 300F, Authorization.Server, -1);
         collide(farCar, driver, connection("driver2", 1L, driver), true);
-        expect((on ? "開的車離目標 40 格：suspect=far … d=40.0 action=logged" : "off：沒有行") + "；不擋，照原版交 LocalCollide/6",
+        expect((on ? "開的車離目標 40 格：suspect=far … d=40.0 action=logged" : "off：沒有行") + "；照原版處理（LocalCollide/6）",
                 on == (line(log, "collide-request suspect=far") != null && line(log, "collide-request suspect=far").contains("d=40.0 action=logged"))
                         && auth(farCar, Authorization.LocalCollide, 6));
 
@@ -223,6 +224,23 @@ public final class MdcUnseatedVehicleWatchTest {
         collide(plain, null, connection("x", 9L, null), false);
         expect("駕駛歸還自己開的車、帶 -1 的一般歸還：不記，照原版（Local/6、Server/-1）",
                 MdcUnseatedVehicleWatch.releasesToPlayer == rtp && auth(own, Authorization.Local, 6) && auth(plain, Authorization.Server, -1));
+        // 9a. 合法交接：別條連線（推車的人）歸還、指名的是伺服器上這台車的駕駛 → 三種模式都照原版交 Local 給駕駛，不計
+        BaseVehicle handed = vehicle(95, 9204, "Base.SUV", 740F, 700F, Authorization.LocalCollide, 5);
+        seat(handed, 0, other);
+        long fr = MdcUnseatedVehicleWatch.forcedRelease;
+        collide(handed, other, connection("attacker6", 5L, attacker), false);
+        expect("別條連線歸還、指名真正的駕駛：照原版 Local/7，不記、不擋",
+                auth(handed, Authorization.Local, 7) && MdcUnseatedVehicleWatch.releasesToPlayer == rtp
+                        && MdcUnseatedVehicleWatch.forcedRelease == fr);
+        // 9c. 邊界：歸還指名查不到的玩家＝B；申請不指名（-1）＝A
+        BaseVehicle lost = vehicle(96, 9205, "Base.SUV", 750F, 700F, Authorization.LocalCollide, 5);
+        collide(lost, ghost, connection("attacker7", 5L, attacker), false);
+        BaseVehicle anon = vehicle(97, 9206, "Base.SUV", 760F, 700F, Authorization.Server, -1);
+        collide(anon, null, connection("attacker8", 5L, attacker), true);
+        expect(enf ? "歸還指名查不到的玩家：收回 Server/-1；不指名的申請：擋下，維持 Server/-1"
+                        : "observe／off：照原版（Local/77、LocalCollide/-1）",
+                enf ? auth(lost, Authorization.Server, -1) && auth(anon, Authorization.Server, -1)
+                        : auth(lost, Authorization.Local, 77) && auth(anon, Authorization.LocalCollide, -1));
         long seen = MdcUnseatedVehicleWatch.requestsSeen;
         BaseVehicle localCar = vehicle(93, 9203, "Base.SUV", 730F, 700F, Authorization.Local, 6);
         collide(localCar, attacker, connection("y", 5L, attacker), true);
@@ -437,8 +455,8 @@ public final class MdcUnseatedVehicleWatchTest {
         expect(on ? "首次生效行（minTiles=5.0 mode=" + (enf ? "enforce" : "observe") + "）" : "off：沒有任何 UnseatedVehicleWatch 行",
                 on ? line(log, "首次生效") != null && line(log, "首次生效").contains("minTiles=5.0 mode=" + (enf ? "enforce" : "observe"))
                         : !log.toString().contains("UnseatedVehicleWatch"));
-        expect(enf ? "擋下計數：refused=2（A 兩次）、forcedRelease=1（B 一次）" : "不擋：refused=0、forcedRelease=0",
-                MdcUnseatedVehicleWatch.refused == (enf ? 2 : 0) && MdcUnseatedVehicleWatch.forcedRelease == (enf ? 1 : 0));
+        expect(enf ? "擋下計數：refused=3（A 三次）、forcedRelease=2（B 兩次）" : "不擋：refused=0、forcedRelease=0",
+                MdcUnseatedVehicleWatch.refused == (enf ? 3 : 0) && MdcUnseatedVehicleWatch.forcedRelease == (enf ? 2 : 0));
 
         OUT.println(failed == 0 ? "MdcUnseatedVehicleWatchTest OK (" + args[0] + ")" : "MdcUnseatedVehicleWatchTest FAILED " + failed);
         System.exit(failed == 0 ? 0 : 1);

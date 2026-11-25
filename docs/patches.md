@@ -4649,7 +4649,7 @@ console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20
 [MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<請求的類別名> object=<建造物名|?> sprite=<sprite 名> owner=<onlineID>:<名稱> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
 ```
 
-`object=` 是建構參數裡第一個建造物定義（B42 建造選單的實體）的名字，由伺服器以請求帶的名字查腳本表還原，舊式建造沒有、印 `?`；`sprite=` 是請求帶的 sprite 名，兩欄都換掉控制字元與欄位分隔符、超過 64 字截斷。
+`object=` 是建構參數裡第一個建造物定義（B42 建造選單的實體）的名字，由伺服器以請求帶的名字查腳本表還原，舊式建造沒有、印 `?`；`sprite=` 是請求帶的 sprite 名。兩欄都把控制字元、空白、Unicode 格式字元（雙向顯示控制、零寬字元）與欄位分隔符換成 `_`，只保留前 64 字，超過的截掉並接 `...`。
 
 **驗收**：上線後正常建造（舊式木牆、B42 建造選單、多格家具、雙門、樓梯、梯子上）照常完成、沒有 `refused` 行；有 `refused` 行時以 `type=`、`object=`、`sprite=`、`at=`、`target=` 判斷是誤擋還是異常請求。
 
@@ -4660,6 +4660,7 @@ console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20
 **守門與驗證**：
 - SmokeCheck：上游指紋——`parse` 恰 1 個 `protectedCall` 且在 `getFunctionObject` 之後、之後 `getFirst()==null` 時 `item=null`，x/y/z/`objectType` 欄位存在，`isValid` 的全 jar 呼叫點數仍為 0；手術後頭部 `aload_0; beginParse`、唯一 `protectedCall` 同形改道，其餘指令與 frames 不變，`BuildAction` 其餘方法不變；helper 委派原呼叫恰 2 處、catch 只有 `RuntimeException`。
 - `MdcBuildActionGuardTest`（`build.ps1` [9zs/10]，both、type-off、range-off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `BuildAction.parse`＋真 wire（Action 標頭、座標、sprite、`PZNetKahluaTableImpl.save` 的類別與參數表），Lua 環境換成最小替身（`LuaManager.env` 放原版 derive 形狀的類別表，`LuaManager.caller` 計次）。照常建造：原版類別相鄰格、二層 derive、雙門原點格、每軸差恰 8 格、樓層差 1、`UseBuildCheat` 管理員遠距；拒絕（不呼叫建構子、`item=null`、計數與 log）：非建造類別、`ISBuildingObject` 本身、metatable 循環、找不到的類別、單軸 9 格（兩軸各一）、遠處、樓層差 2、NaN；拒絕後跑原版 `processServer`，恰送 1 包 Reject 給送封包的人；off 組態照原版呼叫建構子。
+- 同一個測試另驗拒絕行的兩個新欄位：帶 `ObjectInfo` 的遠距請求印出 `object=<名字>`（37 字不截）；sprite 帶換行、欄位分隔符、雙向顯示控制字元且超過 64 字時，清洗後保留前 64 字再接 `...`，log 沒有多出一行。
 
 **退場**：官方在伺服器端驗證建造類別與位置時撤刀。
 
@@ -5484,7 +5485,7 @@ console：
 | 申請（`collide=true`） | 指名的玩家必須屬於送出的連線（查不到玩家也算不符合） | 不交授權，記 `collide-request suspect=notOwnPlayer … action=refused` |
 | 歸還（`collide=false`） | 指名的玩家必須是這台車的駕駛（不指名的歸還照原版） | 當成不指名的歸還（原版 `(-1, false)`，車與拖車夥伴收回伺服器），記 `release-to-player … action=released` |
 
-擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。自己的玩家沒在開車（`suspect=notDriving`）或開的車太遠（`suspect=far`）的申請、以及車輛物理包照原版處理，只記 `action=logged`。判定本身拋例外時照原版交授權、只計 `anomalies`。
+擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。上表以外的申請與歸還、以及車輛物理包照原版處理，只記 `action=logged`。判定本身拋例外時照原版處理、只計 `anomalies`。
 
 **記什麼**：沒有駕駛的車被客戶端回報的位置搬動時，同一台車短時間內的搬動累計起來算（分段搬也算總距離；有人坐上駕駛座或被拖走就重新起算）。`kind` 分四種：
 
@@ -5503,7 +5504,7 @@ console：
 [MinidoracatJavaPatch][UnseatedVehicleWatch] 首次生效（-Dmdc.unseatedVehicleWatch=observe 只記不擋、0|off 照原版）minTiles=5.0 mode=<enforce|observe> accepted=<n> …
 [MinidoracatJavaPatch][UnseatedVehicleWatch] moving kind=unseated vehicle=<sqlId>/<vid> <車型> from=<x>,<y> to=<x>,<y> dist=<格> secs=<秒> packets=<n> user="<帳號>" steamid=<SteamID> auth=<授權> pid=<onlineID> seat=<none|driving …|seat<n> …> playerDist=<開始>/<結束> grant=<collide(…)|release(…)|other> [earlierUsers="<帳號>,…"]
 [MinidoracatJavaPatch][UnseatedVehicleWatch] moved kind=<pushed|unseated|noPlayer> …（欄位同上，起訖是整段累計）
-[MinidoracatJavaPatch][UnseatedVehicleWatch] collide-request suspect=<notOwnPlayer|notDriving|far> user="<帳號>" steamid=<SteamID> pid=<onlineID> vehicle=<sqlId>/<vid> <車型> at=<x>,<y> auth=<授權> requester=<…> action=<refused|logged>
+[MinidoracatJavaPatch][UnseatedVehicleWatch] collide-request suspect=<原因> user="<帳號>" steamid=<SteamID> pid=<onlineID> vehicle=<sqlId>/<vid> <車型> at=<x>,<y> auth=<授權> requester=<…> action=<refused|logged>
 [MinidoracatJavaPatch][UnseatedVehicleWatch] release-to-player user="<帳號>" steamid=<SteamID> pid=<onlineID> own=<yes|no> vehicle=<sqlId>/<vid> <車型> at=<x>,<y> auth=<授權> driver=<none|other> action=<released|logged>
 [MinidoracatJavaPatch][UnseatedVehicleWatch] beat mode=<enforce|observe> accepted=<n> episodes=<n> towed=<n> pushed=<n> unseated=<n> noPlayer=<n> moving=<n> logged=<n> requests=<n> suspect=<n> releaseToPlayer=<n> refused=<n> forcedRelease=<n> open=<n> userCapped=<n> anomalies=<n>
 ```
@@ -5519,17 +5520,17 @@ AutoDrive／Tesla 的召喚是合法的車外授權，會記成 `kind=unseated s
 | 值 | 行為 |
 |---|---|
 | 未設（預設）、`enforce`、未知值 | 記並擋上表兩種 |
-| `observe` | 只記（`action=logged`），授權照原版 |
+| `observe`、`2` | 只記（`action=logged`），授權照原版 |
 | `0`／`off` | 照原版（不計數、不記行、不擋） |
 
 `-Dmdc.unseatedVehicleWatchTiles`（預設 5 格）。觀測與判定的例外只計 `anomalies`；原版 `setClientForce` 在 try 外恰呼叫一次，原版 `authorizationServerCollide` 的呼叫都在 try 外；Error 照常外拋。
 
 **守門與驗證**：
 - SmokeCheck：上游指紋——helper 判讀依據的五個原版方法本體 SHA 鎖（`UNSEATED_VEHICLE_LOCKED`，各配負對照，含 `VehicleCollidePacket.processServer` 與 `BaseVehicle.authorizationServerCollide`）；`processServer` 唯一的 `setClientForce` 在 `hasAuthorization` 與時間檢查之後、`setX` 之前。手術形狀：頭部 `aload_0／aload_2→begin`、`setClientForce` 改道恰 1、原呼叫 0、真指令恰 +3；手術後的 `VehicleCollidePacket.processServer` 文字＝頭部三個指令加原版文字、只把 `authorizationServerCollide` 換成 helper 改道（恰 1、原呼叫 0）。helper 契約：helper 的 `setClientForce` 恰呼叫原版一次；改道的 `authorizationServerCollide` 呼叫原版恰 2 處（通過照原樣、歸還改成不指名）且都不在 try 內，`onCollide` 不呼叫原版；W46 helper 第一個呼叫是 `onCollide`，恰一次；每個 `DebugLog.log` 都在 try 內、handler 恰為 `RuntimeException`＋`LinkageError`。
-- `MdcUnseatedVehicleWatchTest`（`build.ps1` [9zzl/10]，enforce、observe、off、logthrow 四個 JVM）：改道點原樣呼叫原版，沒經過 `begin` 或對不上車只計 anomalies；搬 20 格在 5 格那一包記一次 `moving`、收段記 `moved kind=unseated`；可疑申請經 dist 手術後的真 `VehicleCollidePacket.processServer` 記一行（同一個帳號 5 秒內只記一次），之後由同一位玩家授權的搬動記 `grant=collide`；enforce：別條連線的玩家申請、查不到玩家的申請不交授權（車與拖車夥伴維持 `Server`），送出連線對本車的既有快取失效、夥伴沒有快取時不新建，行尾 `action=refused`；歸還指名非駕駛時車與夥伴收回 `Server`、夥伴的快取失效，行尾 `action=released`；判定拋例外時照原版交授權並計 anomalies；沒在開車、開的車太遠的申請，駕駛歸還自己的車、不指名的歸還、車是 `Local` 都與原版相同；observe 與 off 是原版負對照（同樣的封包照原版交授權）；駕駛撞開旁邊的車 2 格只計數、推 8 格記 `kind=pushed`（沒有 `moving`）；開的車在 100 格外時算 `unseated`；拖車只計數，拆掉拖車、下了車就換成 `unseated` 一段；分段搬（每段 4 格、停 6 秒或 61 秒）累計記 `moving` 與總距離 16 格、記 `earlierUsers`（帳號互為子字串也照記）；拖曳前的起點、同一個 vid 換了車都不延續；一般歸還之後別的來源給的授權記 `grant=other`；申請與歸還對拖車夥伴一起生效；帳號的換行與引號換成 `?`，額度用帳號原文分開計；一個帳號每類最多 100 行（到頂印通知），申請額度用完不影響搬動，之後別的帳號照記；off 不計數、不記行；logthrow（enforce）：日誌鏈拋例外時原版照常完成、兩種申請照擋，拋 `OutOfMemoryError` 時照常外拋。`MdcVehicleCollideResyncTest`（W46）on／off 照舊通過。
+- `MdcUnseatedVehicleWatchTest`（`build.ps1` [9zzl/10]，enforce、observe、off、logthrow 四個 JVM）：改道點原樣呼叫原版，沒經過 `begin` 或對不上車只計 anomalies；搬 20 格在 5 格那一包記一次 `moving`、收段記 `moved kind=unseated`；可疑申請經 dist 手術後的真 `VehicleCollidePacket.processServer` 記一行（同一個帳號 5 秒內只記一次），之後由同一位玩家授權的搬動記 `grant=collide`；enforce：別條連線的玩家申請、查不到玩家的申請、不指名的申請不交授權（車與拖車夥伴維持 `Server`），送出連線對本車的既有快取失效、夥伴沒有快取時不新建，行尾 `action=refused`；歸還指名非駕駛或查不到的玩家時車與夥伴收回 `Server`、夥伴的快取失效，行尾 `action=released`；判定拋例外時照原版處理並計 anomalies；上表以外的申請與歸還（含別條連線歸還、指名的是真正的駕駛）、車是 `Local` 都與原版相同；observe 與 off 是原版負對照（同樣的封包照原版處理）；駕駛撞開旁邊的車 2 格只計數、推 8 格記 `kind=pushed`（沒有 `moving`）；開的車在 100 格外時算 `unseated`；拖車只計數，拆掉拖車、下了車就換成 `unseated` 一段；分段搬（每段 4 格、停 6 秒或 61 秒）累計記 `moving` 與總距離 16 格、記 `earlierUsers`（帳號互為子字串也照記）；拖曳前的起點、同一個 vid 換了車都不延續；一般歸還之後別的來源給的授權記 `grant=other`；申請與歸還對拖車夥伴一起生效；帳號的換行與引號換成 `?`，額度用帳號原文分開計；一個帳號每類最多 100 行（到頂印通知），申請額度用完不影響搬動，之後別的帳號照記；off 不計數、不記行；logthrow（enforce）：日誌鏈拋例外時原版照常完成、兩種申請照擋，拋 `OutOfMemoryError` 時照常外拋。`MdcVehicleCollideResyncTest`（W46）on／off 照舊通過。
 - 實機 E2E（9950X3D，情境 `unseated-move-mp`，jar `04e09198`）：`uvm-w99-obs-1112e` 沒坐在車上的客戶端把伺服器上的車搬了 20.0 格，伺服器 console 在 5.0 格那一包記 `moving kind=unseated … seat=none … grant=other`，收段記 `moved … dist=20.0 secs=6.2 packets=38`；`uvm-w99-seat-1112g` 搬 20.2 格，另記 `release-to-player`；`uvm-w99-off-1112e`（`-Dmdc.unseatedVehicleWatch=off`）沒有任何 W99 行；原版對照 `uvm-van-1112b` 搬 18.2 格、沒有 W99 行。
 
-**部署**：還沒部署。manifest 新增 `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class`（含 `$Episode`、`$Origin`、`$Request`）與 patched class `VehiclePhysicsPacket`，`MdcVehicleCollideResync.class` 換新。授權申請檢查另換新 patched class `VehicleCollidePacket`（多一個改道），實機 E2E 還沒跑。
+**部署**：觀測部分 2026-11-12 起在本服以只記的方式運作。manifest 有 `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class`（含 `$Episode`、`$Origin`、`$Request`）與 patched class `VehiclePhysicsPacket`，`MdcVehicleCollideResync.class` 換新。授權申請檢查另換新 patched class `VehicleCollidePacket`（多一個改道）：換上這一版後不必改 JVM 參數就是 enforce，要維持只記請加 `-Dmdc.unseatedVehicleWatch=observe`（`2` 同義）。
 
 **退場**：SmokeCheck 的上游指紋（五個 SHA 鎖；其中兩個和 W89 重複）變紅時重估：官方改了授權交接或收位置的方式，可能已經修好。
 
@@ -5857,7 +5858,7 @@ console：
 
 **只在伺服器**：`grow` 唯一的呼叫者是 `AnimalData.checkStages`，它只由 `AnimalData.update` 呼叫，後者只在 `IsoAnimal.updateInternal` 的 `GameClient.client` 為 false 那一側呼叫。
 
-console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍內第一隻同號者）：
+console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍內第一隻同號者；長大前的動物站在水格時原版 `grow` 會作廢並每幀重試，這時照樣放行但不計數、不印）：
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] 首次生效（…）growIdClash=<on|off> drops=<n> … growSpared=<n> …
@@ -5866,13 +5867,14 @@ console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍�
 
 **開關**：`-Dmdc.animalGrowIdClash=0|off` 照原版（W60 照記 `grow-dup`），預設 on，需重啟；與 `-Dmdc.animalLossProbe` 互不影響，觀測關掉時放行照做、`grow-spared` 照印。
 
-**部署**：manifest 不變（class 數、命中點、helper 數都不變），`zombie/mdc/AnimalLossProbe.class` 內容更新。
+**部署**：W109 不新增 class 或手術點，只有 `zombie/mdc/AnimalLossProbe.class` 內容更新。部署一律使用同一次建置產出的 agent jar 與兩份 manifest。
 
-**上線驗收**：首次生效行帶 `growIdClash=on`；出現 `grow-spared` 的那隻動物照常長大（成體在原位、ID 不變）；`grow-dup` 的 `twin` 只剩同物種。
+**上線驗收**：首次生效行帶 `growIdClash=on`；出現 `grow-spared` 的那隻動物照常長大（成體在原位、ID 不變）。`grow-dup` 照記沒放行的情況（同物種同號、物種資料不全、混有同物種），行內的 `twin` 是範圍內第一隻同號者，不一定是沒放行的原因。
 
 **守門與驗證**：
 - SmokeCheck：原版 `IsoAnimal.checkForChickenpocalypse`、`IsoGridSquare.getAnimals()` 與 `getAnimals(ArrayList)`（掛鉤過濾在後者）、`AnimalData.grow`、`AnimalData.checkStages`、`IsoAnimal.updateInternal` 本體 SHA 鎖（各配負對照），helper 照抄的就是這些本體；全 jar 呼叫者清冊 `grow` ← `checkStages` ← `AnimalData.update` ← `IsoAnimal.updateInternal`（各恰 1），`updateInternal` 的 `AnimalData.update` 在唯一 `GameClient.client` 讀取的 IFEQ 目標之後、client 分支以 RETURN 結束；`grow` 依序 `setAnimalID` → `checkForChickenpocalypse` → `checkForWater` → `addToWorld`（各恰 1），`checkForChickenpocalypse` 後緊接 IFNE 跳去刪新動物、回 false 才落到 `checkForWater`；`AnimalDefinitions.group` 是 public String、`IsoAnimal.adef` 是 public；`spare` 內沒有 `checkForChickenpocalypse`／`delete`／`setAnimalID`／`removeFrom*` 呼叫，`growDuplicate` 開頭就是 `SPARE && spare(parent, newAnimal)` → return false；出貨的 `checkForChickenpocalypse` 與原版文字相同（行為測試經 `super` 走的就是它）。
 - `AnimalLossProbeTest`（`build.ps1` [9zi/10]，on、off、spare-off 三個 JVM，自驗兩個開關）：替身的 `getSquare()` 回所在格、`delete()` 只記次數，每個佈局先直呼真原版 `checkForChickenpocalypse` 當負對照。15 個佈局：異種同號（on 放行、原版 0 次、delete 0、一行 `grow-spared`；spare-off 照原版刪、記 `grow-dup`）、同物種同號、group 只差大小寫、同號者一異一同、沒有同號、parent 沒有 adef、長大後 group 為 null、同號者 group 為空字串、同號者與長大後同種、dx=−4 與 dy=−4 算、dx=+4 與 dy=+4 不算、不同層不算、掛鉤不算、`getSquare()` 為 null；放行以外的情境結果都與真原版相同。判定拋例外、log 拋例外各計 `anomalies`（後者仍放行）。另以固定種子跑 200 組隨機佈局差分：on 等於「範圍內有不是確定異種的同號者就取真原版結果，否則 false」，spare-off 等於真原版。off（`animalLossProbe=off`）放行照做、照印。
+- 同一個測試另有水格案例：異種同號而長大前的動物站在水格時放行（原版 0 次、delete 0），`growSpared` 與 `grow-spared` 行數不變。
 - 沒驗：實機 E2E 沒跑，放行後 `grow` 後半段（`checkForWater`、`addToWorld`）完成與客戶端看到成體，行為測試驗不到。MOD 動物沒設 `group` 時照原版刪。
 
 **退場**：官方改成依物種判斷或改用不會撞號的 ID 時撤刀；SmokeCheck 的 SHA 鎖或呼叫鏈轉紅時重估。

@@ -276,6 +276,17 @@ public final class AnimalLossProbeTest {
             expect("log 拋例外：仍放行（回 false、原版 0 次、delete 0）、growSpared+1、anomalies+1",
                     h17[0] == 0 && h17[1] == 0 && h17[2] == 0 && AnimalLossProbe.growSpared.get() == spared17 + 1
                             && AnimalLossProbe.anomalies.get() == anom17 + 1);
+
+            TestAnimal p18 = placed(map, "chick", "chicken", 5018, 3800, 2000, 0);
+            placed(map, "rabkitten", "rabbit", 5018, 3801, 2000, 0);
+            TestAnimal g18 = grownAt(map, p18, "hen", "chicken");
+            long spared18 = AnimalLossProbe.growSpared.get();
+            int rows18 = rowsContaining("grow-spared#").size();
+            p18.wet = true;
+            int[] h18 = grow(p18, g18, true);
+            expect("站在水格的異種同號：放行（回 false、原版 0 次、delete 0）但不計不記（原版 grow 每幀重試）",
+                    h18[0] == 0 && h18[1] == 0 && h18[2] == 0 && AnimalLossProbe.growSpared.get() == spared18
+                            && rowsContaining("grow-spared#").size() == rows18);
         }
 
         // ---- log 行（隨機差分之前：差分會用完每分鐘 30 行的額度）----
@@ -422,6 +433,7 @@ public final class AnimalLossProbeTest {
         int deletes;
         boolean onHook;
         int idThrows;
+        boolean wet;
 
         IsoGridSquare sq;
 
@@ -446,6 +458,11 @@ public final class AnimalLossProbeTest {
                 throw new IllegalStateException("id");
             }
             return super.getAnimalID();
+        }
+
+        @Override
+        public boolean checkForWater() {
+            return wet;
         }
 
         @Override

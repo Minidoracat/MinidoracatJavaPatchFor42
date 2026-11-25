@@ -195,12 +195,12 @@ public final class MdcTimedActionProbe {
         }
     }
 
-    /** 共用 log 欄位淨化：控制字元、空白與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
+    /** 共用 log 欄位淨化：控制字元、空白、Unicode 格式字元（雙向顯示控制、零寬）與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
     public static String safeName(String name) {
         return safeName(name, 32);
     }
 
-    /** 同上，限長 {@code max} 字。 */
+    /** 同上，保留前 {@code max} 字，超過的截掉並接 {@code ...}。 */
     public static String safeName(String name, int max) {
         if (name == null || name.isEmpty()) {
             return "?";
@@ -209,7 +209,8 @@ public final class MdcTimedActionProbe {
         StringBuilder s = new StringBuilder(n + 3);
         for (int i = 0; i < n; i++) {
             char c = name.charAt(i);
-            s.append(Character.isISOControl(c) || Character.isWhitespace(c) || c == '[' || c == ']' || c == '|' ? '_' : c);
+            s.append(Character.isISOControl(c) || Character.isWhitespace(c) || Character.getType(c) == Character.FORMAT
+                    || c == '[' || c == ']' || c == '|' ? '_' : c);
         }
         if (name.length() > n) {
             s.append("...");
