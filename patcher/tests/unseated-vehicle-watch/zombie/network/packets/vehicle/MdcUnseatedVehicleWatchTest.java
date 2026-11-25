@@ -106,7 +106,7 @@ public final class MdcUnseatedVehicleWatchTest {
         collide(beetle, attacker, attackerConn, true);
         expect("授權相容性：兩項檢查以外的申請，結果與原版相同", auth(beetle, Authorization.LocalCollide, 5));
         String req = line(log, "collide-request suspect=notDriving");
-        expect(on ? "既有觀測的申請明細：一行，帶帳號、SteamID、車、位置、授權、requester=none、action=logged" : "off：沒有行",
+        expect(on ? "既有觀測：申請明細欄位正確" : "off：沒有行",
                 on ? req != null && req.contains("user=\"attacker\" steamid=76561190000000005 pid=5")
                         && req.contains("vehicle=3047/50 Base.63beetle at=200.0,200.0 auth=Server requester=none action=logged")
                         : req == null);
@@ -154,7 +154,7 @@ public final class MdcUnseatedVehicleWatchTest {
         expect(on ? "判定拋例外：照原版交 Local/5、anomalies +1" : "off：照原版交 Local/5、不計",
                 auth(broken, Authorization.Local, 5) && MdcUnseatedVehicleWatch.anomalies == an + (on ? 1 : 0));
 
-        // 5. 正常撞車：駕駛在 10 格內申請，不記；撞開 2 格不記；推 8 格記 kind=pushed；開的車離 40 格算 far
+        // 5. 正常撞車：駕駛在 10 格內申請，不記；撞開 2 格不記；推 8 格記 kind=pushed
         BaseVehicle car = vehicle(60, 8000, "Base.CarNormal", 300F, 300F, Authorization.Local, 6);
         seat(car, 0, driver);
         BaseVehicle parked = vehicle(61, 8001, "Base.PickUpTruck", 310F, 300F, Authorization.Server, -1);
@@ -172,7 +172,7 @@ public final class MdcUnseatedVehicleWatchTest {
                         : pushLine == null);
         BaseVehicle farCar = vehicle(63, 8003, "Base.SmallCar", 340F, 300F, Authorization.Server, -1);
         collide(farCar, driver, connection("driver2", 1L, driver), true);
-        expect((on ? "既有觀測的另一種申請明細：一行，帶 d=40.0 action=logged" : "off：沒有行") + "；授權相容性：結果與原版相同",
+        expect("既有觀測與授權相容性：" + (on ? "明細欄位正確" : "off 沒有行") + "，結果與原版相同",
                 on == (line(log, "collide-request suspect=far") != null && line(log, "collide-request suspect=far").contains("d=40.0 action=logged"))
                         && auth(farCar, Authorization.LocalCollide, 6));
 
@@ -462,7 +462,7 @@ public final class MdcUnseatedVehicleWatchTest {
         System.exit(failed == 0 ? 0 : 1);
     }
 
-    /** 日誌鏈拋例外（出貨組態 enforce）：首次生效、可疑申請的記錄爆掉時原版照常完成、A 與 B 照擋、只計 anomalies；改拋 OutOfMemoryError 時照常外拋。 */
+    /** 日誌鏈拋例外（出貨組態 enforce）：首次生效與明細記錄爆掉時原版照常完成、兩項檢查照擋、只計 anomalies；改拋 OutOfMemoryError 時照常外拋。 */
     private static void logThrow() throws Exception {
         expect("logthrow 配出貨組態（enforce）", MdcUnseatedVehicleWatch.ENABLED && MdcUnseatedVehicleWatch.ENFORCE);
         explodeLog();
@@ -486,7 +486,7 @@ public final class MdcUnseatedVehicleWatchTest {
         } catch (Throwable e) {
             t = e;
         }
-        expect("可疑申請（C）記錄拋例外：真 processServer 照常跑完交 LocalCollide/5、不外拋、記 anomalies（" + t + "）",
+        expect("授權相容性：明細記錄拋例外時真 processServer 照常跑完、結果與原版相同、不外拋、記 anomalies（" + t + "）",
                 t == null && MdcUnseatedVehicleWatch.requestsSuspect == 1 && MdcUnseatedVehicleWatch.anomalies > before
                         && auth(w, Authorization.LocalCollide, 5));
         IsoPlayer q = player(6, "other", 300F, 300F);

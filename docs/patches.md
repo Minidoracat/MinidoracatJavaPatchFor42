@@ -4649,7 +4649,7 @@ console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20
 [MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<請求的類別名> object=<建造物名|?> sprite=<sprite 名> owner=<onlineID>:<名稱> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
 ```
 
-`object=` 是建構參數裡第一個建造物定義（B42 建造選單的實體）的名字，由伺服器以請求帶的名字查腳本表還原，舊式建造沒有、印 `?`；`sprite=` 是請求帶的 sprite 名。兩欄都把控制字元、空白、Unicode 格式字元（雙向顯示控制、零寬字元）與欄位分隔符換成 `_`，只保留前 64 字，超過的截掉並接 `...`。
+`object=` 是建構參數裡第一個建造物定義（B42 建造選單的實體）的名字，由伺服器以請求帶的名字查腳本表還原，舊式建造沒有、印 `?`；`sprite=` 是請求帶的 sprite 名。兩欄都把控制字元、空白（含不換行空白）、Unicode 格式字元（雙向顯示控制、零寬字元）、落單的代理碼元與欄位分隔符換成 `_`，只保留前 64 字（以 Unicode 碼點計），超過的截掉並接 `...`。
 
 **驗收**：上線後正常建造（舊式木牆、B42 建造選單、多格家具、雙門、樓梯、梯子上）照常完成、沒有 `refused` 行；有 `refused` 行時以 `type=`、`object=`、`sprite=`、`at=`、`target=` 判斷是誤擋還是異常請求。
 
@@ -4660,7 +4660,7 @@ console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20
 **守門與驗證**：
 - SmokeCheck：上游指紋——`parse` 恰 1 個 `protectedCall` 且在 `getFunctionObject` 之後、之後 `getFirst()==null` 時 `item=null`，x/y/z/`objectType` 欄位存在，`isValid` 的全 jar 呼叫點數仍為 0；手術後頭部 `aload_0; beginParse`、唯一 `protectedCall` 同形改道，其餘指令與 frames 不變，`BuildAction` 其餘方法不變；helper 委派原呼叫恰 2 處、catch 只有 `RuntimeException`。
 - `MdcBuildActionGuardTest`（`build.ps1` [9zs/10]，both、type-off、range-off 三個 JVM，自驗 argv 與實際開關相符）：走 dist 內手術後的真 `BuildAction.parse`＋真 wire（Action 標頭、座標、sprite、`PZNetKahluaTableImpl.save` 的類別與參數表），Lua 環境換成最小替身（`LuaManager.env` 放原版 derive 形狀的類別表，`LuaManager.caller` 計次）。照常建造：原版類別相鄰格、二層 derive、雙門原點格、每軸差恰 8 格、樓層差 1、`UseBuildCheat` 管理員遠距；拒絕（不呼叫建構子、`item=null`、計數與 log）：非建造類別、`ISBuildingObject` 本身、metatable 循環、找不到的類別、單軸 9 格（兩軸各一）、遠處、樓層差 2、NaN；拒絕後跑原版 `processServer`，恰送 1 包 Reject 給送封包的人；off 組態照原版呼叫建構子。
-- 同一個測試另驗拒絕行的兩個新欄位：帶 `ObjectInfo` 的遠距請求印出 `object=<名字>`（37 字不截）；sprite 帶換行、欄位分隔符、雙向顯示控制字元且超過 64 字時，清洗後保留前 64 字再接 `...`，log 沒有多出一行。
+- 同一個測試另驗拒絕行的兩個新欄位：帶 `ObjectInfo` 的遠距請求印出 `object=<名字>`（37 字不截）；sprite 帶換行、欄位分隔符、雙向顯示控制字元、不換行空白、補充平面格式字元且超過 64 字時，清洗後保留前 64 字再接 `...`，log 沒有多出一行。`MdcTimedActionProbeTest` 另驗截斷不拆開代理對、落單的代理碼元換成一個 `_`。
 
 **退場**：官方在伺服器端驗證建造類別與位置時撤刀。
 
@@ -5485,7 +5485,7 @@ console：
 | 申請（`collide=true`） | 指名的玩家必須屬於送出的連線（查不到玩家也算不符合） | 不交授權，記 `collide-request suspect=notOwnPlayer … action=refused` |
 | 歸還（`collide=false`） | 指名的玩家必須是這台車的駕駛（不指名的歸還照原版） | 當成不指名的歸還（原版 `(-1, false)`，車與拖車夥伴收回伺服器），記 `release-to-player … action=released` |
 
-擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。上表以外的申請與歸還、以及車輛物理包照原版處理；有產生觀測明細的，沒被擋下時行尾是 `action=logged`。判定本身拋例外時照原版處理、只計 `anomalies`。
+擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。上表以外的申請與歸還、以及車輛物理包照原版處理。有印出 `collide-request` 或 `release-to-player` 明細而沒被擋下時，該行以 `action=logged` 結尾。判定本身拋例外時照原版處理、只計 `anomalies`。
 
 **記什麼**：沒有駕駛的車被客戶端回報的位置搬動時，同一台車短時間內的搬動累計起來算（分段搬也算總距離；有人坐上駕駛座或被拖走就重新起算）。`kind` 分四種：
 
@@ -5527,7 +5527,7 @@ AutoDrive／Tesla 的召喚是合法的車外授權，會記成 `kind=unseated s
 
 **守門與驗證**：
 - SmokeCheck：上游指紋——helper 判讀依據的五個原版方法本體 SHA 鎖（`UNSEATED_VEHICLE_LOCKED`，各配負對照，含 `VehicleCollidePacket.processServer` 與 `BaseVehicle.authorizationServerCollide`）；`processServer` 唯一的 `setClientForce` 在 `hasAuthorization` 與時間檢查之後、`setX` 之前。手術形狀：頭部 `aload_0／aload_2→begin`、`setClientForce` 改道恰 1、原呼叫 0、真指令恰 +3；手術後的 `VehicleCollidePacket.processServer` 文字＝頭部三個指令加原版文字、只把 `authorizationServerCollide` 換成 helper 改道（恰 1、原呼叫 0）。helper 契約：helper 的 `setClientForce` 恰呼叫原版一次；改道的 `authorizationServerCollide` 呼叫原版恰 2 處（通過照原樣、歸還改成不指名）且都不在 try 內，`onCollide` 不呼叫原版；W46 helper 第一個呼叫是 `onCollide`，恰一次；每個 `DebugLog.log` 都在 try 內、handler 恰為 `RuntimeException`＋`LinkageError`。
-- `MdcUnseatedVehicleWatchTest`（`build.ps1` [9zzl/10]，enforce、observe、off、logthrow 四個 JVM）：改道點原樣呼叫原版，沒經過 `begin` 或對不上車只計 anomalies；搬 20 格在 5 格那一包記一次 `moving`、收段記 `moved kind=unseated`；可疑申請經 dist 手術後的真 `VehicleCollidePacket.processServer` 記一行（同一個帳號 5 秒內只記一次），之後由同一位玩家授權的搬動記 `grant=collide`；enforce：別條連線的玩家申請、查不到玩家的申請、不指名的申請不交授權（車與拖車夥伴維持 `Server`），送出連線對本車的既有快取失效、夥伴沒有快取時不新建，行尾 `action=refused`；歸還指名非駕駛或查不到的玩家時車與夥伴收回 `Server`、夥伴的快取失效，行尾 `action=released`；判定拋例外時照原版處理並計 anomalies；上表以外的申請與歸還（含別條連線歸還、指名的是真正的駕駛）、車是 `Local` 都與原版相同；observe 與 off 是原版負對照（同樣的封包照原版處理）；駕駛撞開旁邊的車 2 格只計數、推 8 格記 `kind=pushed`（沒有 `moving`）；開的車在 100 格外時算 `unseated`；拖車只計數，拆掉拖車、下了車就換成 `unseated` 一段；分段搬（每段 4 格、停 6 秒或 61 秒）累計記 `moving` 與總距離 16 格、記 `earlierUsers`（帳號互為子字串也照記）；拖曳前的起點、同一個 vid 換了車都不延續；一般歸還之後別的來源給的授權記 `grant=other`；申請與歸還對拖車夥伴一起生效；帳號的換行與引號換成 `?`，額度用帳號原文分開計；一個帳號每類最多 100 行（到頂印通知），申請額度用完不影響搬動，之後別的帳號照記；off 不計數、不記行；logthrow（enforce）：日誌鏈拋例外時原版照常完成、兩種申請照擋，拋 `OutOfMemoryError` 時照常外拋。`MdcVehicleCollideResyncTest`（W46）on／off 照舊通過。
+- `MdcUnseatedVehicleWatchTest`（`build.ps1` [9zzl/10]，enforce、observe、off、logthrow 四個 JVM）：改道點原樣呼叫原版，沒經過 `begin` 或對不上車只計 anomalies；搬 20 格在 5 格那一包記一次 `moving`、收段記 `moved kind=unseated`；經 dist 手術後的真 `VehicleCollidePacket.processServer` 的申請明細記一行（同一個帳號 5 秒內只記一次），搬動的 `grant=` 記授權來源；enforce：別條連線的玩家申請、查不到玩家的申請、不指名的申請不交授權（車與拖車夥伴維持 `Server`），送出連線對本車的既有快取失效、夥伴沒有快取時不新建，行尾 `action=refused`；歸還指名非駕駛或查不到的玩家時車與夥伴收回 `Server`、夥伴的快取失效，行尾 `action=released`；判定拋例外時照原版處理並計 anomalies；上表以外的申請與歸還（含別條連線歸還、指名的是真正的駕駛）、車是 `Local` 都與原版相同；observe 與 off 是原版負對照（同樣的封包照原版處理）；駕駛撞開旁邊的車 2 格只計數、推 8 格記 `kind=pushed`（沒有 `moving`）；開的車在 100 格外時算 `unseated`；拖車只計數，拆掉拖車、下了車就換成 `unseated` 一段；分段搬（每段 4 格、停 6 秒或 61 秒）累計記 `moving` 與總距離 16 格、記 `earlierUsers`（帳號互為子字串也照記）；拖曳前的起點、同一個 vid 換了車都不延續；一般歸還之後別的來源給的授權記 `grant=other`；申請與歸還對拖車夥伴一起生效；帳號的換行與引號換成 `?`，額度用帳號原文分開計；一個帳號每類最多 100 行（到頂印通知），申請額度用完不影響搬動，之後別的帳號照記；off 不計數、不記行；logthrow（enforce）：日誌鏈拋例外時原版照常完成、兩種申請照擋，拋 `OutOfMemoryError` 時照常外拋。`MdcVehicleCollideResyncTest`（W46）on／off 照舊通過。
 - 實機 E2E（9950X3D，情境 `unseated-move-mp`，jar `04e09198`）：`uvm-w99-obs-1112e` 沒坐在車上的客戶端把伺服器上的車搬了 20.0 格，伺服器 console 在 5.0 格那一包記 `moving kind=unseated … seat=none … grant=other`，收段記 `moved … dist=20.0 secs=6.2 packets=38`；`uvm-w99-seat-1112g` 搬 20.2 格，另記 `release-to-player`；`uvm-w99-off-1112e`（`-Dmdc.unseatedVehicleWatch=off`）沒有任何 W99 行；原版對照 `uvm-van-1112b` 搬 18.2 格、沒有 W99 行。
 
 **部署**：觀測部分 2026-11-12 起在本服以只記的方式運作。manifest 有 `zombie/network/packets/vehicle/MdcUnseatedVehicleWatch.class`（含 `$Episode`、`$Origin`、`$Request`）與 patched class `VehiclePhysicsPacket`，`MdcVehicleCollideResync.class` 換新。授權申請檢查另換新 patched class `VehicleCollidePacket`（多一個改道）：換上這一版後不必改 JVM 參數就是 enforce，要維持只記請加 `-Dmdc.unseatedVehicleWatch=observe`（`2` 同義）。

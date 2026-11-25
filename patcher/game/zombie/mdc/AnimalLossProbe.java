@@ -246,7 +246,7 @@ public final class AnimalLossProbe {
         }
         try {
             if (parent.checkForWater()) {
-                return true;   // 站在水格：原版 grow 接著因 checkForWater 作廢、下一幀重試；放行但不計不記，免得每幀一行
+                return true;   // 到這裡時 parent 在水格（一般在水格上長大時新動物建構就失敗、走不到這裡，見 W37）：原版 grow 接著作廢；放行但不計不記
             }
         } catch (RuntimeException | LinkageError e) {
             anomalies.incrementAndGet();

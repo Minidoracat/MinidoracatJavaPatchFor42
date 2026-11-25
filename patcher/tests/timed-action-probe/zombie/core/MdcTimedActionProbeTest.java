@@ -204,6 +204,9 @@ public final class MdcTimedActionProbeTest {
                 logged.chars().noneMatch(c -> Character.isISOControl(c) || Character.isWhitespace(c)
                         || c == '[' || c == ']' || c == '|')
                 && logged.endsWith("..."));
+        // 逐碼點：合法的補充平面字元占一個名額、截斷不拆開；落單的代理碼元只換一個底線
+        expect("合法代理對剛好在截斷邊界：完整保留", MdcTimedActionProbe.safeName("ab\uD83D\uDE00cd", 3).equals("ab\uD83D\uDE00..."));
+        expect("落單的代理碼元：換一個底線", MdcTimedActionProbe.safeName("a\uD83Db", 8).equals("a_b"));
     }
 
     /**
