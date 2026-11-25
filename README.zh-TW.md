@@ -2,41 +2,66 @@
 
 [English](README.md) | **繁體中文**
 
-**Project Zomboid Build 42**（目前對應 **42.22.2**）的 bytecode 修補：修正我們經營高人數多人伺服器時找到的原版
-bug 與效能熱點，另有給玩家選裝的客戶端修補包。
+**Project Zomboid Build 42**（目前對應 **42.22.2**）的非官方 bytecode 修補，修正我們經營高人數多人伺服器時找到的原版 bug 與效能熱點。分成兩部分：
 
-- **伺服器修補**：dedicated server 開服時由 Java agent 把官方 class 換成手術後的版本（官方 jar 與簽章不動），處理主迴圈凍結與活鎖、chunk／動物／車輛遺失、主執行緒熱點、頻寬迴圈、卡讀條與 log 噪音。42.22.2 共 88 個 patched class、264 個命中點、110 個 helper class。
-- **客戶端修補**：玩家選裝的修補包（隊友／殭屍／車輛隱形；在自建建築附近載入 chunk 時的兩種斷線；模組車停著也每幀重算動畫；開車進入還沒載入的區域時車被丟到幾十到幾百格外；碰撞後車被推到地板下、畫面全黑；屍潮後地上血跡讓畫面變卡；地上一件沒有模型的物品讓客戶端不停跳錯誤；單機沒熄火就下車走遠，回來後車門與引擎蓋錯位、打不開），以 Java agent 載入、不改遊戲檔案，從
-  [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載。
-- **Native 防護**：Linux dedicated server 上兩個 native 崩潰的 `LD_PRELOAD`／`LD_AUDIT` shim。
+- **客戶端修補包**（給玩家，Windows 與 macOS）：修隊友和殭屍隱形、幾種斷線和開車瞬移。[修了什麼](#客戶端修補修了什麼)・[安裝](#客戶端修補安裝)
+- **伺服器修補**（給 dedicated server 服主）：讓主迴圈不再凍結，chunk、動物、車輛不再遺失，並減少主執行緒耗時與頻寬。[修了什麼](#伺服器修補修了什麼)・[建置與部署](#伺服器建置與部署)
 
-每一項修補都針對一個具體的原版缺陷或實測熱點，並附完整根因分析：[docs/patches.md](docs/patches.md)（繁體中文原文，最詳細）與 [docs/patches.en.md](docs/patches.en.md)（英文版）。
+兩者都以 Java agent 載入，官方 `projectzomboid.jar` 不會被修改。遊戲更新後修補會自動停用，等裝上對應新版遊戲的版本才再啟用。每一項修補都有完整的根因分析，見[文件](#文件)。
 
 > **給 The Indie Stone 開發團隊**
 >
-> 以下每一項都是在正式服上用 thread dump、JFR、心跳計數器與封包擷取定位出來的，每個修正都逐指令對照過官方
-> `projectzomboid.jar`。其中幾項已在 42.20.2–42.22.2 由官方修掉（見[官方已修](#官方已修)），謝謝。表格的
-> **TIS** 欄標出哪些已在論壇回報、哪些還沒回報。任何一項都可以提供 log、封包統計或測試版本：請在這裡開
-> issue，或在論壇聯絡 **Minidoracat**。
+> 這裡的每一項都是在正式服上用 thread dump、JFR、心跳計數器與封包擷取定位出來的，每個修正都逐指令對照過官方 `projectzomboid.jar`。其中幾項已在 42.20.2–42.22.2 由官方修掉（見[官方已修](docs/catalog.md#官方已修)），謝謝。[修補目錄](docs/catalog.md)的 **TIS** 欄標出哪些已在論壇回報、哪些還沒回報。任何一項都可以提供 log、封包統計或測試版本：請在這裡開 issue，或在論壇聯絡 **Minidoracat**。
 
-## 目錄
+## 客戶端修補：修了什麼
 
-- [為什麼做這些](#為什麼做這些)
-- [修補目錄](#修補目錄)：[穩定性](#穩定性凍結活鎖與崩潰)・[資料完整性](#資料完整性chunk動物與車輛遺失)・[效能](#效能主執行緒耗時)・[網路](#網路頻寬與重送迴圈)・[多人同步正確性](#多人同步正確性)・[帳號與濫用](#帳號與濫用)・[log 噪音](#log-噪音)・[觀測](#觀測)・[客戶端](#客戶端修補發布包)・[Native](#native-防護linux-dedicated-server)
-- [官方未修的已知問題](#官方未修的已知問題)
-- [官方已修](#官方已修)
-- [修補原理](#修補原理)
-- [伺服器：建置與部署](#伺服器建置與部署)
-- [客戶端修補：安裝](#客戶端修補安裝)
-- [建議的伺服器設定](#建議的伺服器設定)
-- [選用工具](#選用工具)
-- [專案結構](#專案結構)
-- [文件](#文件)
-- [支持作者](#支持作者)・[授權與免責](#授權與免責)
+- **隊友、殭屍、車輛隱形**：玩一陣子後只剩影子和名牌，要重開遊戲才會恢復。修補包修掉背後的貼圖緩衝洩漏；標準版另外放寬貼圖門檻。（[2j](docs/patches.md#2j)）
+- **在自建建築附近斷線**：chunk 載入時附近有人蓋或拆東西，兩個不同的 bug 會把你斷線送回主選單。（[W57](docs/patches.md#2bu)、[W68](docs/patches.md#2cd)）
+- **開車瞬移**：開進還沒載入的區域時，車可能被丟到幾十到幾百格外，或駕駛被拉回舊位置，有時掉進水裡。（[W61](docs/patches.md#2by)、[W62–W63](docs/patches.md#2bz)）
+- **車被推到地板下**：碰撞後車陷到地板下，畫面全黑。（[W65](docs/patches.md#2ca)）
+- **畫面變卡**：門窗會動的模組車（KI5 等）停著也每幀重算動畫；屍潮後地上的血跡逐筆掃描。（[W54](docs/patches.md#2br)、[W55](docs/patches.md#2bs)、[W84](docs/patches.md#2cs)）
+- **沒有模型的物品一直跳錯誤**：這種物品放在地上或拿在手上都會。（[W100](docs/patches.md#2dh)、[W101](docs/patches.md#2di)）
+- **車門打不開**（單機）：引擎沒熄火就下車走遠，回來後車門和引擎蓋錯位、打不開。（[W108](docs/patches.md#2dp)）
 
-## 為什麼做這些
+有三個版本，安裝器會建議用哪個：**標準版**（32 GB 以上 RAM）、**省記憶體版**（同一組修正，保留原版貼圖門檻）、**相容版**（只含車輛修正，給 PZ_Optimization 這類替換遊戲 class 的 MOD 一起用）。每一項客戶端修補都列在[修補目錄](docs/catalog.md#客戶端修補發布包)。
 
-我們的伺服器每日尖峰 68–95 人同時在線（254 個名額）。dedicated server 的主迴圈是單執行緒、上限 10 FPS，每一毫秒都很重要。每一項修補都起源於一次正式服事故或一個 profiler 熱點。部分成效：
+## 客戶端修補：安裝
+
+**Windows**：關閉遊戲，打開 PowerShell（按 Windows 鍵，輸入 `PowerShell`，按 Enter），貼上這一行按 Enter：
+
+```powershell
+irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
+```
+
+**macOS**：結束遊戲，打開「終端機」（應用程式 › 工具程式），貼上這一行按 Return：
+
+```sh
+/bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
+```
+
+在選單輸入 `1`（安裝或更新）、`1`（客戶端修復），直接按 Enter 選建議的版本，問到遊戲記憶體上限時按 Enter 調到建議值，再輸入 `Y` 確認。要全部移除，貼同一行，選 `3`。
+
+- 遊戲更新前不必先移除：遊戲一更新，修補就自動停用、照原版執行。遊戲更新或 Steam 驗證檔案讓修補停用時，再貼一次這一行（遊戲換了新版本時，要等對應的新包發布）。
+- 有裝 PZ_Optimization 或其他替換遊戲 class 的 MOD 時，裝相容版（安裝器會建議）。
+
+不貼指令的下載方式、遊戲記憶體上限、和替換遊戲 class 的 MOD 一起用、Windows 智慧型應用程式控制、macOS 細節與自行建置，見[完整安裝說明](docs/client.md)。
+
+## 伺服器修補：修了什麼
+
+- **凍結與活鎖**：以前會讓主迴圈停幾分鐘到幾小時的錯誤，現在會被攔下或避開：chunk 載入時的「Entity is already registered」、動物聲音排序、建構到一半的動物、Bandit Raid 劇情的無限迴圈，以及背景執行緒寫 engine 與 cell 清單。（[穩定性](docs/catalog.md#穩定性凍結活鎖與崩潰)）
+- **資料遺失**：寫入閘在損毀的 chunk 存檔蓋掉玩家建築之前擋下。動物離線補算不再重複、漏算或被截短（以前會讓牲畜無故死亡、長得太慢、回來像沒吃沒喝）。另外修了吊掛的屍體變回活動物、拿不起來的幽靈物品、移不掉的殘留物件，以及 `Map=` 列了不存在的資料夾時整張地圖的建築消失。（[資料完整性](docs/catalog.md#資料完整性chunk動物與車輛遺失)）
+- **主執行緒耗時**：動物視線與聽覺、物品登記、玩家視線、停著的車、車輛聲音、尋路重建都大幅變便宜（例：動物聽覺每幀 4.34 → 0.69 ms）。多數項目的結果與原版相同；風險較高的預設是只量測的 observe 模式。（[效能](docs/catalog.md#效能主執行緒耗時)）
+- **頻寬**：動物完整快照重送（佔出向流量 38–40%）、製作站廣播（17.5%）、`VehicleCollide` 迴圈（單一 client 每秒 239 包）。（[網路](docs/catalog.md#網路頻寬與重送迴圈)）
+- **多人同步 bug**：讀條卡在 100%、殭屍隱形、隊友不在地圖上、車卡在地板下、動物區域消失或重複、PVE 死亡被公告成擊殺。（[多人同步正確性](docs/catalog.md#多人同步正確性)）
+- **帳號與濫用**：伺服器端多驗證幾種 client 請求（建造、物件圖、燈光設定、物品資料、衣物），Steam 模式也擋 IP 封鎖，每個 Steam ID 的帳號數上限，並記下步行瞬移和不在駕駛座的人移動車輛。（[帳號與濫用](docs/catalog.md#帳號與濫用)）
+- **log 噪音**：已知的洗版訊息不再印出，反作弊與未知警告照常輸出。（[log 噪音](docs/catalog.md#log-噪音)）
+- **Linux native 崩潰**：尋路函式庫的崩潰與記憶體洩漏、Steam 網路函式庫的越界讀取。（[Native 防護](docs/catalog.md#native-防護linux-dedicated-server)）
+
+每項伺服器修補都有 `-Dmdc.*` 開關可回原版。每一項修補與它的 TIS 回報狀態都在[修補目錄](docs/catalog.md)。
+
+### 我們伺服器上的成效
+
+我們的伺服器每日尖峰 68–95 人同時在線（254 個名額）。dedicated server 的主迴圈是單執行緒、上限 10 FPS，每一毫秒都很重要。部分成效：
 
 | 項目 | 修補前 | 修補後 |
 |---|---|---|
@@ -51,206 +76,6 @@ bug 與效能熱點，另有給玩家選裝的客戶端修補包。
 | 製作站廣播 | `GameEntity` 封包佔出向 UDP 17.5% | 只送附近玩家，且只在畫面狀態改變時送 |
 
 約 63 人在線時，主迴圈維持 9.4–10.1 FPS，所有修補計數器異常數皆為 0。
-
-## 修補目錄
-
-狀態欄以 42.22.2 的預設值為準。每項伺服器修補都有 `-Dmdc.*` 開關可回原版（見各節）。**TIS** 欄：編號連到我們的論壇回報；「草稿」表示回報已寫好但還沒發；「未回報」表示還沒寫。42.22.2 由官方修掉而退役的修補移到[官方已修](#官方已修)。
-
-### 穩定性：凍結、活鎖與崩潰
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| W6 地圖格載入捕手（[2r](docs/patches.md#2r)） | `IsoChunk.doLoadGridsquare` 裡的 `IsoObject.addToWorld` 丟出 "Entity is already registered"，該格一直留在待載入佇列，每 0.1 秒重撞一次：活鎖 114 分鐘。 | 在兩處 `addToWorld` 攔截，記下座標與 sprite 後跳過該物件。殘留的重複登記每天仍有幾次，但不會再讓伺服器凍結。 | [#100893](https://theindiestone.com/forums/topic/100893/) |
-| W11 動物聲音排序（[2y](docs/patches.md#2y)） | `BaseAnimalSoundManager` 排序用的比較器會即時重算距離，遇到 NaN 就違反比較契約；TimSort 丟例外、`clear()` 被跳過，陳舊清單每幀都失敗：全服卡讀條、時間停止。 | 攔下例外，該幀跳過排序讓 `clear()` 照常執行，並記錄 NaN 來源。 | [#100897](https://theindiestone.com/forums/topic/100897/) |
-| W37 動物半建構物件（[2az](docs/patches.md#2az)） | `IsoAnimal` 建構子的檢查失敗時，物件已經放進 cell，`adef`／`data` 為 null，之後每個 tick 都丟例外（遊戲時間凍結約 65 分鐘）。存檔先開 `apop_*.bin` 才序列化，一失敗就留下 0 bytes 檔、動物全失。把動物放到水格時，原版又把建構失敗的物件放回格子；那個 cell 卸載時每個 tick 都丟例外，之後的 cell 全部卸不掉，約 1 小時 heap 用盡。有些岸邊格看起來是草地、人也站得上去，地板卻是水，玩家在那裡放下動物不會發覺。 | 建構子返回前撤出失敗的物件；先序列化，成功才寫檔。放到水格的動物改在旁邊第一格能走、沒有被牆或圍欄隔開的陸地建好，也告訴客戶端那一格；找不到才把建構失敗的動物移出世界、不送給客戶端；chunk 卸載只吞這種動物的例外。 | 草稿 |
-| W40／W41 `processItems`（[2bc](docs/patches.md#2bc)、[2bd](docs/patches.md#2bd)） | 載車的背景執行緒直接寫 `IsoCell.processItems`，混進 null 後 `ProcessItems` 每 5 秒丟例外、清單不再縮減，chunk 載入時的線性 `contains` 讓伺服器凍結 5–16 秒（FPS 9.8 → 2–3）。 | W40 同一幀略過並移除 null；W41 把非主執行緒的登記排入佇列，由主執行緒補登記。 | 草稿 |
-| hit 封包 null 守衛（[2c](docs/patches.md#2c)） | `hit/Zombie.process` 與 `hit/Fall.process` 會解參考損壞封包留下的 null 欄位。 | 在呼叫 super 之前加 null 守衛。 | 未回報 |
-| W15 主迴圈看門狗（[2ac](docs/patches.md#2ac)） | 凍結當下沒有任何 stack 可查。 | 純觀測：超過 5 秒沒有新的一幀就對主執行緒拍 stack。結果顯示剩下的凍結都來自同步的 `QueuedSaveAll`。 | 建議 [#100925](https://theindiestone.com/forums/topic/100925/) |
-| W70 Bandit Raid 劇情無限迴圈（[2cf](docs/patches.md#2cf)） | 死亡倖存者劇情 Bandit Raid 的內層放屍體迴圈重用外層的計數器，沒探索過、50–100 間房的建築抽到時外層永遠跑不完：主執行緒卡在載入那個 cell，一直生殭屍和屍體直到 heap 用盡（本服加新地圖後凍結 10 分鐘，關機存檔存下數萬隻殭屍和大量屍體）。 | 輪數上限改成 4（原版迴圈會結束的最大值），這些建築改照 40–49 間房的方式跑；更小的建築行為不變。 | 未回報 |
-| W75 非主執行緒的每幀更新清單移除（[2cj](docs/patches.md#2cj)） | 拖車裡有動物的車在 `ServerPlayersVehicles` 執行緒載入時，`IsoObject.removeFromWorld` 在那條執行緒呼叫 `IsoCell.addToProcessIsoObjectRemove`，讀寫主執行緒每幀在 `ProcessIsoObject` 改動的兩個 `HashSet`（本服 50 分鐘 20 次）。 | 把這些呼叫排隊，下一次 `ProcessIsoObject` 頭部在主執行緒、原版移除步驟之前執行，移除在同一輪生效；主執行緒加回同一物件時取消待移除，與原版加入時的行為相同。 | 未回報 |
-| W75-2 非主執行緒的每幀更新清單加入（[2ck](docs/patches.md#2ck)） | `LoadChunk` 執行緒讀 chunk 檔時，屠宰鉤的建構子在那條執行緒呼叫 `IsoCell.addToProcessIsoObject`，寫入主執行緒每幀使用的清單與集合（本服重啟後 50 分鐘 81 次）。 | 與 W75 共用同一條 FIFO 佇列（加入與移除保留先後），下一次 `ProcessIsoObject` 頭部在主執行緒執行；直接移除同一物件時取消待加入，任何先後順序的結果都與原版相同。 | 未回報 |
-| W105 非主執行緒的 engine 登記／移除（[2dm](docs/patches.md#2dm)） | 42.22.2 的 `GameEntityManager.UnregisterEntity` 不看是否登記過就呼叫 `engine.removeEntity`，拖車裡有動物的車在 `ServerPlayersVehicles` 執行緒載入時，就在那條執行緒寫 engine 的待處理佇列與非執行緒安全的操作物件池。池的 `free` 先放回再 reset，兩條執行緒交錯時佇列留下 entity 為 null 的移除，之後每個 tick 都在 `GameEntityManager.Update` 拋 `key cannot be null`、略過那個 tick 剩下的工作（搬物品與各種動作全部卡住，直到重啟；本服一次）。 | 非主執行緒的 engine 加入／移除排進 FIFO，主執行緒在自己呼叫 engine 之前、每個 tick `engine.update()` 之前、`Save` 之前依序執行；只延後 engine 那一步，ID 表照原版即時處理。 | 未回報 |
-| W106 待處理佇列單筆壞資料不再卡死主迴圈（[2dn](docs/patches.md#2dn)） | `EngineEntityManager.processPendingOperations` 在清空佇列之前拋例外，一筆壞資料（entity 為 null、已登記又被加入、listener 拋例外）就一直留著、每個 tick 重拋。 | entity 為 null 的那筆略過並記錄；單筆拋 `RuntimeException` 時收好那個 entity 的旗標、記錄後繼續，迴圈照原版清空佇列。`Error` 照常外拋。 | 未回報 |
-| W107 背景載車時的拖車動物（[2do](docs/patches.md#2do)） | 車在 `ServerPlayersVehicles` 執行緒載入時，在那條執行緒把存檔裡的動物放進拖車：把動物移出世界（engine、cell 清單、雞舍、動物區域），並寫主迴圈在用的動物同步表。這是 W105 背景呼叫的已知來源。 | `BaseVehicle.load` 的兩個 `addAnimalInTrailer` 在非主執行緒時排隊，在主執行緒、那個 chunk 的 `processMain` 開頭（車加進世界之前）執行，結果與原版相同。 | 未回報 |
-
-### 資料完整性：chunk、動物與車輛遺失
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| W8 chunk 寫入閘（[2t](docs/patches.md#2t)） | 43 個玩家建造的 chunk 在 `SANITY CHECK FAIL` 後被抹除；鑑識證明檔案寫入時就已帶錯誤或為 0 的 CRC。 | 在 `SafeWrite` 截斷舊檔之前先驗長度與 CRC，損毀就擋下、保留舊檔並記錄 stack。42.22.2 起載入也會直接拿存檔佇列裡的資料：佇列裡那份損毀時不拿它載入，改讀磁碟上一版，不抹除重生。上線第一晚擋下 8 筆損毀寫入，零損失。 | [#100901](https://theindiestone.com/forums/topic/100901/) |
-| W9 存檔管線隔離（[2u](docs/patches.md#2u)） | 存檔執行緒共用 `CRC32` 實例而產生競態（W8 損毀 header 的根因），存檔管線還和發送執行緒共用全域 chunk 池。 | CRC 部分已在 42.21.0 由官方修掉並退役；存檔管線的私有 chunk 池保留。修正後 290 萬次寫入零攔截。 | [#100901](https://theindiestone.com/forums/topic/100901/)（部分已修） |
-| W38 畜牧區補算一次（[2ba](docs/patches.md#2ba)） | 42.21：離線補算迴圈用索引走 `zone.animals`，補算過程又把動物移到清單尾端，有的補算兩次、有的被跳過；加倍的飢渴與年齡是多數異常死亡的主因。42.22.2 原版改走複本，但幼體迴圈對每隻幼體補算 N 次（N＝畜牧區動物數）。 | 同一次補算中每隻動物只補一次。 | 草稿 |
-| W42 補算時數上限（[2be](docs/patches.md#2be)） | 離線時數取自圈區上次離開串流的時間；大圍場只有部分重載時這個時間是陳舊的，動物被多補算好幾天（某 session 38 隻死亡中有 25 隻發生在補算後 60 秒內）。 | 補算不超過動物自身的離線時間，動物活著時每小時更新自身時鐘。 | 草稿 |
-| W49 動物離線補算根治（[2bm](docs/patches.md#2bm)） | 同一群動物的懷孕與成長只有遊戲時間的五到六成：存檔的時鐘欄位寫存檔當下，重啟前的離線時間永遠補不回來；開機後首次載入的動物補 0 小時；每次補算丟掉最多 23 小時的累積；補算按午夜、載入中按 24 小時兩種成長語意混用。 | 以動物自身時鐘補算（已卸載的動物把時鐘存進存檔，載入中與雞舍內每小時刷新），成長與載入中一樣每累積 24 小時一次；一次離線最多補 168 遊戲小時（可調）；掛鉤屠體不補算。 | 未回報 |
-| W50 掛鉤屠體存檔（[2bn](docs/patches.md#2bn)） | 從磁碟載入的屠體要到第一次更新才找回鉤子；這之前存檔就寫成 onHook=0，屠體下次載入變成活動物。 | 依屠體載入時還原的座標寫出掛鉤狀態（與原版掛鉤格式相同），絕不寫出已知錯誤的紀錄；apop 存檔失敗重試時不再把世界中的動物寫兩次。 | 未回報 |
-| W56 補算等畜牧區就緒（[2bt](docs/patches.md#2bt)） | chunk 載入時就補算離線時間，這時槽還沒登記回畜牧區（卸載時移除，只有整區載入的 `check()` 放回），補算吃不到槽；原版靠畜牧區整區載入時再補一次（重複補算）才餵到，W42 拿掉重複後，玩家回來時家畜就像離線期間沒吃沒喝。 | 載入時先凍結、不補，等相連畜牧區的 chunk 都載入、重建槽與地上食物後再補（通常同一幀，最多等 10 秒）；槽一進世界就登記回畜牧區；延後中被卸載、抱起或換成新物件都照常接手。 | 未回報 |
-| W33 分娩品種守衛（[2av](docs/patches.md#2av)） | 查不到品種或幼崽定義的分娩仍會呼叫 `IsoAnimal` 建構子。 | 略過那一胎並記錄。 | 未回報 |
-| W43／W44 地面物品過期與交易失敗（[2bg](docs/patches.md#2bg)） | client 每次載入 chunk 都會清掉過期的地面物品，伺服器在 chunk 常駐期間卻從不清；兩邊的物品序號錯位，出現撿不起來的幽靈物品，而撿取失敗又不回報，讀條要空等時長再加 10 秒。 | 伺服器送出 chunk 前以相同規則清掉過期地面物品；交易失敗立即回報拒絕。 | 未回報 |
-| W69 實體 ID 撞號時的移除（[2ce](docs/patches.md#2ce)） | `IsoObject.getEntityNetID` 以座標加上物件在格子清單的序號當 ID，但地板一律算序號 0。玩家後蓋的地板排在牆或家具後面時，排第 0 個的物件就跟地板同 ID。伺服器移除它時 `UnregisterEntity` 丟 `Stored entity mismatch`：移除封包已經送給 client，伺服器卻留著物件，重登後變成拆不掉、擋住放置的殘件（多格家具缺了幾格之後，撿起、拆解、大錘都拆不掉）；chunk 卸載時整個 cell 的卸載中斷。本服 8 天 248 次，其中 19 次在移除時。 | ID 表那一格存的是別的實體時，先放進要移除的實體，讓原版照常移除，再把原本的實體放回；ID 表沒有它的實體也會離開 engine。ID 算法不動（client 也用同一套）。 | 未回報 |
-| W87 `Map=` 列了不存在的地圖資料夾（[2cv](docs/patches.md#2cv)） | 地圖 MOD 更新拿掉 `Map=` 還列著的資料夾時，原版照資料夾在 `Map=` 的序號算地圖優先順序（略過的也佔一號），比對時卻當成實際載入清單的索引：排在缺的資料夾後面的地圖比到自己，建築全部不載入（原生開關、燈、室內透視都壞，`map_meta.bin` 的建築狀態下次存檔就掉了）。客戶端拿同一份清單跑同一段程式，一起壞。本服一次 MOD 更新後 6 張地圖（含 Muldraugh）建築消失。 | 伺服器讀地圖時先拿掉不存在的資料夾（與原版同一個判斷），送給客戶端的清單也換成剩下的，等於管理員把那一項從 `Map=` 拿掉；客戶端不用裝東西。ini 不改。有缺的資料夾時 console 印一行警告。`-Dmdc.mapFolderGuard=off` 照原版保留、只警告。 | 未回報 |
-
-### 效能：主執行緒耗時
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| entity 移除索引化（[2g](docs/patches.md#2g)） | 批次卸載 chunk 時，每個 entity 都對全域陣列做一次 identity 線性搜尋。 | weak-key＋primitive sidecar index：每個 entity 439 → 63 ns。 | 未回報 |
-| W1-1 車輛視線預篩（[2k](docs/patches.md#2k)） | `IsoZombie.isVehicleBetween` 對每隻殭屍、cell 裡的每台車都做完整 OBB 相交。 | 先做保守的包圍球測試，拒絕 99.87%；車輛主題從低 FPS 的 dump 中消失。 | 未回報 |
-| W3 波（[設計文件](docs/wave3-design-v1.md)） | 已有擁有者的殭屍每個 tick 都重跑擁有權選舉（O(連線 × 玩家)）；動物對 cell 內每隻殭屍呼叫 `spotted()`，但效果只在 10 格內；車輛在伺服器上算玩家可見度，結果只餵給一個空操作。 | 每 3 個 pass 才重選；跳過遠距 `spotted()`（攔截 99.94%）；直接略過白算的工作。 | 未回報 |
-| W18／W18-2 動物視線節流（[2af](docs/patches.md#2af)） | `IsoAnimal.updateLOS` 每個 tick 走完整份物件清單；67 人時佔主執行緒取樣的 41.7%。 | 輪轉節流（N 可調），並以結果相同的較便宜掃描處理同一組候選。 | 未回報 |
-| W47 動物視線空間預篩（[2bj](docs/patches.md#2bj)） | W18-2 之後每次視線檢查仍要走約 4,300 個物件：約 50 人時每幀約 16 ms（主迴圈約 9%）。 | 每幀建一次殭屍網格；結果與原版相同（4,000 個隨機世界差分）；基準每幀 4,780 → 約 250 µs。 | 未回報 |
-| W83 玩家視線只走視窗內的物件（[2cr](docs/patches.md#2cr)） | 伺服器上 `IsoPlayer.updateLOS` 每位玩家每幀走完整份物件清單，不論遠近都對每個角色做型別轉換與 `ServerLOS.isCouldSee`（內含對全部玩家的線性掃描）；51–55 人時是主執行緒 self 第一名（60 份 dump 的 13.3%）。`ServerLOS` 96×96 視窗外的物件在伺服器上不可能被看見，迴圈對它們也沒有任何可觀察的效果。 | 把迴圈的迭代器換成只放行自己、視窗內與特殊元素的過濾迭代器，底層仍是原版迭代器（順序與 `ConcurrentModificationException` 時間點相同），迴圈本體不動。預設 observe（行為就是原版，額外成本可忽略）；兩個模式都對每次呼叫各以 1/64 隨機抽比對（本來會略過的物件都必須看不見）與原版計時，不一致就本次啟動回原版。1,105 次呼叫逐欄位差分與原版相同。 | 未回報 |
-| W48-2 動物聽覺索引（[2bk](docs/patches.md#2bk)） | 每隻動物每個 tick 都掃過整份全域聲音清單（約 4,300 個、範圍內平均約 12 個）。 | 結果相同的空間索引（每 256 次比對一次原版；13 萬次比對零不一致）：每幀 4.34 → 0.69 ms。 | 未回報 |
-| W72 雞舍內動物的產蛋檢查（[2cg](docs/patches.md#2cg)） | 雞舍內蛋時間到了的動物每個 tick 重算兩次畜牧區雞舍，每次 3 次整組相連畜牧區搜尋（666 塊時每次 15–34 µs）；但動物已在雞舍內時，搜尋結果不影響任何分支。產蛋箱滿了蛋時間不會歸零，於是每個 tick 重來（60 份主執行緒 dump 中佔 2 份）。 | 動物在雞舍內時直接回傳牠所在的雞舍，否則照原版搜尋；23,040 種情境與原版結果相同，只有原版搜尋自己丟例外的那類不同。 | 未回報 |
-| W45 `processItems` 身分索引（[2bh](docs/patches.md#2bh)） | 每登記一件物品都要對約 3 萬件的清單做線性 `contains`。 | 帶身分索引的清單，順序與內容不變；每件登記 43 → 0.3 µs（基準）。 | 草稿 |
-| W25 序列化物件池隔離（[2am](docs/patches.md#2am)） | `SaveAll` 的 worker 有 80% 的取樣卡在 `BitHeader` 與 `ByteBlock` 的 `ConcurrentLinkedDeque` 池競爭。 | 改為執行緒私有池（主執行緒不查 `ThreadLocal`）：4 執行緒時每次 1,095 → 38 ns（29 倍）。 | 未回報 |
-| W35 使用中玩家索引（[2ax](docs/patches.md#2ax)） | `UsingPlayerUpdateSystem` 每幀掃過所有 IsoObject entity（JFR 5.9%），只為了在玩家走遠時清掉 `usingPlayer`。 | 只追蹤有 `usingPlayer` 的物件，並定期全表稽核。 | 未回報 |
-| W34 聲音參數（[2aw](docs/patches.md#2aw)） | 伺服器替沒人讀的 dummy emitter 計算 FMOD 腳步參數（1.6%）。 | 伺服器上略過。 | 未回報 |
-| W4-1 chunk 請求併包（[2p](docs/patches.md#2p)） | 每位玩家的 chunk 供給上限是主迴圈 FPS × 一列 chunk；3 FPS 時開車會超過供給（黑邊）。 | 把佇列中的請求併成較大的批次（預設 observe）。 | 未回報 |
-| W53 步行時縮小車輛相關範圍（[2bq](docs/patches.md#2bq)） | client 對每台已載入的車每幀重算所有蒙皮零件的骨架（KI5／rSemiTruck 系每台 22–47 µs），而伺服器的車輛相關範圍（1080p ±88 格）比 client 自己的 chunk map 還寬，車多的地方載入上百台、每幀數毫秒。 | 步行時只送、只留圓形 R 格內的車（預設 64，結果一律是原版的子集）；有人在車內或加入中照原版。預設 observe 只計數；正式服快照中 107 台的地點，R=64／48 剩 57／28 台。另外計數坐在停著的車裡的情況，評估停車時是否也照步行算。 | 未回報 |
-| W73 IsoObject 每幀更新閘（[2ch](docs/patches.md#2ch)） | `IsoCell.ProcessIsoObject` 每幀對已載入範圍內每座爐子、洗衣機、發電機與玩家建造的 `IsoThumpable` 呼叫 `update()`。伺服器上一般建造物的 update 只在所在格子做一次線性 `indexOf` 就返回，不寫任何東西；晚峰 dump 中這個迴圈本身約佔主執行緒 8%。 | 預設 observe：量清單大小、組成、每 5 分鐘一幀的各類別逐件成本與非主執行緒寫入。on 模式跳過 `lifeLeft` 不大於 -1 的 `IsoThumpable`（有燃料的燈以外全部）；每 4096 次跳過抽一次照原版跑、逐欄位比對，不一致就本次回原版。 | 未回報 |
-| W74 尋路執行緒觀測（[2ci](docs/patches.md#2ci)） | `PathfindNativeThread`（獨立執行緒，不是主迴圈）在本服 99–100% CPU，取樣全在 native `findPath`。每 50 ms 一輪最多處理 2 個請求，而任何 chunk、格子、載具變動都讓下一次 native `findPath` 重建全部可見圖與載具 cluster；但看不到每次尋路多貴、重建佔多少、誰在排隊、等多久。 | 純觀測（回傳值、例外、呼叫次數與順序都不變）：每分鐘一行，記尋路次數、失敗數、平均／p95／最大耗時、依「之前有沒有世界變動」分組的耗時（可直接算出重建佔比）、各類請求者（玩家、有目標與沒目標的殭屍、動物）的次數與排隊時間。 | 未回報 |
-| W81 尋路世界變動批次化閘門（[2cp](docs/patches.md#2cp)） | 任何 chunk、格子、載具變動都會在 native 尋路設起一個全域旗標，下一次搜尋就重建全部可見圖與載具 cluster。本服 41–45 人時每一輪都在重建：每輪約 335 ms 只處理 2 個請求（約 6 req/s，需求 21–26 req/s，全是動物），動物平均要等 25–106 秒才拿到路徑。 | 世界變動批次套用：開閘那一輪（含它觸發的重建）結束後，關閘 max(T, 2×這輪尋路耗時)（`-Dmdc.pathfindGateMs`，預設 1000，`0`＝原版；`-Dmdc.pathfindGateAdaptive=off` 回到從決定開閘起算、固定 T）。關閘最長 10 秒（`-Dmdc.pathfindGateHoldMaxMs`，`0`／`off` 不封頂），因為重建耗時會隨上次重建以來的請求數變長，2 倍會自我放大。中間這些任務照順序留在佇列，尋路請求照常處理；開閘的那一輪一次套完全部積壓，不受原版每輪 10 個 chunk 的上限。伺服器端尋路看到的世界最多晚「重建耗時＋關閘時間」（本服 T=3000 估計中負載約 6 秒、滿載約 10 秒）。主執行緒耗時不變。 | 未回報 |
-| W85 只把動物附近的載具送進 native 尋路（[2ct](docs/patches.md#2ct)） | 伺服器端尋路只有動物在用。動物的搜尋失敗時會走完整片相連的世界，替沿路碰到的每輛車建可見圖，下一次重建再以「圖節點數 × map 大小」的線性搜尋釋放。本機實驗中，牧場遠處停 300 輛車時每次重建 547 ms、一般搜尋 51 ms；沒車或只有牧場旁 20 輛時是 14–29 ms 與 9–12 ms。本服 50–56 人時每次重建最長約 13.9 秒。 | 車只在離活著的動物 R 格內（`-Dmdc.pathfindVehicleScopeR`，預設 64）才送進 native 尋路：主執行緒每秒更新一次，離開要超過 1.5R（遲滯）；範圍外的車完全不送 native 任務。看到非動物的尋路請求者或 helper 出例外時，本次啟動回原版並把延後的車各補送一次（是保險、不是屏障）；別的執行緒的呼叫排隊交給主執行緒決定。預設 observe（行為同原版，每分鐘一行各半徑的動物與載具數）；`-Dmdc.pathfindVehicleScope=on` 啟用，`off` 完全原版。 | 未回報 |
-| W86 世界地圖可見性索引（[2cu](docs/patches.md#2cu)） | 伺服器每秒替每條連線決定世界地圖上能看到哪些玩家。`MapRemotePlayerVisibility=2`（只看同派系）時，每個「連線×玩家」組合跑兩次派系全表掃描，不同派系再跑一次安全屋全表掃描。本服 506 塊安全屋（名單合計 3,426 筆）、164 個派系，本機量測 50 人時一輪約 16–29 ms，每秒集中在同一幀。 | 每輪第一次查詢時建兩張表（名字→所在安全屋的 bitset、名字→第一個符合的派系），之後查表（本機 50 人一輪 0.35 ms）；每輪重建，只在跑這一輪的執行緒、只在輪內使用；安全屋查詢的名字是 null、派系查詢的玩家是 null、清單不可信或派系清單被換掉時照原版（玩家的名字是 null 時查表回 null，和原版相同）。預設 observe（兩邊都算、回原版，每 5 分鐘記原版與索引耗時）；`-Dmdc.worldMapVisibilityIndex=on` 查表並每 256 次比對原版，不一致就本次啟動回原版；`off` 完全原版。 | 未回報 |
-| W89 閒置車降頻（[2cx](docs/patches.md#2cx)） | 伺服器把每輛載入的車釘在每幀更新，沒人、熄火、沒在動的車也每幀重算格子、作物與燈光，結果和上一幀相同。本服 45–47 人、約 2,090 輛載入車時，主執行緒 dump 有約 20% 停在 `BaseVehicle.update`。 | 「閒置」的車（沒人、引擎 Idle、物理沒在動、授權是伺服器、沒拖車、警報與警笛關、收音機與 CD 關等，每幀重算）連續閒置滿 5 物理秒（接觸時鐘用的時間，掉幀時比牆鐘慢）後每 N 幀才更新一次（`-Dmdc.idleVehicleThrottleN`，預設 8），用車輛 id 錯開；上車、發動、被推、被撞、警報都讓下一幀回到每幀更新，之後要再閒置滿 5 物理秒（剛撞過人的車接觸紀錄要照原版速度過期）。預設 observe（行為同原版，對會跳的車抽樣比對下一幀的位置與狀態，每 5 分鐘一行）；`-Dmdc.idleVehicleThrottle=on` 啟用並每 4096 次跳過抽一次比對，位置在不更新時變了就本次啟動回原版；`off` 完全原版（動物仍先經 W95 只計數的探針，要完全原版另加 `-Dmdc.animalProbes=off`）。 | 未回報 |
-| W90 車輛聲音網路相關性預篩（[2cy](docs/patches.md#2cy)） | 車輛聲音每幀對每條連線走全部車問「這台的聲音和這位玩家有關嗎」：46 條連線 × 約 2,090 輛約每幀 9.6 萬次，而聲音半徑只看車本身（警報、倒車蜂鳴、車門警報、引擎、喇叭、警笛），多數車半徑是 0。 | 每幀先依原順序篩出有聲音的車，各連線只看這份清單；原版判斷照跑，結果與順序相同。預設 observe（每 16 輪兩邊都算並逐條比對、回原版）；`-Dmdc.vehicleSoundPrefilter=on` 用清單並每 256 輪比對，不一致就本次啟動回原版；`off` 完全原版。 | 未回報 |
-| W91 `checkIsNearVehicle` 只在潛行時跑（[2cz](docs/patches.md#2cz)） | 每位玩家每幀最多一次走全部車算距離，結果丟掉（兩個呼叫點互斥：offset 897 在 `updateRemotePlayer` 分支、942 `ireturn`；1263 在伺服器上走不到）；唯一的作用是潛行時標記「靠近車蹲著」，不潛行時什麼都不寫。 | 不潛行時跳過，潛行時照原版。預設 observe（照原版，不潛行時確認狀態沒變）；`-Dmdc.nearVehicleSneakGate=on` 跳過並每 4096 次抽一次照原版檢查，變了就本次啟動回原版；`off` 完全原版。 | 未回報 |
-| W92 動物循環音迴圈在伺服器整段跳過（[2da](docs/patches.md#2da)） | `IsoCell.ProcessObjects` 每幀走完整份物件清單（約 4,000 個），對每隻動物跑走路／奔跑循環音：查品種聲音、走動畫節點、比字串。伺服器上「聽者在範圍內」恆為否、動物的 emitter 是不出聲的 dummy，整段沒有任何可觀察的輸出；11-01 晚峰 60 份主執行緒 dump 有 3 份停在這裡。 | 伺服器上讓這段迴圈拿到空的迭代器，之後照原版跑殭屍聲音。預設 observe（照原版，每 64 幀量一次這段的耗時）；兩個模式都每 256 幀稽核一次前提（`SoundManager` 是原版類別、每隻動物的 emitter 是 dummy、循環音的事件 id 是 0），不成立 on 就本次啟動回原版。`-Dmdc.animalLoopSoundGate=on` 啟用；`off` 完全原版。 | 未回報 |
-| W93 動物同步範圍判定的每連線常數提到迴圈外（[2db](docs/patches.md#2db)） | W13 對每個「連線×動物」組合重算同一條連線的對齊半徑與「有沒有人在車上」（46 人、約 1,364 隻動物時約每秒 58 萬對），計數器還用 `AtomicLong`，雖然只有主執行緒在呼叫。 | 每次 `sendUpdateToClient` 開頭（W14 的 `getPacket` 改道點）每條連線算一次，同一條連線的動物直接用；計數器改普通 long。判定與計數和原本相同。預設 observe（每對照原本重算；每 17 輪抽一輪算快取並比對，不一致記 `hoistMismatch`，併入 W13 心跳）；`-Dmdc.animalRelevancyHoist=on` 用快取並每 4096 對抽一對重算，不一致就本次啟動回每對重算；`off` 每對重算。 | 未回報 |
-| W94 伺服器跳過 `setBodyPartsLastState`（[2dc](docs/patches.md#2dc)） | 每位玩家與每隻動物每幀 postupdate 都把 17 個身體部位的包紮、咬傷、抓傷、割傷狀態抄一份「上一幀」；這份資料唯一的讀者在伺服器上第一行就返回，不存檔、不送封包。 | 伺服器上跳過這次抄寫（其他寫入點照原版）。預設 observe（照原版，分玩家／動物計數並抽樣量耗時）；`-Dmdc.bodyLastStateSkip=on` 跳過；`off` 完全原版。正式服 233 個與本機 466 個 Workshop 項目的 Lua 都沒有讀它（2026-11-02 grep）。 | 未回報 |
-
-### 網路：頻寬與重送迴圈
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| W13／W14 動物同步範圍與冷卻（[2aa](docs/patches.md#2aa)、[2ab](docs/patches.md#2ab)） | 動物 relevancy 半徑是 client 保證載入半寬的 10/8，請求又沒有冷卻與範圍檢查；client 不停要求放不進世界的動物完整快照：佔出向流量 38–40%，其中 87% 是重送。 | 半徑對齊 client 已載入範圍；每條連線每隻動物在冷卻內只送一次完整快照；請求做範圍檢查。 | [#100915](https://theindiestone.com/forums/topic/100915/) |
-| W36 `GameEntity` 廣播範圍（[2ay](docs/patches.md#2ay)） | 運轉中的製作站（例如曬草架）每秒把整份 `CraftLogic` 狀態廣播給全服：佔出向 UDP 17.5%。 | 只送範圍內的連線，且只在畫面上的進度或狀態改變時送。 | 草稿 |
-| W26 雞舍同步收件人（[2an](docs/patches.md#2an)） | 雞舍的自發同步送給全服每位玩家。 | 只送給已載入範圍涵蓋該雞舍的玩家。 | 未回報 |
-| W31 魚群廣播（[2as](docs/patches.md#2as)） | `transmitFishingData` 對每條連線重新序列化同一份內容。 | 同一批只序列化一次並重用。 | 未回報 |
-| W46 `VehicleCollide` 重送授權（[2bi](docs/patches.md#2bi)） | 伺服器在同一幀處理完撞車申請與歸還時，每連線快取沒有變化，就永遠不會糾正 client，client 每幀持續送歸還：每秒 239 包、2 小時 18 萬行警告。 | 收到歸還時把該連線的授權快取標為失效，下一輪同步必定送回真正的授權：每秒 9.8 包。 | 未回報 |
-
-### 多人同步正確性
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| W10 卡讀條（[2x](docs/patches.md#2x)） | 封包參數反序列化成 null 時，Lua 動作建構子在 `processServer` 之前就丟例外；client 既收不到 Accept 也收不到 Reject，整條動作佇列卡死。 | 在建構子與參數解析外加保險絲，client 會收到正確的 Reject。（從錯的物件寫出 Reject 的 W10-A 已在 42.21.0 由官方修掉。） | [#100905](https://theindiestone.com/forums/topic/100905/) |
-| W10-C 被打斷的動作（[2aj](docs/patches.md#2aj)） | 新的請求會在伺服器上靜默停掉玩家已被接受的動作，卻不通知 client。 | 對被打斷的動作補送 Reject（enforce 模式）。（只派送玩家屬於發送連線的動作封包那一段已在 42.22.2 由官方做到並退役。） | 草稿 |
-| W20 衣物同步（[2ah](docs/patches.md#2ah)） | 數量不符時整個 `SyncVisuals` 封包被丟棄；visual 為 null 的穿戴物曾讓 `ItemDescription` 丟例外、整位玩家的衣物廣播停擺。 | 數量不符的觀測保留；tint 守衛 42.22.2 原版已補，退役。 | [#100911](https://theindiestone.com/forums/topic/100911/) |
-| W59 地圖上看不到隊友（[2bw](docs/patches.md#2bw)） | 客戶端只在遠端玩家的變更計數和伺服器不同時索取完整的地圖資料，拿到資料才畫這位玩家。兩邊的條目一開始都是 1（客戶端第一幀把新條目從 0 推到 1），索取和回覆又是不可靠封包，只要掉一包，兩邊計數就一直相等：這位隊友永遠不會出現在玩家的小地圖和世界地圖上。 | 伺服器改送「基準＋2×計數」（基準是每次開機隨機、至少 1024 的偶數），沒拿到資料的客戶端對不上，會每秒持續索取直到拿到；其餘流量與原版相同，只改伺服器。 | 未回報 |
-| W64 車卡在地板下（[2ca](docs/patches.md#2ca)） | 車的物理在駕駛的客戶端算，`VehiclePhysicsPacket.processServer` 照單全收客戶端回報的高度。客戶端物理把車推到地板下時（2026-10-14：低速倒車碰到停著的半掛卡車；2026-10-15：開車瞬移後翻覆掉到地板下 32 m），之後每個客戶端都拿到這個高度，重登也一樣。原版只有 `BaseVehicle.load` 把高度夾回地板，而且不會扶正翻覆的車。 | 車交回伺服器時（下車、換座、斷線、碰撞歸還），原點比有地板的那一格低 0.25 m 以上，就抬回生成時的停放高度，並對每個客戶端送完整更新。翻覆的車要低於地板一層以上才處理：先扶正（保留車頭方向）再抬回；只陷一點的照原版，留給玩家自己翻正。 | 未回報 |
-| W66 畜牧區消失或重複（[2cb](docs/patches.md#2cb)） | 任何玩家都能刪任何一塊畜牧區，連同相連的一起刪，伺服器不留紀錄。每條連線共用一個 `SyncZonePacket` 快取實例；動物吃草時的草地再生通知（`IsoGridSquare.removeGrass`）沒清掉畜牧區欄位，送出的是這位玩家上次的畜牧區新增、改名或刪除：別人刪掉的畜牧區會在他畫面上一直出現，其他客戶端則重播上一次收到的刪除。開服時暫時隨機 id 撞到已載入畜牧區的那一塊不進存檔清單，下次重啟就消失（664 塊時每次重啟約 2.2%）。 | 記錄每次畜牧區新增、改名、刪除，帶帳號、位置與刪除時連帶刪掉的整組；草地通知改送原版已用來更新區域時間戳的 `RegisterZone`；撞號漏掉的畜牧區補回存檔清單。不改誰能刪畜牧區。 | 未回報 |
-| W80 看不到的殭屍（[2co](docs/patches.md#2co)） | 殭屍死後網路擁有者留在物件上，物件 5 秒後回收給下一隻殭屍時沒有清掉。新殭屍出生時擁有者是那位玩家，他的擁有清單裡卻沒有牠：伺服器再把牠指派給同一位玩家時什麼都不做，不送給任何客戶端，所有人都看不到，直到擁有權換人（伺服器印 `moveZombie: There are no zombies in nz.zombies.`）。原版實測生成時帶舊擁有者的 15 隻殭屍兩個客戶端都看不到。 | 物件進回收池時清掉擁有者，並從那位玩家的擁有清單拿掉，新殭屍照原版規則重新指派。抑噪 #5 那行改成計數，心跳帶出累計。 | 草稿 |
-| W88 PVE 死亡被公告成擊殺（[2cw](docs/patches.md#2cw)） | 伺服器只要死者最後被玩家「攻擊」過，就把死亡寫進 pvp.txt 並在全服聊天公告 `Kill: "A" killed "B"`，不看 `PVP` 選項。這個攻擊者沒有時效，被車碰到時又是先記下駕駛或推車的人、之後才檢查 PVP：`PVP=false` 的伺服器上，被隊友的車擦過、之後才失溫或餓死的玩家，也會被公告成被隊友殺死。 | `PVP=false` 時玩家的死亡一律走原版的 non pvp 路徑：user.txt 記 `died … (non pvp)`，聊天公告 `<名> is dead.`。`PVP=true` 照原版。 | 未回報 |
-| LootRespawn 固定容器（[2e](docs/patches.md#2e)） | 沒有原版 TownZone 的自訂地圖上，原生固定容器永遠不刷新。 | 只對未搬動的原生固定容器放行的窄範圍 fallback。 | 設計問題 |
-| 動物壓力調整（[2b](docs/patches.md#2b)） | 玩法調整，不是 bug。 | 閒置壓力衰減 ×2、聲音壓力 ÷3、屠宰連鎖上限減半。 | — |
-
-### 帳號與濫用
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| W23 每個 Steam ID 帳號上限（[2ak](docs/patches.md#2ak)） | `MaxAccountsPerUser` 只在建立新帳號時檢查，既有帳號從不受限。 | 在登入時執行上限，保留最近使用的帳號。屬伺服器政策。 | 未回報 |
-| W52 分割畫面與重生名稱（[2bp](docs/patches.md#2bp)） | `ConnectCoopPacket` 採用封包裡的名稱，只擋空字串與在線同名。分割畫面玩家（原版介面）或重生的主玩家（改過的客戶端 Lua，不受 `AllowCoop` 影響）能換成離線玩家的名字，通過以名字認人的安全屋、陣營與 MOD 檢查，期間本人登不進來。 | 0 號一律用連線登入的帳號；1–3 號分割畫面玩家不能用任何已有帳號的名稱（在任何狀態改變前拒絕）。 | 草稿 |
-| W67 安全屋內的畜牧區（[2cc](docs/patches.md#2cc)） | 任何玩家都能刪任何一塊畜牧區，連同相連的一起刪，別人安全屋裡的也一樣。 | 要刪的整組壓到安全屋時，只接受那間的屋主、成員或管理員（`CanSetupSafehouses`）；其他人刪的話，伺服器保留這些畜牧區、補回刪除者的畫面並告訴他原因。伺服器政策。 | 未回報 |
-| W76 建造請求的類別驗證（[2cl](docs/patches.md#2cl)） | 建造請求的伺服器端驗證有缺口；細節不在此公開。 | 請求指名的建造類別必須是 `ISBuildingObject` 的子類（沿 metatable 鏈找，不寫死名單，原版與 MOD 的建造類別都能過），否則回 Reject 並記錄。 | 未回報 |
-| W77 建造距離驗證（[2cl](docs/patches.md#2cl)） | 同上。 | 建造位置與玩家每軸差超過 8 格或樓層差超過 1 時回 Reject 並記錄；有作弊建造權限的管理員不限。 | 未回報 |
-| W79 物件外觀更新距離驗證（[2cn](docs/patches.md#2cn)） | 物件外觀更新的伺服器端驗證有缺口；細節不在此公開。 | 送封包的連線上必須有玩家在該物件 20 格內，否則不改、不轉發並記錄；拆解、修理、開車撞圍籬照常。殭屍弄壞的圍籬 20 格內沒有玩家時，伺服器維持原圖（服主裁定）。 | 未回報 |
-| W82 燈具設定同步驗證（[2cq](docs/patches.md#2cq)） | 燈具設定同步的伺服器端驗證有缺口；細節不在此公開。 | 伺服器不採用客戶端不該改的燈具設定欄位：從客戶端只接受打掉燈泡與關燈，而且送封包的連線上要有玩家在燈的 50 格內；轉發給其他客戶端的是伺服器的值，被擋的封包會記錄。 | 未回報 |
-| W96 步行瞬移觀測與踢人（[2de](docs/patches.md#2de)） | 反作弊 `AntiCheatSpeed` 每秒取樣一次步行位置算速度，超過只依選項處理：設成只記 log（本服的設定）時，伺服器一秒後就接受瞬移後的位置；改成踢人時，它對瞬移後一秒內的每一包都累計，登入後的位置修正或網路延遲後的追趕也會被踢。 | 沿用原版同一次取樣，每次取樣最多一行 log（帳號、SteamID、速度、起訖座標、距登入／基準點／伺服器傳送／下車的秒數、封包間隔；跳到遠處又跳回原處時標出對應的那一行）。權限、踢人與 log 的帳號都看送出封包的連線；排除有傳送權限的角色、車上與下車那一次（原版車輛上限內）、被車撞，登入／重生／伺服器傳送後的寬限期（預設 60 秒）只豁免第一次跳動。預設 observe 只記 log；`-Dmdc.teleportWatch=kick` 對門檻（預設 150 格／秒）以上的取樣用原版反作弊的踢人流程。 | 未回報 |
-| W97 Steam 模式也擋 IP 封鎖（[2df](docs/patches.md#2df)） | 伺服器只在非 Steam 模式登入時查 `bannedip`。Steam 模式下 `/banip`、`/banuser … -ip`、管理面板寫進 `bannedip` 的位址都不會擋之後的登入：同一個 IP 換一個 Steam 帳號照樣進得來。 | Steam 模式下直連的連線登入時照原版同一句 SQL 查 `bannedip`，查到就照原版回「已封鎖」；Steam Relay 連線（位址是共用的轉送位址，原版也不讓封）與本機位址不查。 | 未回報 |
-| W99 沒人開的車被搬動的觀測（[2dg](docs/patches.md#2dg)） | 車輛物理授權的伺服器端驗證有缺口：沒坐在車上的人可能把車搬走；細節不在此公開。 | 只記 log、不擋：沒有駕駛的車累計搬動 5 格以上時記一行（分段搬也算總距離）（車、起訖座標、帳號、SteamID、授權、那位玩家坐在哪、授權怎麼來的），也記不合原版客戶端條件的碰撞授權申請；同一位駕駛拖著的車只計數。 | 未回報 |
-| W102 物品資料同步驗證（[2dj](docs/patches.md#2dj)） | 物品資料同步的伺服器端驗證有缺口；細節不在此公開。 | 物品 modData 裡只該由伺服器寫的鍵（清單可設定），伺服器維持自己的值，轉發給其他客戶端的也是伺服器的值；其他鍵與耐久、名稱、收藏等欄位照原版，不一致時記錄。 | 未回報 |
-| W103 穿戴同步驗證（[2dk](docs/patches.md#2dk)） | 穿戴同步的伺服器端驗證有缺口；細節不在此公開。 | 預設只記 log：客戶端列的穿戴物在伺服器那位玩家的背包裡找不到時記一行；顯示用物品（傷口與繃帶的模型、原版的化妝品）只累計。可選的 enforce 模式會在伺服器處理與轉發前把找不到的那幾項拿掉，顯示用物品照原版處理。 | 未回報 |
-| W104 衣物換型種類驗證（[2dl](docs/patches.md#2dl)） | 衣物換型（同一件衣物換一種穿法）的伺服器端驗證有缺口；細節不在此公開。 | 指定的種類是原物腳本列的換型種類時伺服器才換，把種類交到伺服器的兩條路都檢查；不是就拒絕換型、原物留著並記一行（物品交易那條路是原物放回背包、照原版穿上，同一個部位原本穿著的另一件可能被換下）。原版選單只會送清單裡的種類，正常遊玩不受影響。 | 未回報 |
-| W29 動物同步驗證（[2aq](docs/patches.md#2aq)） | client 送往伺服器的動物同步封包有驗證缺口；細節會私下回報 TIS，不在此公開。 | 在任何遊戲狀態改變前驗證並丟棄不合法封包。 | 將私下回報 |
-| W19 車輛永久移除帳本（[2ag](docs/patches.md#2ag)） | 好幾條 Lua 路徑都能永久刪除車輛，卻沒有任何稽核紀錄。 | 每次永久移除都記錄呼叫來源與認領狀態（純觀測）。 | 未回報 |
-
-### log 噪音
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| log 噪音過濾（[1](docs/patches.md#1)、[2v](docs/patches.md#2v)、[2bf](docs/patches.md#2bf)） | 已知警告洗版（例如原版物件的 `Invalid SpriteConfig object!`）；由 mod 觸發的 `Send Toxic Building` 佔全部 console 行數的 45.5%。42.22 的客戶端替非玩家角色多送 `Equip` 封包，伺服器每包印一行 `wrong player connection index`，35 人在線時佔 console 行數的 16.6%。 | 只攔完全相符的已知訊息，反作弊與未知警告照常輸出；封包完全不動。`wrong player connection index` 不印、改計數，由心跳帶出累計。 | [#100917](https://theindiestone.com/forums/topic/100917/)（42.21.0 已部分修掉）；`wrong player connection index`：草稿 |
-
-### 觀測
-
-不改任何行為的觀測探針：主迴圈看門狗（[2ac](docs/patches.md#2ac)）、動物離線補算量測（[2au](docs/patches.md#2au)）、動物死亡帳本（[2bb](docs/patches.md#2bb)）、動物 ID 解析失敗紀錄（[2bo](docs/patches.md#2bo)）、聲音封包慢呼叫觀測（[2at](docs/patches.md#2at)）、SyncIsoObject 洪流觀測（[2bv](docs/patches.md#2bv)；原版 `Packets limit has exceeded` 警告不記連線，這支記下洪流背後的玩家與物件）與動物遺失觀測（[2bx](docs/patches.md#2bx)；放下動物時移走了別隻、長大的動物因附近有同 ID 的複製體被刪，都會記一行；chunk 卸載存檔還在寫就被重新載入那一路 42.22.2 原版已修、退役）與動物、液體容器探針（[2dd](docs/patches.md#2dd)；虛擬動物的規模與每幀耗時、液體容器更新的實體數與會集雨的比例、沒人收得到而且閒置的動物比例，給兩個要服主裁定的降頻選項用）。它們在 console
-寫限流的心跳行，上面多數問題都是靠它們找到的。
-
-### 客戶端修補（發布包）
-
-| 修補 | 原版哪裡出錯 | 修補做什麼 | TIS |
-|---|---|---|---|
-| 貼圖管線門檻與洩漏修復（[2j](docs/patches.md#2j)） | 已解碼、尚未上傳的貼圖緩衝累積到 50 MB 時，貼圖載入執行緒會永久睡眠；洩漏（APNG 影格、64 MB 備用緩衝）把地板墊過門檻：玩家、殭屍、車輛只剩影子和名牌。 | 修掉洩漏；標準版另把等待門檻放寬到 4 GiB。隱形問題不再復發。 | [#100919](https://theindiestone.com/forums/topic/100919/) |
-| chunk 串流紀錄（[2o](docs/patches.md#2o)） | 黑邊發生時 client 端沒有任何證據。 | 記錄串流狀態與停滯；不改行為。 | — |
-| W54 車輛靜止姿勢跳過（[2br](docs/patches.md#2br)） | 每台已載入的車每幀對每個蒙皮零件模型無條件 `AnimationPlayer.Update`，不分遠近、停著或看不看得到；窗與裝甲共用門的 player，同一副骨架一幀算 2–3 次。門窗會動的模組車（KI5、rSemiTruck）每台每幀 22–47 µs，原版車 3–5 µs。 | 沒有 track 在播放、姿勢輸入與上一次完整計算相同時跳過 Update，renderer 沿用上一次的矩陣；每 256 次跳過抽查一次完整重算，不一致就本次回原版。合成測試中每幀姿勢與原版逐位相同。 | 未回報 |
-| W55 `isBoneReparented` 快速路徑（[2bs](docs/patches.md#2bs)） | 骨架更新每根骨頭呼叫一次 `isBoneReparented`，每次都從池配置一個 lambda 再掃清單；車輛、殭屍與多數角色的清單是空的。 | 清單為空直接回 false，否則照原版；結果逐位相同，所有角色與車都受惠。 | 未回報 |
-| W57 自建房 chunk 載入斷線（[2bu](docs/patches.md#2bu)） | 42.21.0：chunk 的格子在 World Streamer 執行緒就綁好房間。主執行緒接手前，client 若重建這一帶的自建建築（同一個或相鄰 cell 有人蓋或拆東西），舊的 `IsoRoom` 被清空（`def = null`），`updateSquares` 又跳過排隊中的 chunk；接著 `IsoLightSwitch.chunkLoaded` 丟例外，client 被斷線送回主選單。 | chunk 有格子指向被清空的房間時，先對這個 chunk 補跑遊戲自己的 `updateSquares` 步驟（原版漏掉的重綁），否則照原版。 | [#102213](https://theindiestone.com/forums/topic/102213/) |
-| W61 開車被夾回過期 chunk 的瞬移（[2by](docs/patches.md#2by)） | 42.21.0：客戶端把行駛中的車周圍的 chunk 一起卸載（整張 chunk map 重建）時，車仍指著舊的 chunk 物件。這個物件被回收、排入別處的載入後，`BaseVehicle.update` 把車夾回它，條件只看 `refs` 非空，車被丟到那一塊的角落，幾十到幾百格外。 | 那個 chunk 已載入、車在它的清單裡、相鄰時照原版；否則夾進相鄰最近的已載入 chunk；相鄰都沒載入就留在原地（原版已經停掉它的物理）等那一塊載入。 | 未回報 |
-| W62 車被留在已卸載 chunk 上就不再更新（[2bz](docs/patches.md#2bz)） | 42.21.0：車上有本機乘客時，chunk 卸載的 `removeFromWorld` 移不掉這台車，車仍掛在那塊 chunk 上；之後 `BaseVehicle.update` 每幀再呼叫一次 `removeFromWorld` 就 return，車不再回報位置、引擎聲消失、乘客不擺位。 | 只在這個情況讓 `update` 改走原版「chunk 已回收」的分支（請求車輛更新後照常往下跑），車照常更新，等車底下的 chunk 載入後就換過去。 | 未回報 |
-| W63 駕駛被拉回伺服器的舊位置（[2bz](docs/patches.md#2bz)） | 42.21.0：伺服器位置的格子在 client 沒載入時，`VehiclePacket.doRemove` 把坐在車上的本機玩家移到那個位置；就算這台車由本機模擬、伺服器的位置只是本機送出去的舊值也一樣。 | 本機模擬的車（Local／LocalCollide）不移動駕駛，其餘照原版。 | 未回報 |
-| W65 本機模擬的車掉到地板下（[2ca](docs/patches.md#2ca)） | `BaseVehicle.update` 用物理高度推算樓層，卻不把掉到地板下的車放回地面；坐在車上時鏡頭高度取車的物理高度，整個畫面全黑，下車後車也陷在地下。 | 本機模擬的車（Local／LocalCollide）原點比有地板的那一格低 0.25 m 以上時，用原版 `setWorldTransform` 放回生成時的停放高度，再照原版 `updateTransform`。翻覆的車要低於地板一層以上才處理，先扶正（保留車頭方向，0.2.8 起）。 | 未回報 |
-| W68 房間表被兩條執行緒同時寫（[2cd](docs/patches.md#2cd)） | 42.21.0（42.20.4 也有）：World Streamer 執行緒載入 chunk 時，經 `IsoMetaGrid.getRoomByID` 往 `IsoMetaCell.isoRooms`、`isoBuildings`（一般 `HashMap`）補房間。附近有人蓋或拆東西時，主執行緒重建自建建築，在 `recalculateBuildingAndRoomIDs` 複製、清空、重填同樣兩張表。兩邊沒有任何同步：複製出來的清單有 `null`（`NPE: "isoRoom" is null`）或多一筆（`ArrayIndexOutOfBoundsException`），client 被斷線送回主選單。 | 用同一把公平鎖包住 jar 內每一個 `getRoomByID` 呼叫與重建，兩邊不再同時碰這兩張表；原版方法照常執行。 | [#101035](https://theindiestone.com/forums/topic/101035/) |
-| W84 鄰居 chunk 的血跡逐筆掃描（[2cs](docs/patches.md#2cs)） | 每重畫一個 chunk 的一層，`FBORenderCell.renderOneLevel` 先畫自己的血跡，再對 8 個鄰居各呼叫一次 `renderOneLevel_Blood`：鄰居整份 `floorBloodSplats`（最多 1000 筆）與 `floorBloodSplatsFade` 逐筆掃過，只留下離交界 1 格內的。屍潮後每個 chunk 都有上千筆；正式服約 48 人、屍潮打完後，不開 `-debug` 的 client 這個方法佔主執行緒 4.6–9.4%。 | 兩份清單換成同一實作、只多記結構變動並帶「靠哪一邊」的索引；鄰居呼叫只走那一邊的候選，原版的判斷照樣逐筆再做，留下的血跡、順序、顏色與淡出都與原版相同。每 256 次抽 1 次照原版整份掃描比對，不一致就本次停用。 | 未回報 |
-| W100 沒有模型的武器類物品每次重畫都丟例外（[2dh](docs/patches.md#2dh)） | `ItemModelRenderer.itemHasModel` 對武器直接查 `getModelScript(item.getStaticModel())`，不檢查名稱。沒有 `WorldStaticModel`、`StaticModel`、`WeaponSprite` 的武器類物品（原版留下的開發用物品 `Base.FISH_DEV_ITEM`）名稱是 null，`ScriptBucketCollection.getScript` 丟 `NullPointerException`。地上只要有一件，視野內有它的每位玩家每次重畫都丟一次，錯誤數字一直跳（玩家 log 83 秒 401 筆）。 | 名稱是 null 時當成「沒有模型」，照原版對其他沒有模型的物品的做法改畫圖示；其餘照原版。 | 未回報 |
-| W101 沒有模型的武器類物品拿在手上每幀丟例外（[2di](docs/patches.md#2di)） | `ModelManager.addEquippedModelInstance` 把武器的 `getStaticModel()` 不經檢查交給 `addStatic`；和 W100 同一種物品名稱是 null，`ScriptManager.getItemName` 丟例外。`GameWindow.frameStep` 接住，那一幀後面的更新沒有執行，下一幀再來一次（原版實測 8 秒 1959 筆）。 | 沒有模型名稱的武器改走原版的非武器分支：手上不掛模型，和其他沒有模型的物品相同；其餘照原版。 | 未回報 |
-| W108 引擎沒熄火就下車走遠，回來後車門打不開（[2dp](docs/patches.md#2dp)） | 單機：引擎發動中（推測警報響或警笛開著也一樣）下車走遠，車改由 meta 模擬；走回來時遊戲新建一台車，先照它自己的零件建好門與引擎蓋的模型，`VirtualVehicle.removeFromMeta` 才用 `adoptParts` 換上 meta 期間的零件。模型仍綁著被換掉的舊零件：車門、引擎蓋的位置跑掉，而且打不開。 | 收養後把每個零件模型改綁到車上現在同一個 id 的零件，模型不增減、不重建；其餘照原版。多人遊戲不會走到這條路。 | [#99519](https://theindiestone.com/forums/topic/99519/) |
-
-### Native 防護（Linux dedicated server）
-
-| 防護 | 原版哪裡出錯 | 防護做什麼 | TIS |
-|---|---|---|---|
-| pfguard（[設計文件](docs/pathfind-aligned-block-guard-design-v1.md)） | `libPZPathFind64.so`：`VehicleRect` 池的槽位被寫壞，在 `PolygonalMap2::createVehicleClusters` SIGSEGV；`VehicleCluster::merge` 從不歸還被合併的 cluster（每秒約洩漏 40 塊）。 | 用 `LD_PRELOAD` 在該配置器家族周圍加 guard page（第一次錯誤寫入就當場 fault），並把被合併的 cluster 還回池。啟動時核對函式庫雜湊，不符即停用。 | 崩潰：[#100921](https://theindiestone.com/forums/topic/100921/)；洩漏：草稿 |
-| steamfix | Valve 的 `steamclient.so` PseudoTCP：部分 ACK 只縮短傳送片段、卻沒推進起始序號，重傳時越界讀取。 | 選用：以 `LD_AUDIT` 在已載入的函式庫中修正那一個區塊（磁碟上的檔案不變），只對確切的 Steam build 生效。 | Valve 函式庫 |
-| 啟動閘（[run-with-pfguard.sh](native-observer/deploy/run-with-pfguard.sh)） | 遊戲自動更新後，舊修補不能套在新 jar 上：42.21 以前殘留的 loose class 讓伺服器起不來或靜默混跑；42.22 起混進簽章 package 的 loose class 直接讓 JVM 丟 `SecurityException`。 | 每次開服：殘留的 loose class 不同源就移到一旁；再驗 agent jar 與遊戲 jar 的 SHA，都對才以 `-javaagent` 帶進遊戲，不符就以原版啟動。 | — |
-
-## 官方未修的已知問題
-
-已查出原因、但我們沒有修補的原版問題。回報放在 [docs/report/](docs/report/)，送出前都是草稿。
-
-| 問題 | 原版哪裡出錯 | 玩家可以怎麼做 | TIS |
-|---|---|---|---|
-| 駕駛中的車被留在已卸載的 chunk 上（[回報](docs/report/2026-10-01-vehicle-orphaned-chunk-river-warp-tis.md)） | client 卸載 chunk 時，車上有本機玩家的車移不掉，也沒有被移到已載入的 chunk。這台車之後不再回報位置、也不更新聲音（引擎聲「消失」）。等伺服器記的舊位置落到 client 的載入範圍外，一則車輛更新就會把駕駛拉回那個舊位置，車可能因此掉進水裡：下不了車，畫面一直全黑。 | 客戶端修補包（0.2.7，W61–W63）讓這種車照常更新，兩種瞬移都不再發生。沒裝時：開車時引擎聲突然消失或車子自己煞停，就沿原路倒退，等引擎聲回來再開。已經卡在水裡就重登幾次（每次重登車都往岸邊移幾格），或請管理員移位。 | 草稿 |
-| 有雞舍的 chunk 卸載時被斷線踢回主選單（[回報](docs/report/2026-10-03-hutch-removefromworld-npe-tis.md)） | 42.21.0：`IsoHutch.removeFromWorld` 對 `animalInside` 的每個值呼叫 `removeFromUpdateLists()`，但 client 自己的動物同步會把 `null` 寫進這個 map（例如母雞進巢箱下蛋時）。client 卸載那個 chunk 時（走開、開車離開或傳送），NPE 一路拋到 `IngameState.updateInternal` 的 catch，client 被斷線送回主選單。已在本機伺服器實機重現。 | 重登就能回到遊戲。我們的 Lua 修復 MOD 會在 client 清掉這些空格（[MinidoracatFixesFor42](https://github.com/Minidoracat/MinidoracatFixesFor42) 的 `MDFX_HutchNullSlotGuard`，Workshop 42.21.0-0.13.0 起）。 | 草稿 |
-
-## 官方已修
-
-因官方修掉底層問題而退役的修補：
-
-| 退役的修補 | 官方修正版本 | 我們的回報 |
-|---|---|---|
-| popman 共享 buffer 競態（[2h](docs/patches.md#2h)） | 42.20.2（`readByteBuffer`） | — |
-| `IsoCell` 清單成員 sidecar（[2m](docs/patches.md#2m)） | 42.20.2（高人數 chunk 卸載修正） | — |
-| `VehicleManager` 512 → 256 連線槽（[2k](docs/patches.md#2k)） | 42.20.2 | — |
-| `WorldStreamer` 8 秒請求逾時活鎖（[2p](docs/patches.md#2p)） | 42.20.3（`ChunkNotReady`） | — |
-| 玻璃移除無限迴圈（[2l](docs/patches.md#2l)） | 42.21.0 | [#100899](https://theindiestone.com/forums/topic/100899/) |
-| `faceThisObject` null 解參考（W22，[2ai](docs/patches.md#2ai)） | 42.21.0 | [#100909](https://theindiestone.com/forums/topic/100909/) |
-| 讀條 Reject 從錯的物件寫出（W10-A，[2x](docs/patches.md#2x)） | 42.21.0 | [#100905](https://theindiestone.com/forums/topic/100905/) |
-| chunk 存檔管線共用 `CRC32`（W9，[2u](docs/patches.md#2u)） | 42.21.0 | [#100901](https://theindiestone.com/forums/topic/100901/) |
-| `IsoThumpable not found` console 洗版（[1](docs/patches.md#1)） | 42.21.0 | [#100917](https://theindiestone.com/forums/topic/100917/) |
-| Java 格式字串裡的 `%ld`（W24，[2al](docs/patches.md#2al)） | 42.21.0 | — |
-| `RequestData` ACK 迴圈邊界（W27，[2ao](docs/patches.md#2ao)） | 42.21.0 | — |
-| PopMan 缺格生成與背景存檔互斥（W28，[2ap](docs/patches.md#2ap)） | 42.21.0 | — |
-| `AnimationSet`／`ActionStateContainer` log 噪音（[1](docs/patches.md#1)） | 42.20／42.21.0 | — |
-| 容器互裝成環的無限遞迴（W5，[2q](docs/patches.md#2q)） | 42.22.2（有上限的迴圈、`AddItem` 拒絕成環） | [#100891](https://theindiestone.com/forums/topic/100891/) |
-| 共用 `tempVector2_2` 讓 chunk 載入失敗被抹除（W7，[2s](docs/patches.md#2s)） | 42.22.2（每次 `new Vector2()`） | [#100895](https://theindiestone.com/forums/topic/100895/) |
-| 車輛 DB 從陳舊 `vehicle.chunk` 取 chunk 索引（W12，[2z](docs/patches.md#2z)） | 42.22.2（由座標計算，開檔時修正既有資料） | [#100913](https://theindiestone.com/forums/topic/100913/) |
-| 雞舍載入時丟掉動物（W17，[2ae](docs/patches.md#2ae)） | 42.22.2（位置被佔時改找空位） | [#100907](https://theindiestone.com/forums/topic/100907/) |
-| 衣物 tint 讀到 null visual（W20 tint 守衛，[2ah](docs/patches.md#2ah)） | 42.22.2 | [#100911](https://theindiestone.com/forums/topic/100911/) |
-| timed action 執行者驗證（W78，[2cm](docs/patches.md#2cm)）與動作封包的玩家歸屬（[2aj](docs/patches.md#2aj)） | 42.22.2 | — |
-| chunk 卸載存檔還在寫就被重新載入（W60 之二，[2bx](docs/patches.md#2bx)） | 42.22.2 | — |
-| `PacketsCache` log 噪音（[1](docs/patches.md#1)） | 42.22.2（只在開發模式印） | — |
-| 自建房間 XL 樹例外（[2bl](docs/patches.md#2bl)） | 42.22.2 | [#101887](https://theindiestone.com/forums/topic/101887/) |
-
-## 修補原理
-
-42.22 起官方 `projectzomboid.jar` 是簽章 jar，同一個 package 裡混用沒有簽章的 loose `.class` 會丟 `SecurityException`。所以修補整包是一個 **Java agent**（`mdc-javapatch-agent.jar`）：官方 jar 與簽章不動，agent 在官方類別載入時把 bytes 換成建置期手術好的版本。patcher 用 ASM 直接讀 jar 裡的原版類別並就地修改，不反編譯、也不重新編譯原始碼。
-
-- **只做堆疊形狀不變的手術**：改道到堆疊效果與指令長度相同的 static helper、方法內常數替換、線性的頭部／尾部呼叫。Stack map frame 原樣保留（`ClassWriter(0)`）；helper 是對遊戲 jar 正常編譯的 Java 類別。
-- **逐方法命中數**：每個手術點都宣告必須命中幾條指令。遊戲更新後手術點移動或改變，建置直接失敗，而不是改錯地方。
-- **原版前提檢查**：`SmokeCheck` 釘住每項修正所依賴的結構事實（例如「這個呼叫沒有檢查 null」）。官方修好 bug 時對應的檢查會轉紅，提醒我們退役該修補。
-- **驗證**：`LoadCheck` 以 `-Xverify:all` 載入每個類別，`BytecodeVerify` 跑 ASM 的資料流驗證，行為測試在裸 JVM
-  中直接跑遊戲的真實類別。
-- **開關**：每項伺服器修補都讀一個 `-Dmdc.*` 屬性（`0`／`off` 回原版；很多項另有只量測、不改行為的 `observe` 模式）。
-- **失敗即停的安裝與全有或全無的載入**：安裝要過 agent jar SHA、jar 同源、衝突三道閘；每次開服啟動閘與 agent 都再比對一次兩個 SHA，遊戲更新換了 jar 就整包不啟用、以原版開服。要換的 class 已經被載入、或 classpath 上有會蓋掉修補的 loose class 時 agent 也不啟用；helper 定義失敗時把已換上的 class 還原。開服時印 `[mdc-agent] ARMED` 與版本橫幅（`server patch <commit> … jar=<sha>`）。官方 `IntegrityReport` 照常運作：版本字串會多 `agents=1`，jar 仍判原版。
 
 ## 伺服器：建置與部署
 
@@ -272,100 +97,21 @@ bash uninstall.sh  # 整個目錄搬到 patch-disabled-*；下次開服回到原
 
 **遊戲更新後**：agent 比對到 jar 換了就不啟用，伺服器照原版開，不會有「新 jar＋舊修補」。對新 jar 重新建置，並用 `javap` 確認每個手術點的語境（命中數對不代表意思沒變），再重新安裝。仍建議得知新版就先 `uninstall.sh`。建置檢查與部署後驗證清單見 [docs/patches.md §3](docs/patches.md#3)。
 
-## 客戶端修補：安裝
-
-給玩家使用。關閉遊戲，打開 PowerShell（按 Windows 鍵，輸入 `PowerShell`，按 Enter），貼上這一行按 Enter：
-
-```powershell
-irm https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-windows.ps1 | iex
-```
-
-它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，用腳本內建的值比對 SHA-256，解壓到暫存資料夾再開安裝器的選單；暫存資料夾用完就刪。選單跟著 Windows 的顯示語言或地區格式（任一是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`（安裝或更新）、`1`（客戶端修復），直接按 Enter 選建議的版本（32GB 以上 RAM 選標準版，其餘選省記憶體版；遊戲資料夾裡已有其他 MOD 替換完整版要修補的 class 時建議相容版），問到遊戲記憶體上限時按 Enter 調到建議值，再輸入 `Y` 確認；完成後按 Enter，再輸入 `0` 離開。要換其他版本也是選 `1`；要全部移除或看狀態，貼同一行，在選單選 `3`（全部移除）或 `4`（查看狀態）。
-
-**調整遊戲記憶體上限（0.3.7 起）。** 主選單的 `5` 會顯示目前的上限和這台電腦的建議值。選 `5` 之後輸入 `1` 改成建議值、`2` 自己輸入（MB 整數，至少 3072、不能超過電腦的記憶體，超過一半會提醒）、`3` 恢復遊戲預設的 3072 MB，再輸入 `Y` 確認。它只改 `ProjectZomboid64.json`（macOS 是 `Info.plist`）的 `-Xmx`，有沒有裝修補都能用，下次開遊戲生效。移除修補不會改回；Steam 的「驗證遊戲檔案的完整性」會回到 3072 MB。Windows 裝了 PZ_Optimization 時，它可能在遊戲啟動時自己改掉這個值。
-
-要直接執行某個動作而不開選單，改用 `& ([scriptblock]::Create((irm <上面的網址>))) status` 這種寫法，最後的參數原樣交給安裝器（例如 `status`、`uninstall -All`；只加 `-Lang en` 會用英文開選單）。這行指令執行的是本 repo 發布頁上的 `install-windows.ps1`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以只執行 `irm <那個網址>`。要裝舊版，把網址裡的 `releases/latest/download` 換成 `releases/download/client-v<包版本>`（0.3.5 起才有這個檔；0.3.5 不帶參數時會直接安裝，不開選單）。
-
-不想貼指令：從 [Releases](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases) 下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>.zip`，並與 `SHA256SUMS.txt` 比對（`Get-FileHash .\MinidoracatClientPatches-*.zip`）。
-
-1. 關閉遊戲，把整個 zip 解壓縮到任何資料夾（桌面、下載都可以，不必放進遊戲目錄）。安裝程式會自己透過 Steam
-   找到遊戲目錄，遊戲裝在別的硬碟也找得到；找不到時才會請你貼上路徑（也可以用 `-GameDir "<路徑>"` 指定）。
-2. 執行 `Install-Patches.bat`，輸入 `1`（安裝或更新），再輸入 `1`（客戶端修復）。
-3. 直接按 Enter 選建議的版本。問到遊戲記憶體上限時直接按 Enter 調到建議值，再輸入 `Y` 確認。
-
-安裝器跟著 Windows 的顯示語言或地區格式（任一是中文就用繁體中文，否則英文），主選單按 `L` 或加 `-Lang en` 可切換。它只接受對應的遊戲版本，會比對 `projectzomboid.jar` 與包內檔案的 SHA-256。0.3.0 起修補以 Java agent 載入（42.22 起官方 jar 加了簽章，以前把 `.class` 檔放進遊戲資料夾的做法會讓遊戲起不來）：安裝器把 `MinidoracatClientPatches.jar` 和一個小小的載入器 `mdc-agent-loader.dll`（遊戲的啟動器要靠它才載入得了 Java agent，原始碼在 `patcher/agent-loader/`）放進遊戲資料夾的 `.mdc-patches`，並在 `ProjectZomboid64.json` 加一條 `-agentpath:` 啟動參數，遊戲本身的檔案不動；卸載時只拿掉那一條，其他設定（例如自己改過的 `-Xmx`）原樣保留，安裝時同意調高的記憶體上限也一樣保留（要回到 3072 MB 用 Steam 驗證遊戲檔案的完整性），中斷的安裝也能復原。**遊戲更新前不必先移除**：jar 換了，修補會自動停用、照原版執行。Steam 更新常把 `ProjectZomboid64.json` 換回原版，這時修補沒有啟用（安裝器查看狀態會顯示「已安裝但沒有啟用」），等對應新版的包發布後再貼一次一行指令（或重新執行 `Install-Patches.bat`）即可。不要手動刪 `.mdc-patches` 資料夾：啟動參數還在而檔案不在時，遊戲起不來；要移除請再貼一次一行指令選 `3`，或執行 `Uninstall-Patches.bat`（選 `A`）。移除只看遊戲資料夾裡的安裝紀錄，用比較新的安裝器也能移除舊版，所以用 zip 安裝的也不必留著解壓縮的資料夾（刪掉了就貼一行指令）。從 `ProjectZomboid64.bat` 或 `ShowConsole.bat` 啟動不會讀 `ProjectZomboid64.json`，修補不會載入。從 0.2.x 升級：關閉遊戲，直接用一行指令或新版 `Install-Patches.bat` 安裝，舊版放進遊戲資料夾的 `.class` 檔會在同一次安裝裡移除；只附 `uninstall.bat` 的舊版 TexPipeline v3.0 也認得。
-
-| 模組 | 用途 |
-|---|---|
-| `core` | 共用 Lua bridge、安裝指紋驗證與啟動狀態；自動安裝 |
-| `client-fixes-standard` | 貼圖洩漏修復、4 GiB 貼圖等待門檻、chunk 串流紀錄、自建房斷線修正（兩項）、車輛動畫加速、開車瞬移修正（三項）、車被推到地板下修正、地上血跡加速、沒有模型的地上物品修正、沒熄火下車走遠後車門打不開修正（32GB 以上 RAM） |
-| `client-fixes-lowmem` | 同一組修正，保留原版 50 MiB 貼圖門檻；與其他版本互斥 |
-| `client-fixes-compat` | 只含車輛修正（車輛動畫加速、開車瞬移三項、車被推到地板下、沒熄火下車走遠後車門打不開），給 PZ_Optimization 這類替換其他 class 的 MOD 一起用；與其他版本互斥 |
-| `profiler` | 給模組開發者的 DevProfiler（Java → Lua 呼叫計時、CSV／JFR 匯出）；介面是另一個 mod `MinidoracatDevProfilerFor42` |
-
-**和替換遊戲 class 的 MOD 一起用。** 有些 MOD 會替換遊戲的 class：把 `.class` 檔放進遊戲資料夾，或像 PZ_Optimization 在 42.22 起改用 Java agent（啟動參數 `-javaagent:pzopt/agent/pzopt-agent.jar`，換掉 `pzopt/overrides/` 底下的 class）。它替換了本包要修補的 class 時，本包對那個 class 的修補不會生效，安裝器會以 code 7 停止、不改任何檔案。不要只刪除它列出的檔案：那個 MOD 的其他檔案還需要它們，刪掉後遊戲會在進服時直接關閉（[issue #1](https://github.com/Minidoracat/MinidoracatJavaPatchFor42/issues/1)）。二選一：保留那個 MOD、改裝 `client-fixes-compat`（安裝器會建議），或用那個 MOD 自己的卸載器把它移除（PZ_Optimization：遊戲資料夾裡的 `Uninstall-PZ-Optimization.cmd`）後裝完整版。相容版和 PZ_Optimization 的 agent 可以一起用，兩邊的安裝器都把自己排在最前面，誰排前面都可以（0.3.8 起；用 PZ_Optimization revision 3d39148846 在 Java 載入層實測兩種順序，本包排前面的順序另在單機實機跑過）。0.3.7 以前的本包排在它前面時，會讓它整個以原版執行（它的 `agent.log` 寫 `already loaded … zombie.ai.State … the game runs stock`），請更新到 0.3.8。先裝完整版、之後才裝 PZ_Optimization 時，本包會整包不啟用、照原版跑，安裝器的狀態查詢會提醒改裝相容版。PZ_Optimization 的「Warm-start cache (Java AOT)」選項開著時，遊戲從它的快取載入 class，安裝器會拒絕安裝；先關掉它（下次啟動才生效，所以關掉後要再開一次遊戲到主選單、再關閉）。另外，42.22 起和官方 class 同 package 的 `.class` 檔本身就會讓 Java 丟 `SecurityException`（安裝器看到會提醒），為 42.21 做的這類 MOD 要等作者更新。
-
-**Windows 智慧型應用程式控制。** 修補靠一個沒有程式碼簽章的小 DLL（`mdc-agent-loader.dll`）載入。Windows 11 的智慧型應用程式控制在強制模式的電腦上，Windows 會擋下它，遊戲完全開不起來（在一台這樣的電腦上用 0.3.1 實測）。0.3.2 起安裝器會先檢查，遇到就以代碼 11 停止、不變更任何檔案；評估模式照常安裝並警告。安裝後它才轉成強制模式、遊戲開不起來時，再貼一次一行指令選 `3`，或執行 `Uninstall-Patches.bat` 全部移除。我們不會要你去改那個 Windows 設定。
-
-**macOS。** 結束遊戲，打開「終端機」（應用程式 › 工具程式），貼上這一行按 Return：
-
-```sh
-/bin/bash -c "$(curl -fsSL https://github.com/Minidoracat/MinidoracatJavaPatchFor42/releases/latest/download/install-mac.sh)"
-```
-
-它會從最新的發布下載 `MinidoracatClientPatches-<遊戲版本>-<包版本>-macOS.zip`，用腳本內建的值比對 SHA-256，再開安裝器的選單（和 Windows 版相同）。選單跟著 macOS 的偏好語言（第一個是中文就用繁體中文，否則英文），按 `L` 切換中英。安裝或更新：輸入 `1`、`1`，直接按 Return 選建議的版本，問到遊戲記憶體上限時按 Return 調高，再輸入 `Y` 確認；完成後按 Return，再輸入 `0` 離開。全部移除也是貼同一行，選 `3`。同一行最後加一個空格和 `status` 或 `uninstall --all` 會直接執行那個動作、不開選單；加 `--lang en` 會用英文開選單。只看到一行 `curl:` 開頭的英文就是沒下載成功，再貼一次即可。這行指令執行的是本 repo 發布頁上的 `install-mac.sh`，用它就是信任這個 repo 和 GitHub；比對 SHA-256 只能擋下載損壞或版本不同步，擋不了 repo 被盜用。想先看內容可以執行 `curl -fsSL <那個網址> | less`。要裝舊版，把網址裡的 `releases/latest/download/install-mac.sh` 換成 `releases/download/client-v<包版本>/install-mac.sh`（0.3.5 以前不帶參數時會直接安裝，不開選單）。
-
-主選單的 `5` 可以調整遊戲記憶體上限，用法和 Windows 版相同（見上方）。
-
-不想貼指令：下載 `-macOS.zip`（可用 `shasum -a 256` 比對），雙擊解壓縮，打開「終端機」，輸入 `bash `（後面有一個空格），把解壓出來的 `Install-Patches.command` 拖進視窗再按 Return；之後的選單和 Windows 版相同。直接雙擊 `Install-Patches.command` 不行，macOS 會擋下沒有經過公證的腳本。
-
-安裝器用遊戲自帶的 Java 執行，會透過 Steam 找到 `Project Zomboid.app`（找不到時請你拖進視窗，也可以用 `PZ_APP` 指定），把同一個 `MinidoracatClientPatches.jar` 放進 `Project Zomboid.app/Contents/Java/.mdc-patches`，並在 `Project Zomboid.app/Contents/Info.plist` 的 `JVMOptions` 加一條 `-javaagent:` 啟動參數。Mac 的啟動器可以直接載入 Java agent，所以不需要載入器 DLL。遊戲預設最多只用 3 GB Java 記憶體（`-Xmx3072m`），MOD 多的伺服器不夠用，連線幾分鐘後會以 `OutOfMemoryError` 閃退；上限低於這台 Mac 的建議值時（記憶體 32 GB 以上建議 8 GB、16 GB 以上 6 GB、12 GB 以上 4 GB；只有 8 GB 在遊戲裡實測過），安裝器會問要不要調高。除了記憶體上限，`Info.plist` 只會多那一行啟動參數，全部移除（選單 `3`）後逐位元組回到原本的檔案；調高過的記憶體上限是遊戲本身的設定，移除時不會改回。Steam 更新或「驗證遊戲檔案的完整性」可能把 `Info.plist` 換回原版（記憶體也回到 3 GB），這時狀態會顯示「已安裝但沒有啟用」，再安裝一次就會恢復，也會再問一次記憶體。在 Apple 晶片的 Mac 上測試過（原生，以及用 Rosetta 2 跑 Intel（x86_64）版）；還沒有在 Intel Mac 上實測。
-
-也可以用 `build-client.ps1` 自行建置（另外需要 MinGW-w64 gcc，用來編譯小小的 agent 載入器 DLL；以及 Git for Windows 的 bash，用來測 macOS 的啟動腳本）。安裝器測試：`powershell -NoProfile -ExecutionPolicy Bypass -File patcher/tests-client-installer/Run-InstallerTests.ps1`（Project Zomboid 的 JVM 執行中不要跑）。
-
-## 建議的伺服器設定
-
-不是修補，但屬於同一條調校線：
-
-| 設定 | 變更 | 原因 |
-|---|---|---|
-| `PingLimit` | 400 → 800 | 登入與重連風暴時的 ping 踢人從每天 18 次降到 5 次 |
-| `SaveWorldEveryMinutes` | 15 → 60 | 高人數時每次全服存檔會讓 client 暫停 5–6 秒 |
-| `BackupsPeriod` | 30 → 120 | 內建備份每次壓縮約 25 秒 |
-
-## 選用工具
-
-- **主迴圈健康檢查**（`scripts/pz-health-watch.py`，Linux／LinuxGSM）：透過本機 RCON 的 `players` 確認主迴圈確實回應，連續三次失敗才重啟：先停服，等舊 JVM 真的結束（300 秒還在就 SIGKILL）才開服。測試：`python3 scripts/test_pz_health_watch.py`。
-- **Native 快照**（`scripts/native_snapshot.py`）：每次遊戲更新後對伺服器的 native 函式庫做雜湊與符號差異比對；官方會單獨更新這些函式庫，jar 不變不代表它們沒變。
-
-## 專案結構
-
-```text
-build.ps1 / build-client.ps1   伺服器建置／客戶端修補包建置
-patcher/src/                   ASM patcher、PatchConfig（所有手術點）、SmokeCheck、LoadCheck、BytecodeVerify
-patcher/game/                  伺服器 runtime helper
-patcher/game-client*/          客戶端修復 helper 與共用客戶端核心
-patcher/game-profiler/         DevProfiler runtime
-patcher/tests*/                行為測試（伺服器、客戶端、安裝器、profiler）
-deploy/                        伺服器 install.sh／uninstall.sh 與閘門測試
-deploy-client/                 客戶端安裝器（Manage-Patches.ps1 與 .bat 啟動檔；mac/Install-Patches.command、mac/install-online.sh）
-patcher/installer-mac/         macOS 客戶端安裝器（mdc-mac-installer.jar，用遊戲自帶的 Java 執行）
-native-observer/               LD_PRELOAD／LD_AUDIT native 防護、啟動 wrapper、測試
-scripts/                       上面列出的選用工具
-docs/                          詳細修補文件、設計筆記、給 TIS 的回報
-lib/                           ASM 9.8（BSD-3-Clause，見 lib/LICENSE-ASM.txt）
-```
+修補原理、建議的伺服器設定、選用工具與專案結構，見[伺服器說明](docs/server.md)。
 
 ## 文件
 
-| 文件 | 語言 | 內容 |
-|---|---|---|
-| [docs/patches.md](docs/patches.md) | 繁體中文 | 每一項修補：事故、附 bytecode 證據的根因、修正、安全論證、檢查、開關、實測結果 |
-| [docs/patches.en.md](docs/patches.en.md) | 英文 | 上面文件的英文版 |
-| [docs/report/](docs/report/) | 英文（草稿） | 為 TIS 論壇撰寫的 bug 回報 |
-| [docs/optimization-summary.md](docs/optimization-summary.md) | 繁體中文 | 營運總覽與時間線 |
-| `docs/*-design-*.md` | 繁體中文 | 較大修補的設計筆記 |
-| [docs/specs/](docs/specs/) | JSON | 早期修補的 `javap` 證據 |
+| 文件 | 內容 |
+|---|---|
+| [修補目錄](docs/catalog.md) | 依類別列出每一項修補：原版哪裡出錯、修補做什麼、TIS 回報狀態；已查出但沒有修補的原版問題；因官方修好而退役的修補 |
+| [客戶端安裝說明](docs/client.md) | 每一種安裝方式、遊戲記憶體上限、和替換遊戲 class 的 MOD 一起用、智慧型應用程式控制、macOS 細節、自行建置 |
+| [伺服器說明](docs/server.md) | 修補原理、建議的伺服器設定、選用工具、專案結構 |
+| [docs/patches.md](docs/patches.md) | 每一項修補的技術細節：事故、附 bytecode 證據的根因、修正、安全論證、檢查、開關、實測結果 |
+| [docs/patches.en.md](docs/patches.en.md) | 上面文件的英文版 |
+| [docs/report/](docs/report/) | 為 TIS 論壇撰寫的 bug 回報（英文） |
+| [docs/optimization-summary.md](docs/optimization-summary.md) | 營運總覽與時間線 |
+| `docs/*-design-*.md` | 較大修補的設計筆記 |
+| [docs/specs/](docs/specs/) | 早期修補的 `javap` 證據（JSON） |
 
 ## 支持作者
 
@@ -377,13 +123,9 @@ MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服�
 
 本專案採 MIT 授權，見 [LICENSE](LICENSE)。
 
-第三方元件：建置使用 OW2 ASM 9.8（BSD-3-Clause），隨 `lib/` 散布，授權聲明見
-[lib/LICENSE-ASM.txt](lib/LICENSE-ASM.txt)。任何發布包都不含 ASM。
+第三方元件：建置使用 OW2 ASM 9.8（BSD-3-Clause），隨 `lib/` 散布，授權聲明見 [lib/LICENSE-ASM.txt](lib/LICENSE-ASM.txt)。任何發布包都不含 ASM。
 
-- **非官方專案**，與 The Indie Stone 無任何隸屬、合作或背書關係。Project Zomboid 與其相關素材之著作權均屬
-  The Indie Stone 所有。
-- repo 本身不含任何遊戲檔案。**客戶端發布包含有 `projectzomboid.jar` 中少數類別的修改版**，由本 repo 的 patcher
-  從指定版本的官方原版 jar 產生；只能搭配合法持有的同一版本遊戲使用，安裝器也會拒絕其他版本。若 The Indie
-  Stone 要求停止散布，我們會照辦。
+- **非官方專案**，與 The Indie Stone 無任何隸屬、合作或背書關係。Project Zomboid 與其相關素材之著作權均屬 The Indie Stone 所有。
+- repo 本身不含任何遊戲檔案。**客戶端發布包含有 `projectzomboid.jar` 中少數類別的修改版**，由本 repo 的 patcher 從指定版本的官方原版 jar 產生；只能搭配合法持有的同一版本遊戲使用，安裝器也會拒絕其他版本。若 The Indie Stone 要求停止散布，我們會照辦。
 - **修改遊戲檔案風險自負。** 伺服器用 `bash uninstall.sh`、客戶端用安裝器的「全部移除」移除修補；安裝前請先備份伺服器。
 - **每次 Project Zomboid 更新後都必須重新建置與驗證**，切勿把舊修補套到新版遊戲上。

@@ -15,7 +15,7 @@ Conventions:
   the underlying issue).
 - Players are referred to by codes (Player-A, Player-B, …).
 
-The categorized catalog with report status is in the [README](../README.md#patch-catalog).
+The categorized catalog with report status is in [catalog.en.md](catalog.en.md).
 
 <a id="0"></a>
 ## 0. Core mechanism: why "installed = active" (server and client)
