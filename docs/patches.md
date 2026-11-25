@@ -4639,16 +4639,18 @@ console（前 20 次延後與之後每 1000 次各一行附來源；首次生效
 
 **合法來源調查**：正式服 2026-10-25 的 MOD 清單裡，本機有副本的 MOD 都沒有自己送建造請求或另做不經 `ISBuildingObject` 的建造類別；Neat_Building、TheShortcut 走原版 `ISBuildIsoEntity`，AreaTasks 要求玩家站在該格，SMB_steps 梯子站位距離小於 1、z 是小數。
 
-**手術**：`BuildAction.parse` 頭部 `MdcBuildActionGuard.beginParse(this)`（HeadCall），唯一 `LuaCaller.protectedCall`（javap offset 221，建造物件的建構子）1:1 改道 `MdcBuildActionGuard.protectedCall`（新 ClassPatch，命中 2）。不通過時不呼叫建構子，回只帶一個 nil 的 `LuaSuccess`，原版 `getFirst() == null` 分支設 `item = null`，之後 `processServer` 照原版回 Reject。x、y、z 與 `objectType` 是 `BuildAction` 的 private 欄位，helper 在 class init 時反射取得（找不到就 class init 失敗＝fail-fast）；helper 放 `zombie.core` 才讀得到 `Action.playerId`。檢查本身拋 `RuntimeException` 時計 anomalies、照原版呼叫建構子。
+**手術**：`BuildAction.parse` 頭部 `MdcBuildActionGuard.beginParse(this)`（HeadCall），唯一 `LuaCaller.protectedCall`（javap offset 221，建造物件的建構子）1:1 改道 `MdcBuildActionGuard.protectedCall`（新 ClassPatch，命中 2）。不通過時不呼叫建構子，回只帶一個 nil 的 `LuaSuccess`，原版 `getFirst() == null` 分支設 `item = null`，之後 `processServer` 照原版回 Reject。x、y、z、`objectType` 與 `spriteName` 是 `BuildAction` 的 private 欄位，helper 在 class init 時反射取得（找不到就 class init 失敗＝fail-fast）；helper 放 `zombie.core` 才讀得到 `Action.playerId`。檢查本身拋 `RuntimeException` 時計 anomalies、照原版呼叫建構子。
 
 console（第一次建造請求一行首次生效；拒絕時每 10 秒最多 20 行）：
 
 ```text
 [MinidoracatJavaPatch][BuildActionGuard] 首次生效 typeCheck=on rangeCheck=on maxRange=8.0 maxDz=1.5（…）.
-[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<請求的類別名> owner=<onlineID>:<名稱> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<請求的類別名> object=<建造物名|?> sprite=<sprite 名> owner=<onlineID>:<名稱> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
 ```
 
-**驗收**：上線後正常建造（舊式木牆、B42 建造選單、多格家具、雙門、樓梯、梯子上）照常完成、沒有 `refused` 行；有 `refused` 行時以 `type=`、`at=`、`target=` 判斷是誤擋還是異常請求。
+`object=` 是建構參數裡第一個建造物定義（B42 建造選單的實體）的名字，由伺服器以請求帶的名字查腳本表還原，舊式建造沒有、印 `?`；`sprite=` 是請求帶的 sprite 名，兩欄都換掉控制字元與欄位分隔符、超過 64 字截斷。
+
+**驗收**：上線後正常建造（舊式木牆、B42 建造選單、多格家具、雙門、樓梯、梯子上）照常完成、沒有 `refused` 行；有 `refused` 行時以 `type=`、`object=`、`sprite=`、`at=`、`target=` 判斷是誤擋還是異常請求。
 
 **kill switch**：`-Dmdc.buildTypeCheck=0|off`（W76）、`-Dmdc.buildRangeCheck=0|off`（W77），各自獨立，需重啟。
 

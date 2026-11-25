@@ -5286,16 +5286,18 @@ Hardens server-side validation of build requests: a request that fails is reject
 
 **Legitimate sources**: in our server's mod list of 2026-10-25, no mod with a local copy sends build requests itself or defines a build class outside `ISBuildingObject`. Neat_Building and TheShortcut go through vanilla `ISBuildIsoEntity`, AreaTasks requires the player to stand on the tile, and SMB_steps ladders keep the player within 1 tile with a fractional z.
 
-**Surgery**: a HeadCall `MdcBuildActionGuard.beginParse(this)` at the head of `BuildAction.parse`, and a 1:1 redirect of its only `LuaCaller.protectedCall` (javap offset 221, the build object's constructor) to `MdcBuildActionGuard.protectedCall` (new ClassPatch, 2 hits). On failure the constructor is not called and a `LuaSuccess` carrying one nil is returned, so vanilla's `getFirst() == null` branch sets `item = null` and `processServer` sends the usual Reject. x, y, z and `objectType` are private fields of `BuildAction`; the helper resolves them by reflection at class init (missing fields fail class init, fail-fast). The helper lives in `zombie.core` to read `Action.playerId`. If the check itself throws a `RuntimeException`, it counts an anomaly and calls the constructor as vanilla does.
+**Surgery**: a HeadCall `MdcBuildActionGuard.beginParse(this)` at the head of `BuildAction.parse`, and a 1:1 redirect of its only `LuaCaller.protectedCall` (javap offset 221, the build object's constructor) to `MdcBuildActionGuard.protectedCall` (new ClassPatch, 2 hits). On failure the constructor is not called and a `LuaSuccess` carrying one nil is returned, so vanilla's `getFirst() == null` branch sets `item = null` and `processServer` sends the usual Reject. x, y, z, `objectType` and `spriteName` are private fields of `BuildAction`; the helper resolves them by reflection at class init (missing fields fail class init, fail-fast). The helper lives in `zombie.core` to read `Action.playerId`. If the check itself throws a `RuntimeException`, it counts an anomaly and calls the constructor as vanilla does.
 
 Console (one first-use line on the first build request; rejections at most 20 lines per 10 seconds):
 
 ```text
 [MinidoracatJavaPatch][BuildActionGuard] 首次生效 typeCheck=on rangeCheck=on maxRange=8.0 maxDz=1.5（…）.
-[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<requested class> owner=<onlineID>:<name> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
+[MinidoracatJavaPatch][BuildActionGuard] refused reason=<type|range> type=<requested class> object=<build object name|?> sprite=<sprite name> owner=<onlineID>:<name> at=<x>,<y>,<z> target=<x>,<y>,<z> typeRefused=<n> rangeRefused=<n> suppressed=<n> anomalies=<n>.
 ```
 
-**Acceptance**: after deployment, normal builds (old wooden walls, the B42 build menu, multi-tile furniture, double doors, stairs, building from a ladder) complete and no `refused` line appears; for any `refused` line, use `type=`, `at=` and `target=` to tell a false positive from an abnormal request.
+`object=` is the name of the first build object definition (an entity from the B42 build menu) among the constructor arguments, restored by the server from the name in the request via the script table; old-style builds have none and print `?`. `sprite=` is the sprite name in the request. Both fields have control characters and field separators replaced and are truncated past 64 characters.
+
+**Acceptance**: after deployment, normal builds (old wooden walls, the B42 build menu, multi-tile furniture, double doors, stairs, building from a ladder) complete and no `refused` line appears; for any `refused` line, use `type=`, `object=`, `sprite=`, `at=` and `target=` to tell a false positive from an abnormal request.
 
 **Kill switches**: `-Dmdc.buildTypeCheck=0|off` (W76) and `-Dmdc.buildRangeCheck=0|off` (W77), independent, restart required.
 

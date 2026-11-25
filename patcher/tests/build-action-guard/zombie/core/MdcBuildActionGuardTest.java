@@ -26,6 +26,7 @@ import zombie.core.raknet.UdpConnection;
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.debug.LogSeverity;
+import zombie.entity.components.spriteconfig.SpriteConfigManager;
 import zombie.network.GameServer;
 import zombie.network.PZNetKahluaTableImpl;
 import zombie.network.PacketTypes;
@@ -64,6 +65,7 @@ public final class MdcBuildActionGuardTest {
         KahluaTable base = classTable("ISBaseObject", null);
         KahluaTable building = classTable("ISBuildingObject", base);
         classTable("ISWoodenWall", building);
+        classTable("ISBuildIsoEntity", building);       // B42 建造選單：建構參數帶 ObjectInfo
         KahluaTable cursor = classTable("ISPickCharacterCursor", building);
         classTable("ISAnimalPickMateCursor", cursor);   // 原版唯一的二層 derive
         classTable("ISUIElement", base);                 // 有 new、但不是建造類別
@@ -92,7 +94,7 @@ public final class MdcBuildActionGuardTest {
         if (wantType) {
             expect("W76 計數恰 +4", MdcBuildActionGuard.typeRefusedForTest() == type0 + 4);
             expect("W76 log：refused reason=type 帶客戶端給的 Type",
-                    rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=type type=ISUIElement owner=3:builder")));
+                    rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=type type=ISUIElement object=? sprite=carpentry_01_24 owner=3:builder")));
         } else {
             expect("type-off：零計數", MdcBuildActionGuard.typeRefusedForTest() == type0);
         }
@@ -106,11 +108,32 @@ public final class MdcBuildActionGuardTest {
         expectRangeCase(wantRange, "座標 NaN", OWNER_ID, Float.NaN, 200, 0);
         if (wantRange) {
             expect("W77 計數恰 +5", MdcBuildActionGuard.rangeRefusedForTest() == range0 + 5);
-            expect("W77 log：refused reason=range 帶 owner 位置與目標",
-                    rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=range type=ISWoodenWall owner=3:builder"
+            expect("W77 log：refused reason=range 帶建造物、sprite、owner 位置與目標",
+                    rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=range type=ISWoodenWall object=? sprite=carpentry_01_24 owner=3:builder"
                             + " at=100.5,200.5,0.0 target=109.5,200.0,0.0")));
         } else {
             expect("range-off：零計數", MdcBuildActionGuard.rangeRefusedForTest() == range0);
+        }
+
+        // ---- W77 拒絕行的 object=／sprite=：ObjectInfo 由伺服器以 wire 上的名字查表還原；sprite 是客戶端任意字串 ----
+        long range1 = MdcBuildActionGuard.rangeRefusedForTest();
+        String entity = "ES_Makeshift_Electric_Blower_Forge_II";   // 原版最長的 entity 名（37 字，超過舊上限 32）
+        BuildActionPacket far = expectRangeCase(wantRange, "B42 建造選單的實體（建構參數帶 ObjectInfo）、x 差 9 格", OWNER_ID,
+                "ISBuildIsoEntity", "carpentry_01_24", objectInfo(entity), 109.5F, 200, 0);
+        expectRangeCase(wantRange, "sprite 帶換行與欄位分隔符、超過 64 字", OWNER_ID,
+                "ISWoodenWall", "evil\n[FAKE] x" + "y".repeat(80), null, 9000, 9000, 0);
+        if (wantRange) {
+            expect("W77 計數再 +2", MdcBuildActionGuard.rangeRefusedForTest() == range1 + 2);
+            expect("W77 log：object= 是 ObjectInfo 的名字（37 字不截斷）",
+                    rows(log).stream().anyMatch(r -> r.contains(TAG + " refused reason=range type=ISBuildIsoEntity object=" + entity
+                            + " sprite=carpentry_01_24 owner=3:builder")));
+            String cleaned = "evil__FAKE__x" + "y".repeat(51) + "...";
+            expect("W77 log：sprite 清洗、截在 64 字，一行沒被拆開",
+                    rows(log).stream().anyMatch(r -> r.contains(" object=? sprite=" + cleaned + " owner=3:builder at="))
+                            && log.toString(StandardCharsets.UTF_8).lines().noneMatch(l -> l.contains("[FAKE]")));
+            expectReject("帶 ObjectInfo 的遠距請求", far);
+        } else {
+            expect("range-off：零計數", MdcBuildActionGuard.rangeRefusedForTest() == range1);
         }
         long cheat0 = MdcBuildActionGuard.cheatExemptForTest();
         expectBuilt("role 有 UseBuildCheat 的管理員遠距建造（作弊建造跳過走路）", ADMIN_ID, "ISWoodenWall", 9000, 9000, 0);
@@ -119,18 +142,7 @@ public final class MdcBuildActionGuardTest {
 
         // ---- 拒絕後原版 processServer 回 Reject（客戶端不卡）----
         if (wantType) {
-            BuildActionPacket p = parse(OWNER_ID, "ISUIElement", 100, 200, 0);
-            CaptureConnection connection = captureConnection();
-            p.processServer(PacketTypes.PacketType.BuildAction, connection);
-            byte[] wire = connection.packets.size() == 1 ? connection.packets.get(0) : new byte[0];
-            ByteBufferReader received = new ByteBufferReader(ByteBuffer.wrap(wire));
-            boolean ok = wire.length > 3
-                    && received.getByte() == (byte) 134
-                    && received.getShort() == PacketTypes.PacketType.BuildAction.getId()
-                    && received.getByte() == 7
-                    && received.getEnum(Transaction.TransactionState.class) == Transaction.TransactionState.Reject
-                    && received.getShort() == OWNER_ID;
-            expect("拒絕的請求：原版 processServer 恰送 1 包 Reject 給送封包的人", ok);
+            expectReject("非建造類別", parse(OWNER_ID, "ISUIElement", 100, 200, 0));
         }
 
         // ---- 上下文 ----
@@ -169,18 +181,44 @@ public final class MdcBuildActionGuardTest {
         }
     }
 
-    private static void expectRangeCase(boolean rangeCheck, String what, short who, float x, float y, float z) {
+    private static BuildActionPacket expectRangeCase(boolean rangeCheck, String what, short who, float x, float y, float z) {
+        return expectRangeCase(rangeCheck, what, who, "ISWoodenWall", "carpentry_01_24", null, x, y, z);
+    }
+
+    private static BuildActionPacket expectRangeCase(boolean rangeCheck, String what, short who, String type, String sprite,
+            SpriteConfigManager.ObjectInfo info, float x, float y, float z) {
         int before = ctorCalls;
-        BuildActionPacket p = parse(who, "ISWoodenWall", x, y, z);
+        BuildActionPacket p = parse(who, type, sprite, info, x, y, z);
         if (rangeCheck) {
             expect("W77 拒絕：" + what + "（不呼叫建構子、item=null）", ctorCalls == before && p.item == null);
         } else {
             expect("range-off：檢查關閉，" + what + " 照原版呼叫建構子", ctorCalls == before + 1 && p.item == MADE);
         }
+        return p;
     }
 
-    /** 客戶端 {@code createBuildAction} 送出的 Request：Action 標頭＋座標＋sprite＋Type／Arguments 表。 */
+    /** 拒絕的請求跑原版 processServer：恰送 1 包 Reject 給送封包的人。 */
+    private static void expectReject(String what, BuildActionPacket p) throws Exception {
+        CaptureConnection connection = captureConnection();
+        p.processServer(PacketTypes.PacketType.BuildAction, connection);
+        byte[] wire = connection.packets.size() == 1 ? connection.packets.get(0) : new byte[0];
+        ByteBufferReader received = new ByteBufferReader(ByteBuffer.wrap(wire));
+        boolean ok = wire.length > 3
+                && received.getByte() == (byte) 134
+                && received.getShort() == PacketTypes.PacketType.BuildAction.getId()
+                && received.getByte() == 7
+                && received.getEnum(Transaction.TransactionState.class) == Transaction.TransactionState.Reject
+                && received.getShort() == OWNER_ID;
+        expect("拒絕的請求（" + what + "）：原版 processServer 恰送 1 包 Reject 給送封包的人", ok);
+    }
+
     private static BuildActionPacket parse(short who, String type, float x, float y, float z) {
+        return parse(who, type, "carpentry_01_24", null, x, y, z);
+    }
+
+    /** 客戶端 {@code createBuildAction} 送出的 Request：Action 標頭＋座標＋sprite＋Type／Arguments 表（{@code info} 非 null 時放在參數最後）。 */
+    private static BuildActionPacket parse(short who, String type, String sprite, SpriteConfigManager.ObjectInfo info,
+            float x, float y, float z) {
         ByteBuffer bb = ByteBuffer.allocate(1024);
         bb.put((byte) 7);                                               // Action.id
         bb.put((byte) Transaction.TransactionState.Request.ordinal());  // Action.state
@@ -189,10 +227,13 @@ public final class MdcBuildActionGuardTest {
         bb.putFloat(y);
         bb.putFloat(z);
         bb.put((byte) 1);                                               // north
-        putUTF(bb, "carpentry_01_24");
+        putUTF(bb, sprite);
         PZNetKahluaTableImpl arguments = new PZNetKahluaTableImpl(new LinkedHashMap<>());
         arguments.rawset("sprite", "carpentry_01_24");
         arguments.rawset("northSprite", "carpentry_01_25");
+        if (info != null) {
+            arguments.rawset("objectInfo", info);                       // wire 上是名字，伺服器以 GetObjectInfo 還原
+        }
         PZNetKahluaTableImpl item = new PZNetKahluaTableImpl(new LinkedHashMap<>());
         item.rawset("Type", type);
         item.rawset("Arguments", arguments);
@@ -201,6 +242,19 @@ public final class MdcBuildActionGuardTest {
         BuildActionPacket p = new BuildActionPacket();
         p.parse(new ByteBufferReader(bb), connectionOf(who));
         return p;
+    }
+
+    /** Unsafe 配置的 ObjectInfo（只設 groupName＝{@code getName()}），登記進 {@code SpriteConfigManager.objectInfos} 讓 wire 還原得到。 */
+    @SuppressWarnings("unchecked")
+    private static SpriteConfigManager.ObjectInfo objectInfo(String name) throws Exception {
+        SpriteConfigManager.ObjectInfo info = alloc(SpriteConfigManager.ObjectInfo.class);
+        Field groupName = SpriteConfigManager.ObjectInfo.class.getDeclaredField("groupName");
+        groupName.setAccessible(true);
+        groupName.set(info, name);
+        Field infos = SpriteConfigManager.class.getDeclaredField("objectInfos");
+        infos.setAccessible(true);
+        ((HashMap<String, SpriteConfigManager.ObjectInfo>) infos.get(null)).put(name, info);
+        return info;
     }
 
     /** 送封包的連線：slot 0 是 {@code who}（42.22 伺服器只從送出的連線解析玩家）。 */

@@ -776,7 +776,7 @@ Assert-Ok "IsoObjectAddDeferTest（off，原版負對照）"
 java -Xverify:all "-Dmdc.isoObjectRemoveDefer=0" "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectAddDeferTest on-removeoff
 Assert-Ok "IsoObjectAddDeferTest（on，W75 與 W73 off 時照常）"
 
-Write-Host "[9zs/10] 建造請求類別白名單（W76）與距離（W77）：真 BuildAction.parse＋真 wire，原版建造類別（含二層 derive）、雙門原點、8 格邊界、樓層差 1、管理員遠距照常建造；非建造全域、ISBuildingObject 本身、metatable 循環、不存在的 Type、9 格、樓層差 2、NaN 不呼叫建構子並記 log，原版 processServer 回 Reject；兩個開關各自 off 為原版負對照..."
+Write-Host "[9zs/10] 建造請求類別白名單（W76）與距離（W77）：真 BuildAction.parse＋真 wire，原版建造類別（含二層 derive）、雙門原點、8 格邊界、樓層差 1、管理員遠距照常建造；非建造全域、ISBuildingObject 本身、metatable 循環、不存在的 Type、9 格、樓層差 2、NaN 不呼叫建構子並記 log，原版 processServer 回 Reject；拒絕行帶建造物（wire 還原的 ObjectInfo）與 sprite（清洗、64 字截斷）；兩個開關各自 off 為原版負對照..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcBuildActionGuardTest both
 Assert-Ok "MdcBuildActionGuardTest（兩個開關都開，出貨組態）"
 java -Xverify:all "-Dmdc.buildTypeCheck=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.core.MdcBuildActionGuardTest type-off
