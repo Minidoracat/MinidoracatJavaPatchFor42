@@ -1001,14 +1001,16 @@ Assert-Ok "MdcSteamIpBanTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.steamIpBan=off" -cp $sibCp zombie.network.MdcSteamIpBanTest off
 Assert-Ok "MdcSteamIpBanTest（off，kill switch）"
 
-Write-Host "[9zzl/10] 沒人開的車被客戶端搬動的觀測（W99）：改道點原樣呼叫原版 setClientForce、沒經過 begin 或對不上車只計 anomalies；搬 20 格記 moving 與 moved kind=unseated；經真 VehicleCollidePacket.processServer（W46 helper 轉來）的可疑申請記一行（每個帳號 5 秒一行）、之後由同一位玩家授權的搬動記 grant=collide；pushed 只算開的車在旁邊；拖車只計數；分段搬累計起點（vid 換車、拖走不延續）；拖車夥伴；歸還讓舊申請作廢；帳號清洗；每帳號每類額度；off 照原版；日誌拋例外照原版完成"
+Write-Host "[9zzl/10] 沒人開的車被客戶端搬動的觀測與擋兩種授權申請（W99）：改道點原樣呼叫原版 setClientForce、沒經過 begin 或對不上車只計 anomalies；搬 20 格記 moving 與 moved kind=unseated；經真 VehicleCollidePacket.processServer（W46 helper 轉來、authorizationServerCollide 改道）的可疑申請記一行（每個帳號 5 秒一行）、之後由同一位玩家授權的搬動記 grant=collide；enforce：申請指名的玩家不屬於送出的連線（含查不到）不交授權、送出連線的既有快取失效，歸還指名非駕駛當成不指名的歸還（車與夥伴收回伺服器），沒在開車與太遠的申請照交，判定拋例外照原版；observe 與 off 照原版交授權（負對照）；pushed 只算開的車在旁邊；拖車只計數；分段搬累計起點（vid 換車、拖走不延續）；拖車夥伴；歸還讓舊申請作廢；帳號清洗；每帳號每類額度；日誌拋例外照擋、Error 照常外拋"
 $uvwCp = "$R\work\out;$R\dist\java;$TJ"
-java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest observe
-Assert-Ok "MdcUnseatedVehicleWatchTest（observe，出貨組態）"
+java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest enforce
+Assert-Ok "MdcUnseatedVehicleWatchTest（enforce，出貨組態）"
+java -Xverify:all "-Dmdc.unseatedVehicleWatch=observe" -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest observe
+Assert-Ok "MdcUnseatedVehicleWatchTest（observe，只記不擋）"
 java -Xverify:all "-Dmdc.unseatedVehicleWatch=off" -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest off
 Assert-Ok "MdcUnseatedVehicleWatchTest（off，kill switch）"
 java -Xverify:all -cp $uvwCp zombie.network.packets.vehicle.MdcUnseatedVehicleWatchTest logthrow
-Assert-Ok "MdcUnseatedVehicleWatchTest（logthrow observe，日誌拋例外照原版完成、Error 照常外拋）"
+Assert-Ok "MdcUnseatedVehicleWatchTest（logthrow enforce，日誌拋例外照擋、Error 照常外拋）"
 
 Write-Host "[9zzm/10] 物品資料同步驗證（W102）：真 processServer 套用封包的 modData；保留鍵被改、被拿掉、憑空加上、伺服器沒有 modData、保留鍵在 metatable 時，伺服器那份與轉發用的封包表都是伺服器的值並各記一行 log；內容相同不記、封包沒帶 modData 不動也不記；其他鍵照原版整份取代；自訂保留鍵清單；判不出物品時整份不套用、記 anomalies 與一行 dropped；off 與 jar 原版照收（負對照）；logthrow：日誌拋例外時保護照做、Error 照常外拋..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.network.packets.ItemModDataGuardTest on

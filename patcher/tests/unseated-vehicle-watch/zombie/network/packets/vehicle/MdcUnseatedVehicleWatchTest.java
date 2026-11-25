@@ -20,10 +20,11 @@ import zombie.vehicles.VehicleInterpolationData;
 
 /**
  * W99：helper 的判斷（一段搬動、kind、門檻、累計起點、授權來源、行數額度）＋dist 手術後的真 {@code VehicleCollidePacket.processServer}
- * （經 W46 的 helper 轉來的申請；測試自己設定授權）。{@code VehiclePhysicsPacket.processServer} 的掛點位置（授權與時間檢查之後、setX 之前）由 SmokeCheck
- * 釘住，實機由 E2E {@code unseated-move-mp} 驗。
+ * （經 W46 的 helper 轉來的申請與 {@code authorizationServerCollide} 改道；擋兩種申請的結果看真原版寫進車上的授權）。
+ * {@code VehiclePhysicsPacket.processServer} 的掛點位置（授權與時間檢查之後、setX 之前）由 SmokeCheck 釘住，實機由 E2E {@code unseated-move-mp} 驗。
  *
- * <p>argv：{@code observe}（出貨組態）／{@code off}（配 {@code -Dmdc.unseatedVehicleWatch=off}），自驗旗標。
+ * <p>argv：{@code enforce}（出貨組態，不帶旗標）／{@code observe}（配 {@code -Dmdc.unseatedVehicleWatch=observe}）／{@code off}（配 {@code =off}）
+ * ／{@code logthrow}（出貨組態），自驗旗標。observe 與 off 是原版負對照：同樣的封包照原版交授權。
  * BaseVehicle／IsoPlayer／UdpConnection 以 Unsafe 配置後只補用到的欄位。
  */
 public final class MdcUnseatedVehicleWatchTest {
@@ -41,12 +42,16 @@ public final class MdcUnseatedVehicleWatchTest {
             return;
         }
         boolean on = !"off".equals(args[0]);
+        boolean enf = "enforce".equals(args[0]);
         expect("自驗：argv=" + args[0] + " 與 -Dmdc.unseatedVehicleWatch=" + System.getProperty("mdc.unseatedVehicleWatch") + " 相符",
-                MdcUnseatedVehicleWatch.ENABLED == on);
-        expect("enabled：null／observe／亂寫→開、0／off→關；parseTiles：預設 5、≤0／Inf／亂寫回 5、12 照用",
+                MdcUnseatedVehicleWatch.ENABLED == on && MdcUnseatedVehicleWatch.ENFORCE == enf);
+        expect("enabled：null／observe／亂寫→開、0／off→關；enforce：null／enforce／亂寫→擋、observe／off→不擋；parseTiles：預設 5、≤0／Inf／亂寫回 5、12 照用",
                 MdcUnseatedVehicleWatch.enabled(null) && MdcUnseatedVehicleWatch.enabled("observe")
                         && MdcUnseatedVehicleWatch.enabled("x") && !MdcUnseatedVehicleWatch.enabled(" OFF ")
-                        && !MdcUnseatedVehicleWatch.enabled("0") && MdcUnseatedVehicleWatch.parseTiles(null) == 5F
+                        && !MdcUnseatedVehicleWatch.enabled("0")
+                        && MdcUnseatedVehicleWatch.enforce(null) && MdcUnseatedVehicleWatch.enforce("enforce") && MdcUnseatedVehicleWatch.enforce("x")
+                        && !MdcUnseatedVehicleWatch.enforce(" Observe ") && !MdcUnseatedVehicleWatch.enforce("off") && !MdcUnseatedVehicleWatch.enforce("0")
+                        && MdcUnseatedVehicleWatch.parseTiles(null) == 5F
                         && MdcUnseatedVehicleWatch.parseTiles("-1") == 5F && MdcUnseatedVehicleWatch.parseTiles("Infinity") == 5F
                         && MdcUnseatedVehicleWatch.parseTiles("abc") == 5F && MdcUnseatedVehicleWatch.parseTiles("12") == 12F);
         ByteArrayOutputStream log = captureLog();
@@ -98,12 +103,11 @@ public final class MdcUnseatedVehicleWatchTest {
         // 3. 經真 VehicleCollidePacket.processServer（W46 helper 轉來）的申請：沒在開車 → 可疑申請一行；測試設定授權後搬 30 格，記 grant=collide
         BaseVehicle beetle = vehicle(50, 3047, "Base.63beetle", 200F, 200F, Authorization.Server, -1);
         collide(beetle, attacker, attackerConn, true);
-        beetle.netPlayerAuthorization = Authorization.LocalCollide;
-        beetle.netPlayerId = 5;
+        expect("自己的玩家沒在開車的申請（C）不擋：照原版交 LocalCollide/5", auth(beetle, Authorization.LocalCollide, 5));
         String req = line(log, "collide-request suspect=notDriving");
-        expect(on ? "可疑申請（沒在開車）：一行，帶帳號、SteamID、車、位置、授權、requester=none" : "off：沒有行",
+        expect(on ? "可疑申請（沒在開車）：一行，帶帳號、SteamID、車、位置、授權、requester=none、action=logged" : "off：沒有行",
                 on ? req != null && req.contains("user=\"attacker\" steamid=76561190000000005 pid=5")
-                        && req.contains("vehicle=3047/50 Base.63beetle at=200.0,200.0 auth=Server requester=none")
+                        && req.contains("vehicle=3047/50 Base.63beetle at=200.0,200.0 auth=Server requester=none action=logged")
                         : req == null);
         collide(beetle, attacker, attackerConn, true);
         expect(on ? "同一個帳號 5 秒內第二次可疑申請：只計數不記行" : "off：不計數",
@@ -115,11 +119,39 @@ public final class MdcUnseatedVehicleWatchTest {
                 on ? m2 != null && m2.contains("dist=30.0") && m2.contains("grant=collide(by=\"attacker\" ago=") && m2.contains("own=yes)")
                         : m2 == null);
 
-        // 4. 申請別人的玩家 id（別條連線）
+        // 4. 申請別人的玩家 id（別條連線）：enforce 擋下（車與夥伴不變、送出連線的既有快取失效、沒有快取的不新建）；observe／off 照原版交授權
         BaseVehicle van = vehicle(51, 3048, "Base.Van", 400F, 400F, Authorization.Server, -1);
+        BaseVehicle vanTail = vehicle(52, 3049, "Base.Trailer", 395F, 400F, Authorization.Server, -1);
+        field(BaseVehicle.class, "vehicleTowing").set(van, vanTail);
+        field(BaseVehicle.class, "vehicleTowedBy").set(vanTail, van);
+        BaseVehicle.ServerVehicleState vanState = new BaseVehicle.ServerVehicleState();
+        vanState.netPlayerId = -1;
+        driverConn.vehicleStates.put((short) 51, vanState);
         collide(van, other, driverConn, true);
-        expect(on ? "申請的玩家不在送出的連線上：suspect=notOwnPlayer" : "off：沒有行",
-                (line(log, "collide-request suspect=notOwnPlayer user=\"driver\"") != null) == on);
+        String refusedLine = line(log, "collide-request suspect=notOwnPlayer user=\"driver\"");
+        expect(enf ? "申請的玩家不在送出的連線上（A）：擋下，車與夥伴維持 Server/-1、行尾 action=refused、本車快取 STALE、夥伴沒有快取不新建"
+                        : "A 照原版：車與夥伴變 LocalCollide/7、快取不動" + (on ? "、suspect=notOwnPlayer 行尾 action=logged" : "、沒有行"),
+                enf ? auth(van, Authorization.Server, -1) && auth(vanTail, Authorization.Server, -1)
+                        && refusedLine != null && refusedLine.contains(" action=refused")
+                        && vanState.netPlayerId == MdcVehicleCollideResync.STALE && !driverConn.vehicleStates.containsKey((short) 52)
+                        : auth(van, Authorization.LocalCollide, 7) && auth(vanTail, Authorization.LocalCollide, 7) && vanState.netPlayerId == -1
+                        && (on ? refusedLine != null && refusedLine.contains(" action=logged") : refusedLine == null));
+
+        // 4b. 申請指名的玩家查不到（不在 IDToPlayerMap）：也是 A
+        IsoPlayer ghost = player(77, "ghost", 450F, 400F);
+        GameServer.IDToPlayerMap.remove((short) 77);
+        BaseVehicle ghostCar = vehicle(53, 3050, "Base.Van", 450F, 400F, Authorization.Server, -1);
+        collide(ghostCar, ghost, connection("ghost", 77L, ghost), true);
+        expect(enf ? "申請指名的玩家查不到：擋下，車維持 Server/-1" : "查不到玩家的申請照原版：LocalCollide/77",
+                enf ? auth(ghostCar, Authorization.Server, -1) : auth(ghostCar, Authorization.LocalCollide, 77));
+
+        // 4c. 判定拋例外（車的 passengers=null，查駕駛 NPE）：照原版交授權、只計 anomalies
+        BaseVehicle broken = vehicle(54, 3051, "Base.Van", 460F, 400F, Authorization.LocalCollide, 5);
+        field(BaseVehicle.class, "passengers").set(broken, null);
+        long an = MdcUnseatedVehicleWatch.anomalies;
+        collide(broken, attacker, connection("attacker3", 5L, attacker), false);
+        expect(on ? "判定拋例外：照原版交 Local/5、anomalies +1" : "off：照原版交 Local/5、不計",
+                auth(broken, Authorization.Local, 5) && MdcUnseatedVehicleWatch.anomalies == an + (on ? 1 : 0));
 
         // 5. 正常撞車：駕駛在 10 格內申請，不記；撞開 2 格不記；推 8 格記 kind=pushed；開的車離 40 格算 far
         BaseVehicle car = vehicle(60, 8000, "Base.CarNormal", 300F, 300F, Authorization.Local, 6);
@@ -139,8 +171,9 @@ public final class MdcUnseatedVehicleWatchTest {
                         : pushLine == null);
         BaseVehicle farCar = vehicle(63, 8003, "Base.SmallCar", 340F, 300F, Authorization.Server, -1);
         collide(farCar, driver, connection("driver2", 1L, driver), true);
-        expect(on ? "開的車離目標 40 格：suspect=far … d=40.0" : "off：沒有行",
-                on == (line(log, "collide-request suspect=far") != null && line(log, "collide-request suspect=far").contains("d=40.0")));
+        expect((on ? "開的車離目標 40 格：suspect=far … d=40.0 action=logged" : "off：沒有行") + "；不擋，照原版交 LocalCollide/6",
+                on == (line(log, "collide-request suspect=far") != null && line(log, "collide-request suspect=far").contains("d=40.0 action=logged"))
+                        && auth(farCar, Authorization.LocalCollide, 6));
 
         // 6. 拖車：被同一位駕駛的車拖著，搬 50 格只計數
         BaseVehicle trailer = vehicle(70, 9000, "Base.Trailer", 290F, 300F, Authorization.Local, 6);
@@ -164,21 +197,36 @@ public final class MdcUnseatedVehicleWatchTest {
                 on ? MdcUnseatedVehicleWatch.episodes == ep0 + 2 && line(log, "from=600.0,600.0 to=606.0,600.0") != null
                         : MdcUnseatedVehicleWatch.episodes == 0);
 
-        // 9. 歸還帶玩家 id：他不是這台車的駕駛就記一行
+        // 9. 歸還帶玩家 id、他不是這台車的駕駛（B）：enforce 當成不指名的歸還（車與夥伴收回 Server/-1、夥伴的快取失效）；observe／off 照原版交 Local/5
         BaseVehicle lent = vehicle(90, 9200, "Base.SUV", 700F, 700F, Authorization.LocalCollide, 5);
-        collide(lent, attacker, connection("attacker2", 76561190000000005L, attacker), false);
+        BaseVehicle lentTail = vehicle(89, 9199, "Base.Trailer", 695F, 700F, Authorization.LocalCollide, 5);
+        field(BaseVehicle.class, "vehicleTowing").set(lent, lentTail);
+        field(BaseVehicle.class, "vehicleTowedBy").set(lentTail, lent);
+        UdpConnection a2 = connection("attacker2", 76561190000000005L, attacker);
+        BaseVehicle.ServerVehicleState tailState = new BaseVehicle.ServerVehicleState();
+        tailState.netPlayerId = 5;
+        a2.vehicleStates.put((short) 89, tailState);
+        collide(lent, attacker, a2, false);
         String rel = line(log, "release-to-player");
-        expect(on ? "歸還帶的玩家不是這台車的駕駛：release-to-player 一行（driver=none）" : "off：沒有行",
-                on ? rel != null && rel.contains("pid=5 own=yes vehicle=9200/90 Base.SUV") && rel.contains("driver=none") : rel == null);
+        boolean relText = rel != null && rel.contains("pid=5 own=yes vehicle=9200/90 Base.SUV") && rel.contains("driver=none");
+        expect(enf ? "B：當成不指名的歸還，車與夥伴變 Server/-1、release-to-player 行尾 action=released（driver=none）、夥伴快取 STALE"
+                        : on ? "observe：照原版交 Local/5、release-to-player 一行 action=logged" : "off：照原版交 Local/5、沒有行",
+                enf ? auth(lent, Authorization.Server, -1) && auth(lentTail, Authorization.Server, -1) && relText
+                        && rel.contains(" action=released") && tailState.netPlayerId == MdcVehicleCollideResync.STALE
+                        : auth(lent, Authorization.Local, 5) && auth(lentTail, Authorization.Local, 5) && tailState.netPlayerId == 5
+                        && (on ? relText && rel.contains(" action=logged") : rel == null));
         BaseVehicle own = vehicle(91, 9201, "Base.SUV", 710F, 700F, Authorization.LocalCollide, 6);
         seat(own, 0, driver);
         long rtp = MdcUnseatedVehicleWatch.releasesToPlayer;
         collide(own, driver, connection("driver3", 6L, driver), false);
-        collide(vehicle(92, 9202, "Base.SUV", 720F, 700F, Authorization.LocalCollide, 5), null, connection("x", 9L, null), false);
-        expect("駕駛歸還自己開的車、帶 -1 的一般歸還：不記", MdcUnseatedVehicleWatch.releasesToPlayer == rtp);
+        BaseVehicle plain = vehicle(92, 9202, "Base.SUV", 720F, 700F, Authorization.LocalCollide, 5);
+        collide(plain, null, connection("x", 9L, null), false);
+        expect("駕駛歸還自己開的車、帶 -1 的一般歸還：不記，照原版（Local/6、Server/-1）",
+                MdcUnseatedVehicleWatch.releasesToPlayer == rtp && auth(own, Authorization.Local, 6) && auth(plain, Authorization.Server, -1));
         long seen = MdcUnseatedVehicleWatch.requestsSeen;
-        collide(vehicle(93, 9203, "Base.SUV", 730F, 700F, Authorization.Local, 6), attacker, connection("y", 5L, attacker), true);
-        expect("車是 Local：不計", MdcUnseatedVehicleWatch.requestsSeen == seen);
+        BaseVehicle localCar = vehicle(93, 9203, "Base.SUV", 730F, 700F, Authorization.Local, 6);
+        collide(localCar, attacker, connection("y", 5L, attacker), true);
+        expect("車是 Local：不計，原版也不動（Local/6）", MdcUnseatedVehicleWatch.requestsSeen == seen && auth(localCar, Authorization.Local, 6));
 
         // 9b. 一般歸還（帶 -1）：原版把授權收回伺服器，這一段當場收段
         BaseVehicle back = vehicle(94, 9300, "Base.Van", 800F, 800F, Authorization.LocalCollide, 5);
@@ -385,17 +433,20 @@ public final class MdcUnseatedVehicleWatchTest {
                 on ? line(log, "moving kind=unseated vehicle=47000/570") != null && line(log, "user=\"both\" 的搬動明細已達 100 行") != null
                         : line(log, "vehicle=47000/570") == null);
 
-        // 10. 首次生效行
-        expect(on ? "首次生效行（minTiles=5.0）" : "off：沒有任何 UnseatedVehicleWatch 行",
-                on ? line(log, "首次生效") != null && line(log, "首次生效").contains("minTiles=5.0") : !log.toString().contains("UnseatedVehicleWatch"));
+        // 10. 首次生效行與擋下計數
+        expect(on ? "首次生效行（minTiles=5.0 mode=" + (enf ? "enforce" : "observe") + "）" : "off：沒有任何 UnseatedVehicleWatch 行",
+                on ? line(log, "首次生效") != null && line(log, "首次生效").contains("minTiles=5.0 mode=" + (enf ? "enforce" : "observe"))
+                        : !log.toString().contains("UnseatedVehicleWatch"));
+        expect(enf ? "擋下計數：refused=2（A 兩次）、forcedRelease=1（B 一次）" : "不擋：refused=0、forcedRelease=0",
+                MdcUnseatedVehicleWatch.refused == (enf ? 2 : 0) && MdcUnseatedVehicleWatch.forcedRelease == (enf ? 1 : 0));
 
         OUT.println(failed == 0 ? "MdcUnseatedVehicleWatchTest OK (" + args[0] + ")" : "MdcUnseatedVehicleWatchTest FAILED " + failed);
         System.exit(failed == 0 ? 0 : 1);
     }
 
-    /** 日誌鏈拋例外：首次生效、可疑申請的記錄爆掉時原版照常完成、只計 anomalies；改拋 OutOfMemoryError 時照常外拋。 */
+    /** 日誌鏈拋例外（出貨組態 enforce）：首次生效、可疑申請的記錄爆掉時原版照常完成、A 與 B 照擋、只計 anomalies；改拋 OutOfMemoryError 時照常外拋。 */
     private static void logThrow() throws Exception {
-        expect("logthrow 只配 observe", MdcUnseatedVehicleWatch.ENABLED);
+        expect("logthrow 配出貨組態（enforce）", MdcUnseatedVehicleWatch.ENABLED && MdcUnseatedVehicleWatch.ENFORCE);
         explodeLog();
         IsoPlayer p = player(5, "attacker", 90F, 200F);
         UdpConnection conn = connection("attacker", 5L, p);
@@ -417,8 +468,32 @@ public final class MdcUnseatedVehicleWatchTest {
         } catch (Throwable e) {
             t = e;
         }
-        expect("可疑申請記錄拋例外：真 processServer 照常跑完、不外拋、記 anomalies（" + t + "）",
-                t == null && MdcUnseatedVehicleWatch.requestsSuspect == 1 && MdcUnseatedVehicleWatch.anomalies > before);
+        expect("可疑申請（C）記錄拋例外：真 processServer 照常跑完交 LocalCollide/5、不外拋、記 anomalies（" + t + "）",
+                t == null && MdcUnseatedVehicleWatch.requestsSuspect == 1 && MdcUnseatedVehicleWatch.anomalies > before
+                        && auth(w, Authorization.LocalCollide, 5));
+        IsoPlayer q = player(6, "other", 300F, 300F);
+        BaseVehicle av = vehicle(52, 3049, "Base.Van", 400F, 400F, Authorization.Server, -1);
+        before = MdcUnseatedVehicleWatch.anomalies;
+        t = null;
+        try {
+            collide(av, q, connection("attacker3", 5L, p), true);
+        } catch (Throwable e) {
+            t = e;
+        }
+        expect("A 的記錄拋例外：照擋（車維持 Server/-1、refused=1）、不外拋、記 anomalies（" + t + "）",
+                t == null && auth(av, Authorization.Server, -1) && MdcUnseatedVehicleWatch.refused == 1
+                        && MdcUnseatedVehicleWatch.anomalies > before);
+        BaseVehicle bv = vehicle(53, 3050, "Base.Van", 500F, 500F, Authorization.LocalCollide, 5);
+        before = MdcUnseatedVehicleWatch.anomalies;
+        t = null;
+        try {
+            collide(bv, p, connection("attacker4", 5L, p), false);
+        } catch (Throwable e) {
+            t = e;
+        }
+        expect("B 的記錄拋例外：照擋（收回 Server/-1、forcedRelease=1）、不外拋、記 anomalies（" + t + "）",
+                t == null && auth(bv, Authorization.Server, -1) && MdcUnseatedVehicleWatch.forcedRelease == 1
+                        && MdcUnseatedVehicleWatch.anomalies > before);
         oom = true;
         t = null;
         try {
@@ -429,6 +504,10 @@ public final class MdcUnseatedVehicleWatchTest {
         expect("Error 照常外拋：日誌鏈拋 OutOfMemoryError 時不被吞，從 processServer 拋出（" + t + "）", t instanceof OutOfMemoryError);
         OUT.println(failed == 0 ? "MdcUnseatedVehicleWatchTest OK (logthrow)" : "MdcUnseatedVehicleWatchTest FAILED " + failed);
         System.exit(failed == 0 ? 0 : 1);
+    }
+
+    private static boolean auth(BaseVehicle v, Authorization a, int pid) {
+        return v.netPlayerAuthorization == a && v.netPlayerId == pid;
     }
 
     /** 真的 DebugLog 開到 All、輸出導到一寫就拋例外的串流；先自驗 logger 真的會拋。 */
