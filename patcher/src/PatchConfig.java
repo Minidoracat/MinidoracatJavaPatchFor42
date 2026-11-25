@@ -1541,6 +1541,9 @@ public final class PatchConfig {
         // （ServerVehicleState.shouldSend），client 撞車時又先在本機自設 LocalCollide；申請與歸還在同一幀處理
         // 或申請被他人的歸還蓋回時淨變化為零，伺服器永不糾正，client 每幀送歸還。頭部收 (this, connection)，
         // 歸還包讓該連線對這台車的授權快取失效，下一輪同步必帶授權。
+        // W99 同一方法：全方法唯一的 invokevirtual BaseVehicle.authorizationServerCollide(SZ)V（javap offset 18）同形改道
+        // MdcUnseatedVehicleWatch.authorizationServerCollide：頭部判定為「申請指名的玩家不屬於送出的連線」不呼叫原版，
+        // 「歸還指名的玩家不是這台車的駕駛」改成不指名的歸還（-1, false），其餘原樣呼叫（docs/patches.md 2dg）。
         Patcher.ClassPatch vcPacket = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehicleCollidePacket");
         Patcher.MethodOps vcProcess = vcPacket.method("processServer",
                 "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V");
@@ -1548,7 +1551,10 @@ public final class PatchConfig {
                 "onProcessServer",
                 "(Lzombie/network/packets/vehicle/VehicleCollidePacket;Lzombie/core/raknet/UdpConnection;)V",
                 new int[]{0, 2});
-        vcProcess.expectedHits = 1;
+        vcProcess.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle",
+                "authorizationServerCollide", "(SZ)V", "zombie/network/packets/vehicle/MdcUnseatedVehicleWatch",
+                "authorizationServerCollide"));
+        vcProcess.expectedHits = 2;   // headCall 1＋authorizationServerCollide 1
         patches.add(vcPacket);
 
         // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。伺服器照單全收駕駛回報的物理高度
@@ -1833,9 +1839,9 @@ public final class PatchConfig {
         // 車輛物理同步的伺服器端驗證有缺口（細節不在公開檔描述）。VehiclePhysicsPacket.processServer 頭部 aload_0／aload_2→begin 記下封包與連線；
         // 通過授權與時間檢查後第一個呼叫、全方法唯一的 invokevirtual BaseVehicle.setClientForce(F)V（javap offset 56，在 setX 之前）
         // 同形改道 MdcUnseatedVehicleWatch.setClientForce：先讀舊位置、原樣呼叫一次原版，沒有駕駛的車累計搬動超過門檻就記一行。
-        // VehicleCollide 申請由 W46 的 helper 轉給同一個 helper 記下（沒有新手術）。VehiclePhysicsPacket 原本沒有 ClassPatch
-        // （Reliable／Unreliable 兩個子類別不覆寫 processServer）。只寫 log、不擋。-Dmdc.unseatedVehicleWatch=observe（預設）／0|off；
-        // -Dmdc.unseatedVehicleWatchTiles（預設 5 格）。
+        // VehicleCollide 申請由 W46 的 helper 轉給同一個 helper 判定，改道掛在 W46 的 vcPacket 上（上面）。VehiclePhysicsPacket 原本沒有 ClassPatch
+        // （Reliable／Unreliable 兩個子類別不覆寫 processServer）。物理包只寫 log、不擋。-Dmdc.unseatedVehicleWatch 未設＝enforce（擋兩種申請）／
+        // observe 只記／0|off；-Dmdc.unseatedVehicleWatchTiles（預設 5 格）。
         String uvWatch = "zombie/network/packets/vehicle/MdcUnseatedVehicleWatch";
         Patcher.ClassPatch vehPhysics = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehiclePhysicsPacket");
         Patcher.MethodOps vehPhysicsProcess = vehPhysics.method("processServer",

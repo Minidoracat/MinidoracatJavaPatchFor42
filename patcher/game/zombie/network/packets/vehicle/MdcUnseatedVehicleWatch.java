@@ -13,12 +13,17 @@ import zombie.network.GameServer;
 import zombie.vehicles.BaseVehicle;
 
 /**
- * W99 沒人開的車被客戶端搬動的觀測（只寫 log、不擋；docs/patches.md 2dg）。車輛物理同步的伺服器端驗證有缺口，細節不在公開檔描述。
+ * W99 沒人開的車被客戶端搬動的觀測，並擋兩種不合原版客戶端送法的授權申請（docs/patches.md 2dg）。車輛物理同步的伺服器端驗證有缺口，細節不在公開檔描述。
  *
  * <p><b>手術</b>：{@code VehiclePhysicsPacket.processServer} 頭部 {@link #begin} 記下封包與送出的連線；原版通過檢查之後
  * 第一個呼叫、全方法唯一的 {@code BaseVehicle.setClientForce} 同形改道 {@link #setClientForce}：這時車的位置還是舊的，
  * 先原樣呼叫一次原版，再比對封包的新位置。{@code VehicleCollidePacket.processServer} 頭部 W46 的 helper 先把封包交給
- * {@link #onCollide}（記下這次申請；不符合原版客戶端送出條件的記一行）。
+ * {@link #onCollide}（記下這次申請、判定擋不擋；不符合原版客戶端送出條件的記一行），同方法唯一的
+ * {@code BaseVehicle.authorizationServerCollide} 同形改道 {@link #authorizationServerCollide} 照判定執行。
+ *
+ * <p><b>擋的兩種</b>（enforce）：申請指名的玩家不屬於送出的連線（含查不到玩家）→ 不交授權；歸還指名的玩家不是這台車的駕駛
+ * → 當成不指名的歸還（原版 {@code (-1, false)}，收回伺服器）。擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效，下一輪同步必帶真正授權。
+ * 其他可疑申請（沒在開車、開的車太遠）與物理包只記不擋。
  *
  * <p><b>一段搬動</b>：同一台沒有駕駛的車、同一個授權者、封包沒有中斷，算一段；分類每包重算，變了就換一段。同一台車
  * {@link #ORIGIN_MS} 內的下一段沿用上一段的起點累計（分段搬也算總距離；同一個 vid 換了車不算），有人坐上駕駛座或被拖走就清掉。{@code unseated}／{@code noPlayer}
@@ -26,13 +31,14 @@ import zombie.vehicles.BaseVehicle;
  * {@code pushed} 只算那位玩家開的車就在旁邊（{@link #REQ_FAR} 格內）。明細行：每類每次啟動最多 {@link #LOG_CAP} 行、每個帳號每類最多
  * {@link #USER_CAP} 行（到頂時印一行通知），帳號的控制字元、引號與逗號換成 ?。
  *
- * <p>開關 {@code -Dmdc.unseatedVehicleWatch}：{@code observe}（預設，未知值也是）／{@code 0|off} 照原版。都要重啟。
+ * <p>開關 {@code -Dmdc.unseatedVehicleWatch}：未設（預設，未知值也是）＝{@code enforce} 記並擋／{@code observe} 只記／{@code 0|off} 照原版。都要重啟。
  * 封包在主執行緒處理（{@code GameServer.mainLoopDealWithNetData}），狀態不加鎖。原版 {@code setClientForce} 在 try 外恰呼叫一次；
- * 觀測只 catch {@code RuntimeException|LinkageError} 計 anomalies，Error 照常外拋。
+ * 原版 {@code authorizationServerCollide} 都在 try 外；觀測與判定只 catch {@code RuntimeException|LinkageError} 計 anomalies（判定失敗照原版），Error 照常外拋。
  */
 public final class MdcUnseatedVehicleWatch {
 
     static final boolean ENABLED = enabled(System.getProperty("mdc.unseatedVehicleWatch"));
+    static final boolean ENFORCE = enforce(System.getProperty("mdc.unseatedVehicleWatch"));
     static final float MIN_TILES = parseTiles(System.getProperty("mdc.unseatedVehicleWatchTiles"));
     /** 相鄰兩包超過這麼久就當成另一段。 */
     static final long GAP_MS = 5_000L;
@@ -49,6 +55,10 @@ public final class MdcUnseatedVehicleWatch {
     /** 每個帳號每類（搬動、申請）每次啟動的明細行數上限：一個帳號刷不完別人的額度，刷申請也吃不到自己搬動的額度。 */
     static final int USER_CAP = 100;
     private static final String TAG = "[MinidoracatJavaPatch][UnseatedVehicleWatch] ";
+    /** {@link #onCollide} 的判定，同一個封包緊接著的改道 {@link #authorizationServerCollide} 取用。 */
+    static final int PASS = 0;
+    static final int REFUSE = 1;
+    static final int RELEASE = 2;
 
     static final class Episode {
         BaseVehicle vehicle;
@@ -110,6 +120,9 @@ public final class MdcUnseatedVehicleWatch {
     private static long lastSweepMs;
     private static long lastBeatMs;
     private static boolean announced;
+    private static int verdict;
+    private static BaseVehicle verdictVehicle;
+    private static UdpConnection verdictConn;
 
     static long accepted;
     static long episodes;
@@ -124,6 +137,8 @@ public final class MdcUnseatedVehicleWatch {
     static long releasesToPlayer;
     static long anomalies;
     static long userCapped;
+    static long refused;
+    static long forcedRelease;
     static int moveLines;
     static int requestLines;
 
@@ -135,6 +150,11 @@ public final class MdcUnseatedVehicleWatch {
         }
         String v = raw.trim().toLowerCase(Locale.ROOT);
         return !v.equals("0") && !v.equals("off");
+    }
+
+    /** 未設、{@code enforce}、未知值→擋；{@code observe} 與 {@code 0|off} 不擋。 */
+    static boolean enforce(String raw) {
+        return enabled(raw) && (raw == null || !raw.trim().toLowerCase(Locale.ROOT).equals("observe"));
     }
 
     static float parseTiles(String raw) {
@@ -362,8 +382,11 @@ public final class MdcUnseatedVehicleWatch {
                 + (ep.earlier == null ? "" : " earlierUsers=\"" + earlierText(ep.earlier) + "\"");
     }
 
-    /** W46 helper（{@code VehicleCollidePacket.processServer} 頭部）先轉來，在原版處理之前。 */
+    /** W46 helper（{@code VehicleCollidePacket.processServer} 頭部）先轉來，在原版處理之前；判定留給緊接著的改道 {@link #authorizationServerCollide}。 */
     static void onCollide(VehicleCollidePacket packet, UdpConnection connection) {
+        verdict = PASS;
+        verdictVehicle = null;
+        verdictConn = null;
         if (!ENABLED) {
             return;
         }
@@ -378,11 +401,20 @@ public final class MdcUnseatedVehicleWatch {
             short pid = packet.player.getId();
             IsoPlayer player = pid == -1 ? null : GameServer.IDToPlayerMap.get(pid);
             boolean own = player != null && onConnection(connection, player);
+            boolean releaseToPlayer = !packet.isCollide && pid != -1 && (player == null || vehicle.getDriver() != player);
+            if (ENFORCE && (packet.isCollide && !own || releaseToPlayer)) {
+                // 先寫判定再記帳與記錄：後面拋例外不改變判定
+                verdict = packet.isCollide ? REFUSE : RELEASE;
+                verdictVehicle = vehicle;
+                verdictConn = connection;
+            }
             String userKey = String.valueOf(connection.getUserName());
             String user = clean(userKey);
             // 拖車夥伴（先看 towing、再看 towedBy）一起記
             BaseVehicle partner = vehicle.getVehicleTowing() != null ? vehicle.getVehicleTowing() : vehicle.getVehicleTowedBy();
-            if (pid == -1) {   // 授權收回伺服器：舊申請作廢（帶 −1 的不會通過 hasAuthorization，不必記）
+            if (verdict == REFUSE) {
+                // 不交授權：授權沒變，沒有新的授權來源可記
+            } else if (pid == -1 || verdict == RELEASE) {   // 授權收回伺服器：舊申請作廢（帶 −1 的不會通過 hasAuthorization，不必記）
                 requests.remove(vehicle.getId());
                 if (partner != null) {
                     requests.remove(partner.getId());
@@ -399,7 +431,7 @@ public final class MdcUnseatedVehicleWatch {
                     requests.put(partner.getId(), r);
                 }
             }
-            if (!packet.isCollide && pid == -1 && !open.isEmpty()) {
+            if (!packet.isCollide && (pid == -1 || verdict == RELEASE) && !open.isEmpty()) {
                 endOnRelease(vehicle);   // 原版這包把授權收回伺服器：這一段到此為止
                 if (partner != null) {
                     endOnRelease(partner);
@@ -423,21 +455,63 @@ public final class MdcUnseatedVehicleWatch {
                                 + " vehicle=" + vehicle.getSqlId() + "/" + vehicle.getId() + " " + vehicle.getScriptName()
                                 + " at=" + fmt(vehicle.getX()) + "," + fmt(vehicle.getY()) + " auth=" + vehicle.netPlayerAuthorization
                                 + " requester=" + (player == null ? "?" : player.getVehicle() == null ? "none"
-                                        : seatText(player.getVehicle(), player)) + (driving ? " d=" + fmt(d) : ""), requestLines);
+                                        : seatText(player.getVehicle(), player)) + (driving ? " d=" + fmt(d) : "")
+                                + " action=" + (verdict == REFUSE ? "refused" : "logged"), requestLines);
                     }
                 }
-            } else if (pid != -1 && (player == null || vehicle.getDriver() != player)) {
+            } else if (releaseToPlayer) {
                 releasesToPlayer++;
                 if (requestLines < LOG_CAP && mayLogRequest(userKey, now) && budget(userRequestLines, userKey, "申請")) {
                     requestLines = log("release-to-player user=\"" + user + "\" steamid="
                             + SteamUtils.convertSteamIDToString(connection.getSteamId()) + " pid=" + pid + " own=" + (own ? "yes" : "no")
                             + " vehicle=" + vehicle.getSqlId() + "/" + vehicle.getId() + " " + vehicle.getScriptName()
                             + " at=" + fmt(vehicle.getX()) + "," + fmt(vehicle.getY()) + " auth=" + vehicle.netPlayerAuthorization
-                            + " driver=" + (vehicle.getDriver() == null ? "none" : "other"), requestLines);
+                            + " driver=" + (vehicle.getDriver() == null ? "none" : "other")
+                            + " action=" + (verdict == RELEASE ? "released" : "logged"), requestLines);
                 }
             }
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
+        }
+    }
+
+    /**
+     * {@code VehicleCollidePacket.processServer} 唯一的 {@code authorizationServerCollide} 改道：照 {@link #onCollide} 的判定，
+     * 通過照原樣、申請擋下不呼叫、歸還擋下改成不指名的歸還。原版呼叫都在 try 外。
+     */
+    public static void authorizationServerCollide(BaseVehicle vehicle, short pid, boolean collide) {
+        int v = verdictVehicle == vehicle ? verdict : PASS;
+        UdpConnection connection = verdictConn;
+        verdict = PASS;
+        verdictVehicle = null;
+        verdictConn = null;
+        if (v == PASS) {
+            vehicle.authorizationServerCollide(pid, collide);
+            return;
+        }
+        if (v == RELEASE) {
+            vehicle.authorizationServerCollide((short) -1, false);
+        }
+        try {
+            if (v == REFUSE) {
+                refused++;
+            } else {
+                forcedRelease++;
+            }
+            // 送出的客戶端已自設授權：讓它對本車與夥伴的既有快取失效，下一輪同步帶回真正授權（不新建快取）
+            stale(connection, vehicle);
+            stale(connection, vehicle.getVehicleTowing() != null ? vehicle.getVehicleTowing() : vehicle.getVehicleTowedBy());
+        } catch (RuntimeException | LinkageError e) {
+            anomalies++;
+        }
+    }
+
+    private static void stale(UdpConnection connection, BaseVehicle vehicle) {
+        if (vehicle != null) {
+            BaseVehicle.ServerVehicleState state = connection.vehicleStates.get(vehicle.getId());
+            if (state != null) {
+                state.netPlayerId = MdcVehicleCollideResync.STALE;
+            }
         }
     }
 
@@ -494,12 +568,12 @@ public final class MdcUnseatedVehicleWatch {
             return;
         }
         lastBeatMs = now;
-        String head = announced ? "beat " : "首次生效（-Dmdc.unseatedVehicleWatch=0|off 照原版）minTiles=" + fmt(MIN_TILES) + " ";
+        String head = announced ? "beat " : "首次生效（-Dmdc.unseatedVehicleWatch=observe 只記不擋、0|off 照原版）minTiles=" + fmt(MIN_TILES) + " ";
         announced = true;
-        log(head + "accepted=" + accepted + " episodes=" + episodes + " towed=" + towed + " pushed=" + pushed
+        log(head + "mode=" + (ENFORCE ? "enforce" : "observe") + " accepted=" + accepted + " episodes=" + episodes + " towed=" + towed + " pushed=" + pushed
                 + " unseated=" + unseated + " noPlayer=" + noPlayer + " moving=" + movingNow + " logged=" + logged + " requests=" + requestsSeen
-                + " suspect=" + requestsSuspect + " releaseToPlayer=" + releasesToPlayer + " open=" + open.size()
-                + " userCapped=" + userCapped + " anomalies=" + anomalies);
+                + " suspect=" + requestsSuspect + " releaseToPlayer=" + releasesToPlayer + " refused=" + refused + " forcedRelease=" + forcedRelease
+                + " open=" + open.size() + " userCapped=" + userCapped + " anomalies=" + anomalies);
     }
 
     /** 心跳與首次生效行，不限行數。 */

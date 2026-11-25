@@ -3179,6 +3179,20 @@ public final class SmokeCheck {
         String uvwLog = logHandlerViolations(classNode(distJava, uvwCls));
         failed += check("W99 helper 契約：每個 DebugLog.log 都在 try 內、handler 恰為 RuntimeException＋LinkageError，沒有 Throwable／Error／catch-all" + uvwLog,
                 uvwLog.isEmpty());
+        // W99 擋兩種申請：W46 同一個 processServer 唯一的 authorizationServerCollide 同形改道；原版本體已由 UNSEATED_VEHICLE_LOCKED 鎖。
+        String uvwAscDesc = "(Lzombie/vehicles/BaseVehicle;SZ)V";
+        failed += check("W99 手術後：VehicleCollidePacket.processServer＝頭部 aload_0／aload_2／onProcessServer＋原版文字只把 authorizationServerCollide 換成 MdcUnseatedVehicleWatch 改道（恰 1、原呼叫 0）",
+                countExactCalls(pVcProcess, Opcodes.INVOKESTATIC, uvwCls, "authorizationServerCollide", uvwAscDesc) == 1
+                && countExactCalls(pVcProcess, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "authorizationServerCollide", "(SZ)V") == 0
+                && methodText(pVcProcess).equals("    ALOAD 0\n    ALOAD 2\n    INVOKESTATIC " + vcrCls + ".onProcessServer " + vcrDesc + "\n"
+                        + methodText(vVcProcess).replace("INVOKEVIRTUAL zombie/vehicles/BaseVehicle.authorizationServerCollide (SZ)V",
+                                "INVOKESTATIC " + uvwCls + ".authorizationServerCollide " + uvwAscDesc)));
+        MethodNode gUvAsc = method(distJava, uvwCls, "authorizationServerCollide", uvwAscDesc);
+        MethodNode gUvCollide = method(distJava, uvwCls, "onCollide", vcrDesc);
+        failed += check("W99 helper 契約：改道方法呼叫原版 authorizationServerCollide 恰 2 處（通過照原樣、歸還改不指名）且都不在 try 內；onCollide 不呼叫原版",
+                countExactCalls(gUvAsc, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "authorizationServerCollide", "(SZ)V") == 2
+                && callsInTry(gUvAsc, Opcodes.INVOKEVIRTUAL, "zombie/vehicles/BaseVehicle", "authorizationServerCollide", "(SZ)V") == 0
+                && countCalls(gUvCollide, "zombie/vehicles/BaseVehicle", "authorizationServerCollide") == 0);
 
         // W64：卡進地下的車交回伺服器時抬回地面（docs/patches.md 2ca）。存在理由（TIS 修好即紅＝撤刀）：
         // VehiclePhysicsPacket.processServer 把客戶端回報的高度直接寫進 setZ／jniTransform，不夾樓層；
