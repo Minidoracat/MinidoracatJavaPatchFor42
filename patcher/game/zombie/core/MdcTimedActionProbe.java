@@ -197,10 +197,15 @@ public final class MdcTimedActionProbe {
 
     /** 共用 log 欄位淨化：控制字元、空白與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
     public static String safeName(String name) {
+        return safeName(name, 32);
+    }
+
+    /** 同上，限長 {@code max} 字。 */
+    public static String safeName(String name, int max) {
         if (name == null || name.isEmpty()) {
             return "?";
         }
-        int n = Math.min(name.length(), 32);
+        int n = Math.min(name.length(), max);
         StringBuilder s = new StringBuilder(n + 3);
         for (int i = 0; i < n; i++) {
             char c = name.charAt(i);

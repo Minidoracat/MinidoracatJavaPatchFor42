@@ -11,6 +11,7 @@ import zombie.characters.Capability;
 import zombie.characters.IsoPlayer;
 import zombie.characters.Role;
 import zombie.debug.DebugLog;
+import zombie.entity.components.spriteconfig.SpriteConfigManager;
 import zombie.network.GameServer;
 
 /**
@@ -50,6 +51,10 @@ public final class MdcBuildActionGuard {
     private static final Field Z = field("z");
     /** 客戶端給的 Type 字串（原版 parse 先存進這個欄位），只用於 log。 */
     private static final Field OBJECT_TYPE = field("objectType");
+    /** 客戶端給的 sprite 名（wire 上的 UTF），只用於 log。 */
+    private static final Field SPRITE_NAME = field("spriteName");
+    /** object／sprite 欄位上限：原版 entity 名最長 37 字，32 會把帶與不帶 _II 的截成一樣。 */
+    private static final int NAME_MAX = 64;
 
     private static final ThreadLocal<BuildAction> PARSING = new ThreadLocal<>();
 
@@ -169,14 +174,26 @@ public final class MdcBuildActionGuard {
             IsoPlayer owner = action.player.getPlayer();
             DebugLog.log(TAG + " refused reason=" + reason
                     + " type=" + MdcTimedActionProbe.safeName((String) OBJECT_TYPE.get(action))
+                    + " object=" + MdcTimedActionProbe.safeName(objectName(args), NAME_MAX)
+                    + " sprite=" + MdcTimedActionProbe.safeName((String) SPRITE_NAME.get(action), NAME_MAX)
                     + " owner=" + (owner == null ? "?" : owner.getOnlineID() + ":" + MdcTimedActionProbe.safeName(owner.getUsername()))
                     + " at=" + (owner == null ? "?" : owner.getX() + "," + owner.getY() + "," + owner.getZ())
                     + " target=" + X.getFloat(action) + "," + Y.getFloat(action) + "," + Z.getFloat(action)
                     + " typeRefused=" + typeRefused + " rangeRefused=" + rangeRefused
                     + " suppressed=" + suppressed + " anomalies=" + anomalies + ".");
-        } catch (RuntimeException | IllegalAccessException e) {
+        } catch (RuntimeException | LinkageError | IllegalAccessException e) {
             anomalies++;
         }
+    }
+
+    /** 建構參數裡第一個 ObjectInfo（伺服器以 wire 上的名字查腳本表還原）；舊式建造沒有，回 null。 */
+    private static String objectName(Object[] args) {
+        for (int i = 1; args != null && i < args.length; i++) {
+            if (args[i] instanceof SpriteConfigManager.ObjectInfo info) {
+                return info.getName();
+            }
+        }
+        return null;
     }
 
     private static boolean allowLine() {

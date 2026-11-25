@@ -7421,13 +7421,13 @@ public final class SmokeCheck {
         java.util.Set<String> baFields = new java.util.HashSet<>();
         for (org.objectweb.asm.tree.FieldNode f : classNodeFromJar(jar, ba).fields) baFields.add(f.name + f.desc);
         failed += check("W76/W77 上游指紋：BuildAction.parse 恰 1 個 LuaCaller.protectedCall 且在 getFunctionObject 之後，"
-                        + "之後 getFirst()==null 時 item=null；x/y/z（F）與 objectType 欄位存在；isValid 的全 jar 呼叫點數仍為 0",
+                        + "之後 getFirst()==null 時 item=null；x/y/z（F）、objectType 與 spriteName 欄位存在；isValid 的全 jar 呼叫點數仍為 0",
                 countExactCalls(vParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc) == 1
                 && firstCallIndex(vParse, Opcodes.INVOKESTATIC, "zombie/Lua/LuaManager", "getFunctionObject", "(Ljava/lang/String;)Ljava/lang/Object;")
                         < firstCallIndex(vParse, Opcodes.INVOKEVIRTUAL, luaCaller, "protectedCall", pcDesc)
                 && methodText(vParse).contains("INVOKEVIRTUAL se/krka/kahlua/integration/LuaReturn.getFirst ()Ljava/lang/Object;\n    IFNONNULL")
                 && methodText(vParse).contains("ACONST_NULL\n    PUTFIELD " + ba + ".item : Lse/krka/kahlua/vm/KahluaTable;")
-                && baFields.containsAll(java.util.List.of("xF", "yF", "zF", "objectTypeLjava/lang/String;"))
+                && baFields.containsAll(java.util.List.of("xF", "yF", "zF", "objectTypeLjava/lang/String;", "spriteNameLjava/lang/String;"))
                 && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, ba, "isValid", "()Z").isEmpty()
                 && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/network/packets/BuildActionPacket", "isValid", "()Z").isEmpty()
                 && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, "zombie/core/Action", "isValid", "()Z").isEmpty());
