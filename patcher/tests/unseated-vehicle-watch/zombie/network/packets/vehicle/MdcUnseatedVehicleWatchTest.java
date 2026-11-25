@@ -101,12 +101,12 @@ public final class MdcUnseatedVehicleWatchTest {
                         && MdcUnseatedVehicleWatch.unseated == 1
                         : moved == null && MdcUnseatedVehicleWatch.unseated == 0);
 
-        // 3. 經真 VehicleCollidePacket.processServer（W46 helper 轉來）的申請：沒在開車 → 可疑申請一行；測試設定授權後搬 30 格，記 grant=collide
+        // 3. 經真 VehicleCollidePacket.processServer（W46 helper 轉來）的申請：既有觀測記一行；測試設定授權後搬 30 格，記 grant=collide
         BaseVehicle beetle = vehicle(50, 3047, "Base.63beetle", 200F, 200F, Authorization.Server, -1);
         collide(beetle, attacker, attackerConn, true);
-        expect("不在兩項檢查內的申請：照原版處理（LocalCollide/5）", auth(beetle, Authorization.LocalCollide, 5));
+        expect("授權相容性：兩項檢查以外的申請，結果與原版相同", auth(beetle, Authorization.LocalCollide, 5));
         String req = line(log, "collide-request suspect=notDriving");
-        expect(on ? "可疑申請（沒在開車）：一行，帶帳號、SteamID、車、位置、授權、requester=none、action=logged" : "off：沒有行",
+        expect(on ? "既有觀測的申請明細：一行，帶帳號、SteamID、車、位置、授權、requester=none、action=logged" : "off：沒有行",
                 on ? req != null && req.contains("user=\"attacker\" steamid=76561190000000005 pid=5")
                         && req.contains("vehicle=3047/50 Base.63beetle at=200.0,200.0 auth=Server requester=none action=logged")
                         : req == null);
@@ -172,7 +172,7 @@ public final class MdcUnseatedVehicleWatchTest {
                         : pushLine == null);
         BaseVehicle farCar = vehicle(63, 8003, "Base.SmallCar", 340F, 300F, Authorization.Server, -1);
         collide(farCar, driver, connection("driver2", 1L, driver), true);
-        expect((on ? "開的車離目標 40 格：suspect=far … d=40.0 action=logged" : "off：沒有行") + "；照原版處理（LocalCollide/6）",
+        expect((on ? "既有觀測的另一種申請明細：一行，帶 d=40.0 action=logged" : "off：沒有行") + "；授權相容性：結果與原版相同",
                 on == (line(log, "collide-request suspect=far") != null && line(log, "collide-request suspect=far").contains("d=40.0 action=logged"))
                         && auth(farCar, Authorization.LocalCollide, 6));
 

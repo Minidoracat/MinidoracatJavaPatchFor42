@@ -284,9 +284,16 @@ public final class AnimalLossProbeTest {
             int rows18 = rowsContaining("grow-spared#").size();
             p18.wet = true;
             int[] h18 = grow(p18, g18, true);
-            expect("站在水格的異種同號：放行（回 false、原版 0 次、delete 0）但不計不記（原版 grow 每幀重試）",
+            expect("到達 W109 時長大前的動物在水格：放行（回 false、原版 0 次、delete 0）但不計不記",
                     h18[0] == 0 && h18[1] == 0 && h18[2] == 0 && AnimalLossProbe.growSpared.get() == spared18
                             && rowsContaining("grow-spared#").size() == rows18);
+
+            long anom19 = AnimalLossProbe.anomalies.get();
+            p18.waterThrows = true;
+            int[] h19 = grow(p18, g18, true);
+            expect("查水格拋例外：仍放行（回 false、原版 0 次、delete 0）、anomalies+1、不計不記",
+                    h19[0] == 0 && h19[1] == 0 && h19[2] == 0 && AnimalLossProbe.anomalies.get() == anom19 + 1
+                            && AnimalLossProbe.growSpared.get() == spared18 && rowsContaining("grow-spared#").size() == rows18);
         }
 
         // ---- log 行（隨機差分之前：差分會用完每分鐘 30 行的額度）----
@@ -434,6 +441,7 @@ public final class AnimalLossProbeTest {
         boolean onHook;
         int idThrows;
         boolean wet;
+        boolean waterThrows;
 
         IsoGridSquare sq;
 
@@ -462,6 +470,9 @@ public final class AnimalLossProbeTest {
 
         @Override
         public boolean checkForWater() {
+            if (waterThrows) {
+                throw new IllegalStateException("test: checkForWater");
+            }
             return wet;
         }
 

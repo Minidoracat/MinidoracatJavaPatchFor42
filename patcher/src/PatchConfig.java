@@ -1842,7 +1842,7 @@ public final class PatchConfig {
         // 同形改道 MdcUnseatedVehicleWatch.setClientForce：先讀舊位置、原樣呼叫一次原版，沒有駕駛的車累計搬動超過門檻就記一行。
         // VehicleCollide 申請由 W46 的 helper 轉給同一個 helper 判定，改道掛在 W46 的 vcPacket 上（上面）。VehiclePhysicsPacket 原本沒有 ClassPatch
         // （Reliable／Unreliable 兩個子類別不覆寫 processServer）。物理包只寫 log、不擋。-Dmdc.unseatedVehicleWatch 未設＝enforce（擋兩種申請）／
-        // observe 只記／0|off；-Dmdc.unseatedVehicleWatchTiles（預設 5 格）。
+        // observe|2 只記／0|off；-Dmdc.unseatedVehicleWatchTiles（預設 5 格）。
         String uvWatch = "zombie/network/packets/vehicle/MdcUnseatedVehicleWatch";
         Patcher.ClassPatch vehPhysics = new Patcher.ClassPatch("zombie/network/packets/vehicle/VehiclePhysicsPacket");
         Patcher.MethodOps vehPhysicsProcess = vehPhysics.method("processServer",

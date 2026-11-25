@@ -195,24 +195,27 @@ public final class MdcTimedActionProbe {
         }
     }
 
-    /** 共用 log 欄位淨化：控制字元、空白、Unicode 格式字元（雙向顯示控制、零寬）與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
+    /** 共用 log 欄位淨化：控制字元、空白（含不換行空白）、Unicode 格式字元（雙向顯示控制、零寬）、落單的代理碼元與欄位分隔符換底線並限長，避免偽造新行或欄位。 */
     public static String safeName(String name) {
         return safeName(name, 32);
     }
 
-    /** 同上，保留前 {@code max} 字，超過的截掉並接 {@code ...}。 */
+    /** 同上，保留前 {@code max} 字（以 Unicode 碼點計），超過的截掉並接 {@code ...}。 */
     public static String safeName(String name, int max) {
         if (name == null || name.isEmpty()) {
             return "?";
         }
-        int n = Math.min(name.length(), max);
-        StringBuilder s = new StringBuilder(n + 3);
-        for (int i = 0; i < n; i++) {
-            char c = name.charAt(i);
-            s.append(Character.isISOControl(c) || Character.isWhitespace(c) || Character.getType(c) == Character.FORMAT
+        StringBuilder s = new StringBuilder(Math.min(name.length(), max) + 3);
+        int i = 0;
+        for (int kept = 0; i < name.length() && kept < max; kept++) {
+            int c = name.codePointAt(i);   // 逐碼點：補充平面的格式字元也認得，截斷不留半個代理對
+            i += Character.charCount(c);
+            int type = Character.getType(c);
+            s.appendCodePoint(Character.isISOControl(c) || Character.isWhitespace(c) || Character.isSpaceChar(c)
+                    || type == Character.FORMAT || type == Character.SURROGATE
                     || c == '[' || c == ']' || c == '|' ? '_' : c);
         }
-        if (name.length() > n) {
+        if (i < name.length()) {
             s.append("...");
         }
         return s.toString();

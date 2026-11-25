@@ -23,7 +23,7 @@ import zombie.vehicles.BaseVehicle;
  *
  * <p><b>擋的兩種</b>（enforce）：申請指名的玩家不屬於送出的連線（含查不到玩家）→ 不交授權；歸還指名的玩家不是這台車的駕駛
  * → 當成不指名的歸還（原版 {@code (-1, false)}，收回伺服器）。擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效，下一輪同步必帶真正授權。
- * 其他可疑申請（沒在開車、開的車太遠）與物理包只記不擋。
+ * 上述兩種以外的申請、歸還與物理包照原版處理（有觀測明細的只記）。
  *
  * <p><b>一段搬動</b>：同一台沒有駕駛的車、同一個授權者、封包沒有中斷，算一段；分類每包重算，變了就換一段。同一台車
  * {@link #ORIGIN_MS} 內的下一段沿用上一段的起點累計（分段搬也算總距離；同一個 vid 換了車不算），有人坐上駕駛座或被拖走就清掉。{@code unseated}／{@code noPlayer}
@@ -31,7 +31,7 @@ import zombie.vehicles.BaseVehicle;
  * {@code pushed} 只算那位玩家開的車就在旁邊（{@link #REQ_FAR} 格內）。明細行：每類每次啟動最多 {@link #LOG_CAP} 行、每個帳號每類最多
  * {@link #USER_CAP} 行（到頂時印一行通知），帳號的控制字元、引號與逗號換成 ?。
  *
- * <p>開關 {@code -Dmdc.unseatedVehicleWatch}：未設（預設，未知值也是）＝{@code enforce} 記並擋／{@code observe} 只記／{@code 0|off} 照原版。都要重啟。
+ * <p>開關 {@code -Dmdc.unseatedVehicleWatch}：未設（預設，未知值也是）＝{@code enforce} 記並擋／{@code observe|2} 只記／{@code 0|off} 照原版。都要重啟。
  * 封包在主執行緒處理（{@code GameServer.mainLoopDealWithNetData}），狀態不加鎖。原版 {@code setClientForce} 在 try 外恰呼叫一次；
  * 原版 {@code authorizationServerCollide} 都在 try 外；觀測與判定只 catch {@code RuntimeException|LinkageError} 計 anomalies（判定失敗照原版），Error 照常外拋。
  */

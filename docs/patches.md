@@ -5485,7 +5485,7 @@ console：
 | 申請（`collide=true`） | 指名的玩家必須屬於送出的連線（查不到玩家也算不符合） | 不交授權，記 `collide-request suspect=notOwnPlayer … action=refused` |
 | 歸還（`collide=false`） | 指名的玩家必須是這台車的駕駛（不指名的歸還照原版） | 當成不指名的歸還（原版 `(-1, false)`，車與拖車夥伴收回伺服器），記 `release-to-player … action=released` |
 
-擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。上表以外的申請與歸還、以及車輛物理包照原版處理，只記 `action=logged`。判定本身拋例外時照原版處理、只計 `anomalies`。
+擋下後讓送出連線對本車與拖車夥伴的既有授權快取失效（與 W46 相同做法，不新建快取），下一輪授權同步把伺服器的真正授權送回那個客戶端。上表以外的申請與歸還、以及車輛物理包照原版處理；有產生觀測明細的，沒被擋下時行尾是 `action=logged`。判定本身拋例外時照原版處理、只計 `anomalies`。
 
 **記什麼**：沒有駕駛的車被客戶端回報的位置搬動時，同一台車短時間內的搬動累計起來算（分段搬也算總距離；有人坐上駕駛座或被拖走就重新起算）。`kind` 分四種：
 
@@ -5858,7 +5858,7 @@ console：
 
 **只在伺服器**：`grow` 唯一的呼叫者是 `AnimalData.checkStages`，它只由 `AnimalData.update` 呼叫，後者只在 `IsoAnimal.updateInternal` 的 `GameClient.client` 為 false 那一側呼叫。
 
-console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍內第一隻同號者；長大前的動物站在水格時原版 `grow` 會作廢並每幀重試，這時照樣放行但不計數、不印）：
+console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍內第一隻同號者；到達這個檢查時長大前的動物在水格，原版 `grow` 接著會作廢，這時照樣放行但不計數、不印。一般在水格上長大時新動物建構就失敗，`grow` 更早中止、走不到這裡，那種重試看 W37 的紀錄）：
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] 首次生效（…）growIdClash=<on|off> drops=<n> … growSpared=<n> …
@@ -5874,7 +5874,7 @@ console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍�
 **守門與驗證**：
 - SmokeCheck：原版 `IsoAnimal.checkForChickenpocalypse`、`IsoGridSquare.getAnimals()` 與 `getAnimals(ArrayList)`（掛鉤過濾在後者）、`AnimalData.grow`、`AnimalData.checkStages`、`IsoAnimal.updateInternal` 本體 SHA 鎖（各配負對照），helper 照抄的就是這些本體；全 jar 呼叫者清冊 `grow` ← `checkStages` ← `AnimalData.update` ← `IsoAnimal.updateInternal`（各恰 1），`updateInternal` 的 `AnimalData.update` 在唯一 `GameClient.client` 讀取的 IFEQ 目標之後、client 分支以 RETURN 結束；`grow` 依序 `setAnimalID` → `checkForChickenpocalypse` → `checkForWater` → `addToWorld`（各恰 1），`checkForChickenpocalypse` 後緊接 IFNE 跳去刪新動物、回 false 才落到 `checkForWater`；`AnimalDefinitions.group` 是 public String、`IsoAnimal.adef` 是 public；`spare` 內沒有 `checkForChickenpocalypse`／`delete`／`setAnimalID`／`removeFrom*` 呼叫，`growDuplicate` 開頭就是 `SPARE && spare(parent, newAnimal)` → return false；出貨的 `checkForChickenpocalypse` 與原版文字相同（行為測試經 `super` 走的就是它）。
 - `AnimalLossProbeTest`（`build.ps1` [9zi/10]，on、off、spare-off 三個 JVM，自驗兩個開關）：替身的 `getSquare()` 回所在格、`delete()` 只記次數，每個佈局先直呼真原版 `checkForChickenpocalypse` 當負對照。15 個佈局：異種同號（on 放行、原版 0 次、delete 0、一行 `grow-spared`；spare-off 照原版刪、記 `grow-dup`）、同物種同號、group 只差大小寫、同號者一異一同、沒有同號、parent 沒有 adef、長大後 group 為 null、同號者 group 為空字串、同號者與長大後同種、dx=−4 與 dy=−4 算、dx=+4 與 dy=+4 不算、不同層不算、掛鉤不算、`getSquare()` 為 null；放行以外的情境結果都與真原版相同。判定拋例外、log 拋例外各計 `anomalies`（後者仍放行）。另以固定種子跑 200 組隨機佈局差分：on 等於「範圍內有不是確定異種的同號者就取真原版結果，否則 false」，spare-off 等於真原版。off（`animalLossProbe=off`）放行照做、照印。
-- 同一個測試另有水格案例：異種同號而長大前的動物站在水格時放行（原版 0 次、delete 0），`growSpared` 與 `grow-spared` 行數不變。
+- 同一個測試另有水格案例（替身直接呼叫 helper）：異種同號而長大前的動物在水格時放行（原版 0 次、delete 0），`growSpared` 與 `grow-spared` 行數不變；查水格拋例外時照樣放行、`anomalies` 加一、不計不記。
 - 沒驗：實機 E2E 沒跑，放行後 `grow` 後半段（`checkForWater`、`addToWorld`）完成與客戶端看到成體，行為測試驗不到。MOD 動物沒設 `group` 時照原版刪。
 
 **退場**：官方改成依物種判斷或改用不會撞號的 ID 時撤刀；SmokeCheck 的 SHA 鎖或呼叫鏈轉紅時重估。
