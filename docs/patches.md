@@ -3969,7 +3969,7 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 - `WorldMapChangeCountTest`（on、off 兩個 JVM）：伺服器端跑手術後的真 `GameServer.sendWorldMapPlayerPosition(UdpConnection)` 與 `receiveWorldMapPlayerPosition`，客戶端跑真 `GameClient.receiveWorldMapPlayerPosition`；封包由真 writer 與 `PacketType` 寫進只覆寫 buffer 端點的連線，由測試決定送達或丟掉，客戶端每幀直接呼叫真 `setPlayer`。掉一次回覆、掉一次索取兩種情境：原版負對照（兩種模式都跑，餵原版計數的位置包）與 off 之後 10 秒都不索取、`hasFullData` 一直是 false，重現症狀；on 每秒索取，回覆送達後 `hasFullData=true`。沒掉包時畫面上 10 秒索取 10 次、畫面外 0 次，兩種模式相同。伺服器條目計數不被改；原計數 0–8192 的送出值都是至少 1024 的偶數；off 送原值、零 log 行。
 
 <a id="2bx"></a>
-## 2bx. 動物遺失／複製觀測（W60，server，純觀測）
+## 2bx. 動物遺失／複製觀測（W60，server，觀測）
 
 **為什麼要記**：2026-10-13 一位玩家回報雞舍裡原本有 4 隻公雞，搬走一隻後回來只剩 2 隻。存檔顯示這 4 隻是同一隻公雞的複製體（同一個 animalId，從 10-08 起 1 隻慢慢變成 4 隻），搬走後總數少了一隻，沒有死亡紀錄，也不在背包或附近的車上。全服 apop 另有 15 群、61 隻同 ID 複製體。伺服器 Animal log 等級是 Warning，原版會刪除或丟失動物的幾條路徑都不留紀錄，看不出是哪一條。
 
@@ -3981,28 +3981,29 @@ helper `zombie.mdc.VehicleRelevancyGate` 兩個入口共用同一個判定，結
 
 **手術**：四個呼叫各自 1:1 同形改道 `zombie/mdc/AnimalLossProbe`（receiver 變第一參數），helper 在 try 外照原樣呼叫原方法恰一次，回傳與例外都與原版相同；javap 語境見 `docs/specs/zombie_animal_loss_probe.json`。
 - `IsoGridSquare.AddWorldInventoryItem(InventoryItem, float, float, float, boolean, boolean)`：offset 144 `IsoAnimal.copyFrom` → `dropCopy`、168 `AnimalInstanceManager.get` → `dropLookup`、210 `AnimalInstanceManager.add` → `dropRegister`，`expectedHits = 3`（新的 ClassPatch）。三個呼叫依序發生，helper 照這個順序配對：`copyFrom` 記手上的動物，`get` 在原版移走前記下前持有者的位置與狀態，`add` 判定。
-- `AnimalData.grow(String)`：offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`，`expectedHits = 1`（掛在既有的 AnimalData ClassPatch）。回 true 時在同範圍找出同 ID 的另一隻一起記。
+- `AnimalData.grow(String)`：offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`，`expectedHits = 1`（掛在既有的 AnimalData ClassPatch）。回 true 時在同範圍找出同 ID 的另一隻一起記。W109（[2dq](#2dq)）在同一個 helper 最前面先判定異種同號，放行時不呼叫原方法。
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> evicted=<種類>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
 [MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<種類>#<animalId> onlineId=<id> source=<種類>#<animalId> pos=… inWorld=1 … prev=<none|種類#animalId>
 [MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<種類>#<animalId> pos=… newType=<長大後種類> twin=<種類>#<animalId> pos=…
-[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] grow-spared#<n> animal=<種類>#<animalId> pos=… group=<物種> newType=<長大後種類> twin=<種類>#<animalId> pos=… twinGroup=<物種>
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> growSpared=<n> logged=<n> suppressed=<n> anomalies=<n>
 ```
 
-`drop-evict` 是放下動物時被移出世界的別隻（`evicted` 是牠被移走前的狀態；描述失敗時寫 `?`）。`drop-dup` 是手上的動物放下後仍在世界上，等於多了一隻。明細每 60 秒最多 30 行，其餘計 `suppressed`；第一次事件（通常是開機後第一次載入 chunk）印首次生效行，之後每 5 分鐘一行 beat。簿記例外只計 `anomalies`。
+`drop-evict` 是放下動物時被移出世界的別隻（`evicted` 是牠被移走前的狀態；描述失敗時寫 `?`）。`drop-dup` 是手上的動物放下後仍在世界上，等於多了一隻。`grow-spared` 是 W109 放行的異種同號（見 [2dq](#2dq)）。明細每 60 秒最多 30 行，其餘計 `suppressed`；第一次事件（通常是開機後第一次載入 chunk）印首次生效行（帶 `growIdClash=on|off`），之後每 5 分鐘一行 beat。簿記例外只計 `anomalies`。
 
-**kill switch**：`-Dmdc.animalLossProbe=0|off`（預設開；改道仍在，只呼叫原方法，不記也不印），需重啟。
+**kill switch**：`-Dmdc.animalLossProbe=0|off`（預設開；改道仍在，只呼叫原方法，不記也不印），需重啟。W109 的放行另由 `-Dmdc.animalGrowIdClash=0|off` 關，兩個開關互不影響：觀測關掉時放行照做、`grow-spared` 照印。
 
 **部署**：manifest 新增 `zombie/mdc/AnimalLossProbe.class`、`AnimalLossProbe$Saving.class` 與三個新 patched class（`IsoGridSquare`、`ServerChunkLoader$LoaderThread`、`ServerChunkLoader$SaveUnloadedTask`），`AnimalData.class` 換成多一個命中點的版本（131 → 136 個 class）。manifest 只增不減，不必先卸載：用延後生效流程 stage＋arm，下一次排程重啟時切換。上線後確認橫幅指紋是新版、`[mdc-javagate] OK: 136`，再看 console 出現首次生效行。
 
 **判讀**：玩家再回報動物變多或消失時，先找同一時段、座標附近的明細。`drop-evict` 的 `evicted` 就是消失的那隻；`grow-dup` 是複製體長大時一起消失的兩隻。都沒有出現，就是還有別的路徑，再加觀測。
 
-**未做**：不擋、不修；等抓到是哪條路徑再決定怎麼修（例如放下時只移走同一隻）。
+**未做**：放下動物那一路不擋、不修，等抓到是哪條路徑再決定怎麼修（例如放下時只移走同一隻）。長大撞同號：異種同號由 W109（[2dq](#2dq)）放行，同物種同號照原版刪。
 
 **守門與驗證**：
 - SmokeCheck：原版被觀測的呼叫各恰 1 個；放下動物依序 `copyFrom` → `get` → `add`。手術後兩個方法文字（含 frames）只差這四個呼叫；helper 內每個原方法恰呼叫一次。
-- `AnimalLossProbeTest`（on、off 兩個 JVM）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。off：原方法照常呼叫，不記帳、整個 JVM 零 log 行。
+- `AnimalLossProbeTest`（on、off、spare-off 三個 JVM；W109 的案例見 [2dq](#2dq)）：放下動物照手術後的順序呼叫三個 helper，用真 `AnimalInstanceManager`。原版負對照（直接呼叫原方法）不記帳、不印。手上的動物就是前持有者時不記；前持有者是持有 onlineID 1 的別隻時記一行 `drop-evict`，帶放下位置與被移走那隻的種類、ID、位置；手上的動物放下後仍在世界上記一行 `drop-dup`；描述前持有者時例外只計 `anomalies`、原方法照常；`copyFrom` 的例外原樣上拋。長大：`checkForChickenpocalypse` 回 true 時記一行 `grow-dup`，帶真 `IsoGridSquare.getAnimals` 在 ±4 格內找到的同 ID 另一隻（`ServerMap` 替身回傳格子）；回 false 不記。off：原方法照常呼叫，不記帳，W109 案例之前整個 JVM 零 log 行（之後只有 W109 放行的 `grow-spared` 與首次生效行）。
 
 ### 2026-11-10 42.22.2 對版（chunk 重載觀測退役）
 
@@ -5825,6 +5826,37 @@ console：
 - PZ_Optimization 單獨重現（2026-11-24，9950X3D，revision 3d39148846，遊戲複本沒有 `.mdc-patches`、json 沒有 `-agentpath`，launcher 沒有 `[mdc-agent]`）：單機開新世界、進場約 100 幀就關，`centerFirstLoad=true`（預設）30 輪中 1 輪，同樣在 f:2 由 `BaseVehicle.update` 的 `this.chunk.vehicles.remove` 丟 NPE、退回主選單；`-Dpzopt.centerFirstLoad=false` 30 輪 0 次（次數太少，分不出 center-first 是不是原因）。這個 NPE 不裝本包也會發生。
 
 **退場**：官方在收養時重綁或重建 `models`，SmokeCheck 的存在理由轉紅時撤刀。
+
+---
+
+<a id="2dq"></a>
+## 2dq. 長大撞同號只刪同物種（W109，server，預設 on）
+
+**問題**：`AnimalData.grow` 讓長大後的新動物沿用舊 `animalId`，再呼叫 `parent.checkForChickenpocalypse(newAnimal)`：以 `parent.getSquare()` 為起點，x、y 各 `[-4, +4)`、同一層的格子用 `getAnimals()`（排除掛鉤屠體）找另一隻同 `animalId` 的動物，找到就 `parent.delete()` 回 true，`grow` 接著刪掉新動物並 return。這段是用來擋複製體長大的，但不看物種；`animalId` 由 `IsoAnimal.init` 的 `Rand.Next(10000)` 給，不同物種本來就會撞號，所以幼體長大時附近剛好有同號的別種動物，就整隻消失，沒有死亡紀錄。W60（[2bx](#2bx)）的 `grow-dup` 在本服 8 天記到 11 行，其中 2 行是異種同號。
+
+**做法**：不新增手術，沿用 W60 的 `grow` 改道（offset 313 → `AnimalLossProbe.growDuplicate`）。`growDuplicate` 最前面先跑 `spare(parent, newAnimal)`：用和原版相同的起點、範圍與過濾找同號者；有同號者，而且每一隻都和長大前、長大後的動物確定不同物種（雙方 `adef.group` 都非 null、非空字串，不分大小寫也不同）時，不呼叫原方法、回 false，`grow` 照 false 分支繼續 `checkForWater`、`addToWorld`，與附近沒有同號者時相同。任一同號者是同物種、group 資料不全、`getSquare()` 為 null、沒有同號者，或判定拋 `RuntimeException`／`LinkageError`（計 `anomalies`），都交回原版照刪或照常，再照 W60 記 `grow-dup`。不重抽 `animalId`：重抽會讓已出生幼崽找回母親（`attachBackToMother`）與用 `getAnimalID()` 當識別的 MOD 失聯；代價是 ±4 格內異種同號會並存，這在 ±4 格外本來就是常態。
+
+**只在伺服器**：`grow` 唯一的呼叫者是 `AnimalData.checkStages`，它只由 `AnimalData.update` 呼叫，後者只在 `IsoAnimal.updateInternal` 的 `GameClient.client` 為 false 那一側呼叫。
+
+console（明細走 W60 的額度，每 60 秒最多 30 行；`twin` 是範圍內第一隻同號者）：
+
+```text
+[MinidoracatJavaPatch][AnimalLossProbe] 首次生效（…）growIdClash=<on|off> drops=<n> … growSpared=<n> …
+[MinidoracatJavaPatch][AnimalLossProbe] grow-spared#<n> animal=<種類>#<animalId> pos=… group=<物種> newType=<長大後種類> twin=<種類>#<animalId> pos=… twinGroup=<物種>
+```
+
+**開關**：`-Dmdc.animalGrowIdClash=0|off` 照原版（W60 照記 `grow-dup`），預設 on，需重啟；與 `-Dmdc.animalLossProbe` 互不影響，觀測關掉時放行照做、`grow-spared` 照印。
+
+**部署**：manifest 不變（class 數、命中點、helper 數都不變），`zombie/mdc/AnimalLossProbe.class` 內容更新。
+
+**上線驗收**：首次生效行帶 `growIdClash=on`；出現 `grow-spared` 的那隻動物照常長大（成體在原位、ID 不變）；`grow-dup` 的 `twin` 只剩同物種。
+
+**守門與驗證**：
+- SmokeCheck：原版 `IsoAnimal.checkForChickenpocalypse`、`IsoGridSquare.getAnimals()` 與 `getAnimals(ArrayList)`（掛鉤過濾在後者）、`AnimalData.grow`、`AnimalData.checkStages`、`IsoAnimal.updateInternal` 本體 SHA 鎖（各配負對照），helper 照抄的就是這些本體；全 jar 呼叫者清冊 `grow` ← `checkStages` ← `AnimalData.update` ← `IsoAnimal.updateInternal`（各恰 1），`updateInternal` 的 `AnimalData.update` 在唯一 `GameClient.client` 讀取的 IFEQ 目標之後、client 分支以 RETURN 結束；`grow` 依序 `setAnimalID` → `checkForChickenpocalypse` → `checkForWater` → `addToWorld`（各恰 1），`checkForChickenpocalypse` 後緊接 IFNE 跳去刪新動物、回 false 才落到 `checkForWater`；`AnimalDefinitions.group` 是 public String、`IsoAnimal.adef` 是 public；`spare` 內沒有 `checkForChickenpocalypse`／`delete`／`setAnimalID`／`removeFrom*` 呼叫，`growDuplicate` 開頭就是 `SPARE && spare(parent, newAnimal)` → return false；出貨的 `checkForChickenpocalypse` 與原版文字相同（行為測試經 `super` 走的就是它）。
+- `AnimalLossProbeTest`（`build.ps1` [9zi/10]，on、off、spare-off 三個 JVM，自驗兩個開關）：替身的 `getSquare()` 回所在格、`delete()` 只記次數，每個佈局先直呼真原版 `checkForChickenpocalypse` 當負對照。15 個佈局：異種同號（on 放行、原版 0 次、delete 0、一行 `grow-spared`；spare-off 照原版刪、記 `grow-dup`）、同物種同號、group 只差大小寫、同號者一異一同、沒有同號、parent 沒有 adef、長大後 group 為 null、同號者 group 為空字串、同號者與長大後同種、dx=−4 與 dy=−4 算、dx=+4 與 dy=+4 不算、不同層不算、掛鉤不算、`getSquare()` 為 null；放行以外的情境結果都與真原版相同。判定拋例外、log 拋例外各計 `anomalies`（後者仍放行）。另以固定種子跑 200 組隨機佈局差分：on 等於「範圍內有不是確定異種的同號者就取真原版結果，否則 false」，spare-off 等於真原版。off（`animalLossProbe=off`）放行照做、照印。
+- 沒驗：實機 E2E 沒跑，放行後 `grow` 後半段（`checkForWater`、`addToWorld`）完成與客戶端看到成體，行為測試驗不到。MOD 動物沒設 `group` 時照原版刪。
+
+**退場**：官方改成依物種判斷或改用不會撞號的 ID 時撤刀；SmokeCheck 的 SHA 鎖或呼叫鏈轉紅時重估。
 
 ---
 

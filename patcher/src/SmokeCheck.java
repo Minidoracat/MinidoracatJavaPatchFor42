@@ -3718,6 +3718,101 @@ public final class SmokeCheck {
         failed += check("W60 手術後：四個呼叫同形改道 AnimalLossProbe（AddWorldInventoryItem 另含 W37 兩個呼叫、兩個欄位改道），其餘指令與 frames 保留", w60Patched);
         failed += check("W60 helper 契約：每個原方法在 helper 內恰呼叫 1 次", w60Helper);
 
+        // ---- W109 長大撞同號只刪同物種（docs/patches.md 2dq）----
+        // 沿用 W60 的 grow 改道，不加手術；growDuplicate 開頭的 spare 照原版的起點、範圍與過濾找同號者，全是確定異種才不呼叫原版、回 false。
+        // 依據：helper 照抄 checkForChickenpocalypse／getAnimals；grow 回 false 才走 checkForWater→addToWorld；grow 只在伺服器跑。
+        // 任一 SHA 或呼叫鏈變紅＝重新核對等價或撤刀，不改鎖讓它變綠。
+        String w109Data = "zombie/characters/animals/datas/AnimalData";
+        String w109Sq = "zombie/iso/IsoGridSquare";
+        String w109PairDesc = "(L" + w60Animal + ";L" + w60Animal + ";)Z";
+        failed += shaLocks(jar, "W109", new String[][]{
+                {w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z", "34d5a325d06ae9163890d24f976fb3cd85459e445591b31157df6fa307fe5f52"},
+                {w109Sq, "getAnimals", "()Ljava/util/ArrayList;", "aed216d8717479d5d6191c87f52dda28ec54037eda21051408bd1213abcf20e8"},
+                {w109Sq, "getAnimals", "(Ljava/util/ArrayList;)Ljava/util/ArrayList;", "9322dbc6a7b9a0d6be3d2d6b3907f4ab5d677716209fb1bc8aa4b22feae91a27"},
+                {w109Data, "grow", "(Ljava/lang/String;)V", "c62a912668132347f061824ec2c3382412a3d54abb39bf357ccbf77b73d41bea"},
+                {w109Data, "checkStages", "()V", "f116074c33ced9e86402d3f341640e1b920fc842c084d525bca85e1de66a0244"},
+                {w60Animal, "updateInternal", "()V", "93e1488dd3d465e2b130dd85cce15c71dffca010910b1628d2d41fd07bbca091"}});
+        failed += check("W109 server-only 依據：grow 唯一呼叫者 checkStages、checkStages 唯一呼叫者 AnimalData.update、AnimalData.update 唯一呼叫者 IsoAnimal.updateInternal",
+                jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, w109Data, "grow", "(Ljava/lang/String;)V").equals(List.of(w109Data + ".checkStages()V"))
+                        && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, w109Data, "checkStages", "()V").equals(List.of(w109Data + ".update()V"))
+                        && jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, w109Data, "update", "()V").equals(List.of(w60Animal + ".updateInternal()V")));
+        // updateInternal：唯一的 GameClient.client 讀取後 IFEQ L；L 之前那條是 RETURN、client 分支內的跳轉都不越過 L；AnimalData.update 在 L 之後。
+        MethodNode w109Upd = methodFromJar(jar, w60Animal, "updateInternal", "()V");
+        AbstractInsnNode w109Client = null;
+        int w109ClientReads = 0;
+        for (AbstractInsnNode in : w109Upd.instructions) {
+            if (isField(in, Opcodes.GETSTATIC, "zombie/network/GameClient", "client", "Z")) {
+                w109Client = in;
+                w109ClientReads++;
+            }
+        }
+        boolean w109ServerOnly = false;
+        if (w109ClientReads == 1 && nextReal(w109Client) instanceof JumpInsnNode w109Ifeq && w109Ifeq.getOpcode() == Opcodes.IFEQ) {
+            int w109From = w109Upd.instructions.indexOf(w109Ifeq);
+            int w109To = w109Upd.instructions.indexOf(w109Ifeq.label);
+            boolean w109Contained = prevReal(w109Ifeq.label).getOpcode() == Opcodes.RETURN;
+            for (int i = w109From + 1; i < w109To; i++) {
+                AbstractInsnNode in = w109Upd.instructions.get(i);
+                w109Contained &= !(in instanceof JumpInsnNode j && w109Upd.instructions.indexOf(j.label) >= w109To)
+                        && !(in instanceof TableSwitchInsnNode) && !(in instanceof LookupSwitchInsnNode);
+            }
+            MethodInsnNode w109UpdCall = findExactCall(w109Upd, Opcodes.INVOKEVIRTUAL, w109Data, "update", "()V");
+            w109ServerOnly = w109Contained && w109UpdCall != null && w109Upd.instructions.indexOf(w109UpdCall) > w109To
+                    && countExactCalls(w109Upd, Opcodes.INVOKEVIRTUAL, w109Data, "update", "()V") == 1;
+        }
+        failed += check("W109 server-only 依據：updateInternal 只在 GameClient.client 為 false 的分支呼叫 AnimalData.update（client 分支以 RETURN 結束）", w109ServerOnly);
+        // grow：setAnimalID < checkForChickenpocalypse < checkForWater < addToWorld；checkForChickenpocalypse 後緊接 IFNE（true 跳去刪新動物），
+        // false 才落到 checkForWater，其 IFEQ 落空處就是 IFNE 的目標（同一段刪新動物）。
+        MethodNode w109Grow = methodFromJar(jar, w109Data, "grow", "(Ljava/lang/String;)V");
+        int w109Set = -1, w109Chk = -1, w109Water = -1, w109Add = -1, w109I = 0;
+        boolean w109Branch = false;
+        for (AbstractInsnNode in : w109Grow.instructions) {
+            w109I++;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "setAnimalID", "(I)V")) w109Set = w109I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z")) w109Chk = w109I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "checkForWater", "()Z")) w109Water = w109I;
+            if (isCall(in, Opcodes.INVOKEVIRTUAL, w60Animal, "addToWorld", "()V")) w109Add = w109I;
+        }
+        MethodInsnNode w109ChkCall = findExactCall(w109Grow, Opcodes.INVOKEVIRTUAL, w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z");
+        MethodInsnNode w109WaterCall = findExactCall(w109Grow, Opcodes.INVOKEVIRTUAL, w60Animal, "checkForWater", "()Z");
+        if (w109ChkCall != null && w109WaterCall != null && nextReal(w109ChkCall) instanceof JumpInsnNode w109Ifne
+                && w109Ifne.getOpcode() == Opcodes.IFNE && nextReal(w109WaterCall) instanceof JumpInsnNode w109WaterIfeq
+                && w109WaterIfeq.getOpcode() == Opcodes.IFEQ) {
+            AbstractInsnNode w109DelNew = nextReal(w109Ifne.label);
+            w109Branch = w109DelNew == nextReal(w109WaterIfeq) && w109DelNew != null
+                    && isCall(nextReal(w109DelNew), Opcodes.INVOKEVIRTUAL, w60Animal, "delete", "()V");
+        }
+        failed += check("W109 vanilla 前提：grow 依序 setAnimalID → checkForChickenpocalypse → checkForWater → addToWorld（各恰 1）；"
+                        + "checkForChickenpocalypse 後緊接 IFNE 跳去刪新動物，回 false 才落到 checkForWater",
+                w109Branch && 0 < w109Set && w109Set < w109Chk && w109Chk < w109Water && w109Water < w109Add
+                        && countExactCalls(w109Grow, Opcodes.INVOKEVIRTUAL, w60Animal, "setAnimalID", "(I)V") == 1
+                        && countExactCalls(w109Grow, Opcodes.INVOKEVIRTUAL, w60Animal, "checkForWater", "()Z") == 1
+                        && countExactCalls(w109Grow, Opcodes.INVOKEVIRTUAL, w60Animal, "addToWorld", "()V") == 1);
+        ClassNode w109Def = classNodeFromJar(jar, "zombie/characters/animals/AnimalDefinitions");
+        ClassNode w109AnimalCn = classNodeFromJar(jar, w60Animal);
+        failed += check("W109 vanilla 前提：AnimalDefinitions.group 是 public String、IsoAnimal.adef 是 public AnimalDefinitions",
+                w109Def.fields.stream().anyMatch(f -> f.name.equals("group") && f.desc.equals("Ljava/lang/String;")
+                        && (f.access & Opcodes.ACC_PUBLIC) != 0 && (f.access & Opcodes.ACC_STATIC) == 0)
+                        && w109AnimalCn.fields.stream().anyMatch(f -> f.name.equals("adef")
+                        && f.desc.equals("Lzombie/characters/animals/AnimalDefinitions;") && (f.access & Opcodes.ACC_PUBLIC) != 0));
+        // helper 契約：spare 不刪、不改號、不呼叫原版；growDuplicate 最前面就是 SPARE && spare(parent, newAnimal) → return false。
+        MethodNode w109Spare = method(distJava, w60Probe, "spare", w109PairDesc);
+        boolean w109NoSide = true;
+        for (AbstractInsnNode in : w109Spare.instructions) {
+            w109NoSide &= !(in instanceof MethodInsnNode mi && Set.of("checkForChickenpocalypse", "delete", "setAnimalID",
+                    "removeFromWorld", "removeFromSquare").contains(mi.name));
+        }
+        AbstractInsnNode[] w109Head = firstReal(method(distJava, w60Probe, "growDuplicate", w109PairDesc), 8);
+        boolean w109HeadOk = isField(w109Head[0], Opcodes.GETSTATIC, w60Probe, "SPARE", "Z") && w109Head[1].getOpcode() == Opcodes.IFEQ
+                && isVar(w109Head[2], Opcodes.ALOAD, 0) && isVar(w109Head[3], Opcodes.ALOAD, 1)
+                && isCall(w109Head[4], Opcodes.INVOKESTATIC, w60Probe, "spare", w109PairDesc) && w109Head[5].getOpcode() == Opcodes.IFEQ
+                && w109Head[6].getOpcode() == Opcodes.ICONST_0 && w109Head[7].getOpcode() == Opcodes.IRETURN;
+        failed += check("W109 helper 契約：spare 零個 checkForChickenpocalypse／delete／setAnimalID／removeFrom* 呼叫；"
+                        + "growDuplicate 開頭是 SPARE && spare(parent, newAnimal) → return false", w109NoSide && w109HeadOk);
+        failed += check("W109 行為測試前提：出貨的 IsoAnimal.checkForChickenpocalypse 與原版文字相同（測試替身經 super 走的就是原版本體）",
+                methodText(method(distJava, w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z"))
+                        .equals(methodText(methodFromJar(jar, w60Animal, "checkForChickenpocalypse", w60AnimalArg + "Z"))));
+
         // ---- W66 畜牧區同步修補（docs/patches.md 2cb）----
         // 存在理由：SyncZonePacket 的 Zone 分支（setData／parse 非畜牧區）不清畜牧區欄位、write 先看 designationZone；
         // 全 jar 只有 removeGrass 用 SyncZone 送草地再生；DesignationZone 建構子以暫時 id 查重。TIS 修掉任一條時紅＝重估撤刀。

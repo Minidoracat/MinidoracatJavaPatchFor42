@@ -1194,8 +1194,9 @@ public final class PatchConfig {
         patches.add(animalData);
 
         // ---- W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）----
-        // 純觀測、kill switch -Dmdc.animalLossProbe=0|off。之一：放下動物時以手上動物的 onlineID 查前持有者並移出世界
-        // （雞舍載入的動物在伺服器上沒有登記 onlineID）；之三（grow）掛在上面的 AnimalData ClassPatch。
+        // 觀測、kill switch -Dmdc.animalLossProbe=0|off。之一：放下動物時以手上動物的 onlineID 查前持有者並移出世界
+        // （雞舍載入的動物在伺服器上沒有登記 onlineID）；之三（grow）掛在上面的 AnimalData ClassPatch，
+        // W109（2dq）在同一個改道的 helper 裡放行異種同號（-Dmdc.animalGrowIdClash=0|off），不加手術。
         // 之二（chunk 卸載存檔還在寫時同一個 chunk 被重新載入）2026-11-10 42.22.2 退役：原版 LoaderThread 改成
         // LoadChunk(wx, wy, threadSave.getPendingChunkData(wx, wy))，佇列中或正在寫（currentTask）的卸載存檔直接當載入來源，
         // SaveUnloadedTask.save 也改成 synchronized serialize＋WriteLock 下 writeChunk；復活：git checkout 3f79700 -- 本檔與

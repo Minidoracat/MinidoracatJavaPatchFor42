@@ -699,11 +699,13 @@ Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.worldMapChangeCount=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldMapChangeCountTest off
 Assert-Ok "WorldMapChangeCountTest（off，原版計數）"
 
-Write-Host "[9zi/10] 動物遺失／複製觀測（W60）：放下動物移走別隻、來源仍在世界、長大撞同 ID，原方法恰一次、原版負對照、off 不記帳..."
+Write-Host "[9zi/10] 動物遺失／複製觀測（W60）＋長大撞同號只刪同物種（W109）：放下動物移走別隻、來源仍在世界、長大撞同 ID，原方法恰一次、原版負對照、off 不記帳；異種同號放行、同物種與資料不全照原版刪、真原版直呼負對照、200 組隨機差分..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest on
 Assert-Ok "AnimalLossProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.animalLossProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest off
-Assert-Ok "AnimalLossProbeTest（off，只呼叫原方法）"
+Assert-Ok "AnimalLossProbeTest（off，觀測只呼叫原方法、異種同號仍放行）"
+java -Xverify:all "-Dmdc.animalGrowIdClash=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.AnimalLossProbeTest spare-off
+Assert-Ok "AnimalLossProbeTest（animalGrowIdClash=off，照原版刪）"
 
 Write-Host "[9zj/10] 卡進地下的車交回伺服器時抬回（W64）：真 setNetPlayerAuthorization＋真 shouldSend，下車／碰撞歸還／掉很深都抬回並送完整更新，翻覆掉很深先扶正（保留車頭方向），正常停放、門檻內、交給駕駛、沒有地板、翻覆不到一層照原版..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.VehicleSinkRestoreTest on

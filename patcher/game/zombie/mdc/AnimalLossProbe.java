@@ -2,6 +2,7 @@ package zombie.mdc;
 
 import java.util.concurrent.atomic.AtomicLong;
 
+import zombie.characters.animals.AnimalDefinitions;
 import zombie.characters.animals.IsoAnimal;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
@@ -9,7 +10,8 @@ import zombie.iso.IsoGridSquare;
 import zombie.popman.animal.AnimalInstanceManager;
 
 /**
- * W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）。純觀測：每個原方法照常呼叫恰一次，回傳與例外都與原版相同。
+ * W60 動物遺失／複製觀測（2026-10-13；docs/patches.md 2bx）與 W109 長大撞同號只刪同物種（2026-11-25；2dq）。
+ * 觀測部分每個原方法照常呼叫恰一次，回傳與例外都與原版相同；W109 放行時不呼叫長大的原方法（見下）。
  *
  * <p>2026-10-13 一座雞舍的 4 隻公雞（同一個 animalId 的複製體）在玩家搬走一隻後少了一隻，沒有死亡紀錄；
  * 全服 apop 另有 15 群同 ID 複製體。原版有兩條會讓動物憑空多出或消失、又不留 log 的路徑，各掛一個觀測點：
@@ -23,15 +25,19 @@ import zombie.popman.animal.AnimalInstanceManager;
  *       當載入來源（{@code getPendingChunkData}），不再讀到舊檔或寫到一半的檔。）</li>
  *   <li><b>長大</b>（{@code AnimalData.grow}）：{@code checkForChickenpocalypse} 在 ±4 格內找到同 animalId 的動物時
  *       刪掉長大前的動物，grow 再刪掉新動物，只印 {@code DebugType.Animal.println}（伺服器 Animal 等級 Warning 不印）。
- *       記 {@code grow-dup}。</li>
+ *       記 {@code grow-dup}。<b>W109</b>：原版不看物種，animalId 只是 {@code Rand.Next(10000)}，幼雞會撞上
+ *       ±4 格內剛好同號的兔子而被刪；同號者全都和長大前、長大後的動物確定異種時放行（不呼叫原方法、回 false），
+ *       記 {@code grow-spared}；有任一同物種同號者、group 資料不全或判定例外，一律交回原版照刪。</li>
  * </ol>
  *
  * <p>放下與長大都在主執行緒。簿記全部在 try 內，例外只計 {@code anomalies}；
  * 原方法在 try 外呼叫。明細行每 60 秒最多 30 行（其餘計 suppressed），每 5 分鐘一行 beat。
- * kill switch {@code -Dmdc.animalLossProbe=0|off}：只呼叫原方法，不記帳也不印。
+ * kill switch {@code -Dmdc.animalLossProbe=0|off}：觀測只呼叫原方法，不記帳也不印（W109 放行與它的明細不受影響）；
+ * {@code -Dmdc.animalGrowIdClash=0|off}：W109 不放行，長大照原版（即 W60 觀測）。
  */
 public final class AnimalLossProbe {
     static final boolean ENABLED = parseEnabled(System.getProperty("mdc.animalLossProbe"));
+    static final boolean SPARE = parseEnabled(System.getProperty("mdc.animalGrowIdClash"));
     private static final String TAG = "[MinidoracatJavaPatch][AnimalLossProbe] ";
     private static final long WINDOW_NS = 60_000_000_000L;
     private static final int WINDOW_LINES = 30;
@@ -41,6 +47,7 @@ public final class AnimalLossProbe {
     static final AtomicLong evicted = new AtomicLong();
     static final AtomicLong dropDups = new AtomicLong();
     static final AtomicLong growDups = new AtomicLong();
+    static final AtomicLong growSpared = new AtomicLong();
     static final AtomicLong logged = new AtomicLong();
     static final AtomicLong suppressed = new AtomicLong();
     static final AtomicLong anomalies = new AtomicLong();
@@ -145,6 +152,9 @@ public final class AnimalLossProbe {
 
     /** 取代 {@code AnimalData.grow} 內的 {@code parent.checkForChickenpocalypse(newAnimal)}。 */
     public static boolean growDuplicate(IsoAnimal parent, IsoAnimal newAnimal) {
+        if (SPARE && spare(parent, newAnimal)) {
+            return false;
+        }
         IsoGridSquare sq = null;
         String parentDesc = null;
         if (ENABLED) {
@@ -197,6 +207,68 @@ public final class AnimalLossProbe {
         return "?";
     }
 
+    /**
+     * W109：照原版的起點與範圍（{@code getSquare()}、x、y 各 [-4, +4)、同一層、{@code getAnimals()}）找同 animalId 的動物；
+     * 有同號者且每一隻都和 parent、newAnimal 確定異種才回 true。沒有同號者、任一同物種或判定例外回 false（交回原版）。
+     */
+    private static boolean spare(IsoAnimal parent, IsoAnimal newAnimal) {
+        IsoAnimal twin = null;
+        try {
+            IsoGridSquare sq = parent.getSquare();
+            if (sq == null) {
+                return false;
+            }
+            IsoCell cell = sq.getCell();
+            for (int x = sq.getX() - 4; x < sq.getX() + 4; x++) {
+                for (int y = sq.getY() - 4; y < sq.getY() + 4; y++) {
+                    IsoGridSquare s = cell.getGridSquare(x, y, sq.getZ());
+                    if (s == null) {
+                        continue;
+                    }
+                    for (IsoAnimal other : s.getAnimals()) {
+                        if (other != parent && other != newAnimal && other.getAnimalID() == parent.getAnimalID()) {
+                            if (!otherSpecies(other, parent) || !otherSpecies(other, newAnimal)) {
+                                return false;
+                            }
+                            if (twin == null) {
+                                twin = other;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
+            return false;
+        }
+        if (twin == null) {
+            return false;
+        }
+        long n = growSpared.incrementAndGet();
+        try {
+            long now = System.nanoTime();
+            detail(now, "grow-spared#" + n + " animal=" + describe(parent) + " group=" + group(parent)
+                    + " newType=" + newAnimal.getAnimalType() + " twin=" + describe(twin) + " twinGroup=" + group(twin));
+            maybeBeat(now);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
+        }
+        return true;
+    }
+
+    /** 兩邊都有非空 group 且不同（不分大小寫）才算確定異種；資料不全一律當同物種。 */
+    private static boolean otherSpecies(IsoAnimal a, IsoAnimal b) {
+        String ga = group(a);
+        String gb = group(b);
+        return ga != null && gb != null && !ga.equalsIgnoreCase(gb);
+    }
+
+    private static String group(IsoAnimal a) {
+        AnimalDefinitions def = a.adef;
+        String g = def == null ? null : def.group;
+        return g == null || g.isEmpty() ? null : g;
+    }
+
     // ================= 共用 =================
 
     private static String name(IsoAnimal a) {
@@ -232,11 +304,12 @@ public final class AnimalLossProbe {
             if (announced && now - lastBeatNs < BEAT_NS) {
                 return;
             }
-            String head = announced ? "beat " : "首次生效（純觀測；-Dmdc.animalLossProbe=0|off 停用）";
+            String head = announced ? "beat " : "首次生效（-Dmdc.animalLossProbe=0|off 停用觀測；-Dmdc.animalGrowIdClash=0|off 停用異種同號放行）"
+                    + "growIdClash=" + (SPARE ? "on " : "off ");
             announced = true;
             lastBeatNs = now;
             DebugLog.log(TAG + head + "drops=" + drops + " evicted=" + evicted + " dropDups=" + dropDups
-                    + " growDups=" + growDups + " logged=" + logged
+                    + " growDups=" + growDups + " growSpared=" + growSpared + " logged=" + logged
                     + " suppressed=" + suppressed + " anomalies=" + anomalies);
         }
     }

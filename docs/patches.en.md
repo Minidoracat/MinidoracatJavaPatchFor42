@@ -3929,7 +3929,7 @@ flow, and the switch happens at the next scheduled restart. After it is live, ch
   nothing.
 
 <a id="2bx"></a>
-## 2bx. Animal loss and duplication probe (W60, server, observe only)
+## 2bx. Animal loss and duplication probe (W60, server, observe)
 
 **Why**: on 2026-10-13 a player reported that a hen house held four roosters, and after carrying one away only two were left. The saves show that
 the four were copies of one rooster (the same animalId; one became four from 10-08 on). After the move the total was one short, with no death record
@@ -3962,22 +3962,26 @@ helper calls the original exactly once outside its try, so results and exception
   run in this order and the helper pairs them that way: `copyFrom` records the held animal, `get` records the previous holder's position and state
   before vanilla removes it, and `add` decides.
 - `AnimalData.grow(String)`: offset 313 `IsoAnimal.checkForChickenpocalypse` → `growDuplicate`, `expectedHits = 1` (on the existing AnimalData
-  ClassPatch). When it returns true, also logs the other animal with the same ID in the same range.
+  ClassPatch). When it returns true, also logs the other animal with the same ID in the same range. W109 ([2dq](#2dq)) first checks for a same-ID
+  animal of another species at the top of the same helper and, when it spares the animal, does not call the original.
 
 ```text
 [MinidoracatJavaPatch][AnimalLossProbe] drop-evict#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> evicted=<type>#<animalId> pos=<x>,<y>,<z> inWorld=<0|1> hutch=<0|1> vehicle=<0|1> dead=<0|1>
 [MinidoracatJavaPatch][AnimalLossProbe] drop-dup#<n> at=<x>,<y>,<z> dropped=<type>#<animalId> onlineId=<id> source=<type>#<animalId> pos=… inWorld=1 … prev=<none|type#animalId>
 [MinidoracatJavaPatch][AnimalLossProbe] grow-dup#<n> animal=<type>#<animalId> pos=… newType=<grown type> twin=<type>#<animalId> pos=…
-[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> logged=<n> suppressed=<n> anomalies=<n>
+[MinidoracatJavaPatch][AnimalLossProbe] grow-spared#<n> animal=<type>#<animalId> pos=… group=<species> newType=<grown type> twin=<type>#<animalId> pos=… twinGroup=<species>
+[MinidoracatJavaPatch][AnimalLossProbe] beat drops=<n> evicted=<n> dropDups=<n> growDups=<n> growSpared=<n> logged=<n> suppressed=<n> anomalies=<n>
 ```
 
 `drop-evict` is the other animal removed from the world when one was put down (`evicted` is its state before removal; `?` if it could not be
-described). `drop-dup` means the held animal is still in the world after being put down, so there is one more. At most 30 detail lines per 60
-seconds, the rest are counted in `suppressed`; the first event (normally the first chunk load) prints a first-effect line, then a beat every 5
-minutes. Bookkeeping exceptions only count `anomalies`.
+described). `drop-dup` means the held animal is still in the world after being put down, so there is one more. `grow-spared` is a same-ID animal of
+another species that W109 let grow up (see [2dq](#2dq)). At most 30 detail lines per 60 seconds, the rest are counted in `suppressed`; the first
+event (normally the first chunk load) prints a first-effect line (with `growIdClash=on|off`), then a beat every 5 minutes. Bookkeeping exceptions
+only count `anomalies`.
 
 **Kill switch**: `-Dmdc.animalLossProbe=0|off` (on by default; the redirects stay and only call the original, nothing is counted or logged), needs a
-restart.
+restart. The W109 spare has its own switch, `-Dmdc.animalGrowIdClash=0|off`; the two are independent: with the probe off, sparing still happens and
+`grow-spared` is still logged.
 
 **Deployment**: the manifest gains `zombie/mdc/AnimalLossProbe.class`, `AnimalLossProbe$Saving.class` and three new patched classes (`IsoGridSquare`,
 `ServerChunkLoader$LoaderThread`, `ServerChunkLoader$SaveUnloadedTask`), and `AnimalData.class` is replaced by a version with one more site (131 →
@@ -3988,19 +3992,21 @@ restart. After it goes live, check that the banner shows the new fingerprint and
 a `drop-evict` is the one that vanished; a `grow-dup` names the two copies that vanished together when one grew up. If neither shows up, there is
 another path and it needs more probes.
 
-**Not done**: nothing is blocked or fixed; the fix waits until we know which path it is (for example, only remove the same animal when putting one
-down).
+**Not done**: putting an animal down is neither blocked nor fixed; the fix waits until we know which path it is (for example, only remove the same
+animal when putting one down). Growing up: same-ID animals of another species are spared by W109 ([2dq](#2dq)); a same-species match is deleted as
+in vanilla.
 
 **Guards and verification**:
 - SmokeCheck: vanilla has exactly one of each observed call; putting an animal down calls `copyFrom` → `get` → `add` in this order. After the patch
   the two method texts (with frames) differ only in these four calls; each helper calls its original exactly once.
-- `AnimalLossProbeTest` (on and off, separate JVMs): putting an animal down calls the three helpers in the patched order with the real
-  `AnimalInstanceManager`. The vanilla negative control (calling the originals directly) counts and logs nothing. Nothing is logged when the previous
-  holder is the held animal; when it is another animal holding onlineID 1, one `drop-evict` line with the drop position and that animal's type, ID and
-  position; when the held animal is still in the world after the drop, one `drop-dup` line; an exception while describing the previous holder only
-  counts `anomalies` and the originals still run; an exception from `copyFrom` propagates unchanged. Growing up: when `checkForChickenpocalypse`
-  returns true, one `grow-dup` line with the other same-ID animal found by the real `IsoGridSquare.getAnimals` within ±4 tiles (a `ServerMap` stand-in
-  returns the squares); nothing when it returns false. Off: the originals run, nothing is counted and the JVM logs nothing.
+- `AnimalLossProbeTest` (on, off and spare-off, separate JVMs; the W109 cases are in [2dq](#2dq)): putting an animal down calls the three helpers in
+  the patched order with the real `AnimalInstanceManager`. The vanilla negative control (calling the originals directly) counts and logs nothing.
+  Nothing is logged when the previous holder is the held animal; when it is another animal holding onlineID 1, one `drop-evict` line with the drop
+  position and that animal's type, ID and position; when the held animal is still in the world after the drop, one `drop-dup` line; an exception
+  while describing the previous holder only counts `anomalies` and the originals still run; an exception from `copyFrom` propagates unchanged.
+  Growing up: when `checkForChickenpocalypse` returns true, one `grow-dup` line with the other same-ID animal found by the real
+  `IsoGridSquare.getAnimals` within ±4 tiles (a `ServerMap` stand-in returns the squares); nothing when it returns false. Off: the originals run,
+  nothing is counted and the JVM logs nothing before the W109 cases (after them, only the W109 `grow-spared` and first-effect lines).
 
 ### 2026-11-10 — 42.22.2 re-validation (chunk reload probe retired)
 
@@ -6635,6 +6641,37 @@ A `deferred` line is written for the first 20 entries and every 1000th after tha
 - PZ_Optimization alone (2026-11-24, 9950X3D, revision 3d39148846; the game copy has no `.mdc-patches`, the json has no `-agentpath`, and the launcher shows no `[mdc-agent]`): a new single-player world each round, closed about 100 frames after entering. With `centerFirstLoad=true` (the default), 1 of 30 rounds threw the same NPE at `this.chunk.vehicles.remove` in `BaseVehicle.update` at f:2 and went back to the main menu; with `-Dpzopt.centerFirstLoad=false`, 0 of 30 (too few rounds to tell whether center-first is the cause). This NPE happens without this package.
 
 **Retirement**: when TIS rebinds or rebuilds `models` on adoption; retire when the SmokeCheck reason to exist turns red.
+
+---
+
+<a id="2dq"></a>
+## 2dq. Growing up deletes only on a same-species ID match (W109, server, default on)
+
+**Problem**: `AnimalData.grow` gives the grown animal the old `animalId`, then calls `parent.checkForChickenpocalypse(newAnimal)`: starting at `parent.getSquare()`, it looks through `getAnimals()` (which skips hooked carcasses) on the squares x, y in `[-4, +4)` on the same level for another animal with that `animalId`; if it finds one it calls `parent.delete()` and returns true, and `grow` then deletes the new animal and returns. This is meant to stop copies from growing up, but it never looks at the species, and `animalId` comes from `Rand.Next(10000)` in `IsoAnimal.init`, so different species share IDs all the time. A young animal that grows up next to an animal of another species with the same ID vanishes with no death record. The W60 ([2bx](#2bx)) `grow-dup` line was logged 11 times in 8 days on our server, 2 of them for another species.
+
+**Fix**: no new patch site; it reuses the W60 `grow` redirect (offset 313 → `AnimalLossProbe.growDuplicate`). `growDuplicate` first runs `spare(parent, newAnimal)`, which looks for same-ID animals with the same start square, range and filter as vanilla. If there is at least one and every one of them is surely another species than both the animal growing up and the grown animal (`adef.group` non-null and non-empty on both sides and different ignoring case), it does not call the original and returns false, so `grow` takes the false branch to `checkForWater` and `addToWorld`, just as when no same-ID animal is nearby. A same-species match, missing group data, a null `getSquare()`, no match, or a `RuntimeException`/`LinkageError` in the check (counted in `anomalies`) all go back to vanilla, which deletes or not as before, and W60 logs `grow-dup` as before. IDs are not re-rolled: that would cut babies off from finding their mother again (`attachBackToMother`) and break mods that use `getAnimalID()` as an identity. The cost is that same-ID animals of different species can live within ±4 tiles of each other, which beyond ±4 tiles is already normal.
+
+**Server only**: the only caller of `grow` is `AnimalData.checkStages`, which is called only by `AnimalData.update`, which is called only on the `GameClient.client == false` side of `IsoAnimal.updateInternal`.
+
+console (detail lines share the W60 budget of 30 lines per 60 seconds; `twin` is the first same-ID animal in range):
+
+```text
+[MinidoracatJavaPatch][AnimalLossProbe] 首次生效（…）growIdClash=<on|off> drops=<n> … growSpared=<n> …
+[MinidoracatJavaPatch][AnimalLossProbe] grow-spared#<n> animal=<type>#<animalId> pos=… group=<species> newType=<grown type> twin=<type>#<animalId> pos=… twinGroup=<species>
+```
+
+**Switch**: `-Dmdc.animalGrowIdClash=0|off` is vanilla (W60 logs `grow-dup` as before); on by default, needs a restart. Independent of `-Dmdc.animalLossProbe`: with the probe off, sparing still happens and `grow-spared` is still logged.
+
+**Deployment**: the manifest is unchanged (same class count, patch sites and helpers); only the content of `zombie/mdc/AnimalLossProbe.class` changes.
+
+**Acceptance after going live**: the first-effect line shows `growIdClash=on`; an animal named in a `grow-spared` line grows up normally (the adult is in place with the same ID); the `twin` of every `grow-dup` line is the same species.
+
+**Guards and verification**:
+- SmokeCheck: SHA locks (each with a negative control) on the vanilla bodies of `IsoAnimal.checkForChickenpocalypse`, `IsoGridSquare.getAnimals()` and `getAnimals(ArrayList)` (the hook filter is in the latter), `AnimalData.grow`, `AnimalData.checkStages` and `IsoAnimal.updateInternal`, which the helper copies; the jar-wide caller list `grow` ← `checkStages` ← `AnimalData.update` ← `IsoAnimal.updateInternal` (exactly one each), with `AnimalData.update` after the IFEQ target of the only `GameClient.client` read in `updateInternal` and the client branch ending in RETURN; `grow` calls `setAnimalID` → `checkForChickenpocalypse` → `checkForWater` → `addToWorld` in that order (exactly one each), and `checkForChickenpocalypse` is followed directly by an IFNE to the code that deletes the new animal, falling through to `checkForWater` only on false; `AnimalDefinitions.group` is a public String and `IsoAnimal.adef` is public; `spare` calls no `checkForChickenpocalypse`, `delete`, `setAnimalID` or `removeFrom*`, and `growDuplicate` starts with `SPARE && spare(parent, newAnimal)` → return false; the shipped `checkForChickenpocalypse` text equals vanilla (the behavior test reaches it through `super`).
+- `AnimalLossProbeTest` (`build.ps1` [9zi/10], on, off and spare-off, separate JVMs, both switches self-checked): the stand-in's `getSquare()` returns its square and `delete()` only counts; each layout first calls the real vanilla `checkForChickenpocalypse` directly as a negative control. 15 layouts: another species with the same ID (on spares it, the original runs 0 times, delete 0, one `grow-spared` line; spare-off deletes as vanilla and logs `grow-dup`), same species, groups differing only in case, one match of each kind, no match, parent without `adef`, grown animal with a null group, match with an empty group, match of the grown animal's species, dx=−4 and dy=−4 count, dx=+4 and dy=+4 do not, another level does not, a hooked carcass does not, and a null `getSquare()`; every case except the spared one matches vanilla. An exception in the check and in the log line each count `anomalies` (the latter still spares). A fixed-seed diff over 200 random layouts: on equals "vanilla's result if any match is not surely another species, otherwise false", spare-off equals vanilla. Off (`animalLossProbe=off`) still spares and logs.
+- Not verified: no in-game E2E run; the rest of `grow` (`checkForWater`, `addToWorld`) completing after a spare and clients seeing the adult are beyond the behavior test. Mod animals without a `group` are deleted as in vanilla.
+
+**Retirement**: retire when TIS checks the species or uses IDs that cannot collide; re-evaluate when a SmokeCheck SHA lock or the caller chain turns red.
 
 ---
 
