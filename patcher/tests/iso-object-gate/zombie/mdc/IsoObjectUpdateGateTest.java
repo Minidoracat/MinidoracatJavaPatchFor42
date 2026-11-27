@@ -783,6 +783,29 @@ public final class IsoObjectUpdateGateTest {
                     && IsoObjectUpdateGate.mismatchesForTest() == 0 && !IsoObjectUpdateGate.alDisabledForTest());
         }
 
+        // 先熄、完整輪輪到時被跳過、同一輪後面的物件再點亮的燈：原版這輪也沒 update 它，比對不能算「多」。
+        int relighter = firstRec(b, true);
+        int lamp = wallAfter(b, 0);
+        boolean ahead = b.list.indexOf(b.byId.get(lamp)) < b.list.indexOf(b.byId.get(relighter));
+        both(a, b, w -> offThread(() -> ((IsoThumpable) w.byId.get(lamp)).setLifeLeft(5f)));
+        a.process();   // on：輪首排空時加進子清單尾端；observe：完整輪重建後在原位
+        b.process();
+        boolean held = IsoObjectUpdateGate.activeForTest().contains(a.byId.get(lamp)) && a.ids().equals(b.ids());
+        both(a, b, w -> ((IsoThumpable) w.byId.get(lamp)).setLifeLeft(-1f));
+        both(a, b, w -> ((Rec) w.byId.get(relighter)).onUpdate = () -> ((IsoThumpable) w.byId.get(lamp)).setLifeLeft(5f));
+        long m0 = IsoObjectUpdateGate.mismatchesForTest(), fr0 = IsoObjectUpdateGate.fullPassesForTest();
+        IsoObjectUpdateGate.forceTimedFrameForTest();   // 計時幀＝有比對的完整輪（on、observe 都是）；普查會記燈，只比清單
+        a.process();
+        b.process();
+        ArrayList<IsoObject> act = IsoObjectUpdateGate.activeForTest();
+        boolean relit = IsoObjectUpdateGate.fullPassesForTest() == fr0 + 1 && a.ids().equals(b.ids())
+                && !act.isEmpty() && act.get(act.size() - 1) == a.byId.get(lamp);
+        String d5 = untilFull(a, b, (x, y, phase, i) -> x.equals(on && phase == 0 ? moveToEnd(y, lamp) : y));
+        expect("第二刀先熄、被跳過、同一輪後面的物件再點亮的燈：比對不算多出來（mismatches=" + IsoObjectUpdateGate.mismatchesForTest()
+                        + "）、之後在子清單尾端" + (on ? "、下一個完整輪後回原位" : "") + (d5 == null ? "" : " " + d5),
+                ahead && held && relit && d5 == null && IsoObjectUpdateGate.mismatchesForTest() == m0
+                && !IsoObjectUpdateGate.alDisabledForTest());
+
         // 偵測：子清單漏一件（模擬 lifeLeft 從沒掛到的地方被改）。
         Rec victimA = null;
         for (IsoObject o : a.list) {
@@ -804,11 +827,11 @@ public final class IsoObjectUpdateGateTest {
             b.trace.clear();
             a.process();
             b.process();
-            expect("第二刀 on 漏一件：子清單輪看得到差異（負對照）、完整輪比對抓到並永久停用，之後每輪完整輪且與原版相同"
+            expect("第二刀 on 漏一件：子清單輪看得到差異（負對照）、完整輪比對抓到並永久停用、放掉子清單，之後每輪完整輪且與原版相同"
                             + (d3 == null ? "" : " " + d3),
                     d3 == null && diffSeen[0] && IsoObjectUpdateGate.mismatchesForTest() == 1 && IsoObjectUpdateGate.alDisabledForTest()
                     && IsoObjectUpdateGate.alName().equals("disabled") && IsoObjectUpdateGate.subPassesForTest() == sub0
-                    && a.trace.equals(b.trace));
+                    && IsoObjectUpdateGate.activeForTest().isEmpty() && a.trace.equals(b.trace));
         } else {
             expect("第二刀 observe 漏一件：下一輪比對計數、不停用、行為與原版相同" + (d3 == null ? "" : " " + d3),
                     d3 == null && IsoObjectUpdateGate.mismatchesForTest() == 1 && !IsoObjectUpdateGate.alDisabledForTest());
