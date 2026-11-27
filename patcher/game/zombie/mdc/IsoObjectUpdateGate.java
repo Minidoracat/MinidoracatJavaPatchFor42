@@ -4,12 +4,15 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 import zombie.debug.DebugLog;
@@ -37,6 +40,13 @@ import zombie.network.GameServer;
  * <p><b>observe 成本上限</b>：一般幀每件只多一次靜態旗標判斷，每幀兩次 {@code nanoTime}／一次
  * {@code currentTimeMillis}；每 5 分鐘挑一幀逐件計時（每件兩次 {@code nanoTime}＋一次 HashMap 查詢），同一幀結束時
  * 走一遍清單做普查並寫一行心跳。
+ *
+ * <p><b>第二刀：活躍子清單</b>（{@code -Dmdc.isoObjectActiveList}，2026-11-27；只有 isoObjectGate 是 on 且沒停用時才動作）：
+ * {@code ProcessIsoObject} 的 {@code ArrayList.size}／{@code get} 與 {@code addToProcessIsoObject} 的 {@code ArrayList.add}
+ * 同形改道到這裡，{@code IsoThumpable.setLifeLeft} 尾部呼叫 {@link #afterLifeLeft}。子清單＝真正清單裡不可跳過的物件
+ * （依真正清單的相對順序，保留重複）；真正清單的內容與順序完全不動。{@code 2|observe}（預設）每輪照走完整清單、只比對子清單；
+ * {@code 1|on} 平常只走子清單，每 {@value #FULL_EVERY} 輪、W73 計時幀、清單被繞過掛點改過或有非主執行緒 add 之後走完整輪；
+ * 比對不一致本次啟動永久回完整輪；{@code 0|off} 不動作。
  *
  * <p>只有主執行緒呼叫 ProcessIsoObject；計數欄位只在主執行緒讀寫，跨執行緒寫入計數用 Atomic。
  */
@@ -73,6 +83,30 @@ public final class IsoObjectUpdateGate {
     private static Field[] thumpFields;
     private static Field setField;
     static String lastBeatLine;
+
+    // ---- 第二刀：活躍子清單 ----
+    static final String AL_RAW = System.getProperty("mdc.isoObjectActiveList");
+    static final int AL_MODE = parseMode(AL_RAW);
+    static final int FULL_EVERY = 600;
+    private static final int NONE = 0, BEGUN = 1, FULL = 2, SUB = 3;
+    /** 子清單比對不一致（on）或 helper 例外：本次啟動永久回完整輪。 */
+    private static volatile boolean alDisabled;
+    /** 非主執行緒 add 過真正清單：下一輪走完整輪重建、不比對。 */
+    private static volatile boolean alDirty;
+    /** setLifeLeft 之後 lifeLeft &gt; -1 的物件（LoadChunk 執行緒也會寫）；主執行緒在每輪開頭與完整輪結尾排空。 */
+    private static final ConcurrentLinkedQueue<IsoThumpable> LIT = new ConcurrentLinkedQueue<>();
+    private static final AtomicLong lifeQueued = new AtomicLong();
+    // 以下只在主執行緒。
+    private static ArrayList<IsoObject> active = new ArrayList<>();
+    private static ArrayList<IsoObject> fresh = new ArrayList<>();
+    private static Set<IsoObject> activeSet = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static Set<IsoObject> spareSet = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final ArrayList<IsoThumpable> LIT_NOW = new ArrayList<>();
+    /** 子清單對應的真正清單；expectedSize＝經過掛點的增減後它應有的長度，對不上＝被繞過掛點改過。 */
+    private static ArrayList<?> tracked;
+    private static boolean built, collecting, compareValid;
+    private static int passState, expectedSize, sizeAtStart, sinceFull;
+    private static long fullPasses, subPasses, mismatches, resyncs, lifeAdded, aborted;
 
     static int parseMode(String raw) {
         if (raw == null) {
@@ -112,6 +146,9 @@ public final class IsoObjectUpdateGate {
             audit((IsoThumpable) o);
             return;
         }
+        if (collecting) {
+            fresh.add(o);   // 完整輪：會交給 update() 的物件（不可跳過），依原版順序
+        }
         o.update();
     }
 
@@ -139,11 +176,217 @@ public final class IsoObjectUpdateGate {
         long t0 = System.nanoTime();
         boolean r = list.removeAll(c);
         long dt = System.nanoTime() - t0;
+        int removed = before - list.size();
         removeAllCalls++;
-        removeAllRemoved += before - list.size();
+        removeAllRemoved += removed;
         removeAllNsTotal += dt;
         removeAllNsMax = Math.max(removeAllNsMax, dt);
+        if (removed > 0 && list == tracked && live()) {
+            expectedSize -= removed;
+            if (built) {
+                active.removeIf(c::contains);   // 與 ArrayList.removeAll 同為 c.contains 語意（重複的一併拿掉）
+                activeSet.removeIf(c::contains);
+            }
+        }
         return r;
+    }
+
+    private static boolean live() {
+        return MODE == ON && !disabled && AL_MODE != OFF && !alDisabled;
+    }
+
+    /** {@code ProcessIsoObject} 的兩個 {@code ArrayList.size}：每輪第一次呼叫時決定這輪走完整清單還是子清單。 */
+    public static int size(ArrayList<?> list) {
+        if (passState == BEGUN) {
+            decide(list);
+        }
+        return passState == SUB ? active.size() : list.size();
+    }
+
+    /** {@code ProcessIsoObject} 的 {@code ArrayList.get}。 */
+    public static Object get(ArrayList<?> list, int n) {
+        return passState == SUB ? active.get(n) : list.get(n);
+    }
+
+    private static void decide(ArrayList<?> list) {
+        passState = FULL;
+        if (!live()) {
+            return;
+        }
+        int n = list.size();
+        boolean dirty = alDirty;
+        alDirty = false;
+        boolean same = built && list == tracked && !dirty;
+        if (same && n != expectedSize) {
+            resyncs++;
+            same = false;
+        }
+        compareValid = same;
+        if (AL_MODE == ON && same && !timing && ++sinceFull < FULL_EVERY) {
+            passState = SUB;
+            subPasses++;
+            return;
+        }
+        fullPasses++;
+        collecting = true;
+        fresh.clear();
+        tracked = list;
+        expectedSize = n;
+        sizeAtStart = n;
+    }
+
+    /** {@code addToProcessIsoObject} 唯一 {@code ArrayList.add}（Set.add 成功才走到）：照原版加，再登記子清單。 */
+    public static boolean add(ArrayList<Object> list, Object o) {
+        boolean r = list.add(o);
+        if (live()) {
+            Thread main = GameServer.mainThread;
+            if (main != null && Thread.currentThread() != main) {
+                alDirty = true;
+            } else if (list == tracked) {
+                expectedSize++;
+                // 完整輪中途加入的由完整輪結尾補登記（原版這輪也不 update 它；子清單輪 append 到尾端，迴圈用的是快取長度）
+                if (built && passState != FULL && o instanceof IsoObject io && !skippable(io)) {
+                    active.add(io);
+                    activeSet.add(io);
+                }
+            }
+        }
+        return r;
+    }
+
+    /** {@code IsoThumpable.setLifeLeft} 尾部（寫入之後）：點亮的燈排進佇列，主執行緒下一次排空時加進子清單尾端。 */
+    public static void afterLifeLeft(IsoThumpable t) {
+        if (live() && t.getLifeLeft() > -1.0F) {
+            LIT.add(t);
+            lifeQueued.incrementAndGet();
+        }
+    }
+
+    private static void drainLit(IsoCell cell) {
+        try {
+            boolean use = live() && built && cell.getProcessIsoObjects() == tracked;
+            Set<?> set = use ? (Set<?>) setField().get(cell) : null;
+            for (IsoThumpable t; (t = LIT.poll()) != null; ) {
+                if (use) {
+                    admitLit(t, set);
+                }
+            }
+        } catch (RuntimeException | ReflectiveOperationException e) {
+            alFail("drain " + e);
+        }
+    }
+
+    private static void admitLit(IsoThumpable t, Set<?> set) {
+        if (!skippable(t) && set.contains(t) && activeSet.add(t)) {
+            active.add(t);
+            lifeAdded++;
+        }
+    }
+
+    private static void finishFull(IsoCell cell) {
+        if (!live()) {
+            built = false;
+            fresh.clear();
+            return;
+        }
+        try {
+            rebuild(cell);
+        } catch (RuntimeException | ReflectiveOperationException e) {
+            alFail("rebuild " + e);
+        }
+    }
+
+    private static void rebuild(IsoCell cell) throws ReflectiveOperationException {
+        LIT_NOW.clear();
+        for (IsoThumpable t; (t = LIT.poll()) != null; ) {
+            LIT_NOW.add(t);
+        }
+        ArrayList<?> list = tracked;
+        // 這輪中途被繞過掛點改過（長度對不上）：fresh 不可信，照樣重建但下一輪再走一次完整輪、不比對。
+        boolean clean = list.size() == expectedSize;
+        Set<IsoObject> next = spareSet;
+        next.clear();
+        next.addAll(fresh);
+        if (compareValid && clean) {
+            compare(next);
+        }
+        if (alDisabled) {
+            built = false;
+            fresh.clear();
+            next.clear();
+            return;
+        }
+        ArrayList<IsoObject> old = active;
+        active = fresh;
+        fresh = old;
+        fresh.clear();
+        spareSet = activeSet;
+        spareSet.clear();
+        activeSet = next;
+        for (int i = sizeAtStart, n = list.size(); i < n; i++) {
+            if (list.get(i) instanceof IsoObject o && !skippable(o)) {
+                active.add(o);
+                activeSet.add(o);
+            }
+        }
+        Set<?> set = (Set<?>) setField().get(cell);
+        for (int i = 0; i < LIT_NOW.size(); i++) {
+            admitLit(LIT_NOW.get(i), set);
+        }
+        LIT_NOW.clear();
+        if (!clean) {
+            alDirty = true;
+        }
+        expectedSize = list.size();
+        sinceFull = 0;
+        built = true;
+    }
+
+    /** 缺＝原版這輪 update 了但不在舊子清單（也不是這輪才點亮的燈）；多＝舊子清單有、原版這輪沒 update 且仍不可跳過。 */
+    private static void compare(Set<IsoObject> freshSet) {
+        int missing = 0, extra = 0;
+        IsoObject firstMissing = null, firstExtra = null;
+        for (int i = 0, n = fresh.size(); i < n; i++) {
+            IsoObject o = fresh.get(i);
+            if (!activeSet.contains(o) && !LIT_NOW.contains(o) && missing++ == 0) {
+                firstMissing = o;
+            }
+        }
+        for (int i = 0, n = active.size(); i < n; i++) {
+            IsoObject o = active.get(i);
+            if (!freshSet.contains(o) && !skippable(o) && extra++ == 0) {
+                firstExtra = o;
+            }
+        }
+        if (missing + extra == 0) {
+            return;
+        }
+        mismatches++;
+        if (AL_MODE == ON) {
+            alDisabled = true;
+        }
+        try {
+            log("activeList MISMATCH missing=" + missing + (firstMissing == null ? "" : "(" + firstMissing.getClass().getSimpleName() + ")")
+                    + " extra=" + extra + (firstExtra == null ? "" : "(" + firstExtra.getClass().getSimpleName() + ")")
+                    + (AL_MODE == ON ? " DISABLED（本次啟動永久回完整輪）" : " observe 只計數") + " mismatches=" + mismatches);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
+        }
+    }
+
+    private static void alFail(String reason) {
+        alDisabled = true;
+        built = false;
+        anomalies.incrementAndGet();
+        try {
+            log("activeList DISABLED（本次啟動永久回完整輪）reason=" + reason);
+        } catch (RuntimeException | LinkageError e) {
+            anomalies.incrementAndGet();
+        }
+    }
+
+    static String alName() {
+        return AL_MODE == OFF ? "off" : alDisabled ? "disabled" : MODE != ON || disabled ? "inactive" : AL_MODE == ON ? "on" : "observe";
     }
 
     /** {@code ProcessIsoObject} 頭部。 */
@@ -156,11 +399,23 @@ public final class IsoObjectUpdateGate {
             started = true;
             lastBeat = now;
             log("首次生效 mode=" + modeName() + " raw=" + RAW + " server=" + GameServer.server
+                    + " activeList=" + alName() + " alRaw=" + AL_RAW
                     + "（-Dmdc.isoObjectGate=0|off 原版、1|on 跳過伺服器上 lifeLeft 不是 > -1 的 IsoThumpable、2|observe 只量；"
-                    + "心跳每 5 分鐘一行）");
+                    + "-Dmdc.isoObjectActiveList=0|off、1|on 只走活躍子清單、2|observe 只比對；心跳每 5 分鐘一行）");
         }
         timing = now - lastBeat >= HEARTBEAT_MS;
         passStartNs = System.nanoTime();
+        if (passState == FULL || passState == SUB) {
+            // 上一輪被例外打斷、沒經 endPass：完整輪中途 add 的物件沒補進子清單，下一輪重建、不比對
+            aborted++;
+            alDirty = true;
+            fresh.clear();
+        }
+        passState = BEGUN;
+        collecting = false;
+        if (!LIT.isEmpty()) {
+            drainLit(cell);
+        }
     }
 
     /** {@code ProcessIsoObject} 唯一 RETURN 前。 */
@@ -168,6 +423,11 @@ public final class IsoObjectUpdateGate {
         if (MODE == OFF) {
             return;
         }
+        if (passState == FULL && collecting) {
+            finishFull(cell);
+        }
+        passState = NONE;
+        collecting = false;
         long ns = System.nanoTime() - passStartNs;
         frames++;
         passNsTotal += ns;
@@ -341,7 +601,10 @@ public final class IsoObjectUpdateGate {
                 + " timed=" + timed
                 + " skips=" + skips + " audits=" + audits + " fallback=" + fallbacks
                 + " offThreadAdds=" + offThreadAdds.get() + " offThreadRemoves=" + offThreadRemoves.get()
-                + " anomalies=" + anomalies.get();
+                + " anomalies=" + anomalies.get()
+                + " activeList=" + alName() + " active=" + active.size() + " fullPasses=" + fullPasses + " subPasses=" + subPasses
+                + " mismatches=" + mismatches + " resyncs=" + resyncs + " aborted=" + aborted
+                + " lifeQueued=" + lifeQueued.get() + " lifeAdded=" + lifeAdded;
         lastBeatLine = line;
         log(line);
     }
@@ -364,16 +627,20 @@ public final class IsoObjectUpdateGate {
 
     private static int setSize(IsoCell cell) {
         try {
-            if (setField == null) {
-                Field f = IsoCell.class.getDeclaredField("processIsoObjectSet");
-                f.setAccessible(true);
-                setField = f;
-            }
-            return ((Set<?>) setField.get(cell)).size();
+            return ((Set<?>) setField().get(cell)).size();
         } catch (RuntimeException | ReflectiveOperationException e) {
             anomalies.incrementAndGet();
             return -1;
         }
+    }
+
+    private static Field setField() throws NoSuchFieldException {
+        if (setField == null) {
+            Field f = IsoCell.class.getDeclaredField("processIsoObjectSet");
+            f.setAccessible(true);
+            setField = f;
+        }
+        return setField;
     }
 
     private static String ms(long ns) {
@@ -414,6 +681,17 @@ public final class IsoObjectUpdateGate {
     static long removeAllCallsForTest() { return removeAllCalls; }
     static long removeAllRemovedForTest() { return removeAllRemoved; }
     static long framesForTest() { return frames; }
+    static ArrayList<IsoObject> activeForTest() { return active; }
+    static void dropActiveForTest(IsoObject o) { active.remove(o); activeSet.remove(o); }
+    static void injectActiveForTest(IsoObject o) { active.add(o); activeSet.add(o); }
+    static boolean alDisabledForTest() { return alDisabled; }
+    static long fullPassesForTest() { return fullPasses; }
+    static long subPassesForTest() { return subPasses; }
+    static long mismatchesForTest() { return mismatches; }
+    static long resyncsForTest() { return resyncs; }
+    static long lifeQueuedForTest() { return lifeQueued.get(); }
+    static long lifeAddedForTest() { return lifeAdded; }
+    static long abortedForTest() { return aborted; }
 
     private IsoObjectUpdateGate() {}
 }

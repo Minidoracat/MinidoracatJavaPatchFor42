@@ -5,9 +5,13 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Random;
 import java.util.Set;
 import java.util.function.BiPredicate;
 
@@ -29,6 +33,9 @@ import zombie.network.GameServer;
  *   <li>mutant：{@code >=}、{@code <= -1}（NaN 不跳）、拿掉 server 檢查、改 instanceof、拿掉 lifeLeft 判斷，各至少一格與預期不同。</li>
  *   <li>on：每 4096 次跳過抽一次照原版跑；比對不一致永久停用、之後全照原版。</li>
  *   <li>真 ProcessIsoObject：null 略過、其他物件照常更新、removeAll 計數、心跳欄位、非主執行緒寫入計數；off 不計數。</li>
+ *   <li>第二刀活躍子清單（argv {@code al-off}／{@code al-observe}／{@code al-on}，isoObjectGate=on）：真 IsoCell 與原版迴圈的
+ *       模擬跑同一份腳本 1300 輪（加入、移除、別的執行緒點燈、燈燒完、非主執行緒 add、繞過掛點改清單、迴圈中途加入／移除），
+ *       每輪比對「有作用的 update 序列」與清單內容順序；外加兩項已知差別的確切形狀，以及子清單漏一件／多一件時的偵測與停用。</li>
  * </ul>
  */
 public final class IsoObjectUpdateGateTest {
@@ -69,10 +76,10 @@ public final class IsoObjectUpdateGateTest {
             return;
         }
         int expected = switch (arg) {
-            case "on" -> IsoObjectUpdateGate.ON;
+            case "on", "al-off", "al-observe", "al-on" -> IsoObjectUpdateGate.ON;
             case "off" -> IsoObjectUpdateGate.OFF;
             case "observe", "unknown" -> IsoObjectUpdateGate.OBSERVE;
-            default -> throw new IllegalArgumentException("argv 必須是 observe|on|off|unknown：" + arg);
+            default -> throw new IllegalArgumentException("argv 必須是 observe|on|off|unknown|al-off|al-observe|al-on：" + arg);
         };
         expect("旗標與 argv 相符：argv=" + arg + " MODE=" + IsoObjectUpdateGate.modeName() + " raw=" + IsoObjectUpdateGate.RAW,
                 IsoObjectUpdateGate.MODE == expected);
@@ -81,12 +88,20 @@ public final class IsoObjectUpdateGateTest {
         GameServer.mainThread = Thread.currentThread();
 
         parseModes();
-        differential(on);
-        vanillaNegativeControl();
-        mutants();
-        processIsoObject(on, off);
-        if (on) {
-            auditAndDisable();   // 會永久停用，必須最後跑
+        if (arg.startsWith("al-")) {
+            int al = arg.equals("al-off") ? IsoObjectUpdateGate.OFF : arg.equals("al-on") ? IsoObjectUpdateGate.ON : IsoObjectUpdateGate.OBSERVE;
+            expect("第二刀旗標與 argv 相符：AL_MODE=" + IsoObjectUpdateGate.alName() + " alRaw=" + IsoObjectUpdateGate.AL_RAW,
+                    IsoObjectUpdateGate.AL_MODE == al);
+            activeList(al);
+        } else {
+            differential(on);
+            vanillaNegativeControl();
+            mutants();
+            processIsoObject(on, off);
+            activeListInert(on);
+            if (on) {
+                auditAndDisable();   // 會永久停用，必須最後跑
+            }
         }
 
         if (failed > 0) {
@@ -296,6 +311,514 @@ public final class IsoObjectUpdateGateTest {
         expect("非主執行緒 add／remove 各記一次（off 不記）",
                 IsoObjectUpdateGate.offThreadAddsForTest() == (off ? 0 : 1)
                 && IsoObjectUpdateGate.offThreadRemovesForTest() == (off ? 0 : 1));
+    }
+
+    /** 非 al-* 執行：第二刀預設 observe；isoObjectGate 不是 on 時完全不動作，on 時每輪都是完整輪且比對一致。 */
+    private static void activeListInert(boolean on) {
+        IsoThumpable t = thumpable(-1f, 2);
+        long q0 = IsoObjectUpdateGate.lifeQueuedForTest();
+        t.setLifeLeft(5f);   // dist 手術後的 setLifeLeft（尾部 afterLifeLeft）
+        long queued = IsoObjectUpdateGate.lifeQueuedForTest() - q0;
+        if (on) {
+            expect("第二刀預設 observe（isoObjectGate=on）：真 ProcessIsoObject 每輪完整輪、沒有子清單輪、比對一致、點燈有入列（fullPasses="
+                            + IsoObjectUpdateGate.fullPassesForTest() + " queued=" + queued + "）",
+                    IsoObjectUpdateGate.AL_MODE == IsoObjectUpdateGate.OBSERVE && IsoObjectUpdateGate.fullPassesForTest() >= 2
+                    && IsoObjectUpdateGate.subPassesForTest() == 0 && IsoObjectUpdateGate.mismatchesForTest() == 0 && queued == 1);
+        } else {
+            expect("第二刀：isoObjectGate 不是 on 時不動作（無完整輪計數、子清單空、點燈不入列）",
+                    IsoObjectUpdateGate.fullPassesForTest() == 0 && IsoObjectUpdateGate.activeForTest().isEmpty() && queued == 0
+                    && IsoObjectUpdateGate.alName().equals("inactive"));
+        }
+    }
+
+    // ---- 第二刀：活躍子清單 ----
+
+    private static Method processMethod;
+
+    /** 會記錄自己被 update 的一般物件；onUpdate 在下一次 update 時跑一次（迴圈中途加入／移除／點燈）。 */
+    public static class Rec extends IsoObject {
+        World w;
+        int id;
+        Runnable onUpdate;
+
+        @Override
+        public void update() {
+            w.trace.add(id);
+            Runnable r = onUpdate;
+            if (r != null) {
+                onUpdate = null;
+                r.run();
+            }
+        }
+    }
+
+    /** 測試用：某物件的 update 丟出、把整個 ProcessIsoObject 打斷的例外。 */
+    static final class Boom extends RuntimeException {
+        Boom() {
+            super("測試：update 中斷", null, false, false);
+        }
+    }
+
+    /** 兩邊各跑一輪，兩邊都必須被 Boom 打斷，且打斷前的 update 序列與清單相同。 */
+    private static boolean abortedRound(World a, World b) throws Exception {
+        a.trace.clear();
+        b.trace.clear();
+        boolean ta = false, tb = false;
+        try {
+            a.process();
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            ta = e.getCause() instanceof Boom;
+        }
+        try {
+            b.process();
+        } catch (Boom e) {
+            tb = true;
+        }
+        return ta && tb && a.trace.equals(b.trace) && a.ids().equals(b.ids());
+    }
+
+    private static int firstRec(World w, boolean last) {
+        int found = -1;
+        for (IsoObject o : w.list) {
+            if (o instanceof Rec rec) {
+                found = rec.id;
+                if (!last) break;
+            }
+        }
+        return found;
+    }
+
+    /** IsoThumpable 所在格子的 objects：原版 update 第一步 getObjectIndex＝objects.indexOf；只記有作用的（燈亮著）那次。 */
+    static final class RecList extends ArrayList<IsoObject> {
+        final World w;
+
+        RecList(World w) {
+            super(2);
+            this.w = w;
+        }
+
+        @Override
+        public int indexOf(Object o) {
+            if (o instanceof IsoThumpable t && t.getLifeLeft() > -1f) {
+                w.trace.add(w.idOf.get(t));
+            }
+            return super.indexOf(o);
+        }
+    }
+
+    /** real＝真 IsoCell（dist 手術後的 ProcessIsoObject／addToProcessIsoObject*）；否則＝原版迴圈與兩個寫入方法的模擬。 */
+    static final class World {
+        final boolean real;
+        final IsoCell cell = raw(IsoCell.class);
+        final ArrayList<IsoObject> list = new ArrayList<>();
+        final Set<IsoObject> set = new HashSet<>();
+        final Set<IsoObject> remove = new HashSet<>();
+        final List<Integer> trace = new ArrayList<>();
+        final Map<Integer, IsoObject> byId = new HashMap<>();
+        final Map<IsoObject, Integer> idOf = new IdentityHashMap<>();
+
+        World(boolean real) throws Exception {
+            this.real = real;
+            setField(IsoCell.class, cell, "processIsoObject", list);
+            setField(IsoCell.class, cell, "processIsoObjectSet", set);
+            setField(IsoCell.class, cell, "processIsoObjectRemove", remove);
+        }
+
+        void add(IsoObject o) {
+            if (real) {
+                cell.addToProcessIsoObject(o);
+            } else {
+                remove.remove(o);
+                if (set.add(o)) {
+                    list.add(o);
+                }
+            }
+        }
+
+        void removeReq(IsoObject o) {
+            if (real) {
+                cell.addToProcessIsoObjectRemove(o);
+            } else if (set.contains(o)) {
+                remove.add(o);
+            }
+        }
+
+        /** 原版 ProcessIsoObject（javap：removeAll 三步 → 快取 size → get／null 略過／update → 清單變短時 n--、size--）。 */
+        void process() throws Exception {
+            if (real) {
+                processMethod.invoke(cell);
+                return;
+            }
+            if (!remove.isEmpty()) {
+                list.removeAll(remove);
+                set.removeAll(remove);
+                remove.clear();
+            }
+            int size = list.size();
+            for (int n = 0; n < size; n++) {
+                IsoObject o = list.get(n);
+                if (o == null) {
+                    continue;
+                }
+                o.update();
+                if (size > list.size()) {
+                    n--;
+                    size--;
+                }
+            }
+        }
+
+        Rec rec(int id) {
+            Rec r = raw(Rec.class);
+            r.w = this;
+            r.id = id;
+            byId.put(id, r);
+            idOf.put(r, id);
+            return r;
+        }
+
+        IsoThumpable thump(int id, float life) throws Exception {
+            IsoThumpable t = raw(IsoThumpable.class);
+            setField(IsoThumpable.class, t, "lifeLeft", life);
+            IsoGridSquare sq = raw(IsoGridSquare.class);
+            setField(IsoGridSquare.class, sq, "objects", new RecList(this));
+            sq.chunk = raw(IsoChunk.class);
+            sq.getObjects().add(t);
+            t.square = sq;
+            byId.put(id, t);
+            idOf.put(t, id);
+            return t;
+        }
+
+        List<Integer> ids() {
+            List<Integer> out = new ArrayList<>();
+            for (IsoObject o : list) {
+                out.add(o == null ? -1 : idOf.get(o));
+            }
+            return out;
+        }
+    }
+
+    interface Op {
+        void run(World w) throws Exception;
+    }
+
+    private static void both(World a, World b, Op op) throws Exception {
+        op.run(a);
+        op.run(b);
+    }
+
+    private static void offThread(Runnable r) throws InterruptedException {
+        Thread t = new Thread(r, "LoadChunk");
+        t.start();
+        t.join();
+    }
+
+    private static boolean lit(IsoObject o) {
+        return o instanceof IsoThumpable t && t.getLifeLeft() > -1f;
+    }
+
+    /** 第一個 index ≥ from、不是最後一件的可跳過牆。 */
+    private static int wallAfter(World w, int from) {
+        for (int i = Math.max(0, from); i < w.list.size() - 1; i++) {
+            IsoObject o = w.list.get(i);
+            if (o != null && o.getClass() == IsoThumpable.class && !lit(o)) {
+                return w.idOf.get(o);
+            }
+        }
+        throw new IllegalStateException("找不到可點亮的牆");
+    }
+
+    private static List<Integer> moveToEnd(List<Integer> xs, int id) {
+        List<Integer> out = new ArrayList<>(xs);
+        if (out.remove((Integer) id)) {
+            out.add(id);
+        }
+        return out;
+    }
+
+    private static List<Integer> minus(List<Integer> xs, int id) {
+        List<Integer> out = new ArrayList<>(xs);
+        out.remove((Integer) id);
+        return out;
+    }
+
+    interface Expect {
+        /** phase：0＝還沒遇到完整輪、1＝完整輪那一輪、2＝完整輪之後一輪；i＝第幾輪（0 起）。 */
+        boolean ok(List<Integer> a, List<Integer> b, int phase, int i);
+    }
+
+    /** 跑到出現完整輪、再多跑一輪；每輪清單內容順序必須相同、update 序列符合 Expect。 */
+    private static String untilFull(World a, World b, Expect e) throws Exception {
+        int phase = 0;
+        for (int i = 0; i <= IsoObjectUpdateGate.FULL_EVERY + 1; i++) {
+            long f0 = IsoObjectUpdateGate.fullPassesForTest();
+            a.trace.clear();
+            b.trace.clear();
+            a.process();
+            b.process();
+            if (phase == 0 && IsoObjectUpdateGate.fullPassesForTest() > f0) {
+                phase = 1;
+            } else if (phase == 1) {
+                phase = 2;
+            }
+            if (!a.ids().equals(b.ids()) || !e.ok(a.trace, b.trace, phase, i)) {
+                return "第 " + i + " 輪 phase=" + phase + " A=" + a.trace + " B=" + b.trace;
+            }
+            if (phase == 2) {
+                return null;
+            }
+        }
+        return "沒有遇到完整輪";
+    }
+
+    private static void activeList(int al) throws Exception {
+        GameServer.server = true;
+        processMethod = IsoCell.class.getDeclaredMethod("ProcessIsoObject");
+        processMethod.setAccessible(true);
+        boolean on = al == IsoObjectUpdateGate.ON, observe = al == IsoObjectUpdateGate.OBSERVE;
+        World a = new World(true), b = new World(false);
+        int[] next = {1};
+        for (int i = 0; i < 60; i++) {
+            int id = next[0]++;
+            int kind = i % 6;
+            boolean lamp = kind == 5 && i % 12 == 5;
+            both(a, b, w -> w.add(kind == 4 ? w.rec(id) : w.thump(id, lamp ? 5f : -1f)));
+        }
+
+        // 主腳本：每輪最多一個操作，兩個世界做同一件事，接著各跑一輪。
+        Random rnd = new Random(73);
+        int rounds = 1300, bad = 0;
+        String firstBad = null;
+        List<Integer> fullRounds = new ArrayList<>();
+        long resync0 = IsoObjectUpdateGate.resyncsForTest();
+        boolean dirtyFull = false, resyncFull = true;
+        for (int r = 0; r < rounds; r++) {
+            String op = switch (r) {
+                case 50 -> "addWall";
+                case 51 -> "lightTail";
+                case 100 -> "offThreadAdd";
+                case 200 -> "bypassAdd";
+                case 201 -> "bypassNull";
+                case 300 -> "spawn";
+                case 301 -> "removeMidPass";
+                default -> rnd.nextInt(10) < 3
+                        ? List.of("addRec", "addWall", "addLamp", "remove", "remove", "lightTail", "burn", "spawn", "removeMidPass")
+                                .get(rnd.nextInt(9))
+                        : "none";
+            };
+            int id = next[0]++;
+            List<IsoObject> alive = new ArrayList<>();
+            for (IsoObject o : b.list) {
+                if (o != null && !b.remove.contains(o)) alive.add(o);
+            }
+            IsoObject pick = alive.isEmpty() ? null : alive.get(rnd.nextInt(alive.size()));
+            int pickId = pick == null ? -1 : b.idOf.get(pick);
+            switch (op) {
+                case "addRec" -> both(a, b, w -> w.add(w.rec(id)));
+                case "addWall" -> both(a, b, w -> w.add(w.thump(id, -1f)));
+                case "addLamp" -> both(a, b, w -> w.add(w.thump(id, 5f)));
+                case "remove" -> {
+                    if (pick != null) both(a, b, w -> w.removeReq(w.byId.get(pickId)));
+                }
+                case "lightTail" -> {
+                    // 尾端的牆被別的執行緒點亮：排進尾端與原版順序相同（非尾端的差別在下面另驗）。
+                    IsoObject tail = b.list.isEmpty() ? null : b.list.get(b.list.size() - 1);
+                    if (tail != null && tail.getClass() == IsoThumpable.class && !lit(tail)) {
+                        int tid = b.idOf.get(tail);
+                        both(a, b, w -> offThread(() -> ((IsoThumpable) w.byId.get(tid)).setLifeLeft(5f)));
+                    }
+                }
+                case "burn" -> {
+                    if (lit(pick)) both(a, b, w -> ((IsoThumpable) w.byId.get(pickId)).setLifeLeft(-1f));
+                }
+                case "offThreadAdd" -> both(a, b, w -> {
+                    Rec rec = w.rec(id);
+                    offThread(() -> w.add(rec));
+                });
+                case "bypassAdd" -> both(a, b, w -> w.list.add(w.rec(id)));
+                case "bypassNull" -> both(a, b, w -> w.list.add(null));
+                case "spawn" -> {
+                    if (pick instanceof Rec) both(a, b, w -> {
+                        Rec spawned = w.rec(id);
+                        ((Rec) w.byId.get(pickId)).onUpdate = () -> w.add(spawned);
+                    });
+                }
+                case "removeMidPass" -> {
+                    IsoObject target = alive.isEmpty() ? null : alive.get(rnd.nextInt(alive.size()));
+                    if (pick instanceof Rec && target != null) {
+                        int targetId = b.idOf.get(target);
+                        both(a, b, w -> ((Rec) w.byId.get(pickId)).onUpdate = () -> w.removeReq(w.byId.get(targetId)));
+                    }
+                }
+                default -> { }
+            }
+            long f0 = IsoObjectUpdateGate.fullPassesForTest();
+            a.trace.clear();
+            b.trace.clear();
+            a.process();
+            b.process();
+            boolean full = IsoObjectUpdateGate.fullPassesForTest() > f0;
+            if (full) fullRounds.add(r);
+            if (r == 100) dirtyFull = full;
+            if (r == 200 || r == 201) resyncFull &= full;
+            if (!a.trace.equals(b.trace) || !a.ids().equals(b.ids())) {
+                bad++;
+                if (firstBad == null) firstBad = "第 " + r + " 輪 op=" + op + " A=" + a.trace + " B=" + b.trace;
+            }
+        }
+        long full = IsoObjectUpdateGate.fullPassesForTest(), sub = IsoObjectUpdateGate.subPassesForTest();
+        long resyncs = IsoObjectUpdateGate.resyncsForTest() - resync0;
+        String counters = " full=" + full + " sub=" + sub + " resyncs=" + resyncs + " mismatches=" + IsoObjectUpdateGate.mismatchesForTest()
+                + " lifeQueued=" + IsoObjectUpdateGate.lifeQueuedForTest() + " lifeAdded=" + IsoObjectUpdateGate.lifeAddedForTest()
+                + " active=" + IsoObjectUpdateGate.activeForTest().size() + " 清單=" + a.list.size();
+        System.out.println("  " + IsoObjectUpdateGate.alName() + counters + (firstBad == null ? "" : " firstBad=" + firstBad));
+        expect("第二刀 " + IsoObjectUpdateGate.alName() + "：" + rounds + " 輪腳本，每輪有作用的 update 序列與原版逐輪相同、getProcessIsoObjects() 內容與順序相同（不同 " + bad + " 輪）",
+                bad == 0);
+        if (!on && !observe) {
+            expect("第二刀 off：不建子清單、不計數、點燈不入列" + counters,
+                    full == 0 && sub == 0 && resyncs == 0 && IsoObjectUpdateGate.lifeQueuedForTest() == 0
+                    && IsoObjectUpdateGate.activeForTest().isEmpty());
+            return;
+        }
+        boolean periodic = false;
+        for (int i = 1; i < fullRounds.size(); i++) {
+            periodic |= fullRounds.get(i) - fullRounds.get(i - 1) == IsoObjectUpdateGate.FULL_EVERY;
+        }
+        if (on) {
+            expect("第二刀 on：平常走子清單、每 " + IsoObjectUpdateGate.FULL_EVERY + " 輪一次完整輪、非主執行緒 add 與繞過掛點改清單的下一輪走完整輪、別的執行緒點燈加進子清單、比對一致不停用"
+                            + counters,
+                    sub > 1000 && periodic && dirtyFull && resyncFull && resyncs == 2 && IsoObjectUpdateGate.lifeAddedForTest() >= 1
+                    && IsoObjectUpdateGate.mismatchesForTest() == 0 && !IsoObjectUpdateGate.alDisabledForTest());
+        } else {
+            expect("第二刀 observe：每輪都是完整輪（交給原版迴圈的序列與 W73 相同）、每輪比對一致" + counters,
+                    sub == 0 && full == rounds && resyncs == 2 && IsoObjectUpdateGate.lifeAddedForTest() >= 1
+                    && IsoObjectUpdateGate.mismatchesForTest() == 0 && !IsoObjectUpdateGate.alDisabledForTest());
+        }
+        for (World w : new World[]{a, b}) {
+            for (IsoObject o : w.byId.values()) {
+                if (o instanceof Rec rec) rec.onUpdate = null;
+            }
+        }
+
+        // 已知差別一：兩輪之間被點亮、不在尾端的燈——on 的子清單輪排在尾端（只差順序），完整輪後回原位；observe 完全相同。
+        int mid = wallAfter(b, b.list.size() / 2);
+        both(a, b, w -> offThread(() -> ((IsoThumpable) w.byId.get(mid)).setLifeLeft(5f)));
+        String d1 = untilFull(a, b, (x, y, phase, i) -> x.equals(on && phase == 0 ? moveToEnd(y, mid) : y));
+        expect("第二刀已知差別一（兩輪之間點亮的燈）：" + (on ? "子清單輪排在尾端、完整輪後回原位" : "observe 與原版相同") + (d1 == null ? "" : " " + d1),
+                d1 == null && IsoObjectUpdateGate.mismatchesForTest() == 0);
+
+        // 已知差別二：迴圈中途被排在前面的物件點亮的燈——on 子清單輪那一輪不 update、下一輪起在尾端；完整輪的比對不算它缺（不誤停用）。
+        int lighter = -1;
+        for (IsoObject o : b.list) {
+            if (o instanceof Rec) {
+                lighter = b.idOf.get(o);
+                break;
+            }
+        }
+        int lighterId = lighter;
+        int late = wallAfter(b, b.list.indexOf(b.byId.get(lighterId)) + 1);
+        both(a, b, w -> ((Rec) w.byId.get(lighterId)).onUpdate = () -> ((IsoThumpable) w.byId.get(late)).setLifeLeft(5f));
+        String d2 = untilFull(a, b, (x, y, phase, i) -> x.equals(!on || phase > 0 ? y : i == 0 ? minus(y, late) : moveToEnd(y, late)));
+        expect("第二刀已知差別二（迴圈中途點亮的燈）：" + (on ? "當輪不 update、下一輪起在尾端、完整輪後回原位" : "observe 與原版相同")
+                        + "，比對不誤判（mismatches=" + IsoObjectUpdateGate.mismatchesForTest() + "）" + (d2 == null ? "" : " " + d2),
+                d2 == null && IsoObjectUpdateGate.mismatchesForTest() == 0 && !IsoObjectUpdateGate.alDisabledForTest());
+
+        // 心跳欄位（計時幀一定是完整輪）。普查會呼叫 getObjectIndex，這一輪只比清單、不比 update 序列。
+        long f0 = IsoObjectUpdateGate.fullPassesForTest();
+        IsoObjectUpdateGate.forceTimedFrameForTest();
+        IsoObjectUpdateGate.lastBeatLine = null;
+        a.process();
+        b.process();
+        String beat = IsoObjectUpdateGate.lastBeatLine;
+        System.out.println("  beat: " + beat);
+        expect("第二刀心跳：計時幀走完整輪，帶 activeList 模式與子清單計數",
+                beat != null && IsoObjectUpdateGate.fullPassesForTest() == f0 + 1 && a.ids().equals(b.ids())
+                && beat.contains(" activeList=" + (on ? "on" : "observe") + " active=" + IsoObjectUpdateGate.activeForTest().size() + " fullPasses=")
+                && beat.contains(" mismatches=0 resyncs=2 aborted=0 lifeQueued=") && beat.contains(" lifeAdded="));
+
+        if (on) {
+            // 完整輪被例外打斷：中途經 add 掛點加進來的物件只算進預期長度、沒經輪尾補進子清單，下一輪必須重建。
+            int spawner = firstRec(b, false), thrower = next[0]++, born = next[0]++;
+            both(a, b, w -> {
+                Rec x = w.rec(thrower);
+                x.onUpdate = () -> { throw new Boom(); };
+                w.list.add(x);   // 繞過掛點 → 這一輪 resync 走完整輪；它排在最後、在 born 之前丟例外
+                Rec n = w.rec(born);
+                ((Rec) w.byId.get(spawner)).onUpdate = () -> w.add(n);
+            });
+            long full0 = IsoObjectUpdateGate.fullPassesForTest(), ab0 = IsoObjectUpdateGate.abortedForTest();
+            boolean abortFull = abortedRound(a, b) && IsoObjectUpdateGate.fullPassesForTest() == full0 + 1;
+            String e1 = null;
+            List<Integer> fulls = new ArrayList<>();
+            for (int i = 0; i <= IsoObjectUpdateGate.FULL_EVERY + 1 && e1 == null; i++) {
+                long f1 = IsoObjectUpdateGate.fullPassesForTest();
+                a.trace.clear();
+                b.trace.clear();
+                a.process();
+                b.process();
+                if (IsoObjectUpdateGate.fullPassesForTest() > f1) fulls.add(i);
+                if (!a.trace.equals(b.trace) || !a.ids().equals(b.ids()) || !a.trace.contains(born)) {
+                    e1 = "第 " + i + " 輪 A=" + a.trace + " B=" + b.trace;
+                }
+            }
+            expect("第二刀 on 完整輪被例外打斷：下一輪走完整輪重建，中途加入的物件之後每輪都 update、到下一個定期完整輪都與原版相同、比對不誤判"
+                            + " fulls=" + fulls + (e1 == null ? "" : " " + e1),
+                    abortFull && e1 == null && fulls.size() == 2 && fulls.get(0) == 0 && fulls.get(1) == IsoObjectUpdateGate.FULL_EVERY
+                    && IsoObjectUpdateGate.abortedForTest() == ab0 + 1 && IsoObjectUpdateGate.mismatchesForTest() == 0
+                    && !IsoObjectUpdateGate.alDisabledForTest());
+
+            // 子清單輪被例外打斷：下一輪走完整輪，序列與原版相同。
+            int spawner2 = firstRec(b, false), thrower2 = firstRec(b, true), born2 = next[0]++;
+            both(a, b, w -> {
+                Rec n = w.rec(born2);
+                ((Rec) w.byId.get(spawner2)).onUpdate = () -> w.add(n);
+                ((Rec) w.byId.get(thrower2)).onUpdate = () -> { throw new Boom(); };
+            });
+            long sub1 = IsoObjectUpdateGate.subPassesForTest(), ab1 = IsoObjectUpdateGate.abortedForTest();
+            boolean abortSub = abortedRound(a, b) && IsoObjectUpdateGate.subPassesForTest() == sub1 + 1;
+            String e2 = untilFull(a, b, (x, y, phase, i) -> (i > 0 || phase == 1) && x.equals(y) && x.contains(born2));
+            expect("第二刀 on 子清單輪被例外打斷：下一輪走完整輪、序列與原版相同" + (e2 == null ? "" : " " + e2),
+                    abortSub && spawner2 != thrower2 && e2 == null && IsoObjectUpdateGate.abortedForTest() == ab1 + 1
+                    && IsoObjectUpdateGate.mismatchesForTest() == 0 && !IsoObjectUpdateGate.alDisabledForTest());
+        }
+
+        // 偵測：子清單漏一件（模擬 lifeLeft 從沒掛到的地方被改）。
+        Rec victimA = null;
+        for (IsoObject o : a.list) {
+            if (o instanceof Rec rec) victimA = rec;
+        }
+        int victim = victimA.id;
+        IsoObjectUpdateGate.dropActiveForTest(victimA);
+        boolean[] diffSeen = {false};
+        String d3 = untilFull(a, b, (x, y, phase, i) -> {
+            if (on && phase == 0) {
+                diffSeen[0] |= !x.equals(y);
+                return x.equals(minus(y, victim));
+            }
+            return x.equals(y);
+        });
+        if (on) {
+            long sub0 = IsoObjectUpdateGate.subPassesForTest();
+            a.trace.clear();
+            b.trace.clear();
+            a.process();
+            b.process();
+            expect("第二刀 on 漏一件：子清單輪看得到差異（負對照）、完整輪比對抓到並永久停用，之後每輪完整輪且與原版相同"
+                            + (d3 == null ? "" : " " + d3),
+                    d3 == null && diffSeen[0] && IsoObjectUpdateGate.mismatchesForTest() == 1 && IsoObjectUpdateGate.alDisabledForTest()
+                    && IsoObjectUpdateGate.alName().equals("disabled") && IsoObjectUpdateGate.subPassesForTest() == sub0
+                    && a.trace.equals(b.trace));
+        } else {
+            expect("第二刀 observe 漏一件：下一輪比對計數、不停用、行為與原版相同" + (d3 == null ? "" : " " + d3),
+                    d3 == null && IsoObjectUpdateGate.mismatchesForTest() == 1 && !IsoObjectUpdateGate.alDisabledForTest());
+            Rec ghost = a.rec(next[0]++);   // 不在清單裡
+            IsoObjectUpdateGate.injectActiveForTest(ghost);
+            String d4 = untilFull(a, b, (x, y, phase, i) -> x.equals(y));
+            expect("第二刀 observe 多一件：比對計數、不停用、行為與原版相同（ghost 沒被 update）" + (d4 == null ? "" : " " + d4),
+                    d4 == null && IsoObjectUpdateGate.mismatchesForTest() == 2 && !IsoObjectUpdateGate.alDisabledForTest()
+                    && !a.trace.contains(ghost.id));
+        }
     }
 
     // ---- 物件建構 ----

@@ -1425,15 +1425,24 @@ public final class PatchConfig {
                 "zombie/iso/IsoObject", "update", "()V", isoGate, "update"));
         processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
                 "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z", isoGate, "removeAll"));
+        // W73 第二刀（活躍子清單，-Dmdc.isoObjectActiveList 0|off/1|on/2|observe 預設）：迴圈的兩個 ArrayList.size（bci 51、90）
+        // 與唯一 ArrayList.get（bci 67）同形改道，子清單輪回子清單的長度／元素，其餘回真正清單。
+        processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "size", "()I", isoGate, "size"));
+        processIsoObject.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "get", "(I)Ljava/lang/Object;", isoGate, "get"));
         // W75 起頭部改呼叫 IsoObjectRemoveDefer.beginPass（先排空 W75 佇列，再呼叫 W73 beginPass）。
         processIsoObject.headCall = new Patcher.HeadCall(isoRemoveDefer, "beginPass", cellArg);
         processIsoObject.tailCall = new Patcher.TailCall(isoGate, "endPass", cellArg);
-        processIsoObject.expectedHits = 4;   // 兩個改道＋head＋單一 RETURN
+        processIsoObject.expectedHits = 7;   // update／removeAll／size×2／get 改道＋head＋單一 RETURN
         Patcher.MethodOps isoAdd = isoCell.method("addToProcessIsoObject", "(Lzombie/iso/IsoObject;)V");
         // W75 起頭部改呼叫 IsoObjectRemoveDefer.beforeAdd(cell, object)（先 W73 touchAdd，再取消同物件的待移除）。
         isoAdd.headCall = new Patcher.HeadCall(isoRemoveDefer, "beforeAdd",
                 "(Lzombie/iso/IsoCell;Lzombie/iso/IsoObject;)V", new int[]{0, 1});
-        isoAdd.expectedHits = 1;
+        // W73 第二刀：唯一 ArrayList.add（bci 34，Set.add 成功才走到）同形改道，照原版加完再登記子清單。
+        isoAdd.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,
+                "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z", isoGate, "add"));
+        isoAdd.expectedHits = 2;
         Patcher.MethodOps isoRemove = isoCell.method("addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V");
         isoRemove.headCall = new Patcher.HeadCall(isoGate, "touchRemove", cellArg);
         isoRemove.expectedHits = 1;
@@ -1455,6 +1464,14 @@ public final class PatchConfig {
                 "addToProcessIsoObjectRemove", "(Lzombie/iso/IsoObject;)V", isoRemoveDefer, "addToProcessIsoObjectRemove"));
         objRemove.expectedHits = 1;
         patches.add(isoObjectPatch);
+        // W73 第二刀：IsoThumpable.setLifeLeft（aload_0／fload_1／putfield lifeLeft／return）唯一 RETURN 前呼叫
+        // afterLifeLeft，讀寫入後的 lifeLeft，點亮的燈排進子清單佇列。HeadCall 不收 float 參數，所以用尾部呼叫讀欄位。
+        // lifeLeft 另外只有 4 個建構子（寫 -1.0f）與 loadChange（伺服器走不到）寫入，SmokeCheck 鎖住。
+        Patcher.ClassPatch thumpable = new Patcher.ClassPatch("zombie/iso/objects/IsoThumpable");
+        Patcher.MethodOps lifeLeft = thumpable.method("setLifeLeft", "(F)V");
+        lifeLeft.tailCall = new Patcher.TailCall(isoGate, "afterLifeLeft", "(Lzombie/iso/objects/IsoThumpable;)V");
+        lifeLeft.expectedHits = 1;
+        patches.add(thumpable);
         // W75-2：IsoButcherHook 三個 invokevirtual IsoCell.addToProcessIsoObject 同形改道（receiver 前置；docs/patches.md 2ck）。
         // 實測 LoadChunk 執行緒讀檔時建構屠宰鉤（IsoGridSquare.load → factoryFromFileInput → IsoButcherHook.<init>(IsoCell)）
         // 寫清單；非主執行緒排進 W75 同一條 FIFO 佇列（op＝ADD），主執行緒照原版。load 那處只在 GameClient.client 分支，

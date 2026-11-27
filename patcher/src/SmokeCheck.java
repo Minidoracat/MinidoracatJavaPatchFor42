@@ -7289,21 +7289,128 @@ public final class SmokeCheck {
                         + equalsInChain + "）",
                 subclasses.isEmpty() && equalsInChain.isEmpty() && superOf.containsKey(thump));
 
+        // ---- W73 第二刀：活躍子清單（-Dmdc.isoObjectActiveList）----
+        String al = "java/util/ArrayList";
+        List<AbstractInsnNode> alLoopCalls = new ArrayList<>();
+        for (AbstractInsnNode in : vProcess.instructions) {
+            if (in instanceof MethodInsnNode alMi && alMi.owner.equals(al) && (alMi.name.equals("size") || alMi.name.equals("get"))) {
+                alLoopCalls.add(in);
+            }
+        }
+        failed += check("W73 第二刀 vanilla 前提：ProcessIsoObject 恰 2 個 ArrayList.size()、1 個 ArrayList.get(int)，接收者都是 getfield processIsoObject",
+                countExactCalls(vProcess, Opcodes.INVOKEVIRTUAL, al, "size", "()I") == 2
+                && countExactCalls(vProcess, Opcodes.INVOKEVIRTUAL, al, "get", "(I)Ljava/lang/Object;") == 1
+                && alLoopCalls.size() == 3
+                && alLoopCalls.stream().allMatch(in -> {
+                    AbstractInsnNode p = prevReal(in);
+                    if (p instanceof VarInsnNode pv && pv.getOpcode() == Opcodes.ILOAD) p = prevReal(p);
+                    return p instanceof FieldInsnNode pf && pf.getOpcode() == Opcodes.GETFIELD && pf.owner.equals(cell)
+                            && pf.name.equals("processIsoObject");
+                }));
+        MethodNode vAdd = methodFromJar(jar, cell, "addToProcessIsoObject", "(L" + obj + ";)V");
+        AbstractInsnNode alAdd = firstCall(vAdd, Opcodes.INVOKEVIRTUAL, al, "add", "(Ljava/lang/Object;)Z");
+        failed += check("W73 第二刀 vanilla 前提：addToProcessIsoObject 恰 1 個 ArrayList.add，前面是 getfield processIsoObject／aload_1",
+                countExactCalls(vAdd, Opcodes.INVOKEVIRTUAL, al, "add", "(Ljava/lang/Object;)Z") == 1
+                && prevReal(alAdd) instanceof VarInsnNode alA1 && alA1.getOpcode() == Opcodes.ALOAD && alA1.var == 1
+                && prevReal(prevReal(alAdd)) instanceof FieldInsnNode alAf && alAf.getOpcode() == Opcodes.GETFIELD
+                        && alAf.name.equals("processIsoObject"));
+        Map<String, Integer> alListGets = jarWideFieldRefs(jar, Opcodes.GETFIELD, cell, "processIsoObject");
+        Map<String, Integer> alListPuts = jarWideFieldRefs(jar, Opcodes.PUTFIELD, cell, "processIsoObject");
+        Map<String, Integer> alSetGets = jarWideFieldRefs(jar, Opcodes.GETFIELD, cell, "processIsoObjectSet");
+        Map<String, Integer> alSetPuts = jarWideFieldRefs(jar, Opcodes.PUTFIELD, cell, "processIsoObjectSet");
+        failed += check("W73 第二刀 vanilla 前提：processIsoObject 只在 IsoCell 的 <init>（寫）／ProcessIsoObject×4／addToProcessIsoObject／getProcessIsoObjects 存取，"
+                        + "processIsoObjectSet 只在 IsoCell 存取（實際 " + alListGets + alListPuts + alSetGets + alSetPuts + "）",
+                alListGets.equals(Map.of(cell + ".ProcessIsoObject", 4, cell + ".addToProcessIsoObject", 1, cell + ".getProcessIsoObjects", 1))
+                && alListPuts.equals(Map.of(cell + ".<init>", 1))
+                && alSetGets.keySet().stream().allMatch(k -> k.startsWith(cell + "."))
+                && alSetPuts.equals(Map.of(cell + ".<init>", 1)));
+        Map<String, Integer> alLifePuts = jarWideFieldRefs(jar, Opcodes.PUTFIELD, thump, "lifeLeft");
+        boolean alCtorsMinusOne = true;
+        int alCtorPuts = 0;
+        for (MethodNode m : classNodeFromJar(jar, thump).methods) {
+            if (!m.name.equals("<init>")) continue;
+            for (AbstractInsnNode in : m.instructions) {
+                if (in instanceof FieldInsnNode lf && lf.getOpcode() == Opcodes.PUTFIELD && lf.owner.equals(thump) && lf.name.equals("lifeLeft")) {
+                    alCtorPuts++;
+                    alCtorsMinusOne &= prevReal(in) instanceof LdcInsnNode ll && Float.valueOf(-1.0f).equals(ll.cst);
+                }
+            }
+        }
+        MethodNode vSetLife = methodFromJar(jar, thump, "setLifeLeft", "(F)V");
+        AbstractInsnNode[] sl = firstReal(vSetLife, 4);
+        failed += check("W73 第二刀 vanilla 前提：IsoThumpable.lifeLeft 只有 4 個建構子（寫 -1.0f）、setLifeLeft、loadChange 寫入（實際 " + alLifePuts
+                        + "）；setLifeLeft＝aload_0／fload_1／putfield lifeLeft／return",
+                alLifePuts.equals(Map.of(thump + ".<init>", 4, thump + ".setLifeLeft", 1, thump + ".loadChange", 1))
+                && alCtorPuts == 4 && alCtorsMinusOne
+                && realInsnCount(vSetLife) == 4
+                && sl[0] instanceof VarInsnNode sl0 && sl0.getOpcode() == Opcodes.ALOAD && sl0.var == 0
+                && sl[1] instanceof VarInsnNode sl1 && sl1.getOpcode() == Opcodes.FLOAD && sl1.var == 1
+                && sl[2] instanceof FieldInsnNode sl2 && sl2.getOpcode() == Opcodes.PUTFIELD && sl2.name.equals("lifeLeft")
+                && sl[3].getOpcode() == Opcodes.RETURN);
+        // loadChange 是第三個寫入點：只由 ObjectChangePacket.parseObjectChange 呼叫，而它只在 ObjectChangePacket.parse（伺服器不處理這個封包）
+        // 與單機的 SinglePlayerClient 被呼叫。任何一條改變＝伺服器可能在 setLifeLeft 以外點亮燈，子清單會漏，重評。
+        String loadChangeDesc = "(Lzombie/core/properties/IsoObjectChange;Lzombie/core/network/ByteBufferReader;)V";
+        String ocp = "zombie/network/packets/ObjectChangePacket";
+        List<String> alLoadObj = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, obj, "loadChange", loadChangeDesc);
+        List<String> alLoadThump = jarWideCallers(jar, Opcodes.INVOKEVIRTUAL, thump, "loadChange", loadChangeDesc);
+        List<String> alParse = jarWideCallers(jar, Opcodes.INVOKESTATIC, ocp, "parseObjectChange",
+                "(L" + obj + ";Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)L" + obj + ";");
+        ClassNode ocpNode = classNodeFromJar(jar, ocp);
+        Integer ocpHandling = null;
+        if (ocpNode.visibleAnnotations != null) {
+            for (org.objectweb.asm.tree.AnnotationNode an : ocpNode.visibleAnnotations) {
+                if (an.desc.equals("Lzombie/network/PacketSetting;") && an.values != null) {
+                    for (int i = 0; i + 1 < an.values.size(); i += 2) {
+                        if ("handlingType".equals(an.values.get(i))) ocpHandling = (Integer) an.values.get(i + 1);
+                    }
+                }
+            }
+        }
+        failed += check("W73 第二刀 vanilla 前提：IsoObject.loadChange 只由 ObjectChangePacket.parseObjectChange 呼叫（實際 " + alLoadObj + alLoadThump
+                        + "），parseObjectChange 只由 ObjectChangePacket.parse 與 SinglePlayerClient.receiveObjectChange 呼叫（實際 " + alParse
+                        + "），ObjectChangePacket 的 @PacketSetting handlingType 沒有伺服器位元 1（實際 " + ocpHandling + "）",
+                alLoadObj.equals(List.of(ocp + ".parseObjectChange(L" + obj + ";Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)L" + obj + ";",
+                        ocp + ".parseObjectChange(L" + obj + ";Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)L" + obj + ";"))
+                && alLoadThump.isEmpty()
+                && alParse.size() == 2
+                && alParse.get(0).equals(ocp + ".parse(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V")
+                && alParse.get(1).startsWith("zombie/spnetwork/SinglePlayerClient.receiveObjectChange(")
+                && ocpHandling != null && (ocpHandling & 1) == 0);
+
         MethodNode pProcess = method(distJava, cell, "ProcessIsoObject", "()V");
         String defer = "zombie/mdc/IsoObjectRemoveDefer";   // W75 起兩個頭部呼叫改經 W75 helper（再轉呼叫 W73）
-        failed += check("W73 手術後：ProcessIsoObject 的 update／removeAll 1:1 改道、頭部 beginPass（W75 起經 IsoObjectRemoveDefer）、唯一 RETURN 前 endPass、真指令恰 +4",
+        failed += check("W73 手術後：ProcessIsoObject 的 update／removeAll／size×2／get 1:1 改道、頭部 beginPass（W75 起經 IsoObjectRemoveDefer）、唯一 RETURN 前 endPass、真指令恰 +4",
                 countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "update", "(L" + obj + ";)V") == 1
                 && countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z") == 1
+                && countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "size", "(Ljava/util/ArrayList;)I") == 2
+                && countExactCalls(pProcess, Opcodes.INVOKESTATIC, gate, "get", "(Ljava/util/ArrayList;I)Ljava/lang/Object;") == 1
                 && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, obj, "update", "()V") == 0
                 && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 0
+                && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, al, "size", "()I") == 0
+                && countExactCalls(pProcess, Opcodes.INVOKEVIRTUAL, al, "get", "(I)Ljava/lang/Object;") == 0
                 && headCallSlotsOk(pProcess, defer, "beginPass", cellDesc, 0)
                 && tailCallOk(pProcess, gate, "endPass", cellDesc)
                 && realInsnCount(pProcess) == realInsnCount(vProcess) + 4);
-        MethodNode vAdd = methodFromJar(jar, cell, "addToProcessIsoObject", "(L" + obj + ";)V");
         MethodNode pAdd = method(distJava, cell, "addToProcessIsoObject", "(L" + obj + ";)V");
-        failed += check("W73／W75 addToProcessIsoObject 頭部 IsoObjectRemoveDefer.beforeAdd(cell, object)、真指令恰 +3",
+        failed += check("W73／W75 addToProcessIsoObject 頭部 IsoObjectRemoveDefer.beforeAdd(cell, object)、ArrayList.add 1:1 改道 W73 add、真指令恰 +3",
                 headCallSlotsOk(pAdd, defer, "beforeAdd", "(L" + cell + ";L" + obj + ";)V", 0, 1)
+                && countExactCalls(pAdd, Opcodes.INVOKESTATIC, gate, "add", "(Ljava/util/ArrayList;Ljava/lang/Object;)Z") == 1
+                && countExactCalls(pAdd, Opcodes.INVOKEVIRTUAL, al, "add", "(Ljava/lang/Object;)Z") == 0
                 && realInsnCount(pAdd) == realInsnCount(vAdd) + 3);
+        String lifeDesc = "(L" + thump + ";)V";
+        MethodNode pSetLife = method(distJava, thump, "setLifeLeft", "(F)V");
+        failed += check("W73 第二刀手術後：IsoThumpable.setLifeLeft 唯一 RETURN 前 aload_0＋afterLifeLeft、真指令恰 +2；IsoThumpable 其餘方法逐指令不變",
+                tailCallOk(pSetLife, gate, "afterLifeLeft", lifeDesc)
+                && realInsnCount(pSetLife) == realInsnCount(vSetLife) + 2
+                && classNodeFromJar(jar, thump).methods.stream()
+                        .filter(m -> !(m.name + m.desc).equals("setLifeLeft(F)V"))
+                        .allMatch(m -> {
+                            try {
+                                return methodText(m).equals(methodText(method(distJava, thump, m.name, m.desc)));
+                            } catch (Exception e) {
+                                return false;
+                            }
+                        }));
         MethodNode vRem = methodFromJar(jar, cell, "addToProcessIsoObjectRemove", "(L" + obj + ";)V");
         MethodNode pRem = method(distJava, cell, "addToProcessIsoObjectRemove", "(L" + obj + ";)V");
         failed += check("W73 addToProcessIsoObjectRemove 頭部 touchRemove、真指令恰 +2",
@@ -7330,6 +7437,13 @@ public final class SmokeCheck {
         failed += check("W73 helper 契約：removeAll 只呼叫原版 ArrayList.removeAll（off 與量測兩條路各 1）",
                 countExactCalls(method(distJava, gate, "removeAll", "(Ljava/util/ArrayList;Ljava/util/Collection;)Z"),
                         Opcodes.INVOKEVIRTUAL, "java/util/ArrayList", "removeAll", "(Ljava/util/Collection;)Z") == 2);
+        MethodNode alAddHelper = method(distJava, gate, "add", "(Ljava/util/ArrayList;Ljava/lang/Object;)Z");
+        failed += check("W73 第二刀 helper 契約：add 第一個呼叫就是原版 ArrayList.add（真正清單一定先照原版加；另一個 add 是子清單）；"
+                        + "get 只有兩個 ArrayList.get（子清單或真正清單二選一）",
+                countExactCalls(alAddHelper, Opcodes.INVOKEVIRTUAL, al, "add", "(Ljava/lang/Object;)Z") == 2
+                && callOrder(alAddHelper).get(0).equals(al + ".add")
+                && callOrder(method(distJava, gate, "get", "(Ljava/util/ArrayList;I)Ljava/lang/Object;"))
+                        .equals(List.of(al + ".get", al + ".get")));
         return failed;
     }
 
