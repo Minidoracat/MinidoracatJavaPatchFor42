@@ -139,6 +139,26 @@ public final class MdcAnimalProbesTest {
                 (boolean) get(FluidContainer.class, petrolFc, "cacheInvalidated") && (float) get(FluidContainer.class, petrolFc, "amountCache") == 0.0F
                         && ((CountingObject) petrolEntity).fluidUpdates == 0 && MdcAnimalProbes.fluidsHandleForTest());
 
+        // 容量夾值：原版 recalculateCaches 加總後 capacity - amount < 0.001 就把量設成容量；容量 0、有正量汽油的容器原版判空
+        java.lang.invoke.VarHandle fluidsVh = java.lang.invoke.MethodHandles.privateLookupIn(FluidContainer.class, java.lang.invoke.MethodHandles.lookup())
+                .findVarHandle(FluidContainer.class, "fluids", ArrayList.class);
+        boolean clampOk = true;
+        StringBuilder clampSeen = new StringBuilder();
+        for (float cap : new float[]{0.0F, 10.0F}) {
+            FluidContainer fc = entity(1.0F, "Petrol").getFluidContainer();
+            set(FluidContainer.class, fc, "capacity", cap);
+            String probe = MdcAnimalProbes.primaryType(fluidsVh, fc);
+            // 原版：讓快取失效後走真的 recalculateCaches（isEmpty→getAmount），快取有效後再讀 isEmpty
+            set(FluidContainer.class, fc, "cacheInvalidated", true);
+            set(FluidContainer.class, fc, "propertiesCache", new zombie.entity.components.fluids.SealedFluidProperties());
+            set(FluidContainer.class, fc, "color", new zombie.core.Color());
+            set(FluidInstance.class, ((ArrayList<?>) fluidsVh.get(fc)).get(0), "color", new zombie.core.Color());
+            boolean vanillaEmpty = fc.isEmpty();
+            clampSeen.append(" cap=").append(cap).append(" vanillaEmpty=").append(vanillaEmpty).append(" probe=").append(probe);
+            clampOk &= vanillaEmpty == (probe == null) && (cap == 0.0F ? vanillaEmpty : "Petrol".equals(probe));
+        }
+        check("F1 容量夾值與原版 isEmpty 相同：容量 0 有汽油 → 兩邊都判空；容量 10 → 兩邊都不空、探針判汽油（" + clampSeen + "）", clampOk);
+
         // ---- sim ----
         UdpEngine engine = alloc(UdpEngine.class);
         List<UdpConnection> conns = new ArrayList<>();
@@ -384,6 +404,7 @@ public final class MdcAnimalProbesTest {
                 set(FluidContainer.class, fc, "fluids", fluids);
                 set(FluidContainer.class, fc, "canPlayerEmpty", true);
                 set(FluidContainer.class, fc, "amountCache", 1.0F);
+                set(FluidContainer.class, fc, "capacity", 10.0F);
                 set(zombie.entity.Component.class, fc, "owner", o);
             }
             byId[ComponentType.FluidContainer.GetID()] = fc;

@@ -248,7 +248,8 @@ public final class PlayerLosFilter {
         pendingCell = null;
         calls++;
         maybeBeat();
-        if (gridDisabled && !gridReleased) {
+        // 網格停用或刀 1 永久停用都放掉快照（後者之後直接回原版迭代器，不會再走到網格）
+        if ((gridDisabled || disabled) && !gridReleased) {
             releaseGrid();
         }
         if (disabled) {

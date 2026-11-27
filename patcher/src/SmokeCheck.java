@@ -3581,6 +3581,7 @@ public final class SmokeCheck {
                 {w110Door, "setLockedByKey", "(Z)V", "5477d062560a0a1843301bf37d2464ebf4d392f74344aa2f6d9a9177e13893f1"},
                 {w110Door, "setLockedByKey", "(ZZ)V", "c6a86f8e67a2498564fdee3e9bdd91e78808a2a1107bb0217693036cf165f173"},
                 {w110Door, "changeSprite", "(L" + w110Door + ";)V", "eed3ba20b8c671068a79c88a35a529bfb6e36a95081038b95defc25b2d94d03b"},
+                {w110Thump, "setLockedByKey", "(Z)V", "108f2fcaeff8966a1c24930d81f5c34d97e3a742e17cc8442fdc09a0b57e402b"},
                 {w110Thump, "setLockedByKey", "(ZZ)V", "dc2601d279d9c945387c5c8c236fca587732ff9ff38107a09d65335d6be8a466"},
                 {w110Thump, "changeSprite", "(L" + w110Thump + ";)V", "4b4a389d5d1a94cf40b99490cfdfa2c823791ab3938c891da7ad6c3086e4fb04"},
                 {"zombie/network/fields/NetObject", "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
@@ -3606,16 +3607,24 @@ public final class SmokeCheck {
                                 && (f.name.equals("open") && f.desc.equals("Z") || f.name.equals("openSprite") && f.desc.equals(w110Sprite))).count() == 2);
         String w110AllowDesc = "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)Z";
         MethodNode w110Probe = method(distJava, w58Probe, "syncIsoObject", w58ProbeDesc);
-        MethodNode w110Allow = method(distJava, w110Guard, "allow", "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;J)Z");
-        // 主動同步對收包的 IsoDoor（owner 是 IsoDoor）：IsoDoor 的 syncIsoObjectSend 帶整條鏈；不得以 IsoObject 呼叫
+        MethodNode w110Flush = method(distJava, w110Guard, "flushResyncs", "()V");
+        // 主動同步對收包的 IsoDoor（owner 是 IsoDoor）：IsoDoor 的 syncIsoObjectSend 帶整條鏈；不得以 IsoObject 呼叫。
+        // 補同步要帶這一包套用後的狀態：flushResyncs 在原方法之後；原方法不在 try 內（它丟例外時不 flush）
         ClassNode w110GuardNode = classNode(distJava, w110Guard);
-        failed += check("W110 helper 契約：W58 helper 恰呼叫 DoorSyncGuard.allow 1 次、在原方法之前；主動同步恰 1 處、對 IsoDoor 呼叫、不在 try 內",
+        int w110Orig = firstCallIndex(w110Probe, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc);
+        failed += check("W110 helper 契約：W58 helper 恰呼叫 allow 1 次（原方法之前）、flushResyncs 1 次（原方法之後），兩者與原方法都不在 try 內；"
+                        + "主動同步恰 1 處、在 flushResyncs 內、對 IsoDoor 呼叫、在 try 內（handler 型別由下一條鎖）",
                 countExactCalls(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc) == 1
-                        && firstCallIndex(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc)
-                                < firstCallIndex(w110Probe, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc)
+                        && firstCallIndex(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc) < w110Orig
+                        && countExactCalls(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "flushResyncs", "()V") == 1
+                        && firstCallIndex(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "flushResyncs", "()V") > w110Orig
+                        && callsInTry(w110Probe, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 0
+                        && callsInTry(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc) == 0
+                        && callsInTry(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "flushResyncs", "()V") == 0
                         && classWideCalls(w110GuardNode, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 1
                         && classWideCalls(w110GuardNode, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 0
-                        && callsInTry(w110Allow, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 0);
+                        && countExactCalls(w110Flush, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 1
+                        && callsInTry(w110Flush, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 1);
         String w110Log = logHandlerViolations(w110GuardNode);
         failed += check("W110 helper 契約：每個 DebugLog.log 都在 try 內、handler 恰為 RuntimeException＋LinkageError，沒有 Throwable／Error／catch-all" + w110Log,
                 w110Log.isEmpty());
@@ -9600,9 +9609,12 @@ public final class SmokeCheck {
             {"zombie/entity/components/fluids/FluidContainer", "isEmpty", "()Z", "f11f6a4af729f8dc47976ae23297b8611da3986895721a7c73d7c4f592fb9ff7"},
             {"zombie/entity/components/fluids/FluidContainer", "getPrimaryFluid", "()Lzombie/entity/components/fluids/Fluid;", "eb8f2a8ec3e56d9d5560143a0d0bbd7404a36e59fe837414362905c8f097eb5e"},
             {"zombie/entity/components/fluids/Fluid", "getFluidTypeString", "()Ljava/lang/String;", "9c5e24f4a1b1f5a0e515cd727223e8884359cdccdb726797ae07235d4637e743"},
-            // 探針自己算 isEmpty＋primary 時只呼叫這兩個 getter：本體只有 getfield＋return（不重算快取）
+            // 探針自己算 isEmpty＋primary 時只呼叫這幾個 getter：本體只有 getfield＋return（不重算快取）
             {"zombie/entity/components/fluids/FluidInstance", "getAmount", "()F", "ce761074fc071ffc27d9e34be8f2b27ecff969d8137f3997e28d8e93c52e4977"},
             {"zombie/entity/components/fluids/FluidInstance", "getFluid", "()Lzombie/entity/components/fluids/Fluid;", "e0df8b8219caa7e57bec601afdd9602c02da3496b000fe950691fd28a0fdf652"},
+            {"zombie/entity/components/fluids/FluidContainer", "getCapacity", "()F", "0221a05215138da71b93498ae6248fa144237b8b8c2c54c710959603f3e60fd0"},
+            // 探針照抄的加總順序（由尾到頭）與容量夾值（capacity - amount < 0.001F → amount = capacity）
+            {"zombie/entity/components/fluids/FluidContainer", "recalculateCaches", "(ZZ)V", "6f2a3731d700ac2b9a1104c1133363e412d7611d7821159f282bd5bda880e5d5"},
             {"zombie/iso/weather/ClimateManager", "getPrecipitationIntensity", "()F", "76ef2a89be20e37b51d2a91b50a4da16798aa14bd8e7a6d9a5e024a77c786846"},
     };
 

@@ -26,7 +26,8 @@ import zombie.iso.IsoObject;
  * 簿記全部在 try 內，例外只計 {@code anomalies}；原方法在 try 外呼叫，原版例外原樣上拋。
  * kill switch {@code -Dmdc.syncIsoObjectProbe=0|off}：只呼叫原方法，不記帳也不印。
  * W110 {@link DoorSyncGuard}（2dr）掛在 record 之後、原方法之前，開關 {@code -Dmdc.doorSyncGuard} 與本探針互相獨立；
- * 它回 false（enforce 丟包）時不呼叫原方法。
+ * 它回 false（enforce 丟包）時不呼叫原方法。原方法正常返回後（或丟包時）才 {@link DoorSyncGuard#flushResyncs} 送出排隊的主動同步，
+ * 讓補同步帶的是套用這一包之後的狀態；原方法丟例外時不送，佇列留到下一包。
  */
 public final class SyncIsoObjectProbe {
     static final boolean ENABLED = parseEnabled(System.getProperty("mdc.syncIsoObjectProbe"));
@@ -91,6 +92,7 @@ public final class SyncIsoObjectProbe {
         if (DoorSyncGuard.allow(obj, remote, connection, bb)) {
             obj.syncIsoObject(remote, state, connection, bb);
         }
+        DoorSyncGuard.flushResyncs();
     }
 
     static void record(IsoObject obj, byte state, UdpConnection connection, long now) {

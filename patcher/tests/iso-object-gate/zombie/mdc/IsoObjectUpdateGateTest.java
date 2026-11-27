@@ -226,11 +226,19 @@ public final class IsoObjectUpdateGateTest {
                 audits == 2 && skips == 8190 && !IsoObjectUpdateGate.disabledForTest());
 
         // 比對不一致（模擬 TIS 讓 update 寫欄位）：永久停用，之後全照原版。
+        boolean heldBefore = !IsoObjectUpdateGate.activeForTest().isEmpty();
         Object[] before = IsoObjectUpdateGate.snapshot(wall);
         setField(IsoThumpable.class, wall, "lastUpdateHours", 123f);
         IsoObjectUpdateGate.auditAfter(wall, before);
         expect("on：抽樣比對不一致即停用、fallback=1", IsoObjectUpdateGate.disabledForTest()
                 && IsoObjectUpdateGate.fallbacksForTest() == 1);
+        boolean heldAtDisable = !IsoObjectUpdateGate.activeForTest().isEmpty();
+        IsoCell cell = raw(IsoCell.class);
+        IsoObjectUpdateGate.beginPass(cell);
+        boolean released = IsoObjectUpdateGate.activeForTest().isEmpty();
+        IsoObjectUpdateGate.endPass(cell);
+        expect("on：停用前子清單有物件（" + heldBefore + "）、停用當下不放（可能在子清單輪中途，" + heldAtDisable + "），下一輪開始時放掉（" + released + "）",
+                heldBefore && heldAtDisable && released);
         long skips1 = IsoObjectUpdateGate.skipsForTest();
         Probe p = raw(Probe.class);
         IsoObjectUpdateGate.update(wall);

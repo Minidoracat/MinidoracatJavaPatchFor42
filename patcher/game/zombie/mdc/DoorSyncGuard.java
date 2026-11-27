@@ -40,10 +40,12 @@ import zombie.iso.sprite.IsoSprite;
  * <p><b>模式</b> {@code -Dmdc.doorSyncGuard=off|observe|enforce}（預設 observe，和 {@code -Dmdc.syncIsoObjectProbe} 互相獨立）：
  * observe 只計數、還原 position、照原樣呼叫原方法；enforce 對 {@code same} 只寫 {@code lastPlayerOnlineId}、不呼叫原方法，
  * 隔離開始那一包丟掉並讓伺服器對這扇門主動同步一次（{@code IsoDoor} 的同步帶整條鏈），隔離期間這個 key 的包一律丟掉；
- * 隔離到期時若期間丟過包、門還在世界上，再主動同步一次（{@code resyncs}），補上被丟掉的最後狀態。
+ * 隔離到期時若期間丟過包，再主動同步一次（{@code resyncs}），讓被丟包的客戶端回到伺服器現況；隔離期間被丟掉的改動不套用、會被蓋回。
+ * 主動同步排進佇列，由 {@link #flushResyncs} 在原方法套用這一包之後送出；送出當下再用世界查回確認門還在原格子上，
+ * 每扇門各自隔離失敗（計 {@code resyncFailed}、不重送）。
  *
- * <p>只在主執行緒被呼叫，不加鎖。分類與記錄的 RuntimeException／LinkageError 只計 anomalies（短包的
- * BufferUnderflowException 計 malformed）、還原 position、照原樣；Error 照常外拋；原方法與主動同步不在 try 內。
+ * <p>只在主執行緒被呼叫，不加鎖。分類、記錄與主動同步的 RuntimeException／LinkageError 只計 anomalies（短包的
+ * BufferUnderflowException 計 malformed）、還原 position、照原樣；Error 照常外拋；原方法不在 try 內。
  */
 public final class DoorSyncGuard {
     static final int OFF = 0;
@@ -112,10 +114,12 @@ public final class DoorSyncGuard {
     private static int trackCount;
     private static int quarantinedCount;
     private static IsoDoor[] resync = new IsoDoor[4];
+    /** 和 resync 平行：true＝到期補同步（成功才計 resyncs），false＝隔離開始那一包的主動同步。 */
+    private static boolean[] resyncExpiry = new boolean[4];
     private static int resyncCount;
     private static IsoObject[] parts = new IsoObject[16];
-    private static long doorRemote, same, sameSkipped, other, flip, quarantines, dropped, wouldDrop, resyncs, overflow, malformed,
-            anomalies;
+    private static long doorRemote, same, sameSkipped, other, flip, quarantines, dropped, wouldDrop, resyncs, resyncFailed, overflow,
+            malformed, anomalies;
     private static int maxFlipsPerSec;
     private static long lastBeatNs;
     private static boolean announced;
@@ -134,7 +138,7 @@ public final class DoorSyncGuard {
         };
     }
 
-    /** 回 true＝呼叫端照原樣呼叫原方法。enforce 丟包時回 false；要主動同步的門在本方法內同步（不在 try 內）。 */
+    /** 回 true＝呼叫端照原樣呼叫原方法。enforce 丟包時回 false；要主動同步的門只排進佇列，呼叫端在原方法之後呼叫 {@link #flushResyncs}。 */
     public static boolean allow(IsoObject obj, boolean remote, UdpConnection connection, ByteBufferReader bb) {
         return MODE == OFF || allow(obj, remote, connection, bb, System.nanoTime());
     }
@@ -175,13 +179,35 @@ public final class DoorSyncGuard {
                 pass = false;
             }
         }
-        // 主動同步（隔離開始的這扇門、到期補同步的門）：對 IsoDoor 本身同步，它的 syncIsoObjectSend 帶整條鏈
-        while (resyncCount > 0) {
-            IsoDoor d = resync[--resyncCount];
-            resync[resyncCount] = null;
-            d.syncIsoObject(false, (byte) 0, null, null);
-        }
         return pass;
+    }
+
+    /**
+     * 送出排隊的主動同步；W58 helper 在原方法套用這一包之後呼叫（原方法丟例外時不呼叫，佇列留到下一包）。
+     * 對 IsoDoor 本身同步，它的 syncIsoObjectSend 帶整條鏈。送出當下用世界查回確認門還在原格子上；
+     * 每扇門各自 try，失敗計 resyncFailed、不重送，不影響其他門。
+     */
+    public static void flushResyncs() {
+        while (resyncCount > 0) {
+            int i = --resyncCount;
+            IsoDoor d = resync[i];
+            boolean expiry = resyncExpiry[i];
+            resync[i] = null;
+            resyncExpiry[i] = false;
+            try {
+                IsoGridSquare sq = d.square;
+                if (sq == null || IsoWorld.instance.currentCell.getGridSquare(sq.x, sq.y, sq.z) != sq || d.getObjectIndex() == -1) {
+                    continue;
+                }
+                d.syncIsoObject(false, (byte) 0, null, null);
+                if (expiry) {
+                    resyncs++;
+                }
+            } catch (RuntimeException | LinkageError e) {
+                resyncFailed++;
+                anomaly("resync", e);
+            }
+        }
     }
 
     /** 預讀並分類；回 PASS／SKIP。PASS 時呼叫端還原 position。 */
@@ -298,7 +324,7 @@ public final class DoorSyncGuard {
             report(t, now);
             if (ACTIVE == ENFORCE) {
                 dropped++;
-                queueResync(door);
+                queueResync(door, false);
                 return SKIP;
             }
             wouldDrop++;
@@ -312,7 +338,7 @@ public final class DoorSyncGuard {
         return PASS;
     }
 
-    /** 到期的隔離解除；期間丟過包、門還在世界上的排進主動同步（同一扇門只排一次）。只在有隔離中的紀錄時被呼叫。 */
+    /** 到期的隔離解除；期間丟過包的排進到期補同步（同一扇門只排一次；門還在不在世界上由 flushResyncs 送出當下查）。只在有隔離中的紀錄時被呼叫。 */
     private static void expire(long now) {
         for (int i = 0; i < trackCount; i++) {
             Track t = tracks[i];
@@ -321,25 +347,26 @@ public final class DoorSyncGuard {
             }
             t.quarantined = false;
             quarantinedCount--;
-            IsoDoor d = t.door;
-            if (t.droppedDuring && d.square != null && d.getObjectIndex() != -1 && queueResync(d)) {
-                resyncs++;
+            if (t.droppedDuring) {
+                queueResync(t.door, true);
             }
             t.droppedDuring = false;
         }
     }
 
-    private static boolean queueResync(IsoDoor d) {
+    private static void queueResync(IsoDoor d, boolean expiry) {
         for (int i = 0; i < resyncCount; i++) {
             if (resync[i] == d) {
-                return false;
+                resyncExpiry[i] |= expiry;
+                return;
             }
         }
         if (resyncCount == resync.length) {
             resync = Arrays.copyOf(resync, resyncCount * 2);
+            resyncExpiry = Arrays.copyOf(resyncExpiry, resyncCount * 2);
         }
+        resyncExpiry[resyncCount] = expiry;
         resync[resyncCount++] = d;
-        return true;
     }
 
     /** 同 NetObject.getObject 的查法，但取不到時不印 warn（原版稍後會再查一次並自己印）。 */
@@ -392,7 +419,7 @@ public final class DoorSyncGuard {
         trackCount = kept;
     }
 
-    /** 進入隔離時印一行；同一個 key 10 秒最多一行。 */
+    /** 進入隔離時印一行；同一筆仍在追蹤中的紀錄 10 秒最多一行（紀錄被清掉後重建就重新計）。 */
     private static void report(Track t, long now) {
         if (t.everLogged && now - t.lastLogNs < LOG_GAP_NS) {
             return;
@@ -433,7 +460,7 @@ public final class DoorSyncGuard {
         prune(now, IDLE_NS);
         String line = TAG + head + "mode=" + modeName() + " doorRemote=" + doorRemote + " same=" + same
                 + " sameSkipped=" + sameSkipped + " other=" + other + " flip=" + flip + " quarantines=" + quarantines + " dropped=" + dropped
-                + " wouldDrop=" + wouldDrop + " resyncs=" + resyncs + " maxFlipsPerSec=" + maxFlipsPerSec + " tracked=" + trackCount
+                + " wouldDrop=" + wouldDrop + " resyncs=" + resyncs + " resyncFailed=" + resyncFailed + " maxFlipsPerSec=" + maxFlipsPerSec + " tracked=" + trackCount
                 + " overflow=" + overflow + " malformed=" + malformed + " anomalies=" + anomalies;
         maxFlipsPerSec = 0;
         try {
@@ -485,6 +512,10 @@ public final class DoorSyncGuard {
 
     static long resyncsForTest() {
         return resyncs;
+    }
+
+    static long resyncFailedForTest() {
+        return resyncFailed;
     }
 
     static long overflowForTest() {

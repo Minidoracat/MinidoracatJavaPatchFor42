@@ -165,27 +165,34 @@ public final class MdcAnimalProbes {
     }
 
     /**
-     * 同原版 {@code isEmpty}＋{@code getPrimaryFluid} 的結果，但不碰快取：全部量加總為 0 視為空（量不為負，加總順序不影響），primary＝第一個、
-     * 後面嚴格大於才換。只呼叫無副作用的 getter（javap 42.22：{@code FluidInstance.getAmount／getFluid}、{@code Fluid.getFluidTypeString}
-     * 都只有 getfield＋return；{@code getRainCatcher}／{@code canPlayerEmpty} 只讀 owner、item、spriteGrid 與自己的欄位）。
+     * 同原版 {@code isEmpty}＋{@code getPrimaryFluid} 的結果，但不碰快取：照 {@code recalculateCaches(ZZ)} 由尾到頭加總量，
+     * 再套原版的容量夾值（{@code getCapacity() - 總量 < 0.001F} 時總量＝容量；容量 0 的容器因此一律算空），總量為 0 視為空；
+     * primary＝第一個、後面嚴格大於才換。只呼叫無副作用的 getter（javap 42.22：{@code FluidInstance.getAmount／getFluid}、
+     * {@code FluidContainer.getCapacity}、{@code Fluid.getFluidTypeString} 都只有 getfield＋return；{@code getRainCatcher}／{@code canPlayerEmpty}
+     * 只讀 owner、item、spriteGrid 與自己的欄位）。
      */
     static String primaryType(VarHandle fluids, FluidContainer fc) {
         @SuppressWarnings("unchecked")
         ArrayList<FluidInstance> list = (ArrayList<FluidInstance>) fluids.get(fc);
-        FluidInstance best = null;
         float total = 0.0F;
+        for (int i = list.size() - 1; i >= 0; i--) {
+            total += list.get(i).getAmount();
+        }
+        float capacity = fc.getCapacity();
+        if (capacity - total < 0.001F) {
+            total = capacity;
+        }
+        if (total == 0.0F) {
+            return null;
+        }
+        FluidInstance best = null;
         for (int i = 0; i < list.size(); i++) {
             FluidInstance fi = list.get(i);
-            float a = fi.getAmount();
-            total += a;
-            if (best == null || a > best.getAmount()) {
+            if (best == null || fi.getAmount() > best.getAmount()) {
                 best = fi;
             }
         }
-        if (total == 0.0F || best == null) {
-            return null;
-        }
-        Fluid f = best.getFluid();
+        Fluid f = best == null ? null : best.getFluid();
         return f == null ? null : f.getFluidTypeString();
     }
 

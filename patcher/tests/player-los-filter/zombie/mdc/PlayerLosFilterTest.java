@@ -681,6 +681,7 @@ public final class PlayerLosFilterTest {
                 skippedB += sawB ? 0 : 1;
             }
         }
+        boolean gridHeldAtDisable = PlayerLosFilter.gridHeldForTest();
         long[] c = PlayerLosFilter.countersForTest();
         OUT.println("  violation：第 " + calls + " 次呼叫抽到漂移下的比對（其間過濾 " + filtered + " 次、原版計時 " + plainN + " 次、不漂移的比對 "
                 + quietAudits + " 次）");
@@ -701,6 +702,9 @@ public final class PlayerLosFilterTest {
         String after = run(world, Call.plain());
         expect("停用後回原版迭代器：engaged 不再增加、同樣的漂移下原版處理到 B",
                 PlayerLosFilter.countersForTest()[1] == engaged && after.startsWith("thrown=- ") && EVENTS.contains("tzsp " + id(b)));
+        expect("刀 1 停用那次迭代正常結束時網格快照仍在（" + gridHeldAtDisable + "，放掉延到下一次 iterator），下一次呼叫後 static 欄位不再指到快照（"
+                        + !PlayerLosFilter.gridHeldForTest() + "）",
+                gridHeldAtDisable && !PlayerLosFilter.gridHeldForTest());
         OUT.println("  " + PlayerLosFilter.beatLine());
     }
 

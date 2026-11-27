@@ -376,7 +376,7 @@ public final class IsoObjectUpdateGate {
     }
 
     /**
-     * 永久停用時放掉子清單持有的物件參照。呼叫點只在輪首（drainLit）與完整輪輪尾（finishFull／rebuild），
+     * 永久停用時放掉子清單持有的物件參照。呼叫點只在輪首（drainLit、beginPass 看到第一刀已停用）與完整輪輪尾（finishFull／rebuild），
      * 都不在子清單輪中途，size／get 不會拿到換掉的清單。
      */
     private static void alRelease() {
@@ -427,6 +427,10 @@ public final class IsoObjectUpdateGate {
             aborted++;
             alDirty = true;
             fresh.clear();
+        }
+        // 第一刀永久停用後 live() 恆 false、不會再走到 rebuild：上一輪已結束，在這裡放掉還握著的子清單一次
+        if (disabled && (built || tracked != null)) {
+            alRelease();
         }
         passState = BEGUN;
         collecting = false;
