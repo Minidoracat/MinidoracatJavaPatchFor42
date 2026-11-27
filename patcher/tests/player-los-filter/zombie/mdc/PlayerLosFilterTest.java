@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.Stack;
 
 import zombie.GameTime;
+import zombie.MovingObjectUpdateScheduler;
 import zombie.characters.IsoPlayer;
 import zombie.characters.IsoSurvivor;
 import zombie.characters.IsoZombie;
@@ -44,7 +45,7 @@ import zombie.network.ServerLOS;
 import zombie.vehicles.BaseVehicle;
 
 /**
- * W83 PlayerLosFilter 行為測試。用法：{@code PlayerLosFilterTest vanilla|off|observe|on|violation <trace>}，每種一個 JVM，
+ * W83 PlayerLosFilter 行為測試。用法：{@code PlayerLosFilterTest vanilla|off|observe|on|violation|phase50|phase64|grid-off|grid-observe|grid-on <trace>}，每種一個 JVM，
  * 全部帶 {@code -XX:hashCode=2}（identity hash 固定，HashSet 迭代順序在兩個 JVM 之間相同）與 {@code -XX:-OmitStackTraceInFastThrow}
  * （C2 熱路徑的 NPE 不換成沒有訊息的預建例外，例外訊息才逐行可比）。
  *
@@ -67,6 +68,9 @@ public final class PlayerLosFilterTest {
     static final IdentityHashMap<Object, Integer> IDS = new IdentityHashMap<>();
     static Object hookOn;
     static Runnable hook;
+    /** 刀 3 網格開著時，測試世界的 objectList 用 W47 的 ObjectSet（網格靠它的版本計數；迭代順序與 HashSet 相同）。 */
+    static boolean useObjectSet;
+    static String lastKind;
 
     private static Field PLAYERS_MAIN;
     private static Constructor<?> PD_NEW;
@@ -110,7 +114,7 @@ public final class PlayerLosFilterTest {
     private static void patchedChecks(String mode, Path trace, ByteArrayOutputStream log) throws Exception {
         int want = switch (mode) {
             case "off" -> PlayerLosFilter.MODE_OFF;
-            case "on", "violation", "phase50", "phase64" -> PlayerLosFilter.MODE_ON;
+            case "on", "violation", "phase50", "phase64", "grid-off", "grid-observe", "grid-on" -> PlayerLosFilter.MODE_ON;
             case "observe" -> PlayerLosFilter.MODE_OBSERVE;
             default -> throw new IllegalArgumentException(mode);
         };
@@ -130,6 +134,15 @@ public final class PlayerLosFilterTest {
         expect("測試用固定種子（-Dmdc.playerLosFilter.seed=" + seedProp + "）", seedProp != null
                 && PlayerLosFilter.SEED == Long.parseLong(seedProp.trim()));
         expect("反射取得 ServerLOS.playersMain／PlayerData 欄位與 BusyInMain", PlayerLosFilter.reflectForTest().equals("ok"));
+        int wantGrid = switch (mode) {
+            case "off", "observe", "grid-off" -> PlayerLosFilter.MODE_OFF;
+            case "grid-on" -> PlayerLosFilter.MODE_ON;
+            default -> PlayerLosFilter.MODE_OBSERVE;
+        };
+        expect("網格模式（-Dmdc.playerLosGrid=" + System.getProperty("mdc.playerLosGrid") + "）：只在過濾 on 時有作用、沒設是 observe",
+                PlayerLosFilter.GRID == wantGrid);
+        useObjectSet = PlayerLosFilter.GRID != PlayerLosFilter.MODE_OFF;
+        expect("網格開著時測試清單是 W47 ObjectSet", !useObjectSet || AnimalLosIndex.wrapObjectList(new HashSet<>()) instanceof AnimalLosIndex.ObjectSet);
         if (mode.equals("violation")) {
             violation(log);
             return;
@@ -182,8 +195,12 @@ public final class PlayerLosFilterTest {
                 checks > 0 && plainLoops > 0 && plainLoops <= plains && auditLoops > 0 && auditLoops <= audits);
         expect("objAvg 的分母只含過濾＋比對迴圈：略過 " + (objSum - keepSum) + "／" + objSum + "（keep>0 且略過 ≥ 1/3）",
                 keepSum > 0 && (objSum - keepSum) * 3 >= objSum);
+        long gridLoops = PlayerLosFilter.gridCountersForTest()[3];
         if (mode.equals("observe")) {
             expect("observe：沒有過濾迴圈", loops == 0);
+        } else if (PlayerLosFilter.GRID == PlayerLosFilter.MODE_ON) {
+            expect("on＋網格 on：其餘呼叫都走網格（網格迴圈 " + gridLoops + "，engaged−抽樣 " + (engaged - audits - plains) + "）、沒有刀 1 過濾迴圈",
+                    loops == 0 && gridLoops > 0 && gridLoops <= engaged - audits - plains);
         } else {
             expect("on：其餘呼叫都過濾（過濾迴圈 " + loops + "，engaged−抽樣 " + (engaged - audits - plains) + "）",
                     loops > 0 && loops <= engaged - audits - plains);
@@ -191,12 +208,228 @@ public final class PlayerLosFilterTest {
         samplingProbe(mode, rng);
         expect("首次生效行：模式、reflect=ok、kill switch 與抽樣說明", logText.contains("[MinidoracatJavaPatch][PlayerLosFilter] 首次生效")
                 && logText.contains("reflect=ok") && logText.contains("0|off") && logText.contains("各以 1/64 隨機抽比對")
-                && logText.contains("mode=" + mode));
+                && logText.contains("mode=" + (want == PlayerLosFilter.MODE_ON ? "on" : "observe")) && logText.contains("-Dmdc.playerLosGrid="));
         String beat = PlayerLosFilter.beatLine();
-        expect("beat 欄位齊全", beat.matches("mode=\\w+ calls=\\d+ engaged=\\d+ fallback\\[notBusy=\\d+ noData=\\d+ reflect=\\d+ thread=\\d+\\]"
+        String gridLabel = PlayerLosFilter.GRID == PlayerLosFilter.MODE_OFF ? "off" : PlayerLosFilter.GRID == PlayerLosFilter.MODE_ON ? "on" : "observe";
+        expect("beat 欄位齊全（grid=" + gridLabel + "）", beat.matches("mode=\\w+ calls=\\d+ engaged=\\d+ fallback\\[notBusy=\\d+ noData=\\d+ reflect=\\d+ thread=\\d+\\]"
                 + " objAvg=\\d+ keepAvg=\\d+ skipAvg=\\d+ loopUsAvg=\\d+/\\d+/\\d+ audits=\\d+ plains=\\d+ mismatches=\\d+ disabled=false"
-                + " anomalies=\\d+"));
+                + " anomalies=\\d+ grid=" + gridLabel + " snapshots=\\d+ snapUsAvg=\\d+ candAvg=\\d+ gridLoops=\\d+ gridLoopUsAvg=\\d+ gridMismatches=0"));
         OUT.println("  beat 範例：[MinidoracatJavaPatch][PlayerLosFilter] beat " + beat);
+        if (want == PlayerLosFilter.MODE_ON) {
+            gridChecks(rng, log);
+        }
+    }
+
+    // ---- 刀 3 網格 ----
+
+    /**
+     * 直接呼叫 getCell／iterator（不跑 updateLOS 本體），照同一種子預測每次抽籤，交出的序列必須和測試裡獨立重寫的刀 1 判斷逐件相同、
+     * 順序相同：快照後同一幀內移動不超過 MARGIN、沒有格子的物件之後拿到格子、objectList 增減、換幀重建、PlayerData 落後使自己在網格外、
+     * 非 IsoMovingObject 元素；最後移動超過 MARGIN：on 在比對前會漏掉它，比對抓到後本次啟動停用網格、之後等於刀 1；
+     * observe 序列始終等於刀 1、只計數；off 不建快照。
+     */
+    private static void gridChecks(Rng rng, ByteArrayOutputStream log) throws Exception {
+        int grid = PlayerLosFilter.GRID;
+        boolean off = grid == PlayerLosFilter.MODE_OFF;
+        boolean on = grid == PlayerLosFilter.MODE_ON;
+        long[] g0 = PlayerLosFilter.gridCountersForTest();
+        expect("網格：前面的情境零不一致、未停用" + (off ? "、off 不建快照也不收集候選" : "、建過快照（" + g0[0] + "）"),
+                g0[4] == 0 && !PlayerLosFilter.gridDisabledForTest() && (off ? g0[0] == 0 && g0[1] == 0 && g0[3] == 0 : g0[0] > 0 && g0[1] > 0));
+        Field fc = MovingObjectUpdateScheduler.class.getDeclaredField("frameCounter");
+        fc.setAccessible(true);
+        World w = new World(viewer(500.5F, 500.5F, 0), 500, 500, 0);
+        int minX = 500 - 48;
+        for (int i = 0; i < 6; i++) {
+            w.add(w.zombie(470 + i * 7, 480 + i * 3, 0, false, true));
+        }
+        for (int i = 0; i < 4; i++) {
+            w.add(w.zombie(minX - 4 - i * 3, 500, 0, false, true));
+        }
+        for (int i = 0; i < 60; i++) {
+            w.add(w.zombie(100 + i * 5, 100 + i * 3, 0, false, true));
+        }
+        IsoZombie mv = w.zombie(minX - 20, 500, 0, false, true);
+        IsoZombie ns = w.zombie(490, 490, 0, true, true);
+        IsoZombie far = w.zombie(200, 500, 0, false, true);
+        w.add(mv);
+        w.add(ns);
+        w.add(far);
+        IsoPhysicsObject phys = alloc(IsoPhysicsObject.class);
+        w.position(phys, 500, 501, 0, false);
+        w.add(phys);
+        BaseVehicle car = alloc(BaseVehicle.class);
+        w.position(car, 501, 500, 0, false);
+        w.add(car);
+        w.add(w.viewer);
+        w.extras.add(null);
+        w.extras.add("not-a-moving-object");
+        w.install(true);
+        int size = w.set.size();
+        int[] bad = new int[1];
+        int[] draws = new int[3];
+
+        // 1. 基本（含 null、非 IsoMovingObject、physics、車輛、自己）：建一次快照，候選比整份清單少很多
+        long[] a = PlayerLosFilter.gridCountersForTest();
+        steps(w, rng, on, "基本", bad, draws, 200);
+        long[] b = PlayerLosFilter.gridCountersForTest();
+        long collects = b[1] - a[1];
+        long wantCollects = on ? draws[0] + draws[2] : off ? 0 : draws[0];
+        long wantLoops = on ? draws[2] : off ? 0 : draws[0];
+        expect("網格基本（200 次：比對 " + draws[0] + "、原版計時 " + draws[1] + "、其餘 " + draws[2] + "）：序列與刀 1 逐件相同（差 " + bad[0] + "）；快照 "
+                        + (b[0] - a[0]) + " 次、候選收集 " + collects + " 次（預期 " + wantCollects + "）、網格迴圈 " + (b[3] - a[3]) + "（預期 " + wantLoops + "）",
+                bad[0] == 0 && draws[0] > 0 && draws[2] > 0 && b[0] - a[0] == (off ? 0 : 1) && collects == wantCollects && b[3] - a[3] == wantLoops);
+        if (!off) {
+            long avgCand = (b[2] - a[2]) / Math.max(1, collects);
+            expect("候選平均 " + avgCand + " 個（清單 " + size + " 個）：只含視窗外擴 MARGIN 的網格＋每次都看＋自己", avgCand > 0 && avgCand * 3 < size);
+        }
+
+        // 2. 快照後同一幀內移動不超過 MARGIN：從視窗外 20 格移進視窗，快照不重建也照樣交出
+        w.position(mv, minX + 5, 500, 0, false);
+        a = PlayerLosFilter.gridCountersForTest();
+        steps(w, rng, on, "移動 25 格", bad, draws, 200);
+        b = PlayerLosFilter.gridCountersForTest();
+        expect("快照後移動 25 格（快照在視窗外 20 格，≤ MARGIN " + PlayerLosFilter.MARGIN + "）進視窗：快照沒重建、序列仍與刀 1 相同（差 " + bad[0] + "）",
+                bad[0] == 0 && b[0] == a[0] && b[4] == 0);
+
+        // 3. 沒有格子的物件之後拿到格子（視窗內）
+        setField(ns, "current", square(490, 490, 0));
+        steps(w, rng, on, "拿到格子", bad, draws, 100);
+        expect("快照時沒有格子、之後在視窗內拿到格子：每次都看，序列與刀 1 相同（差 " + bad[0] + "）", bad[0] == 0);
+
+        // 4. objectList 增、減、同大小換成員：各重建一次
+        a = PlayerLosFilter.gridCountersForTest();
+        w.set.add(w.zombie(495, 505, 0, false, true));
+        steps(w, rng, on, "加入", bad, draws, 64);
+        w.set.remove(w.order.get(0));
+        steps(w, rng, on, "移除", bad, draws, 64);
+        w.set.remove(w.order.get(1));
+        w.set.add(w.zombie(505, 495, 0, false, true));
+        steps(w, rng, on, "同大小換成員", bad, draws, 64);
+        b = PlayerLosFilter.gridCountersForTest();
+        expect("objectList 加入、移除、同大小換成員：快照各重建一次（" + (b[0] - a[0]) + "）、序列與刀 1 相同（差 " + bad[0] + "）",
+                bad[0] == 0 && b[0] - a[0] == (off ? 0 : 3));
+
+        // 5. 換幀重建
+        a = PlayerLosFilter.gridCountersForTest();
+        fc.setLong(MovingObjectUpdateScheduler.instance, fc.getLong(MovingObjectUpdateScheduler.instance) + 1);
+        steps(w, rng, on, "換幀", bad, draws, 10);
+        b = PlayerLosFilter.gridCountersForTest();
+        expect("換幀：快照重建一次（" + (b[0] - a[0]) + "）、序列與刀 1 相同（差 " + bad[0] + "）", bad[0] == 0 && b[0] - a[0] == (off ? 0 : 1));
+
+        // 6. PlayerData 落後（LOS 執行緒的位置在 200 格外）：自己不在網格範圍內也照樣交出
+        World lag = new World(w.viewer, 700, 500, 0);
+        for (int i = 0; i < 5; i++) {
+            lag.add(lag.zombie(690 + i, 500, 0, false, true));
+        }
+        lag.add(lag.zombie(505, 500, 0, false, true));
+        lag.add(w.viewer);
+        lag.install(true);
+        steps(lag, rng, on, "自己在網格外", bad, draws, 100);
+        expect("PlayerData 落後 200 格、自己在候選網格外：自己照樣交出，序列與刀 1 相同（差 " + bad[0] + "）", bad[0] == 0);
+        steps(w, rng, on, "換回", bad, draws, 10);
+
+        // 7. 快照後同一幀內移動超過 MARGIN（280 格）：on 在比對前漏掉，比對抓到後本次啟動停用網格、之後等於刀 1
+        w.position(far, 480, 500, 0, false);
+        a = PlayerLosFilter.gridCountersForTest();
+        int missed = 0;
+        int after = 0;
+        int auditsSeen = 0;
+        int calls = 0;
+        while (calls < 5000 && (on ? !PlayerLosFilter.gridDisabledForTest() || after < 64 : calls < 400)) {
+            boolean gridLive = on && !PlayerLosFilter.gridDisabledForTest();
+            int t = step(w, rng, gridLive, gridLive ? far : null, "移動超過 MARGIN", bad);
+            calls++;
+            if (t == 0 && (gridLive || !on)) {
+                auditsSeen++;
+            } else if (t > 1 && gridLive) {
+                missed++;
+            } else if (t > 1 && on) {
+                after++;
+            }
+        }
+        b = PlayerLosFilter.gridCountersForTest();
+        String text = log.toString(StandardCharsets.UTF_8);
+        List<String> gridLines = text.lines().filter(l -> l.contains("[PlayerLosFilter] 網格")).toList();
+        String gridLine = gridLines.isEmpty() ? "" : gridLines.get(0);
+        OUT.println("  移動超過 MARGIN：" + calls + " 次呼叫、網格期間比對 " + auditsSeen + " 次、網格漏掉 " + missed + " 次、停用後 " + after + " 次；記錄行：" + gridLine);
+        if (on) {
+            expect("on：比對前網格漏掉移動 280 格的物件（" + missed + " 次，假設被破壞的代價），第一次比對抓到（gridMismatches=" + (b[4] - a[4])
+                            + "）並本次啟動停用網格；之後走刀 1 過濾器，序列與刀 1 相同（差 " + bad[0] + "）",
+                    bad[0] == 0 && PlayerLosFilter.gridDisabledForTest() && b[4] - a[4] == 1 && auditsSeen == 1 && after >= 64);
+            expect("停用行（只一行）：網格停用、類別、移動距離、MARGIN，不記玩家名", gridLines.size() == 1
+                    && gridLine.contains("網格停用（本次啟動改回刀 1 過濾器）：視窗內物件不在網格候選裡 obj=IsoZombie moved=280,0 margin=32")
+                    && !gridLine.contains("Tester"));
+            long[] c = PlayerLosFilter.gridCountersForTest();
+            fc.setLong(MovingObjectUpdateScheduler.instance, fc.getLong(MovingObjectUpdateScheduler.instance) + 1);
+            steps(w, rng, false, "停用後換幀", bad, draws, 64);
+            long[] d = PlayerLosFilter.gridCountersForTest();
+            expect("停用後不再建快照、不收集候選、不走網格（序列與刀 1 相同，差 " + bad[0] + "）；beat 是 grid=disabled",
+                    bad[0] == 0 && d[0] == c[0] && d[1] == c[1] && d[3] == c[3] && PlayerLosFilter.beatLine().contains(" grid=disabled "));
+        } else if (off) {
+            expect("off：移動超過 MARGIN 也只是刀 1（序列相同，差 " + bad[0] + "）、網格計數全 0、沒有網格記錄行",
+                    bad[0] == 0 && b[0] == 0 && b[1] == 0 && b[3] == 0 && b[4] == 0 && gridLines.isEmpty()
+                            && PlayerLosFilter.beatLine().contains(" grid=off "));
+        } else {
+            expect("observe：移動超過 MARGIN 時交給原版迴圈的序列仍等於刀 1（差 " + bad[0] + "）；每次比對各記一次 gridMismatches（" + (b[4] - a[4]) + "／"
+                            + auditsSeen + "），不停用",
+                    bad[0] == 0 && auditsSeen > 1 && b[4] - a[4] == auditsSeen && !PlayerLosFilter.gridDisabledForTest()
+                            && PlayerLosFilter.beatLine().contains(" grid=observe "));
+            expect("observe 記錄行（只記第一次）：類別、移動距離、MARGIN，不記玩家名", gridLines.size() == 1
+                    && gridLine.contains("網格比對不一致（observe 只計數，之後不再記）：視窗內物件不在網格候選裡 obj=IsoZombie moved=280,0 margin=32")
+                    && !gridLine.contains("Tester"));
+        }
+        long[] c = PlayerLosFilter.countersForTest();
+        expect("網格檢查後：刀 1 零 mismatch、零 anomalies、亂數狀態同步", c[11] == 0 && c[12] == 0 && c[16] == rng.x);
+        OUT.println("  beat 範例：[MinidoracatJavaPatch][PlayerLosFilter] beat " + PlayerLosFilter.beatLine());
+    }
+
+    private static void steps(World w, Rng rng, boolean gridOn, String label, int[] bad, int[] draws, int n) throws Exception {
+        for (int i = 0; i < n; i++) {
+            int t = step(w, rng, gridOn, null, label, bad);
+            draws[t == 0 ? 0 : t == 1 ? 1 : 2]++;
+        }
+    }
+
+    /** 一次呼叫：交出的序列必須等於刀 1（missing＝網格在假設被破壞時漏掉的物件），迭代器種類要對。回傳這次的抽籤。 */
+    private static int step(World w, Rng rng, boolean gridOn, Object missing, String label, int[] bad) throws Exception {
+        int t = rng.next();
+        w.prepare(Call.plain());
+        PlayerLosFilter.getCell(w.viewer);
+        Iterator<?> it = PlayerLosFilter.iterator(w.set);
+        lastKind = it.getClass().getSimpleName();
+        List<Object> got = new ArrayList<>();
+        while (it.hasNext()) {
+            got.add(it.next());
+        }
+        List<Object> want = blade1(w, t <= 1);
+        if (t > 1 && missing != null) {
+            want.remove(missing);
+        }
+        String kind = t == 1 ? "Plain" : t == 0 || !gridOn ? "Filter" : "Grid";
+        if ((!got.equals(want) || !lastKind.equals(kind)) && bad[0]++ < 3) {
+            OUT.println("  " + label + " 差異：draw=" + t + " kind=" + lastKind + "（預期 " + kind + "）\n    got  " + ids(got) + "\n    want " + ids(want));
+        }
+        return t;
+    }
+
+    /** 刀 1 交給原版迴圈的序列（判斷在測試裡獨立重寫）；all＝抽到比對或原版計時，全部放行。 */
+    private static List<Object> blade1(World w, boolean all) {
+        List<Object> out = new ArrayList<>();
+        int minX = w.px - 48;
+        int minY = w.py - 48;
+        int minZ = w.pz - LosUtil.sizeZ / 2;
+        for (Object o : (Set<?>) w.set) {
+            boolean keep = all || !(o instanceof IsoMovingObject) || o == w.viewer;
+            if (!keep && !(o instanceof IsoPhysicsObject) && !(o instanceof BaseVehicle)) {
+                IsoGridSquare sq = ((IsoMovingObject) o).getCurrentSquare();
+                keep = sq != null && sq.x - minX >= 0 && sq.x - minX < 96 && sq.y - minY >= 0 && sq.y - minY < 96
+                        && sq.z - minZ >= 0 && sq.z - minZ < LosUtil.sizeZ;
+            }
+            if (keep) {
+                out.add(o);
+            }
+        }
+        return out;
     }
 
     /**
@@ -211,7 +444,7 @@ public final class PlayerLosFilterTest {
         }
         w.add(w.viewer);
         w.install(true);
-        RecSet<IsoMovingObject> rec = (RecSet<IsoMovingObject>) w.set;
+        Set<IsoMovingObject> rec = w.set;
         int plainOk = 0;
         int auditOk = 0;
         int restOk = 0;
@@ -224,7 +457,7 @@ public final class PlayerLosFilterTest {
             int t = rng.next();
             PlayerLosFilter.getCell(w.viewer);
             Iterator<?> it = PlayerLosFilter.iterator(rec);
-            Iterator<?> raw = rec.last;
+            Iterator<?> raw = rec instanceof RecSet<IsoMovingObject> r ? r.last : null;
             int n = 0;
             while (it.hasNext()) {
                 it.next();
@@ -241,13 +474,15 @@ public final class PlayerLosFilterTest {
                 auditOk += kind.equals("Filter") && checks == 8 && n == rec.size() && c1[10] == c0[10] + 1 ? 1 : 0;
             } else {
                 restN++;
-                boolean ok = mode.equals("observe") ? it == raw && checks == 0 : kind.equals("Filter") && it != raw && checks == 0 && n == 9;
+                boolean ok = mode.equals("observe") ? it == raw && checks == 0
+                        : kind.equals(PlayerLosFilter.GRID == PlayerLosFilter.MODE_ON ? "Grid" : "Filter") && it != raw && checks == 0 && n == 9;
                 restOk += ok ? 1 : 0;
             }
         }
         expect("抽樣探針（640 次）：原版計時 " + plainOk + "／" + plainN + "（Plain、走完全部元素、不呼叫 isCouldSee）、比對 " + auditOk + "／" + auditN
                         + "（8 個視窗外各呼叫一次 isCouldSee）、其餘 " + restOk + "／" + restN
-                        + (mode.equals("observe") ? "（回傳的就是原版迭代器本身）" : "（過濾，只交出自己與視窗內 8 個）") + "；亂數狀態同步",
+                        + (mode.equals("observe") ? "（回傳的就是原版迭代器本身）" : PlayerLosFilter.GRID == PlayerLosFilter.MODE_ON ? "（網格，只交出自己與視窗內 8 個）"
+                        : "（過濾，只交出自己與視窗內 8 個）") + "；亂數狀態同步",
                 plainN > 0 && auditN > 0 && plainOk == plainN && auditOk == auditN && restOk == restN
                         && PlayerLosFilter.countersForTest()[16] == rng.x);
     }
@@ -791,15 +1026,21 @@ public final class PlayerLosFilterTest {
         }
 
         /**
-         * HashSet（正式服是 W47 的 HashSet 子類，迭代器相同；這裡不用它，vanilla classpath 沒有 dist）、PlayerData、visible：
+         * HashSet（網格開著時用 W47 的 ObjectSet，迭代順序與 HashSet 相同；vanilla classpath 沒有 dist，用 RecSet）、PlayerData、visible：
          * 視窗內的物件格子三分之二看得見。
          */
         void install(boolean withData) throws Exception {
-            set = new RecSet<>();
+            set = useObjectSet ? AnimalLosIndex.wrapObjectList(new HashSet<>()) : new RecSet<>();
             set.addAll(order);
             @SuppressWarnings({"unchecked", "rawtypes"})
             Set<Object> raw = (Set) set;
-            raw.addAll(extras);
+            for (Object e : extras) {
+                if (!useObjectSet || e == null || e instanceof IsoMovingObject) {
+                    raw.add(e);
+                } else {
+                    rawAdd(set, e);
+                }
+            }
             data = withData ? PD_NEW.newInstance(viewer) : null;
             if (data != null) {
                 setField(data, "px", px);
@@ -1203,6 +1444,15 @@ public final class PlayerLosFilterTest {
         Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
         f.setAccessible(true);
         return (T) ((sun.misc.Unsafe) f.get(null)).allocateInstance(type);
+    }
+
+    /** ObjectSet 的 add 經泛型橋接會 checkcast IsoMovingObject：直接寫進 HashSet 底層的 map（不經 add、不改 addCount，只在 install 時用）。 */
+    @SuppressWarnings({"deprecation", "removal", "unchecked"})
+    static void rawAdd(Set<?> set, Object o) throws Exception {
+        Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        f.setAccessible(true);
+        sun.misc.Unsafe u = (sun.misc.Unsafe) f.get(null);
+        ((Map<Object, Object>) u.getObject(set, u.objectFieldOffset(HashSet.class.getDeclaredField("map")))).put(o, Boolean.TRUE);
     }
 
     private static void expect(String what, boolean ok) {
