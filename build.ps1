@@ -171,6 +171,7 @@ $helperEntries = @(
     'zombie/mdc/PlayerLosFilter.class',
     'zombie/mdc/PlayerLosFilter$Filter.class',
     'zombie/mdc/PlayerLosFilter$Plain.class',
+    'zombie/mdc/PlayerLosFilter$Grid.class',
     'zombie/mdc/WorldMapVisibilityIndex.class',
     'zombie/mdc/MapFolderGuard.class',
     'zombie/mdc/PveDeathLog.class',
@@ -838,7 +839,7 @@ Assert-Ok "LightSettingsGuardTest（off，kill switch）"
 java -Xverify:all -cp "$R\work\out;$TJ" zombie.network.packets.LightSettingsGuardTest vanilla
 Assert-Ok "LightSettingsGuardTest（vanilla，jar 原版負對照）"
 
-Write-Host "[9zx/10] 伺服器端玩家 LOS 過濾迭代器（W83）：同一批世界先跑 jar 原版 updateLOS 寫 trace，再跑 dist 手術後的 observe／on／off 逐行比對（例外、TestZombieSpotPlayer／spotted 序列、spottedList／lastSpotted、viewer／stats／每個物件的全部基本型別欄位）；視窗邊界 ±1 格與 z 邊界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物、survivor、睡著、PlayerData 重複（互斥視窗、第一筆不是 BusyInMain）／缺少、status 不是 BusyInMain、迴圈中改清單（含最後一個元素）、null 與非 IsoMovingObject 元素、非主執行緒；私有亂數各 1/64 抽比對與原版計時（固定種子下的精確次數、原版計時不呼叫 isCouldSee、observe 其餘呼叫回原版迭代器本身）；violation：迴圈中位置漂移由比對抓到後本次啟動停用；phase50／phase64：固定順序輪流時非 0 位置的玩家漂移也會被抓到..."
+Write-Host "[9zx/10] 伺服器端玩家 LOS 過濾迭代器（W83）：同一批世界先跑 jar 原版 updateLOS 寫 trace，再跑 dist 手術後的 observe／on／off 逐行比對（例外、TestZombieSpotPlayer／spotted 序列、spottedList／lastSpotted、viewer／stats／每個物件的全部基本型別欄位）；視窗邊界 ±1 格與 z 邊界、自己、physics、車輛、沒有格子、grapple-only、玩家、動物、survivor、睡著、PlayerData 重複（互斥視窗、第一筆不是 BusyInMain）／缺少、status 不是 BusyInMain、迴圈中改清單（含最後一個元素）、null 與非 IsoMovingObject 元素、非主執行緒；私有亂數各 1/64 抽比對與原版計時（固定種子下的精確次數、原版計時不呼叫 isCouldSee、observe 其餘呼叫回原版迭代器本身）；violation：迴圈中位置漂移由比對抓到後本次啟動停用；phase50／phase64：固定順序輪流時非 0 位置的玩家漂移也會被抓到；刀 3 網格 grid-off／grid-observe／grid-on（on 本身就是預設 grid observe）：同一批 trace 比對之外，交出的序列逐件等於刀 1、移動 ≤ MARGIN、清單增減與換幀重建、沒格子後拿到格子、自己在網格外，移動超過 MARGIN 時 on 由比對抓到後停用、observe 只計數..."
 # 全部帶 -XX:hashCode=2（identity hash 固定，兩個 JVM 的 HashSet 迭代順序相同才能逐行比對）與 -XX:-OmitStackTraceInFastThrow（熱路徑 NPE 保留訊息）。
 # vanilla＝classpath 不含 dist（jar 原版負對照）。手術後的 JVM 都帶 -Dmdc.playerLosFilter.seed（只給測試重現抽樣，正式服不設）。
 $plfTrace = "$R\work\player-los-vanilla.txt"
@@ -858,6 +859,12 @@ java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;
 Assert-Ok "PlayerLosFilterTest（phase50，50 人輪流不鎖相）"
 java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest phase64 $plfTrace
 Assert-Ok "PlayerLosFilterTest（phase64，64 人輪流不鎖相）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" "-Dmdc.playerLosGrid=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest grid-off $plfTrace
+Assert-Ok "PlayerLosFilterTest（grid-off，刀 3 網格 kill switch）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" "-Dmdc.playerLosGrid=observe" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest grid-observe $plfTrace
+Assert-Ok "PlayerLosFilterTest（grid-observe，刀 3 網格只比對計數）"
+java -Xverify:all @plfHash $plfSeed "-Dmdc.playerLosFilter=on" "-Dmdc.playerLosGrid=on" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.PlayerLosFilterTest grid-on $plfTrace
+Assert-Ok "PlayerLosFilterTest（grid-on，刀 3 網格過濾）"
 
 Write-Host "[9zy/10] 只把動物附近的載具送進 native 尋路（W85）：替身 native（只記 addVehicle／removeVehicle／findPath、沒有 JNI）跑同一串呼叫——啟動迴圈、第一次更新補送、遲滯（進入 8／離開 12 chunk、1 秒限頻）、沒送過與送過的重新加入、移除沒送過的車、CheckSwap 的 remove→add→add、經真探針 findPath 的非動物請求（findPath 前就記下）、背景 add 與背景移除送過的車；observe／off 與原版 18 筆逐筆相同（探針 off 順序相同、背景呼叫改在主執行緒送），observe 的 vehNative 鏡像（含背景）與 M2 beat 欄位等於暴力列舉，off 零計數零 log；on 只送範圍內、回原版補送延後的車各一次；on 的背景呼叫一律排隊由主執行緒決定（背景重新加入延後的車之後回原版不重複 add、背景移除送過的車由主執行緒送、回原版補送途中背景 remove＋add 不重複 add）；排空途中例外不重入、照順序送；helper 例外回原版；參數解析..."
 $pvsCp = "$R\work\out;$R\dist\java;$TJ"
