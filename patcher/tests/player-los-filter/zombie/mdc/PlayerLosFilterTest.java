@@ -335,10 +335,19 @@ public final class PlayerLosFilterTest {
         int after = 0;
         int auditsSeen = 0;
         int calls = 0;
+        int disableDraw = -1;
+        int disableBad = -1;
+        boolean heldAtDisable = false;
         while (calls < 5000 && (on ? !PlayerLosFilter.gridDisabledForTest() || after < 64 : calls < 400)) {
             boolean gridLive = on && !PlayerLosFilter.gridDisabledForTest();
+            int bad0 = bad[0];
             int t = step(w, rng, gridLive, gridLive ? far : null, "移動超過 MARGIN", bad);
             calls++;
+            if (gridLive && PlayerLosFilter.gridDisabledForTest()) {
+                disableDraw = t;
+                disableBad = bad[0] - bad0;
+                heldAtDisable = PlayerLosFilter.gridHeldForTest();
+            }
             if (t == 0 && (gridLive || !on)) {
                 auditsSeen++;
             } else if (t > 1 && gridLive) {
@@ -359,6 +368,9 @@ public final class PlayerLosFilterTest {
             expect("停用行（只一行）：網格停用、類別、移動距離、MARGIN，不記玩家名", gridLines.size() == 1
                     && gridLine.contains("網格停用（本次啟動改回刀 1 過濾器）：視窗內物件不在網格候選裡 obj=IsoZombie moved=280,0 margin=32")
                     && !gridLine.contains("Tester"));
+            expect("停用發生在比對迭代中途（draw=" + disableDraw + "）：那一次交出的序列仍等於刀 1（差 " + disableBad + "）；快照參照在迭代結束時還在（"
+                            + heldAtDisable + "，放掉延到下一次 iterator），之後 static 欄位不再指到快照（" + !PlayerLosFilter.gridHeldForTest() + "）",
+                    disableDraw == 0 && disableBad == 0 && heldAtDisable && !PlayerLosFilter.gridHeldForTest());
             long[] c = PlayerLosFilter.gridCountersForTest();
             fc.setLong(MovingObjectUpdateScheduler.instance, fc.getLong(MovingObjectUpdateScheduler.instance) + 1);
             steps(w, rng, false, "停用後換幀", bad, draws, 64);

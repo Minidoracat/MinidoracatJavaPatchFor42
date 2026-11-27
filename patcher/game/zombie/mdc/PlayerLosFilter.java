@@ -171,6 +171,8 @@ public final class PlayerLosFilter {
     private static int[] scratch = new int[1];
     private static final IdentityHashMap<Object, Integer> PLAYER_AT = new IdentityHashMap<>();
     private static boolean gridDisabled;
+    /** 停用後快照參照已放掉（停用可能發生在迭代中途，放掉延到下一次 iterator 進來）。 */
+    private static boolean gridReleased;
     private static boolean gridLogged;
     private static long snapshots;
     private static long snapNs;
@@ -246,6 +248,9 @@ public final class PlayerLosFilter {
         pendingCell = null;
         calls++;
         maybeBeat();
+        if (gridDisabled && !gridReleased) {
+            releaseGrid();
+        }
         if (disabled) {
             return it;
         }
@@ -466,6 +471,26 @@ public final class PlayerLosFilter {
         } catch (RuntimeException e) {
             anomalies++;
         }
+    }
+
+    /**
+     * 停用後放掉快照（玩家與物件的參照不留到重啟）。只在 {@link #iterator} 開頭呼叫：停用可能發生在比對迭代中途，
+     * 那時正在跑的迭代器仍持有自己建立時拿到的陣列；這裡只重新指派 static 欄位，不清原陣列。
+     */
+    private static void releaseGrid() {
+        gridReleased = true;
+        snapList = null;
+        snapCount = 0;
+        snapAdds = 0;
+        keyCount = 0;
+        alwaysCount = 0;
+        snapObjs = new Object[0];
+        snapX = new int[0];
+        snapY = new int[0];
+        keys = new long[0];
+        always = new int[0];
+        scratch = new int[1];
+        PLAYER_AT.clear();
     }
 
     /** 比對：刀 1 放行的物件不在網格候選裡。on 停用網格，observe 只計數（各記第一次）。 */
@@ -810,5 +835,10 @@ public final class PlayerLosFilter {
 
     static boolean gridDisabledForTest() {
         return gridDisabled;
+    }
+
+    /** static 欄位是否還指到快照（清單、物件、玩家索引）。 */
+    static boolean gridHeldForTest() {
+        return snapList != null || snapObjs.length != 0 || !PLAYER_AT.isEmpty() || keys.length != 0;
     }
 }
