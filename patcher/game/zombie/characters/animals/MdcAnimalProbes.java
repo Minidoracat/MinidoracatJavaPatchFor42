@@ -1,5 +1,7 @@
 package zombie.characters.animals;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -16,6 +18,7 @@ import zombie.entity.EntityBucket;
 import zombie.entity.GameEntity;
 import zombie.entity.components.fluids.FluidContainer;
 import zombie.entity.components.fluids.Fluid;
+import zombie.entity.components.fluids.FluidInstance;
 import zombie.entity.util.ImmutableArray;
 import zombie.iso.weather.ClimateManager;
 import zombie.network.GameServer;
@@ -31,7 +34,9 @@ import zombie.network.GameServer;
  *   <li><b>F1 液體容器</b>：{@code FluidContainerUpdateSystem.updateSimulation} offset 19 唯一的 {@code EntityBucket.getEntities()}
  *       同形改道 {@link #fluidEntities}：照原版回傳同一個陣列，記 bucket 大小與有降水的幀數 {@code precipFrames}；每 64 次掃一次
  *       rainCatcher &gt; 0 的數量與其中符合原版 {@code updateEntity} 汽油蒸發分支條件的數量（{@code petrolRcAvg}／{@code petrolRcMax}），
- *       並量這次唯讀掃描的 µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，這個比例就是 W35 式索引能省的部分）。</li>
+ *       並量這次唯讀掃描的 µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，這個比例就是 W35 式索引能省的部分）。汽油判斷不呼叫
+ *       {@code isEmpty}／{@code getPrimaryFluid}（它們經 {@code getAmount} 重算快取、寫回欄位並呼叫 {@code onFluidContainerUpdate}），
+ *       改用 VarHandle 讀 private {@code fluids} 自己算；讀不到就不掃汽油（心跳印 {@code n/a}）。</li>
  *   <li><b>sim 動物降頻候選</b>：W89 {@code IdleVehicleThrottle.add} 入口對每隻 {@code IsoAnimal} 呼叫 {@link #sim}（不改 W89 對車的行為）。
  *       每 16 幀抽一幀，數「沒有任何連線收得到（原版送出半徑再加 16 格）而且沒在移動」的動物比例 {@code wouldPct}，以及其中懷孕且壓力
  *       &gt; 80 的隻數 {@code pregStress}。</li>
@@ -64,6 +69,20 @@ public final class MdcAnimalProbes {
     private static long vaCalls, vaNs, vaMaxNs;
     // F1
     private static long fluidCalls, bucketSum, bucketMax, fluidScans, rcSum, fluidScanNs, precipFrames, petrolRcSum, petrolRcMax;
+
+    /** {@code FluidContainer.fluids}（private final ArrayList）；查找的 checked 例外留在巢狀類別，外層只有 RuntimeException＋LinkageError handler。 */
+    private static final class Fluids {
+        static final VarHandle LIST = handle();
+
+        private static VarHandle handle() {
+            try {
+                return MethodHandles.privateLookupIn(FluidContainer.class, MethodHandles.lookup())
+                        .findVarHandle(FluidContainer.class, "fluids", ArrayList.class);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                return null;
+            }
+        }
+    }
     // sim
     private static long simFrame = Long.MIN_VALUE;
     private static boolean simSampled;
@@ -119,14 +138,14 @@ public final class MdcAnimalProbes {
                 long t0 = System.nanoTime();
                 int rc = 0;
                 int petrol = 0;
+                VarHandle fluids = Fluids.LIST;
                 for (int i = 0; i < n; i++) {
                     GameEntity e = entities.get(i);
                     FluidContainer fc = e == null ? null : e.getFluidContainer();
                     if (fc != null && fc.getRainCatcher() > 0.0F) {
                         rc++;
-                        // 原版 updateEntity 蒸發分支的條件（getPrimaryFluid 多一個 null 防護）
-                        Fluid primary = fc.canPlayerEmpty() && !fc.isEmpty() ? fc.getPrimaryFluid() : null;
-                        if (primary != null && "Petrol".equals(primary.getFluidTypeString())) {
+                        // 原版 updateEntity 蒸發分支：canPlayerEmpty && !isEmpty && primary 是 Petrol
+                        if (fluids != null && fc.canPlayerEmpty() && "Petrol".equals(primaryType(fluids, fc))) {
                             petrol++;
                         }
                     }
@@ -143,6 +162,31 @@ public final class MdcAnimalProbes {
             anomaly("F1", t);
         }
         return entities;
+    }
+
+    /**
+     * 同原版 {@code isEmpty}＋{@code getPrimaryFluid} 的結果，但不碰快取：全部量加總為 0 視為空（量不為負，加總順序不影響），primary＝第一個、
+     * 後面嚴格大於才換。只呼叫無副作用的 getter（javap 42.22：{@code FluidInstance.getAmount／getFluid}、{@code Fluid.getFluidTypeString}
+     * 都只有 getfield＋return；{@code getRainCatcher}／{@code canPlayerEmpty} 只讀 owner、item、spriteGrid 與自己的欄位）。
+     */
+    static String primaryType(VarHandle fluids, FluidContainer fc) {
+        @SuppressWarnings("unchecked")
+        ArrayList<FluidInstance> list = (ArrayList<FluidInstance>) fluids.get(fc);
+        FluidInstance best = null;
+        float total = 0.0F;
+        for (int i = 0; i < list.size(); i++) {
+            FluidInstance fi = list.get(i);
+            float a = fi.getAmount();
+            total += a;
+            if (best == null || a > best.getAmount()) {
+                best = fi;
+            }
+        }
+        if (total == 0.0F || best == null) {
+            return null;
+        }
+        Fluid f = best.getFluid();
+        return f == null ? null : f.getFluidTypeString();
     }
 
     /** sim：W89 {@code IdleVehicleThrottle.add} 入口，每隻放進 bucket 的動物每幀一次；只計數，不改放進哪個 bucket。 */
@@ -291,7 +335,8 @@ public final class MdcAnimalProbes {
                 + " fluidCalls=" + fluidCalls + " bucketAvg=" + (fluidCalls == 0 ? 0 : bucketSum / fluidCalls) + " bucketMax=" + bucketMax
                 + " rcAvg=" + (fluidScans == 0 ? 0 : rcSum / fluidScans) + " fluidScanUsAvg=" + avgUs(fluidScanNs, fluidScans)
                 + " fluidScans=" + fluidScans + " precipFrames=" + precipFrames + "/" + fluidCalls
-                + " petrolRcAvg=" + (fluidScans == 0 ? 0 : petrolRcSum / fluidScans) + " petrolRcMax=" + petrolRcMax
+                + " petrolRcAvg=" + (Fluids.LIST == null ? "n/a" : fluidScans == 0 ? "0" : String.valueOf(petrolRcSum / fluidScans))
+                + " petrolRcMax=" + (Fluids.LIST == null ? "n/a" : String.valueOf(petrolRcMax))
                 + " simFrames=" + simFrames + " animals=" + (simFrames == 0 ? 0 : simAnimals / simFrames)
                 + " unseenPct=" + pct(simUnseen, simAnimals) + " stillPct=" + pct(simStill, simAnimals)
                 + " wouldPct=" + pct(simWould, simAnimals)
@@ -346,6 +391,8 @@ public final class MdcAnimalProbes {
     static long simAnimalsForTest() { return simAnimals; }
     static long simWouldForTest() { return simWould; }
     static long simPregStressForTest() { return simPregStress; }
+
+    static boolean fluidsHandleForTest() { return Fluids.LIST != null; }
 
     private MdcAnimalProbes() {}
 }
