@@ -3585,7 +3585,17 @@ public final class SmokeCheck {
                 {w110Thump, "changeSprite", "(L" + w110Thump + ";)V", "4b4a389d5d1a94cf40b99490cfdfa2c823791ab3938c891da7ad6c3086e4fb04"},
                 {"zombie/network/fields/NetObject", "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
                         "1c3602a6527ea3e79f95646e6eb96f0503edb9c81eb192d0bd2f7a5019a84115"},
-                {"zombie/network/fields/NetObject", "getObject", "()Lzombie/iso/IsoObject;", "d1b522626b77f6d8d604bfaa4cf6e2ea027a806b984efe5a8b30f576c0518e8b"}});
+                {"zombie/network/fields/NetObject", "getObject", "()Lzombie/iso/IsoObject;", "d1b522626b77f6d8d604bfaa4cf6e2ea027a806b984efe5a8b30f576c0518e8b"},
+                // same／flip 判定讀的狀態：getter 與 setter 改了＝欄位語意可能變了
+                {w110Door, "isOpen", "()Z", "63d1e8b96a2c3e1eadc4586067c222c8427ce82ca8bcd314473de0c062f79a58"},
+                {w110Door, "setOpen", "(Z)V", "1b03163641cede49688b9e5ef71b22ab008e97ff8d8185f81681081d10a71e20"},
+                {w110Door, "isLocked", "()Z", "5c38da705c993e2f70122d13e5b01928a2b9c8341a534ff4a64b0f6c7281e437"},
+                {w110Door, "setIsLocked", "(Z)V", "52c4f9c2fe0a6c8f9a8b40fd1297839167c16da08554e86057549322226f0dff"},
+                {w110Door, "isLockedByKey", "()Z", "8b33bf42d2b946b8316e603a5b550f63a5ff3f9248e57f2d80d1c5aa511dee6c"},
+                {w110Door, "getOpenSprite", "()Lzombie/iso/sprite/IsoSprite;", "b7515ab48974cfb6941b89fe63544c2bf46fcb11b6b96fcecde2925729896be2"},
+                {w110Thump, "isLocked", "()Z", "e6fe4621cc20d58dcca6d71b221f4b3471441ad23d727cc64021d1a54d62101e"},
+                {w110Thump, "setIsLocked", "(Z)V", "fe198dff229fb3beee9a0f93a3eea8bb64e9fc9c2bbea4ea29b21f6cb1b26c9f"},
+                {w110Thump, "isLockedByKey", "()Z", "724c80523f8e602f3017fc678fc3f9d0bd1d19f139b9b3f168c1c16dc8a130bb"}});
         String w110Sprite = "Lzombie/iso/sprite/IsoSprite;";
         ClassNode w110DoorNode = classNodeFromJar(jar, w110Door);
         ClassNode w110ThumpNode = classNodeFromJar(jar, w110Thump);
@@ -3597,7 +3607,7 @@ public final class SmokeCheck {
         String w110AllowDesc = "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)Z";
         MethodNode w110Probe = method(distJava, w58Probe, "syncIsoObject", w58ProbeDesc);
         MethodNode w110Allow = method(distJava, w110Guard, "allow", "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;J)Z");
-        // 主動同步對封包指到的 IsoDoor（owner 是 IsoDoor）：IsoDoor 的 syncIsoObjectSend 帶整條鏈；不得對代表片（可能是 IsoThumpable）以 IsoObject 呼叫
+        // 主動同步對收包的 IsoDoor（owner 是 IsoDoor）：IsoDoor 的 syncIsoObjectSend 帶整條鏈；不得以 IsoObject 呼叫
         ClassNode w110GuardNode = classNode(distJava, w110Guard);
         failed += check("W110 helper 契約：W58 helper 恰呼叫 DoorSyncGuard.allow 1 次、在原方法之前；主動同步恰 1 處、對 IsoDoor 呼叫、不在 try 內",
                 countExactCalls(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc) == 1
@@ -9476,6 +9486,9 @@ public final class SmokeCheck {
             {"zombie/entity/components/fluids/FluidContainer", "isEmpty", "()Z", "f11f6a4af729f8dc47976ae23297b8611da3986895721a7c73d7c4f592fb9ff7"},
             {"zombie/entity/components/fluids/FluidContainer", "getPrimaryFluid", "()Lzombie/entity/components/fluids/Fluid;", "eb8f2a8ec3e56d9d5560143a0d0bbd7404a36e59fe837414362905c8f097eb5e"},
             {"zombie/entity/components/fluids/Fluid", "getFluidTypeString", "()Ljava/lang/String;", "9c5e24f4a1b1f5a0e515cd727223e8884359cdccdb726797ae07235d4637e743"},
+            // 探針自己算 isEmpty＋primary 時只呼叫這兩個 getter：本體只有 getfield＋return（不重算快取）
+            {"zombie/entity/components/fluids/FluidInstance", "getAmount", "()F", "ce761074fc071ffc27d9e34be8f2b27ecff969d8137f3997e28d8e93c52e4977"},
+            {"zombie/entity/components/fluids/FluidInstance", "getFluid", "()Lzombie/entity/components/fluids/Fluid;", "e0df8b8219caa7e57bec601afdd9602c02da3496b000fe950691fd28a0fdf652"},
             {"zombie/iso/weather/ClimateManager", "getPrecipitationIntensity", "()F", "76ef2a89be20e37b51d2a91b50a4da16798aa14bd8e7a6d9a5e024a77c786846"},
     };
 
@@ -9687,6 +9700,14 @@ public final class SmokeCheck {
                                 < firstCallIndex(hAdd, Opcodes.INVOKEVIRTUAL, "zombie/MovingObjectUpdateSchedulerUpdateBucket", "add",
                                         "(Lzombie/iso/IsoMovingObject;)V"));
         failed += shaLocks(jar, "W95", ANIMAL_PROBES_LOCKED);
+        // F1 不得走會重算快取的 getter（getAmount→recalculateCaches 寫回欄位並呼叫 onFluidContainerUpdate）：改讀 private fluids
+        String fcCls = "zombie/entity/components/fluids/FluidContainer";
+        ClassNode probesNode = classNode(distJava, probes);
+        failed += check("W95 F1 不碰液體快取：FluidContainer.fluids 仍是 ArrayList；探針整個 class 不呼叫 FluidContainer.isEmpty／getPrimaryFluid／getAmount",
+                hasField(classNodeFromJar(jar, fcCls), "fluids", "Ljava/util/ArrayList;")
+                        && classWideCalls(probesNode, Opcodes.INVOKEVIRTUAL, fcCls, "isEmpty", "()Z") == 0
+                        && classWideCalls(probesNode, Opcodes.INVOKEVIRTUAL, fcCls, "getPrimaryFluid", "()Lzombie/entity/components/fluids/Fluid;") == 0
+                        && classWideCalls(probesNode, Opcodes.INVOKEVIRTUAL, fcCls, "getAmount", "()F") == 0);
         // 診斷碼不得把日誌鏈的例外帶進原版流程，也不得吞掉 Error（docs/patches.md「Error 必須保持致命且可見」）：
         // 四個 helper 的每個 DebugLog.log 都在 try 內，涵蓋它的 handler 型別恰為 {RuntimeException, LinkageError}；
         // 四個 helper 全部 try-catch 也只准這兩種（比照 W6／W10 把型別釘在 exception table 上）。

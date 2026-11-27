@@ -2,6 +2,7 @@ package zombie.mdc;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.nio.BufferUnderflowException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -25,18 +26,24 @@ import zombie.iso.sprite.IsoSprite;
  * {@code setLockedByKey}／{@code changeSprite}，然後轉給附近其他連線。客戶端收到後對鏈上別片 {@code setLockedByKey} 值有變就
  * {@code sync(3|4)} 回送那一片；兩個以上客戶端時，晚到的舊值回送把伺服器翻回舊值並轉發，客戶端互相觸發。
  *
- * <p><b>分類</b>（只看 {@code IsoDoor}、遠端、{@code bb != null}、在格子上的門；其餘原樣）：預讀封包（記下 position）。
- * {@code same}＝原版處理這一包後除了 {@code lastPlayerOnlineId} 以外的物件欄位都不會變；{@code flip}＝本片或任一片的開關或鎖和封包不同；
- * 其餘（只有血量不同、帶「試開」旗標、有片取不到或不是門，計 {@code other}）照原樣。本片也列在鏈裡時，原版迴圈的 {@code setLockedByKey}
- * 會把本片 {@code locked} 蓋成封包的 lockedByKey，所以那時不拿本片 {@code locked} 和封包的 locked 比。每條鏈（車庫門取 (x,y,z,index) 最小的片，否則本片）1 秒視窗內
- * 第 {@link #FLIP_LIMIT}+1 個 flip 起隔離 {@link #QUARANTINE_NS}。
+ * <p><b>分類</b>（只看收包物件是 {@code IsoDoor}、遠端、{@code bb != null}、在格子上的門；{@code IsoThumpable} 門片與全由它組成的車庫門
+ * 原樣）：預讀封包（記下 position）。{@code same}＝原版處理這一包後除了 {@code lastPlayerOnlineId} 以外的物件欄位都不會變；
+ * {@code flip}＝本片或任一片的開關或鎖和封包不同；其餘（只有血量不同、帶「試開」旗標、有片取不到或不是門，計 {@code other}）照原樣。
+ * 本片也列在鏈裡時，原版迴圈的 {@code setLockedByKey} 會把本片 {@code locked} 蓋成封包的 lockedByKey，所以那時不拿本片 {@code locked}
+ * 和封包的 locked 比。各片只用來分類。
+ *
+ * <p><b>限速</b>：以（收包的 {@code IsoDoor}，送包的 {@code UdpConnection}）兩個物件參照為 key（identity），1 秒視窗內第
+ * {@link #FLIP_LIMIT}+1 個 flip 起這個 key 隔離 {@link #QUARANTINE_NS}；另一條連線對同一扇門、或同一條連線對別扇門的包照原樣。
+ * 追蹤表最多 {@link #MAX_TRACKED} 筆：滿了先淘汰不在隔離中、1 秒內沒有 flip 的；仍滿就不建紀錄（照原樣、計 {@code overflow}）。
+ * beat 清掉 60 秒沒有 flip、不在隔離中的。
  *
  * <p><b>模式</b> {@code -Dmdc.doorSyncGuard=off|observe|enforce}（預設 observe，和 {@code -Dmdc.syncIsoObjectProbe} 互相獨立）：
  * observe 只計數、還原 position、照原樣呼叫原方法；enforce 對 {@code same} 只寫 {@code lastPlayerOnlineId}、不呼叫原方法，
- * 隔離開始那一包丟掉並讓伺服器對封包指到的門主動同步一次（{@code IsoDoor} 的同步帶整條鏈），隔離期間這條鏈的遠端門同步一律丟掉。
+ * 隔離開始那一包丟掉並讓伺服器對這扇門主動同步一次（{@code IsoDoor} 的同步帶整條鏈），隔離期間這個 key 的包一律丟掉；
+ * 隔離到期時若期間丟過包、門還在世界上，再主動同步一次（{@code resyncs}），補上被丟掉的最後狀態。
  *
- * <p>只在主執行緒被呼叫，不加鎖。分類與記錄的 RuntimeException／LinkageError 只計 anomalies、還原 position、照原樣；
- * Error 照常外拋；原方法與主動同步不在 try 內。
+ * <p>只在主執行緒被呼叫，不加鎖。分類與記錄的 RuntimeException／LinkageError 只計 anomalies（短包的
+ * BufferUnderflowException 計 malformed）、還原 position、照原樣；Error 照常外拋；原方法與主動同步不在 try 內。
  */
 public final class DoorSyncGuard {
     static final int OFF = 0;
@@ -47,10 +54,12 @@ public final class DoorSyncGuard {
     /** 1 秒內超過這麼多 flip 才隔離：人手與殭屍開關不可能到（讀碼推的，observe 看 maxFlipsPerSec 再定）。 */
     static final int FLIP_LIMIT = 8;
     static final long QUARANTINE_NS = 3_000_000_000L;
+    static final int MAX_TRACKED = 256;
     private static final long WINDOW_NS = 1_000_000_000L;
     private static final long LOG_GAP_NS = 10_000_000_000L;
     private static final long IDLE_NS = 60_000_000_000L;
     private static final long BEAT_NS = 300_000_000_000L;
+    private static final int ANOMALY_LOGS = 5;
     private static final String TAG = "[MinidoracatJavaPatch][DoorSyncGuard] ";
 
     /** 實際生效的模式：sprite 欄位找不到就不分類（off）；lastPlayerOnlineId 找不到就 enforce 降成 observe。 */
@@ -74,34 +83,39 @@ public final class DoorSyncGuard {
 
     private static final int PASS = 0;
     private static final int SKIP = 1;
-    private static final int SKIP_RESYNC = 2;
 
-    /** 一條鏈的視窗狀態；只記座標，不握物件參照。 */
-    private static final class Chain {
-        final int x, y, z, idx;
+    /** 一扇門 × 一條連線的視窗狀態；key 是兩個物件參照（identity）。 */
+    private static final class Track {
+        final IsoDoor door;
+        final UdpConnection conn;
         long windowStartNs;
         int flips;
         int sames;
         long lastFlipNs;
         long quarantineUntilNs;
         boolean quarantined;
+        /** 隔離期間（開始那一包之後）enforce 丟過包：到期要補同步。 */
+        boolean droppedDuring;
         boolean everLogged;
         long lastLogNs;
 
-        Chain(int x, int y, int z, int idx) {
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.idx = idx;
+        Track(IsoDoor door, UdpConnection conn) {
+            this.door = door;
+            this.conn = conn;
         }
     }
 
     // ---- 主執行緒單寫 ----
-    // ponytail: 線性掃描找鏈（同 SyncIsoObjectProbe.Conn），同時在翻轉的門鏈個位數；上百條再換 map
-    private static Chain[] chains = new Chain[8];
-    private static int chainCount;
+    // ponytail: 線性掃描（同 SyncIsoObjectProbe.Conn）；只有正在翻轉的門才建紀錄，上限 MAX_TRACKED 筆，
+    // 隔離中與 1 秒內有 flip 的紀錄不淘汰，beat 清 60 秒沒 flip 的；熱到常駐上百筆再換 map
+    private static Track[] tracks = new Track[8];
+    private static int trackCount;
+    private static int quarantinedCount;
+    private static IsoDoor[] resync = new IsoDoor[4];
+    private static int resyncCount;
     private static IsoObject[] parts = new IsoObject[16];
-    private static long doorRemote, same, sameSkipped, other, flip, quarantines, dropped, wouldDrop, anomalies;
+    private static long doorRemote, same, sameSkipped, other, flip, quarantines, dropped, wouldDrop, resyncs, overflow, malformed,
+            anomalies;
     private static int maxFlipsPerSec;
     private static long lastBeatNs;
     private static boolean announced;
@@ -120,7 +134,7 @@ public final class DoorSyncGuard {
         };
     }
 
-    /** 回 true＝呼叫端照原樣呼叫原方法。enforce 丟包時回 false；隔離開始時本方法先對封包指到的門主動同步一次（不在 try 內）。 */
+    /** 回 true＝呼叫端照原樣呼叫原方法。enforce 丟包時回 false；要主動同步的門在本方法內同步（不在 try 內）。 */
     public static boolean allow(IsoObject obj, boolean remote, UdpConnection connection, ByteBufferReader bb) {
         return MODE == OFF || allow(obj, remote, connection, bb, System.nanoTime());
     }
@@ -130,36 +144,47 @@ public final class DoorSyncGuard {
             return true;
         }
         try {
+            // 先解除到期的隔離，beat 才清得掉剛解除的紀錄
+            if (quarantinedCount > 0) {
+                expire(now);
+            }
             if (!announced || now - lastBeatNs >= BEAT_NS) {
                 beat(now);
             }
         } catch (RuntimeException | LinkageError e) {
-            anomalies++;
+            anomaly("beat", e);
         }
-        if (ACTIVE == OFF || !remote || bb == null || !(obj instanceof IsoDoor door) || door.square == null) {
-            return true;
+        boolean pass = true;
+        if (ACTIVE != OFF && remote && bb != null && obj instanceof IsoDoor door && door.square != null) {
+            int start = bb.position();
+            int verdict;
+            try {
+                verdict = door.getObjectIndex() == -1 ? PASS : decide(door, connection, bb, now);
+            } catch (RuntimeException | LinkageError e) {
+                if (e instanceof BufferUnderflowException) {
+                    malformed++;
+                } else {
+                    anomaly("decide", e);
+                }
+                verdict = PASS;
+            }
+            Arrays.fill(parts, null);
+            if (verdict == PASS) {
+                bb.position(start);
+            } else {
+                pass = false;
+            }
         }
-        int start = bb.position();
-        int verdict;
-        try {
-            verdict = door.getObjectIndex() == -1 ? PASS : decide(door, connection, bb, now);
-        } catch (RuntimeException | LinkageError e) {
-            anomalies++;
-            verdict = PASS;
+        // 主動同步（隔離開始的這扇門、到期補同步的門）：對 IsoDoor 本身同步，它的 syncIsoObjectSend 帶整條鏈
+        while (resyncCount > 0) {
+            IsoDoor d = resync[--resyncCount];
+            resync[resyncCount] = null;
+            d.syncIsoObject(false, (byte) 0, null, null);
         }
-        Arrays.fill(parts, null);
-        if (verdict == PASS) {
-            bb.position(start);
-            return true;
-        }
-        if (verdict == SKIP_RESYNC) {
-            // 對 IsoDoor 本身同步：它的 syncIsoObjectSend 帶整條鏈；代表片可能是 IsoThumpable，格式不同
-            door.syncIsoObject(false, (byte) 0, null, null);
-        }
-        return false;
+        return pass;
     }
 
-    /** 預讀並分類；回 PASS／SKIP／SKIP_RESYNC。PASS 時呼叫端還原 position。 */
+    /** 預讀並分類；回 PASS／SKIP。PASS 時呼叫端還原 position。 */
     private static int decide(IsoDoor door, UdpConnection connection, ByteBufferReader bb, long now) {
         doorRemote++;
         boolean bOpen = bb.getBoolean();
@@ -193,14 +218,10 @@ public final class DoorSyncGuard {
         boolean misc = tryLocked || tryBarricaded;
         // 本片也在 parts 裡時，原版迴圈的 setLockedByKey 會把本片 locked 再蓋成 bLockedByKey（迴圈裡已比過），不比 bLocked
         boolean selfInParts = false;
-        // 鏈的代表片：車庫門取各片 (x,y,z,index) 最小的，否則本片
-        IsoObject rep = door;
-        int rx = door.square.x, ry = door.square.y, rz = door.square.z, ri = door.getObjectIndex();
         for (int i = 0; i < n; i++) {
             IsoObject p = parts[i];
             selfInParts |= p == door;
-            IsoGridSquare sq = p == null ? null : p.getSquare();
-            if (sq == null) {
+            if (p == null || p.getSquare() == null) {
                 misc = true;
                 continue;
             }
@@ -227,14 +248,6 @@ public final class DoorSyncGuard {
             } else if (p.sprite != wantSprite) {
                 misc = true;
             }
-            int pi = p.getObjectIndex();
-            if (before(sq.x, sq.y, sq.z, pi, rx, ry, rz, ri)) {
-                rep = p;
-                rx = sq.x;
-                ry = sq.y;
-                rz = sq.z;
-                ri = pi;
-            }
         }
         if (!selfInParts && door.isLocked() != bLocked) {
             flipped = true;
@@ -243,40 +256,53 @@ public final class DoorSyncGuard {
             misc = true;
         }
 
-        Chain c = find(rx, ry, rz, ri, now, flipped && !misc);
-        if (c != null && c.quarantined && now >= c.quarantineUntilNs) {
-            c.quarantined = false;
-        }
-        if (c != null && now - c.windowStartNs >= WINDOW_NS) {
-            c.windowStartNs = now;
-            c.flips = 0;
-            c.sames = 0;
+        Track t = find(door, connection, now, flipped && !misc);
+        if (t != null && now - t.windowStartNs >= WINDOW_NS) {
+            t.windowStartNs = now;
+            t.flips = 0;
+            t.sames = 0;
         }
         if (misc) {
             other++;
         } else if (flipped) {
             flip++;
-            c.flips++;
-            c.lastFlipNs = now;
-            if (c.flips > maxFlipsPerSec) {
-                maxFlipsPerSec = c.flips;
+            if (t != null) {
+                t.flips++;
+                t.lastFlipNs = now;
+                if (t.flips > maxFlipsPerSec) {
+                    maxFlipsPerSec = t.flips;
+                }
             }
         } else {
             same++;
-            if (c != null) {
-                c.sames++;
+            if (t != null) {
+                t.sames++;
             }
         }
 
-        if (c != null && c.quarantined) {
-            return drop();
+        if (t != null && t.quarantined) {
+            if (ACTIVE == ENFORCE) {
+                dropped++;
+                t.droppedDuring = true;
+                return SKIP;
+            }
+            wouldDrop++;
+            return PASS;
         }
-        if (!misc && flipped && c.flips > FLIP_LIMIT) {
-            c.quarantined = true;
-            c.quarantineUntilNs = now + QUARANTINE_NS;
+        if (t != null && !misc && flipped && t.flips > FLIP_LIMIT) {
+            t.quarantined = true;
+            t.droppedDuring = false;
+            t.quarantineUntilNs = now + QUARANTINE_NS;
+            quarantinedCount++;
             quarantines++;
-            report(c, rep, connection, now);
-            return drop() == SKIP ? SKIP_RESYNC : PASS;
+            report(t, now);
+            if (ACTIVE == ENFORCE) {
+                dropped++;
+                queueResync(door);
+                return SKIP;
+            }
+            wouldDrop++;
+            return PASS;
         }
         if (!misc && !flipped && ACTIVE == ENFORCE) {
             Handles.LAST_ID.set(door, lastId);
@@ -286,13 +312,34 @@ public final class DoorSyncGuard {
         return PASS;
     }
 
-    private static int drop() {
-        if (ACTIVE == ENFORCE) {
-            dropped++;
-            return SKIP;
+    /** 到期的隔離解除；期間丟過包、門還在世界上的排進主動同步（同一扇門只排一次）。只在有隔離中的紀錄時被呼叫。 */
+    private static void expire(long now) {
+        for (int i = 0; i < trackCount; i++) {
+            Track t = tracks[i];
+            if (!t.quarantined || now < t.quarantineUntilNs) {
+                continue;
+            }
+            t.quarantined = false;
+            quarantinedCount--;
+            IsoDoor d = t.door;
+            if (t.droppedDuring && d.square != null && d.getObjectIndex() != -1 && queueResync(d)) {
+                resyncs++;
+            }
+            t.droppedDuring = false;
         }
-        wouldDrop++;
-        return PASS;
+    }
+
+    private static boolean queueResync(IsoDoor d) {
+        for (int i = 0; i < resyncCount; i++) {
+            if (resync[i] == d) {
+                return false;
+            }
+        }
+        if (resyncCount == resync.length) {
+            resync = Arrays.copyOf(resync, resyncCount * 2);
+        }
+        resync[resyncCount++] = d;
+        return true;
     }
 
     /** 同 NetObject.getObject 的查法，但取不到時不印 warn（原版稍後會再查一次並自己印）。 */
@@ -305,74 +352,89 @@ public final class DoorSyncGuard {
         return id >= 0 && id < objs.size() ? objs.get(id) : null;
     }
 
-    private static boolean before(int x, int y, int z, int i, int rx, int ry, int rz, int ri) {
-        if (x != rx) {
-            return x < rx;
-        }
-        if (y != ry) {
-            return y < ry;
-        }
-        if (z != rz) {
-            return z < rz;
-        }
-        return i < ri;
-    }
-
-    private static Chain find(int x, int y, int z, int idx, long now, boolean create) {
-        for (int i = 0; i < chainCount; i++) {
-            Chain c = chains[i];
-            if (c.x == x && c.y == y && c.z == z && c.idx == idx) {
-                return c;
+    /** 找（門, 連線）的紀錄；create 時表滿先淘汰閒置的，仍滿就計 overflow、回 null（照原樣、不追蹤）。 */
+    private static Track find(IsoDoor door, UdpConnection conn, long now, boolean create) {
+        for (int i = 0; i < trackCount; i++) {
+            Track t = tracks[i];
+            if (t.door == door && t.conn == conn) {
+                return t;
             }
         }
         if (!create) {
             return null;
         }
-        if (chainCount == chains.length) {
-            chains = Arrays.copyOf(chains, chainCount * 2);
+        if (trackCount == MAX_TRACKED) {
+            prune(now, WINDOW_NS);
+            if (trackCount == MAX_TRACKED) {
+                overflow++;
+                return null;
+            }
         }
-        Chain c = new Chain(x, y, z, idx);
-        c.windowStartNs = now - WINDOW_NS;
-        chains[chainCount++] = c;
-        return c;
+        if (trackCount == tracks.length) {
+            tracks = Arrays.copyOf(tracks, Math.min(trackCount * 2, MAX_TRACKED));
+        }
+        Track t = new Track(door, conn);
+        t.windowStartNs = now - WINDOW_NS;
+        tracks[trackCount++] = t;
+        return t;
     }
 
-    /** 鏈進入隔離時印一行；同一條鏈 10 秒最多一行。 */
-    private static void report(Chain c, IsoObject rep, UdpConnection connection, long now) {
-        if (c.everLogged && now - c.lastLogNs < LOG_GAP_NS) {
+    /** 就地留下隔離中的與 idleNs 內有 flip 的紀錄。 */
+    private static void prune(long now, long idleNs) {
+        int kept = 0;
+        for (int i = 0; i < trackCount; i++) {
+            Track t = tracks[i];
+            if (t.quarantined || now - t.lastFlipNs <= idleNs) {
+                tracks[kept++] = t;
+            }
+        }
+        Arrays.fill(tracks, kept, trackCount, null);
+        trackCount = kept;
+    }
+
+    /** 進入隔離時印一行；同一個 key 10 秒最多一行。 */
+    private static void report(Track t, long now) {
+        if (t.everLogged && now - t.lastLogNs < LOG_GAP_NS) {
             return;
         }
-        c.everLogged = true;
-        c.lastLogNs = now;
+        t.everLogged = true;
+        t.lastLogNs = now;
         try {
+            IsoDoor d = t.door;
+            UdpConnection c = t.conn;
             DebugLog.log(TAG + "quarantine#" + quarantines + " mode=" + modeName()
-                    + " player=" + MdcTimedActionProbe.safeName(connection == null ? null : connection.getUserName())
-                    + " guid=" + (connection == null ? "?" : String.valueOf(connection.getConnectedGUID()))
-                    + " chain=" + c.x + "," + c.y + "," + c.z + "#" + c.idx
-                    + " sprite=" + MdcTimedActionProbe.safeName(rep.getSpriteName())
-                    + " flips=" + c.flips + " same=" + c.sames + " quarantineMs=" + QUARANTINE_NS / 1_000_000L);
+                    + " player=" + MdcTimedActionProbe.safeName(c == null ? null : c.getUserName())
+                    + " guid=" + (c == null ? "?" : String.valueOf(c.getConnectedGUID()))
+                    + " door=" + d.square.x + "," + d.square.y + "," + d.square.z + "#" + d.getObjectIndex()
+                    + " sprite=" + MdcTimedActionProbe.safeName(d.getSpriteName())
+                    + " flips=" + t.flips + " same=" + t.sames + " quarantineMs=" + QUARANTINE_NS / 1_000_000L);
         } catch (RuntimeException | LinkageError e) {
             anomalies++;
         }
     }
 
-    /** 每 5 分鐘一行（首次呼叫立即一行）；先清掉 60 秒沒有 flip 的鏈。 */
+    /** 計 anomalies；前 {@link #ANOMALY_LOGS} 次印類別與訊息。 */
+    private static void anomaly(String where, Throwable e) {
+        anomalies++;
+        if (anomalies <= ANOMALY_LOGS) {
+            try {
+                DebugLog.log(TAG + "anomaly #" + anomalies + " " + where + " " + e.getClass().getName() + ": " + e.getMessage());
+            } catch (RuntimeException | LinkageError ignored) {
+                anomalies++;
+            }
+        }
+    }
+
+    /** 每 5 分鐘一行（首次呼叫立即一行）；先清掉 60 秒沒有 flip、不在隔離中的紀錄。 */
     private static void beat(long now) {
         String head = announced ? "beat " : "首次生效（-Dmdc.doorSyncGuard=off|observe|enforce） ";
         announced = true;
         lastBeatNs = now;
-        int kept = 0;
-        for (int i = 0; i < chainCount; i++) {
-            if (now - chains[i].lastFlipNs <= IDLE_NS) {
-                chains[kept++] = chains[i];
-            }
-        }
-        Arrays.fill(chains, kept, chainCount, null);
-        chainCount = kept;
+        prune(now, IDLE_NS);
         String line = TAG + head + "mode=" + modeName() + " doorRemote=" + doorRemote + " same=" + same
                 + " sameSkipped=" + sameSkipped + " other=" + other + " flip=" + flip + " quarantines=" + quarantines + " dropped=" + dropped
-                + " wouldDrop=" + wouldDrop + " maxFlipsPerSec=" + maxFlipsPerSec + " tracked=" + chainCount
-                + " anomalies=" + anomalies;
+                + " wouldDrop=" + wouldDrop + " resyncs=" + resyncs + " maxFlipsPerSec=" + maxFlipsPerSec + " tracked=" + trackCount
+                + " overflow=" + overflow + " malformed=" + malformed + " anomalies=" + anomalies;
         maxFlipsPerSec = 0;
         try {
             DebugLog.log(line);
@@ -421,12 +483,28 @@ public final class DoorSyncGuard {
         return wouldDrop;
     }
 
+    static long resyncsForTest() {
+        return resyncs;
+    }
+
+    static long overflowForTest() {
+        return overflow;
+    }
+
+    static long malformedForTest() {
+        return malformed;
+    }
+
     static long anomaliesForTest() {
         return anomalies;
     }
 
     static int trackedForTest() {
-        return chainCount;
+        return trackCount;
+    }
+
+    static int quarantinedForTest() {
+        return quarantinedCount;
     }
 
     /** 下一次呼叫就印 beat（模擬過了 5 分鐘）。 */

@@ -2,6 +2,7 @@ package zombie.mdc;
 
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -9,13 +10,19 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
+import zombie.GameTime;
 import zombie.core.network.ByteBufferReader;
 import zombie.core.raknet.UdpConnection;
+import zombie.core.raknet.UdpEngine;
 import zombie.debug.DebugLog;
 import zombie.debug.DebugType;
 import zombie.debug.LogSeverity;
 import zombie.iso.IsoCell;
+import zombie.iso.IsoChunk;
+import zombie.iso.IsoChunkLevel;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
@@ -25,20 +32,22 @@ import zombie.iso.sprite.IsoSprite;
 import zombie.network.GameServer;
 import zombie.network.ServerMap;
 import zombie.network.fields.NetObject;
+import zombie.pathfind.CollideWithObstaclesPoly;
 
 /**
  * W110 門同步回送閘行為驗證（獨立 JVM；{@code MODE} 是 static final）。用法：{@code DoorSyncGuardTest off|observe|enforce}
  * （配 {@code -Dmdc.doorSyncGuard=同值}，測試自驗）。
  *
- * <p>裸 JVM 跑不動真的 {@code IsoDoor.syncIsoObject}（尾段要 GameTime、Lua 事件、格子重算），所以 {@link TestDoor} 照原版遠端分支的封包格式
- * 讀包並套用狀態（本片欄位、單門換 sprite、車庫門每片用真的 {@code NetObject.parse／getObject}、{@code setLockedByKey}、{@code changeSprite}；
- * 片取不到就像原版一樣不轉發），用 {@code forwards} 代表「重算並轉發」；替身與原版的對應由 SmokeCheck 的 W110 SHA 鎖守住。
+ * <p>主流程用 {@link TestDoor}：照原版遠端分支的封包格式讀包並套用狀態（本片欄位、單門換 sprite、車庫門每片用真的 {@code NetObject.parse／getObject}、
+ * {@code setLockedByKey}、{@code changeSprite}；片取不到就像原版一樣不轉發），用 {@code forwards} 代表「重算並轉發」；替身與原版的對應由
+ * SmokeCheck 的 W110 SHA 鎖守住。{@link #vanilla} 另用 jar 裡真正的 {@code IsoDoor.syncIsoObject} 跑單門與車庫門的 same／flip 差分。
  *
  * <p>鎖：原版負對照（相同內容照樣轉發、舊值回送把伺服器翻回去）；observe 不改狀態、position 還原、原方法照常；enforce 對 same 不呼叫原方法、
  * 寫入 lastPlayerOnlineId，對不同內容照常；試開旗標、只有血量不同、片取不到、片 sprite 不符照常；車庫門 locked≠lockedByKey 的包在各片已套用後算 same
- * （原版迴圈把本片 locked 蓋成 lockedByKey）；1 秒內第 9 個 flip 起隔離，enforce 丟包並對封包指到的門主動同步一次（代表片是 IsoThumpable 時也一樣），
- * 隔離期間丟包、期滿恢復，同一條鏈 10 秒最多一行 log；預讀例外還原 position 並照原樣；
- * beat 欄位與清掉 60 秒沒 flip 的鏈；off 只呼叫原方法、零 log。
+ * （原版迴圈把本片 locked 蓋成 lockedByKey）；同一扇門×同一條連線 1 秒內第 9 個 flip 起隔離，enforce 丟包並對收包的門主動同步一次，
+ * 隔離期間丟包、到期時期間丟過包且門還在世界上就補同步恰一次；另一條連線、別扇門（即使被列為片）、收包物件是 IsoThumpable 照原樣；
+ * 同一個 key 10 秒最多一行 log；短包計 malformed、還原 position 並照原樣；追蹤表滿時照原樣並計 overflow、1 秒後就地淘汰；
+ * beat 欄位與清掉 60 秒沒 flip 的紀錄；off 只呼叫原方法、零 log。
  */
 public final class DoorSyncGuardTest {
     private static final String TAG = "[MinidoracatJavaPatch][DoorSyncGuard]";
@@ -163,7 +172,7 @@ public final class DoorSyncGuardTest {
         boolean openBefore = g2.isOpen();
         send(g2, pkt(g2, !g2.isOpen(), false, 6, chain), tq + 80 * MS);
         if (enforce) {
-            expect("enforce：第 9 個 flip 丟掉（原方法沒呼叫、狀態不變），封包指到的 g2 主動同步一次、代表片 g0 沒有（g2=" + g2.serverSyncs + " g0=" + g0.serverSyncs + "）",
+            expect("enforce：第 9 個 flip 丟掉（原方法沒呼叫、狀態不變），收包的 g2 主動同步一次、鏈上的 g0 沒有（g2=" + g2.serverSyncs + " g0=" + g0.serverSyncs + "）",
                     g2.calls == g2Before + 8 && g2.isOpen() == openBefore && g2.serverSyncs == 1 && g0.serverSyncs == 0
                             && DoorSyncGuard.quarantinesForTest() == 1 && DoorSyncGuard.droppedForTest() == 1);
         } else {
@@ -180,22 +189,24 @@ public final class DoorSyncGuardTest {
         calls = g2.calls;
         boolean wasOpen = g2.isOpen();
         send(g2, pkt(g2, !g2.isOpen(), false, 6, chain), tq + 3500 * MS);
-        expect(mode + "：期滿恢復，flip 照常呼叫並套用", g2.calls == calls + 1 && g2.isOpen() != wasOpen
-                && g0.isOpen() == g2.isOpen() && gt.open == g2.isOpen() && g1.sprite == (g1.isOpen() ? g1.getOpenSprite() : closed(g1)));
+        expect(mode + "：期滿恢復，flip 照常呼叫並套用；" + (enforce ? "期間丟過包 → 先補同步 g2 一次（resyncs 1）" : "沒有補同步"),
+                g2.calls == calls + 1 && g2.isOpen() != wasOpen
+                && g0.isOpen() == g2.isOpen() && gt.open == g2.isOpen() && g1.sprite == (g1.isOpen() ? g1.getOpenSprite() : closed(g1))
+                && g2.serverSyncs == (enforce ? 2 : 0) && DoorSyncGuard.resyncsForTest() == (enforce ? 1 : 0));
         for (int i = 1; i <= 8; i++) {
             send(g2, pkt(g2, !g2.isOpen(), false, 6, chain), tq + 3500 * MS + i * 10 * MS);
         }
         List<String> q = rowsContaining(" quarantine#");
-        expect(mode + "：再洪流一次" + (off ? "（off 不計）" : "→ quarantine 2，同一條鏈 10 秒內只印 1 行（" + q + "）"),
+        expect(mode + "：再洪流一次" + (off ? "（off 不計）" : "→ quarantine 2，同一扇門×連線 10 秒內只印 1 行，印收包門自己的格子與 index（" + q + "）"),
                 off ? DoorSyncGuard.quarantinesForTest() == 0 && q.isEmpty()
                         : DoorSyncGuard.quarantinesForTest() == 2 && q.size() == 1 && q.get(0).contains("player=Player_A")
-                                && q.get(0).contains("guid=1001") && q.get(0).contains("chain=110,200,0#1")
+                                && q.get(0).contains("guid=1001") && q.get(0).contains(" door=112,200,0#1 ")
                                 && q.get(0).contains("sprite=") && q.get(0).contains("flips=9 ") && q.get(0).contains("mode=" + mode));
         if (enforce) {
-            expect("enforce：第二次隔離開始再對 g2 主動同步一次", g2.serverSyncs == 2 && g0.serverSyncs == 0);
+            expect("enforce：第二次隔離開始再對 g2 主動同步一次", g2.serverSyncs == 3 && g0.serverSyncs == 0);
         }
 
-        // ---- 代表片是 IsoThumpable 的鏈：主動同步的仍是封包指到的 IsoDoor ----
+        // ---- 鏈上有 IsoThumpable 片：隔離與主動同步都只針對收包的 IsoDoor ----
         IsoThumpable ht = thump(120, 200, 0);
         TestDoor h1 = door(121, 200, 0, 1);
         TestDoor h2 = door(122, 200, 0, 1);
@@ -203,13 +214,13 @@ public final class DoorSyncGuardTest {
         for (int i = 0; i <= 8; i++) {
             send(h2, pkt(h2, !h2.isOpen(), false, 7, ht, h1, h2), tx + i * 10 * MS);
         }
-        List<String> qh = rowsContaining(" chain=120,200,0#0 ");
-        expect(mode + "：代表片是 IsoThumpable 的鏈" + (off ? "（off 不計）" : enforce ? "隔離時主動同步 h2 一次、h1 沒有" : "隔離、沒有主動同步"),
+        List<String> qh = rowsContaining(" door=122,200,0#1 ");
+        expect(mode + "：鏈上有 IsoThumpable 片" + (off ? "（off 不計）" : enforce ? "，隔離時主動同步收包的 h2 一次、h1 沒有" : "，隔離、沒有主動同步"),
                 off ? DoorSyncGuard.quarantinesForTest() == 0 && qh.isEmpty()
                         : DoorSyncGuard.quarantinesForTest() == 3 && qh.size() == 1 && h1.serverSyncs == 0
                                 && h2.serverSyncs == (enforce ? 1 : 0) && ht.open == h2.isOpen());
 
-        // ---- 預讀例外 ----
+        // ---- 短包 ----
         calls = d1.calls;
         long anomalies = DoorSyncGuard.anomaliesForTest();
         ByteBuffer shortBuf = ByteBuffer.allocate(START + 2);
@@ -222,9 +233,9 @@ public final class DoorSyncGuardTest {
         } catch (BufferUnderflowException e) {
             thrown = e;
         }
-        expect(mode + "：預讀例外" + (off ? "（off 不讀）" : "計 anomalies 1、") + "還原 position、照原樣呼叫原方法（原方法自己的例外照常上拋）",
+        expect(mode + "：短包" + (off ? "（off 不讀）" : "計 malformed 1、不計 anomalies、") + "還原 position、原方法恰呼叫一次（原方法自己的例外照常上拋）",
                 d1.calls == calls + 1 && d1.entryPos == START && thrown != null
-                        && DoorSyncGuard.anomaliesForTest() == anomalies + (off ? 0 : 1));
+                        && DoorSyncGuard.malformedForTest() == (off ? 0 : 1) && DoorSyncGuard.anomaliesForTest() == anomalies);
 
         // ---- beat ----
         long tb = tq + 100 * SEC;
@@ -236,8 +247,13 @@ public final class DoorSyncGuardTest {
                 : beat.contains("mode=" + mode + " ") && beat.contains(" quarantines=3 ") && beat.contains(" dropped=" + (enforce ? 5 : 0) + " ")
                         && beat.contains(" wouldDrop=" + (enforce ? 0 : 5) + " ") && beat.contains(" maxFlipsPerSec=9 ")
                         && beat.contains(" sameSkipped=" + (enforce ? 4 : 0) + " ") && beat.contains(" other=4 ")
+                        && beat.contains(" resyncs=" + (enforce ? 1 : 0) + " ") && beat.contains(" overflow=0 ") && beat.contains(" malformed=1 ")
                         && DoorSyncGuard.sameSkippedForTest() == (enforce ? 5 : 0) && DoorSyncGuard.otherForTest() == 4
-                        && beat.contains(" tracked=0 ") && beat.contains(" anomalies=1") && DoorSyncGuard.trackedForTest() == 0);
+                        && beat.contains(" tracked=0 ") && beat.contains(" anomalies=0") && DoorSyncGuard.trackedForTest() == 0
+                        && DoorSyncGuard.quarantinedForTest() == 0);
+
+        perKey(mode, tb + 10 * SEC);
+        vanilla(mode, tb + 400 * SEC);
 
         for (String row : rows()) {
             System.out.println("log  " + row.substring(row.indexOf(TAG)));
@@ -251,9 +267,271 @@ public final class DoorSyncGuardTest {
 
     /** 同 W58 入口：閘回 true 才呼叫原方法。 */
     private static void send(IsoDoor door, ByteBufferReader bb, long now) {
-        if (DoorSyncGuard.allow(door, true, conn, bb, now)) {
-            door.syncIsoObject(true, (byte) 0, conn, bb);
+        send(conn, door, bb, now);
+    }
+
+    private static void send(UdpConnection from, IsoDoor door, ByteBufferReader bb, long now) {
+        if (DoorSyncGuard.allow(door, true, from, bb, now)) {
+            door.syncIsoObject(true, (byte) 0, from, bb);
         }
+    }
+
+    /** 隔離對象是「這扇 IsoDoor × 這條連線」：兩條連線、到期補同步、別扇門的片、IsoThumpable 收包、追蹤表上限。 */
+    private static void perKey(String mode, long t0) throws Exception {
+        boolean off = mode.equals("off");
+        boolean enforce = mode.equals("enforce");
+        boolean observe = mode.equals("observe");
+        UdpConnection connB = connection(1002L, "Player B");
+        IsoObject plain = alloc(IsoObject.class);
+
+        // ---- 兩條連線對同一扇門 ----
+        TestDoor m = door(140, 200, 0, 0);
+        long q0 = DoorSyncGuard.quarantinesForTest();
+        for (int i = 0; i < 4; i++) {
+            send(connB, m, pkt(m, !m.isOpen(), false, 2), t0 + i * 10 * MS);
+        }
+        for (int i = 0; i < 8; i++) {
+            send(m, pkt(m, !m.isOpen(), false, 1), t0 + (40 + i * 10) * MS);
+        }
+        expect(mode + "：B 的 4 個 flip 不算進 A 的視窗（合算是 12 個）：A 的 8 個 flip 後仍沒有隔離、12 包都轉給原方法",
+                DoorSyncGuard.quarantinesForTest() == q0 && m.calls == 12);
+        send(m, pkt(m, !m.isOpen(), false, 1), t0 + 120 * MS);
+        int callsM = m.calls;
+        boolean openM = m.isOpen();
+        send(connB, m, pkt(m, !m.isOpen(), false, 2), t0 + 130 * MS);
+        expect(mode + "：A 的第 9 個 flip " + (off ? "（off 不計）" : "隔離 A×這扇門") + "；B 對同一扇門的 flip 照常轉給原方法並套用",
+                DoorSyncGuard.quarantinesForTest() == q0 + (off ? 0 : 1) && m.calls == callsM + 1 && m.isOpen() != openM
+                        && m.serverSyncs == (enforce ? 1 : 0));
+        long drop0 = DoorSyncGuard.droppedForTest();
+        long would0 = DoorSyncGuard.wouldDropForTest();
+        callsM = m.calls;
+        send(m, pkt(m, !m.isOpen(), false, 1), t0 + 140 * MS);
+        expect(mode + "：A 隔離中的下一包" + (enforce ? "丟掉（dropped +1）" : "照常呼叫" + (observe ? "（wouldDrop +1）" : "")),
+                enforce ? m.calls == callsM && DoorSyncGuard.droppedForTest() == drop0 + 1
+                        : m.calls == callsM + 1 && DoorSyncGuard.wouldDropForTest() == would0 + (observe ? 1 : 0));
+
+        // ---- 到期補同步：任何一次呼叫（收包物件不是門也一樣）先處理到期 ----
+        long r0 = DoorSyncGuard.resyncsForTest();
+        ByteBufferReader notDoor = pkt(m, false, false, 1);
+        boolean passPlain = DoorSyncGuard.allow(plain, true, conn, notDoor, t0 + 3200 * MS);
+        expect(mode + "：隔離到期後下一次呼叫" + (enforce ? "補同步 m 恰一次（期間丟過包）" : "不補同步（沒有丟過包）") + "；非門物件照原樣",
+                passPlain && notDoor.position() == START && m.serverSyncs == (enforce ? 2 : 0)
+                        && DoorSyncGuard.resyncsForTest() == r0 + (enforce ? 1 : 0) && DoorSyncGuard.quarantinedForTest() == 0);
+        DoorSyncGuard.allow(plain, true, conn, null, t0 + 3300 * MS);
+        expect(mode + "：再呼叫不會再補同步", m.serverSyncs == (enforce ? 2 : 0) && DoorSyncGuard.resyncsForTest() == r0 + (enforce ? 1 : 0));
+
+        // ---- 隔離期間沒丟過包：到期不補 ----
+        TestDoor r1 = door(141, 200, 0, 0);
+        long t1 = t0 + 10 * SEC;
+        for (int i = 0; i <= 8; i++) {
+            send(r1, pkt(r1, !r1.isOpen(), false, 1), t1 + i * 10 * MS);
+        }
+        DoorSyncGuard.allow(plain, true, conn, null, t1 + 3200 * MS);
+        expect(mode + "：隔離期間沒有丟過包（只有開始那一包），到期不補同步",
+                r1.serverSyncs == (enforce ? 1 : 0) && DoorSyncGuard.resyncsForTest() == r0 + (enforce ? 1 : 0)
+                        && DoorSyncGuard.quarantinedForTest() == 0);
+
+        // ---- 門已不在世界上：到期不補 ----
+        TestDoor r2 = door(142, 200, 0, 0);
+        long t2 = t0 + 20 * SEC;
+        for (int i = 0; i <= 9; i++) {
+            send(r2, pkt(r2, !r2.isOpen(), false, 1), t2 + i * 10 * MS);
+        }
+        r2.square.getObjects().remove(r2);
+        DoorSyncGuard.allow(plain, true, conn, null, t2 + 3200 * MS);
+        expect(mode + "：隔離期間丟過包但門已移出格子（getObjectIndex == -1），到期不補同步",
+                r2.serverSyncs == (enforce ? 1 : 0) && DoorSyncGuard.resyncsForTest() == r0 + (enforce ? 1 : 0)
+                        && DoorSyncGuard.quarantinedForTest() == 0);
+
+        // ---- 封包宣告別扇門的片：不改那扇門的紀錄；隔離中收包物件是 IsoThumpable 照原樣 ----
+        TestDoor x = door(160, 200, 0, 1);
+        TestDoor y = door(161, 200, 0, 1);
+        IsoThumpable xt = thump(162, 200, 0);
+        long t3 = t0 + 30 * SEC;
+        long q3 = DoorSyncGuard.quarantinesForTest();
+        for (int i = 0; i <= 8; i++) {
+            send(x, pkt(x, !x.isOpen(), false, 3, x, y, xt), t3 + i * 10 * MS);
+        }
+        int callsY = y.calls;
+        send(y, pkt(y, !y.isOpen(), false, 3, y, x, xt), t3 + 100 * MS);
+        expect(mode + "：x 的封包都列出 y 這片；x 隔離" + (off ? "（off 不計）" : "") + "後 y 自己收的 flip 照常轉給原方法、y 沒有被隔離",
+                DoorSyncGuard.quarantinesForTest() == q3 + (off ? 0 : 1) && y.calls == callsY + 1 && y.serverSyncs == 0);
+        long remote0 = DoorSyncGuard.doorRemoteForTest();
+        ByteBufferReader thumpPkt = pkt(x, !x.isOpen(), false, 3, x, y, xt);
+        boolean thumpPass = DoorSyncGuard.allow(xt, true, conn, thumpPkt, t3 + 150 * MS);
+        expect(mode + "：x 隔離中，收包物件是同鏈 IsoThumpable 的同步照原樣（回 true、position 不動、不計 doorRemote）",
+                thumpPass && thumpPkt.position() == START && DoorSyncGuard.doorRemoteForTest() == remote0);
+
+        // ---- 追蹤表上限：beat 先清空，再塞滿 MAX_TRACKED 筆 1 秒內有 flip 的紀錄 ----
+        long t4 = t0 + 200 * SEC;
+        DoorSyncGuard.armBeatForTest(t4);
+        DoorSyncGuard.allow(plain, true, conn, null, t4);
+        expect(mode + "：beat 清掉 60 秒沒 flip 的紀錄 → tracked 0", DoorSyncGuard.trackedForTest() == 0);
+        for (int i = 0; i < DoorSyncGuard.MAX_TRACKED; i++) {
+            TestDoor f = door(1000 + i, 300, 0, 0);
+            send(f, pkt(f, true, false, 1), t4 + MS);
+        }
+        long over0 = DoorSyncGuard.overflowForTest();
+        TestDoor fx = door(999, 300, 0, 0);
+        send(fx, pkt(fx, true, false, 1), t4 + 500 * MS);
+        expect(mode + "：表滿（" + DoorSyncGuard.trackedForTest() + " 筆、都在 1 秒內有 flip）時新門照原版放行並套用" + (off ? "" : "、overflow +1、不建紀錄"),
+                fx.calls == 1 && fx.isOpen() && DoorSyncGuard.overflowForTest() == over0 + (off ? 0 : 1)
+                        && DoorSyncGuard.trackedForTest() == (off ? 0 : DoorSyncGuard.MAX_TRACKED));
+        TestDoor fy = door(998, 300, 0, 0);
+        send(fy, pkt(fy, true, false, 1), t4 + 1500 * MS);
+        expect(mode + "：1 秒後再有新門：先就地淘汰 1 秒內沒 flip、不在隔離的紀錄，再建紀錄（tracked " + DoorSyncGuard.trackedForTest() + "）",
+                fy.calls == 1 && DoorSyncGuard.overflowForTest() == over0 + (off ? 0 : 1) && DoorSyncGuard.trackedForTest() == (off ? 0 : 1));
+    }
+
+    /**
+     * 原版差分：jar 裡真正的 {@code IsoDoor.syncIsoObject(true, …)}（不是替身）。只換掉對外輸出：送包對象是空的連線表、
+     * Lua 環境未載入（{@code triggerEvent} 直接 return）、伺服器上 {@code WeatherFxMask} 直接 return；格子重算照原版跑在測試格子上，
+     * 車庫門片的路徑網格更新因 chunk 標成未載入而直接 return。尾段有沒有跑到看 {@code GameTime.lightSourceUpdate} 是否被設成 100。
+     */
+    private static void vanilla(String mode, long t0) throws Exception {
+        boolean off = mode.equals("off");
+        boolean enforce = mode.equals("enforce");
+        UdpEngine engine = alloc(UdpEngine.class);
+        set(UdpEngine.class, engine, "connections", new ArrayList<UdpConnection>());
+        GameServer.udpEngine = engine;
+        if (GameTime.instance == null) {
+            GameTime.instance = alloc(GameTime.class);
+        }
+        IsoDoor v = vdoor(170, 200, 0);
+
+        // same：真原版跑完只有 lastPlayerOnlineId 變（尾段有跑到）
+        Map<String, Object> before = snapshot(v);
+        GameTime.instance.lightSourceUpdate = 0.0F;
+        v.syncIsoObject(true, (byte) 0, conn, pkt(v, false, false, 42));
+        Set<String> diff = changed(before, snapshot(v));
+        expect("原版差分：真原版處理 same 包後只有 lastPlayerOnlineId 變（" + diff + "），尾段有跑到",
+                diff.equals(Set.of("IsoDoor.lastPlayerOnlineId")) && lastId(v) == 42 && GameTime.instance.lightSourceUpdate == 100.0F);
+
+        // 同一包經閘：分類成 same；enforce 的捷徑結果和真原版相同（只寫 lastPlayerOnlineId）
+        long same0 = DoorSyncGuard.sameForTest();
+        before = snapshot(v);
+        GameTime.instance.lightSourceUpdate = 0.0F;
+        ByteBufferReader bb = pkt(v, false, false, 43);
+        if (DoorSyncGuard.allow(v, true, conn, bb, t0)) {
+            v.syncIsoObject(true, (byte) 0, conn, bb);
+        }
+        diff = changed(before, snapshot(v));
+        expect(mode + "：原版差分 same 包經閘" + (off ? "（off 不分類）" : "分類成 same") + (enforce ? "、不呼叫原版（尾段沒跑）" : "、呼叫原版")
+                        + "，結果都只有 lastPlayerOnlineId 變（" + diff + "）",
+                DoorSyncGuard.sameForTest() == same0 + (off ? 0 : 1) && diff.equals(Set.of("IsoDoor.lastPlayerOnlineId")) && lastId(v) == 43
+                        && GameTime.instance.lightSourceUpdate == (enforce ? 0.0F : 100.0F));
+
+        // flip（開門）：分類成 flip、照常呼叫原版、欄位照封包變
+        long flip0 = DoorSyncGuard.flipForTest();
+        bb = pkt(v, true, false, 44);
+        if (DoorSyncGuard.allow(v, true, conn, bb, t0 + 10 * SEC)) {
+            v.syncIsoObject(true, (byte) 0, conn, bb);
+        }
+        expect(mode + "：原版差分 flip（開門）" + (off ? "" : "分類成 flip、") + "真原版把門打開、sprite 換成 openSprite",
+                DoorSyncGuard.flipForTest() == flip0 + (off ? 0 : 1) && v.isOpen() && v.sprite == v.getOpenSprite() && lastId(v) == 44);
+
+        // flip（上鎖）
+        bb = raw(true, true, true, false, false, 500, 45);
+        if (DoorSyncGuard.allow(v, true, conn, bb, t0 + 20 * SEC)) {
+            v.syncIsoObject(true, (byte) 0, conn, bb);
+        }
+        expect(mode + "：原版差分 flip（上鎖）" + (off ? "" : "分類成 flip、") + "真原版把 locked／lockedByKey 都設成 true、門仍開著",
+                DoorSyncGuard.flipForTest() == flip0 + (off ? 0 : 2) && v.isLocked() && v.isLockedByKey() && v.isOpen() && lastId(v) == 45);
+
+        // 上鎖後的 same：真原版不再改任何東西
+        before = snapshot(v);
+        v.syncIsoObject(true, (byte) 0, conn, raw(true, true, true, false, false, 500, 46));
+        diff = changed(before, snapshot(v));
+        expect("原版差分：開著且上鎖的門收到相同內容，真原版只改 lastPlayerOnlineId（" + diff + "）", diff.equals(Set.of("IsoDoor.lastPlayerOnlineId")));
+
+        // 車庫門路徑（真原版）：兩片都 locked＝lockedByKey＝true，收到 bLocked=false、bLockedByKey=true、本片也列在片裡的包
+        IsoDoor g0 = vdoor(180, 200, 0);
+        IsoDoor g1 = vdoor(181, 200, 0);
+        // 片迴圈的 PolygonalMap2.squareChanged：PathfindNative 讀 chunk.loadedBits（0＝未載入就 return）、FMODAmbientWalls 讀 levels；
+        // 尾段 RecalcProperties 在 chunk 非 null 時清 collision
+        IsoChunk chunk = alloc(IsoChunk.class);
+        set(IsoChunk.class, chunk, "levels", new IsoChunkLevel[1]);
+        set(IsoChunk.class, chunk, "collision", new CollideWithObstaclesPoly.ChunkData());
+        g0.square.chunk = chunk;
+        g1.square.chunk = chunk;
+        g0.setLockedByKey(true);
+        g1.setLockedByKey(true);
+        Map<String, Object> b0 = snapshot(g0);
+        Map<String, Object> b1 = snapshot(g1);
+        GameTime.instance.lightSourceUpdate = 0.0F;
+        g1.syncIsoObject(true, (byte) 0, conn, raw(false, false, true, false, false, 500, 8, ref(g1), ref(g0)));
+        Set<String> d0 = changed(b0, snapshot(g0));
+        Set<String> d1 = changed(b1, snapshot(g1));
+        expect("原版差分（車庫門）：真原版處理 bLocked=false／bLockedByKey=true、本片也列在片裡的包，收包片只改 lastPlayerOnlineId（" + d1
+                        + "）、另一片不變（" + d0 + "），尾段有跑到",
+                d1.equals(Set.of("IsoDoor.lastPlayerOnlineId")) && d0.isEmpty() && g1.isLocked() && g1.isLockedByKey()
+                        && GameTime.instance.lightSourceUpdate == 100.0F);
+        long same1 = DoorSyncGuard.sameForTest();
+        b0 = snapshot(g0);
+        b1 = snapshot(g1);
+        GameTime.instance.lightSourceUpdate = 0.0F;
+        bb = raw(false, false, true, false, false, 500, 9, ref(g1), ref(g0));
+        if (DoorSyncGuard.allow(g1, true, conn, bb, t0 + 30 * SEC)) {
+            g1.syncIsoObject(true, (byte) 0, conn, bb);
+        }
+        d0 = changed(b0, snapshot(g0));
+        d1 = changed(b1, snapshot(g1));
+        expect(mode + "：原版差分（車庫門）同內容經閘" + (off ? "（off 不分類）" : "分類成 same") + (enforce ? "、不呼叫原版" : "、呼叫原版")
+                        + "，結果都是收包片只改 lastPlayerOnlineId（" + d1 + "）、另一片不變（" + d0 + "）",
+                DoorSyncGuard.sameForTest() == same1 + (off ? 0 : 1) && d1.equals(Set.of("IsoDoor.lastPlayerOnlineId")) && d0.isEmpty()
+                        && lastId(g1) == 9 && GameTime.instance.lightSourceUpdate == (enforce ? 0.0F : 100.0F));
+    }
+
+    /** 真 IsoDoor（不是替身），關著、沒鎖、血量 500，放在格子的第 0 個。 */
+    private static IsoDoor vdoor(int x, int y, int z) throws Exception {
+        IsoGridSquare sq = square(x, y, z);
+        // 尾段 RecalcProperties／RecalcAllWithNeighbours 要讀格子的 PropertyContainer 與 nav[8]（建構子才會建）
+        set(IsoGridSquare.class, sq, "properties", new zombie.core.properties.PropertyContainer());
+        set(IsoGridSquare.class, sq, "nav", new IsoGridSquare[8]);
+        IsoDoor d = alloc(IsoDoor.class);
+        d.square = sq;
+        d.health = 500;
+        d.setOpenSprite(alloc(IsoSprite.class));
+        set(IsoDoor.class, d, "closedSprite", alloc(IsoSprite.class));
+        d.sprite = closed(d);
+        sq.getObjects().add(d);
+        return d;
+    }
+
+    /** 物件（含父類別）全部實例欄位的淺快照：基本型別比值，參照比 identity。 */
+    private static Map<String, Object> snapshot(Object o) throws Exception {
+        Map<String, Object> out = new HashMap<>();
+        for (Class<?> c = o.getClass(); c != null; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (!Modifier.isStatic(f.getModifiers())) {
+                    f.setAccessible(true);
+                    out.put(c.getSimpleName() + "." + f.getName(), f.get(o));
+                }
+            }
+        }
+        return out;
+    }
+
+    private static Set<String> changed(Map<String, Object> a, Map<String, Object> b) {
+        Set<String> out = new TreeSet<>();
+        for (Map.Entry<String, Object> e : a.entrySet()) {
+            Object x = e.getValue();
+            Object y = b.get(e.getKey());
+            boolean boxed = x instanceof Number || x instanceof Boolean || x instanceof Character;
+            if (boxed ? !x.equals(y) : x != y) {
+                out.add(e.getKey());
+            }
+        }
+        return out;
+    }
+
+    private static UdpConnection connection(long guid, String name) throws Exception {
+        UdpConnection c = alloc(UdpConnection.class);
+        Field f = UdpConnection.class.getDeclaredField("connectedGuid");
+        f.setAccessible(true);
+        f.setLong(c, guid);
+        c.setUserName(name);
+        return c;
     }
 
     /** 原版 IsoDoor.syncIsoObject 遠端分支的替身（雙開門與尾段重算略過）；forwards＝走到「轉發給其他連線」那一步。 */

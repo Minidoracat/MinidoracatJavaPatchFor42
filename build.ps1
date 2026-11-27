@@ -138,7 +138,7 @@ $helperEntries = @(
     'zombie/mdc/SyncIsoObjectProbe.class',
     'zombie/mdc/SyncIsoObjectProbe$Conn.class',
     'zombie/mdc/DoorSyncGuard.class',
-    'zombie/mdc/DoorSyncGuard$Chain.class',
+    'zombie/mdc/DoorSyncGuard$Track.class',
     'zombie/mdc/DoorSyncGuard$Handles.class',
     'zombie/mdc/WorldMapChangeCount.class',
     'zombie/mdc/AnimalLossProbe.class',
@@ -182,6 +182,7 @@ $helperEntries = @(
     'zombie/mdc/AnimalLoopSoundGate$Timed.class',
     'zombie/mdc/BodyLastStateGate.class',
     'zombie/characters/animals/MdcAnimalProbes.class',
+    'zombie/characters/animals/MdcAnimalProbes$Fluids.class',
     'zombie/mdc/TeleportWatch.class',
     'zombie/mdc/TeleportWatch$State.class',
     'zombie/network/MdcSteamIpBan.class',
@@ -696,7 +697,7 @@ Assert-Ok "SyncIsoObjectProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.SyncIsoObjectProbeTest off
 Assert-Ok "SyncIsoObjectProbeTest（off，只呼叫原方法）"
 
-Write-Host "[9zg2/10] 門同步回送閘（W110）：原版負對照（相同內容照樣轉發、舊值回送把伺服器翻回、車庫門 locked≠lockedByKey 處理後不變）、經 W58 入口、same／flip／試開／只差血量／片取不到／sprite 不符分類、車庫門鏈代表片、翻轉超過 8／秒隔離 3 秒並對收包的 IsoDoor 主動同步一次（代表片是 IsoThumpable 時也一樣）、期滿恢復、10 秒一行、預讀例外還原 position、sameSkipped／other 計數；off／observe／enforce 三個 JVM..."
+Write-Host "[9zg2/10] 門同步回送閘（W110）：原版負對照（相同內容照樣轉發、舊值回送把伺服器翻回、車庫門 locked≠lockedByKey 處理後不變）、真原版 IsoDoor.syncIsoObject 差分、經 W58 入口、same／flip／試開／只差血量／片取不到／sprite 不符分類、key＝門×連線（兩條連線分開計、別扇門與 IsoThumpable 照原樣）、翻轉超過 8／秒隔離 3 秒並對收包的 IsoDoor 主動同步一次、期滿補同步恰一次（observe 不補）、表滿 overflow 與就地淘汰、10 秒一行、短包 malformed 還原 position、sameSkipped／other 計數；off／observe／enforce 三個 JVM..."
 foreach ($m in 'off', 'observe', 'enforce') {
     java -Xverify:all "-Dmdc.doorSyncGuard=$m" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.DoorSyncGuardTest $m
     Assert-Ok "DoorSyncGuardTest（$m）"

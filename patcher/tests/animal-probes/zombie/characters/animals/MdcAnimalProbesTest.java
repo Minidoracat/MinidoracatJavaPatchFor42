@@ -107,9 +107,18 @@ public final class MdcAnimalProbesTest {
         membership.setAccessible(true);
         String[] fluid = {null, null, null, null, null, "Petrol", "Water"};
         float[] rain = {1.0F, 0.0F, 2.5F, Float.NaN, -1.0F, 3.0F, 1.5F};
+        IsoObject petrolEntity = null;
         for (int i = 0; i < rain.length; i++) {
-            membership.invoke(bucket, entity(rain[i], fluid[i]));
+            IsoObject o = entity(rain[i], fluid[i]);
+            if ("Petrol".equals(fluid[i])) {
+                petrolEntity = o;
+            }
+            membership.invoke(bucket, o);
         }
+        // 汽油那個容器的快取標成失效：原版 getAmount 會重算、寫回欄位、呼叫 onFluidContainerUpdate；探針不得碰
+        FluidContainer petrolFc = petrolEntity.getFluidContainer();
+        set(FluidContainer.class, petrolFc, "cacheInvalidated", true);
+        set(FluidContainer.class, petrolFc, "amountCache", 0.0F);
         check("前提：bucket 內 7 個", bucket.getEntities().size() == 7);
         zombie.iso.weather.ClimateManager climate = zombie.iso.weather.ClimateManager.getInstance();
         Field precipField = zombie.iso.weather.ClimateManager.class.getDeclaredField("precipitationIntensity");
@@ -126,6 +135,9 @@ public final class MdcAnimalProbesTest {
                 sameArray && MdcAnimalProbes.fluidCallsForTest() == (off ? 0 : 64)
                         && MdcAnimalProbes.fluidScansForTest() == (off ? 0 : 1) && MdcAnimalProbes.rcSumForTest() == (off ? 0 : 4)
                         && MdcAnimalProbes.precipFramesForTest() == (off ? 0 : 32) && MdcAnimalProbes.petrolRcSumForTest() == (off ? 0 : 1));
+        check(mode + "：F1 掃描不碰液體快取（cacheInvalidated 仍為 true、amountCache 仍為 0、onFluidContainerUpdate 0 次）；VarHandle 取得到",
+                (boolean) get(FluidContainer.class, petrolFc, "cacheInvalidated") && (float) get(FluidContainer.class, petrolFc, "amountCache") == 0.0F
+                        && ((CountingObject) petrolEntity).fluidUpdates == 0 && MdcAnimalProbes.fluidsHandleForTest());
 
         // ---- sim ----
         UdpEngine engine = alloc(UdpEngine.class);
@@ -342,9 +354,19 @@ public final class MdcAnimalProbesTest {
         return ch;
     }
 
-    /** 未初始化的 IsoObject，ComponentContainer 有 bucketBits；rainCatcher 是 NaN 時不放液體容器；fluidType 不是 null 時可倒、有量、裝一種液體。 */
+    /** 數 onFluidContainerUpdate 次數的 IsoObject（原版重算快取時會經 getGameEntity 呼叫它）。 */
+    public static class CountingObject extends IsoObject {
+        int fluidUpdates;
+
+        @Override
+        public void onFluidContainerUpdate() {
+            fluidUpdates++;
+        }
+    }
+
+    /** 未初始化的 IsoObject，ComponentContainer 有 bucketBits；rainCatcher 是 NaN 時不放液體容器；fluidType 不是 null 時可倒、有量（1）、裝一種液體，容器 owner 是這個物件。 */
     static IsoObject entity(float rainCatcher, String fluidType) throws Exception {
-        IsoObject o = alloc(IsoObject.class);
+        IsoObject o = alloc(CountingObject.class);
         ComponentContainer cc = alloc(ComponentContainer.class);
         Array<Component> list = new Array<>(false, 1);
         Component[] byId = new Component[ComponentType.MAX_ID_INDEX + 1];
@@ -356,11 +378,13 @@ public final class MdcAnimalProbesTest {
                 set(Fluid.class, f, "fluidTypeStr", fluidType);
                 FluidInstance fi = alloc(FluidInstance.class);
                 set(FluidInstance.class, fi, "fluid", f);
+                set(FluidInstance.class, fi, "amount", 1.0F);
                 ArrayList<FluidInstance> fluids = new ArrayList<>();
                 fluids.add(fi);
                 set(FluidContainer.class, fc, "fluids", fluids);
                 set(FluidContainer.class, fc, "canPlayerEmpty", true);
                 set(FluidContainer.class, fc, "amountCache", 1.0F);
+                set(zombie.entity.Component.class, fc, "owner", o);
             }
             byId[ComponentType.FluidContainer.GetID()] = fc;
             list.add(fc);
@@ -390,6 +414,12 @@ public final class MdcAnimalProbesTest {
         Field f = owner.getDeclaredField(name);
         f.setAccessible(true);
         f.set(target, value);
+    }
+
+    static Object get(Class<?> owner, Object target, String name) throws Exception {
+        Field f = owner.getDeclaredField(name);
+        f.setAccessible(true);
+        return f.get(target);
     }
 
     @SuppressWarnings("unchecked")
