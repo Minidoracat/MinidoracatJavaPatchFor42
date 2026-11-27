@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](catalog.md) · [Back to README](../README.md)
 
-Every patch in this repository, by area: what goes wrong in vanilla, what the patch does and whether we have reported it to TIS. The link in the first column opens the technical write-up of that patch in [patches.en.md](patches.en.md) (root cause with bytecode evidence, safety argument, checks, measured results). On 42.22.2 the server patches change 88 classes at 265 patch sites, with 110 helper classes.
+Every patch in this repository, by area: what goes wrong in vanilla, what the patch does and whether we have reported it to TIS. The link in the first column opens the technical write-up of that patch in [patches.en.md](patches.en.md) (root cause with bytecode evidence, safety argument, checks, measured results). On 42.22.2 the server patches change 88 classes at 265 patch sites, with 113 helper classes.
 
 
 Status is the default on 42.22.2. Every server patch has a `-Dmdc.*` kill switch (see its section) unless
@@ -83,6 +83,7 @@ noted. **TIS**: a topic number links to our forum report; "draft" means a report
 | W26 Hutch sync recipients ([2an](patches.en.md#2an)) | Hutch self-syncs go to every player on the server. | Sends them only to players whose loaded area covers the hutch. | not reported |
 | W31 Fish school broadcast ([2as](patches.en.md#2as)) | `transmitFishingData` serializes the same body again for every connection. | Serializes once per batch and reuses the bytes. | not reported |
 | W46 `VehicleCollide` resync ([2bi](patches.en.md#2bi)) | When the server handles a collide request and its release in the same frame, its per-connection cache does not change, so it never corrects the client, which keeps sending releases every frame: 239 packets/s and 180k warning lines in 2 hours. | A release marks that connection's authorization cache stale so the next sync sends the real authority: 9.8 packets/s. | not reported |
+| W110 Door sync echo guard ([2dr](patches.en.md#2dr)) | The server re-applies and forwards door syncs identical to its current state; a client that receives a garage-door sync and has another piece's lock change sends it back, a late echo of the old value flips the server back and is forwarded, and two clients keep triggering each other: two connections on the live server sent 202–310 packets/s each for 5 minutes. | Default observe: counts identical packets and flips per door per second, and logs the player and door when a door flips more than 8 times. Under enforce, identical packets are not applied or forwarded, a door over the flip limit is quarantined for 3 seconds with its packets dropped, and the server pushes its current state once when the quarantine starts. | not reported |
 
 ## Multiplayer correctness
 

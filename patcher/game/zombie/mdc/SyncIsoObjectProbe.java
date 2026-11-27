@@ -10,7 +10,7 @@ import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 
 /**
- * W58 SyncIsoObject 洪流觀測（2026-10-11；docs/patches.md 2bv）。純觀測：原方法照常呼叫恰一次，回傳與例外都與原版相同。
+ * W58 SyncIsoObject 洪流觀測（2026-10-11；docs/patches.md 2bv）。探針本身純觀測：原方法照常呼叫恰一次，回傳與例外都與原版相同（W110 門閘 enforce 丟包時除外）。
  *
  * <p><b>原版</b>：{@code GameServer.receiveSyncIsoObject} 依封包座標與 index 找到物件後呼叫
  * {@code IsoObject.syncIsoObject(true, state, connection, bb)}，後者不分距離轉送給其他所有連線。
@@ -25,6 +25,8 @@ import zombie.iso.IsoObject;
  * <p>只在主執行緒（{@code mainLoopDealWithNetData}）被呼叫，計數不加鎖；熱路徑不配置物件（新連線與 log 除外）。
  * 簿記全部在 try 內，例外只計 {@code anomalies}；原方法在 try 外呼叫，原版例外原樣上拋。
  * kill switch {@code -Dmdc.syncIsoObjectProbe=0|off}：只呼叫原方法，不記帳也不印。
+ * W110 {@link DoorSyncGuard}（2dr）掛在 record 之後、原方法之前，開關 {@code -Dmdc.doorSyncGuard} 與本探針互相獨立；
+ * 它回 false（enforce 丟包）時不呼叫原方法。
  */
 public final class SyncIsoObjectProbe {
     static final boolean ENABLED = parseEnabled(System.getProperty("mdc.syncIsoObjectProbe"));
@@ -76,7 +78,7 @@ public final class SyncIsoObjectProbe {
         return raw == null || !("0".equals(raw.trim()) || "off".equalsIgnoreCase(raw.trim()));
     }
 
-    /** 取代 {@code GameServer.receiveSyncIsoObject} 內的 {@code obj.syncIsoObject(true, state, connection, bb)}。 */
+    /** 取代 {@code GameServer.receiveSyncIsoObject} 內的 {@code obj.syncIsoObject(true, state, connection, bb)}；W110 門閘決定要不要呼叫。 */
     public static void syncIsoObject(IsoObject obj, boolean remote, byte state, UdpConnection connection,
             ByteBufferReader bb) {
         if (ENABLED) {
@@ -86,7 +88,9 @@ public final class SyncIsoObjectProbe {
                 anomalies++;
             }
         }
-        obj.syncIsoObject(remote, state, connection, bb);
+        if (DoorSyncGuard.allow(obj, remote, connection, bb)) {
+            obj.syncIsoObject(remote, state, connection, bb);
+        }
     }
 
     static void record(IsoObject obj, byte state, UdpConnection connection, long now) {

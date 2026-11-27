@@ -1006,7 +1006,8 @@ public final class PatchConfig {
         // W58：SyncIsoObject 洪流觀測（docs/patches.md 2bv）。原版 PacketsCache 超限警告不記連線，
         // 抓不到是誰；receiveSyncIsoObject 內唯一的 IsoObject.syncIsoObject（javap offset 115）改道
         // SyncIsoObjectProbe：每連線 1 秒視窗計數，超過門檻記玩家與物件，之後照原版呼叫。只觀測不改行為；
-        // kill switch -Dmdc.syncIsoObjectProbe=0|off。
+        // kill switch -Dmdc.syncIsoObjectProbe=0|off。W110（2dr）門同步回送閘掛在同一個 helper 裡
+        // （-Dmdc.doorSyncGuard=off|observe|enforce，預設 observe），不加手術。
         Patcher.MethodOps syncIsoIngress = gameServer.method("receiveSyncIsoObject",
                 "(Lzombie/core/network/ByteBufferReader;Lzombie/core/raknet/UdpConnection;S)V");
         syncIsoIngress.redirects.add(new Patcher.Site(Opcodes.INVOKEVIRTUAL,

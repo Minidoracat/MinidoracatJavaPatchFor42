@@ -137,6 +137,9 @@ $helperEntries = @(
     'zombie/mdc/VehicleRelevancyGate$StillState.class',
     'zombie/mdc/SyncIsoObjectProbe.class',
     'zombie/mdc/SyncIsoObjectProbe$Conn.class',
+    'zombie/mdc/DoorSyncGuard.class',
+    'zombie/mdc/DoorSyncGuard$Chain.class',
+    'zombie/mdc/DoorSyncGuard$Handles.class',
     'zombie/mdc/WorldMapChangeCount.class',
     'zombie/mdc/AnimalLossProbe.class',
     'zombie/mdc/ZoneSyncGuard.class',
@@ -693,6 +696,12 @@ Assert-Ok "SyncIsoObjectProbeTest（on，出貨組態）"
 java -Xverify:all "-Dmdc.syncIsoObjectProbe=off" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.SyncIsoObjectProbeTest off
 Assert-Ok "SyncIsoObjectProbeTest（off，只呼叫原方法）"
 
+Write-Host "[9zg2/10] 門同步回送閘（W110）：原版負對照（相同內容照樣轉發、舊值回送把伺服器翻回、車庫門 locked≠lockedByKey 處理後不變）、經 W58 入口、same／flip／試開／只差血量／片取不到／sprite 不符分類、車庫門鏈代表片、翻轉超過 8／秒隔離 3 秒並對收包的 IsoDoor 主動同步一次（代表片是 IsoThumpable 時也一樣）、期滿恢復、10 秒一行、預讀例外還原 position、sameSkipped／other 計數；off／observe／enforce 三個 JVM..."
+foreach ($m in 'off', 'observe', 'enforce') {
+    java -Xverify:all "-Dmdc.doorSyncGuard=$m" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.DoorSyncGuardTest $m
+    Assert-Ok "DoorSyncGuardTest（$m）"
+}
+
 Write-Host "[9zh/10] 世界地圖隊友點錯位（W59）：真 GameServer／GameClient 往返，掉一次回覆或索取後 on 持續索取、off 與原版計數負對照卡住，沒掉包時索取次數與原版相同..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.WorldMapChangeCountTest on
 Assert-Ok "WorldMapChangeCountTest（on，出貨組態）"
@@ -974,7 +983,7 @@ Assert-Ok "BodyLastStateGateTest（logthrow observe，日誌拋例外照原版�
 java -Xverify:all -cp "$R\work\out;$TJ" zombie.mdc.BodyLastStateGateTest vanilla
 Assert-Ok "BodyLastStateGateTest（vanilla，jar 原版負對照）"
 
-Write-Host "[9zzi/10] 動物與液體容器純觀測（W95）：a0 照原版呼叫 updateVirtualAnimals、loadedCells 掃描（cell／chunk／idle／moving／足跡）；F1 回原版同一個陣列、抽樣數 rainCatcher > 0；sim 只在主執行緒每 16 幀數一幀（沒人收得到而且閒置的比例、懷孕壓力 > 80），sim 例外不計入 animals 並記例外類別訊息；日誌鏈拋例外（首次生效、心跳、anomaly）時 a0／F1 照原版完成、拋 OutOfMemoryError 時照常外拋；off 原樣轉呼叫不計數..."
+Write-Host "[9zzi/10] 動物與液體容器純觀測（W95）：a0 照原版呼叫 updateVirtualAnimals、loadedCells 掃描（cell／chunk／idle／moving／足跡）；F1 回原版同一個陣列、抽樣數 rainCatcher > 0 與其中汽油容器、降水幀數；sim 只在主執行緒每 16 幀數一幀（沒人收得到而且閒置的比例、懷孕壓力 > 80），sim 例外不計入 animals 並記例外類別訊息；日誌鏈拋例外（首次生效、心跳、anomaly）時 a0／F1 照原版完成、拋 OutOfMemoryError 時照常外拋；off 原樣轉呼叫不計數..."
 $apCp = "$R\work\out;$R\dist\java;$TJ"
 java -Xverify:all -cp $apCp zombie.characters.animals.MdcAnimalProbesTest observe
 Assert-Ok "MdcAnimalProbesTest（observe，出貨組態）"

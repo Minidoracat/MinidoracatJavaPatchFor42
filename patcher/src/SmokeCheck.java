@@ -3569,6 +3569,47 @@ public final class SmokeCheck {
                         Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1
                 && classWideCalls(classNode(distJava, w58Probe), Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 1);
 
+        // ---- W110 門同步回送閘（docs/patches.md 2dr）----
+        // 不加手術：掛在 W58 helper 裡、原方法之前。預讀照 syncIsoObjectSend／NetObject.parse 的格式，same 判定照原版遠端分支會蓋的欄位；
+        // 任一 SHA 或欄位變紅＝封包格式或套用邏輯變了，重新核對分類再改鎖，不改鎖讓它變綠。
+        String w110Door = "zombie/iso/objects/IsoDoor";
+        String w110Thump = "zombie/iso/objects/IsoThumpable";
+        String w110Guard = "zombie/mdc/DoorSyncGuard";
+        failed += shaLocks(jar, "W110", new String[][]{
+                {w110Door, "syncIsoObject", w58Desc, "c84eb7c59e328e078da55ce3b264a3ef8afdcdf6140f6bbf625d6c5b43e932bd"},
+                {w110Door, "syncIsoObjectSend", "(Lzombie/core/network/ByteBufferWriter;)V", "55fe22520fbf519f1c44617c1f1ec1cb521023889715c443d3bcdef688bbd718"},
+                {w110Door, "setLockedByKey", "(Z)V", "5477d062560a0a1843301bf37d2464ebf4d392f74344aa2f6d9a9177e13893f1"},
+                {w110Door, "setLockedByKey", "(ZZ)V", "c6a86f8e67a2498564fdee3e9bdd91e78808a2a1107bb0217693036cf165f173"},
+                {w110Door, "changeSprite", "(L" + w110Door + ";)V", "eed3ba20b8c671068a79c88a35a529bfb6e36a95081038b95defc25b2d94d03b"},
+                {w110Thump, "setLockedByKey", "(ZZ)V", "dc2601d279d9c945387c5c8c236fca587732ff9ff38107a09d65335d6be8a466"},
+                {w110Thump, "changeSprite", "(L" + w110Thump + ";)V", "4b4a389d5d1a94cf40b99490cfdfa2c823791ab3938c891da7ad6c3086e4fb04"},
+                {"zombie/network/fields/NetObject", "parse", "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V",
+                        "1c3602a6527ea3e79f95646e6eb96f0503edb9c81eb192d0bd2f7a5019a84115"},
+                {"zombie/network/fields/NetObject", "getObject", "()Lzombie/iso/IsoObject;", "d1b522626b77f6d8d604bfaa4cf6e2ea027a806b984efe5a8b30f576c0518e8b"}});
+        String w110Sprite = "Lzombie/iso/sprite/IsoSprite;";
+        ClassNode w110DoorNode = classNodeFromJar(jar, w110Door);
+        ClassNode w110ThumpNode = classNodeFromJar(jar, w110Thump);
+        failed += check("W110 vanilla 前提：IsoDoor.lastPlayerOnlineId 是 short、closedSprite 是 IsoSprite；IsoThumpable.closedSprite 是 IsoSprite、open／openSprite 是 public",
+                hasField(w110DoorNode, "lastPlayerOnlineId", "S") && hasField(w110DoorNode, "closedSprite", w110Sprite)
+                        && hasField(w110ThumpNode, "closedSprite", w110Sprite)
+                        && w110ThumpNode.fields.stream().filter(f -> (f.access & Opcodes.ACC_PUBLIC) != 0
+                                && (f.name.equals("open") && f.desc.equals("Z") || f.name.equals("openSprite") && f.desc.equals(w110Sprite))).count() == 2);
+        String w110AllowDesc = "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;)Z";
+        MethodNode w110Probe = method(distJava, w58Probe, "syncIsoObject", w58ProbeDesc);
+        MethodNode w110Allow = method(distJava, w110Guard, "allow", "(L" + w58Iso + ";ZLzombie/core/raknet/UdpConnection;Lzombie/core/network/ByteBufferReader;J)Z");
+        // 主動同步對封包指到的 IsoDoor（owner 是 IsoDoor）：IsoDoor 的 syncIsoObjectSend 帶整條鏈；不得對代表片（可能是 IsoThumpable）以 IsoObject 呼叫
+        ClassNode w110GuardNode = classNode(distJava, w110Guard);
+        failed += check("W110 helper 契約：W58 helper 恰呼叫 DoorSyncGuard.allow 1 次、在原方法之前；主動同步恰 1 處、對 IsoDoor 呼叫、不在 try 內",
+                countExactCalls(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc) == 1
+                        && firstCallIndex(w110Probe, Opcodes.INVOKESTATIC, w110Guard, "allow", w110AllowDesc)
+                                < firstCallIndex(w110Probe, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc)
+                        && classWideCalls(w110GuardNode, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 1
+                        && classWideCalls(w110GuardNode, Opcodes.INVOKEVIRTUAL, w58Iso, "syncIsoObject", w58Desc) == 0
+                        && callsInTry(w110Allow, Opcodes.INVOKEVIRTUAL, w110Door, "syncIsoObject", w58Desc) == 0);
+        String w110Log = logHandlerViolations(w110GuardNode);
+        failed += check("W110 helper 契約：每個 DebugLog.log 都在 try 內、handler 恰為 RuntimeException＋LinkageError，沒有 Throwable／Error／catch-all" + w110Log,
+                w110Log.isEmpty());
+
         // ---- W59 世界地圖隊友點錯位（docs/patches.md 2bw）----
         // GameServer 送出計數的兩個 getChangeCount 同形改道；客戶端唯一讀點是 receiveWorldMapPlayerPosition 的相等比較。
         String w59Gs = "zombie/network/GameServer";
@@ -9422,7 +9463,7 @@ public final class SmokeCheck {
             {"zombie/characters/IsoGameCharacter$Bandages", "update", "(Lzombie/characters/IsoGameCharacter;)V", "e8cb1fe4c31a22fa65c001b037c585f3bc4bd2cbd2e65e6a3e996c4d66b54bc5"},
     };
 
-    /** W95 探針判讀依據：idle＝沒有遷徙定義就 return；迴圈只對 rainCatcher > 0 做事；sim 用原版送出半徑。 */
+    /** W95 探針判讀依據：idle＝沒有遷徙定義就 return；迴圈只對 rainCatcher > 0 做事；sim 用原版送出半徑；汽油集雨與降水幀用的原版讀取器。 */
     static final String[][] ANIMAL_PROBES_LOCKED = {
             {"zombie/characters/animals/AnimalZones", "updateVirtualAnimals", "()V", "8b6433916ddeba143aac12bb118334cbc4ebf658a04c2f974a7418c230272034"},
             {"zombie/characters/animals/VirtualAnimal", "update", "()V", "4d555295abfeffcbe02bee4f8ab875cce581781efae100eb10f9fa55ce5726dc"},
@@ -9431,6 +9472,11 @@ public final class SmokeCheck {
                     "(Lzombie/entity/GameEntity;Lzombie/entity/components/fluids/FluidContainer;Z)V", "dcecab3e7c1207a7c5fe50e49772b06c54030902c927b3ee363b1ca4ee8684a3"},
             {"zombie/entity/components/fluids/FluidContainer", "getRainCatcher", "()F", "f129591e1357f00533b0872bf260f9f84d12b420ca2f36a403bbcb3dbe9f25e1"},
             {"zombie/entity/components/fluids/FluidContainer", "isQualifiesForMetaStorage", "()Z", "a4a193ac443a72866b22e922b9e2800c06d1f78ee7d96c5c45b828fa8180da40"},
+            {"zombie/entity/components/fluids/FluidContainer", "canPlayerEmpty", "()Z", "b18b094b0f68a0a956445aad9d911531f7d764e43fb19853bf0c0baee5d079f2"},
+            {"zombie/entity/components/fluids/FluidContainer", "isEmpty", "()Z", "f11f6a4af729f8dc47976ae23297b8611da3986895721a7c73d7c4f592fb9ff7"},
+            {"zombie/entity/components/fluids/FluidContainer", "getPrimaryFluid", "()Lzombie/entity/components/fluids/Fluid;", "eb8f2a8ec3e56d9d5560143a0d0bbd7404a36e59fe837414362905c8f097eb5e"},
+            {"zombie/entity/components/fluids/Fluid", "getFluidTypeString", "()Ljava/lang/String;", "9c5e24f4a1b1f5a0e515cd727223e8884359cdccdb726797ae07235d4637e743"},
+            {"zombie/iso/weather/ClimateManager", "getPrecipitationIntensity", "()F", "76ef2a89be20e37b51d2a91b50a4da16798aa14bd8e7a6d9a5e024a77c786846"},
     };
 
     /** W92（2da）／W93（2db）／W94（2dc）／W95（2dd）：原版前提、同形手術、helper 契約。任一前提變紅＝先重新分析等價或撤刀，不改斷言讓它變綠。 */

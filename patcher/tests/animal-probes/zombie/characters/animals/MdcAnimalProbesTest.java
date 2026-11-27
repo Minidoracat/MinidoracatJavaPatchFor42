@@ -20,7 +20,9 @@ import zombie.entity.ComponentContainer;
 import zombie.entity.ComponentType;
 import zombie.entity.EntityBucket;
 import zombie.entity.GameEntity;
+import zombie.entity.components.fluids.Fluid;
 import zombie.entity.components.fluids.FluidContainer;
+import zombie.entity.components.fluids.FluidInstance;
 import zombie.entity.util.Array;
 import zombie.entity.util.BitSet;
 import zombie.entity.util.ImmutableArray;
@@ -34,8 +36,9 @@ import zombie.network.GameServer;
  *   <li>a0：helper 真的呼叫原版 {@code AnimalZones.updateVirtualAnimals}（原版開頭會清掉 {@code doneVirtualAnimals}，放一個哨兵看它被清掉），
  *       observe 計數；心跳的 loadedCells 掃描：2 個 cell（一個 chunks 是 null）、3 個 chunk（一個空的）、3 隻虛擬動物（2 隻遷徙群組沒有定義
  *       ＝idle、1 隻 rabbit）、1 個足跡。</li>
- *   <li>F1：回傳原版同一個陣列；5 個實體（2 個 rainCatcher &gt; 0、1 個 0、1 個沒有液體容器、1 個液體容器的 rainCatcher 是負的），
- *       第 64 次呼叫抽樣數到 2。</li>
+ *   <li>F1：回傳原版同一個陣列；7 個實體（4 個 rainCatcher &gt; 0，其中 1 個可倒、有量、裝 Petrol，1 個裝 Water；1 個 0、1 個沒有液體容器、
+ *       1 個液體容器的 rainCatcher 是負的），第 64 次呼叫抽樣數到 4 個 rainCatcher &gt; 0、1 個符合汽油蒸發分支；前 32 次沒降水、後 32 次有降水
+ *       → precipFrames 32/64。</li>
  *   <li>sim：一條連線（relevantRange 7 → 半徑 66 格），4 隻動物：近的、遠而閒置、遠而在走、遠而閒置且懷孕壓力 90；只在 frame % 16 == 0 的幀數，
  *       wouldPct 50、pregStress 1；不在主執行緒、frame 17 不數。</li>
  * </ul>
@@ -102,18 +105,27 @@ public final class MdcAnimalProbesTest {
         EntityBucket bucket = (EntityBucket) bucketCtor.newInstance(3);
         java.lang.reflect.Method membership = EntityBucket.class.getDeclaredMethod("updateMembership", GameEntity.class);
         membership.setAccessible(true);
-        float[] rain = {1.0F, 0.0F, 2.5F, Float.NaN, -1.0F};
-        for (float r : rain) {
-            membership.invoke(bucket, entity(r));
+        String[] fluid = {null, null, null, null, null, "Petrol", "Water"};
+        float[] rain = {1.0F, 0.0F, 2.5F, Float.NaN, -1.0F, 3.0F, 1.5F};
+        for (int i = 0; i < rain.length; i++) {
+            membership.invoke(bucket, entity(rain[i], fluid[i]));
         }
-        check("前提：bucket 內 5 個", bucket.getEntities().size() == 5);
+        check("前提：bucket 內 7 個", bucket.getEntities().size() == 7);
+        zombie.iso.weather.ClimateManager climate = zombie.iso.weather.ClimateManager.getInstance();
+        Field precipField = zombie.iso.weather.ClimateManager.class.getDeclaredField("precipitationIntensity");
+        precipField.setAccessible(true);
+        Object precipFloat = precipField.get(climate);
+        Field precipFinal = precipFloat.getClass().getDeclaredField("finalValue");
+        precipFinal.setAccessible(true);
         boolean sameArray = true;
         for (int i = 0; i < 64; i++) {
+            precipFinal.setFloat(precipFloat, i < 32 ? 0.0F : 0.5F);
             sameArray &= MdcAnimalProbes.fluidEntities(bucket) == bucket.getEntities();
         }
-        check(mode + "：F1 64 次都回原版同一個陣列；" + (off ? "不計數" : "計 64 次、第 64 次抽樣數到 2 個 rainCatcher > 0"),
+        check(mode + "：F1 64 次都回原版同一個陣列；" + (off ? "不計數" : "計 64 次、32 次有降水、第 64 次抽樣數到 4 個 rainCatcher > 0、1 個汽油"),
                 sameArray && MdcAnimalProbes.fluidCallsForTest() == (off ? 0 : 64)
-                        && MdcAnimalProbes.fluidScansForTest() == (off ? 0 : 1) && MdcAnimalProbes.rcSumForTest() == (off ? 0 : 2));
+                        && MdcAnimalProbes.fluidScansForTest() == (off ? 0 : 1) && MdcAnimalProbes.rcSumForTest() == (off ? 0 : 4)
+                        && MdcAnimalProbes.precipFramesForTest() == (off ? 0 : 32) && MdcAnimalProbes.petrolRcSumForTest() == (off ? 0 : 1));
 
         // ---- sim ----
         UdpEngine engine = alloc(UdpEngine.class);
@@ -158,7 +170,8 @@ public final class MdcAnimalProbesTest {
             String line = MdcAnimalProbes.lastBeatLine;
             check("心跳（" + line + "）", line != null && line.contains("mode=observe") && line.contains(" vaCalls=1 ")
                     && line.contains(" cells=1 chunks=3 va=3 vaIdle=2 vaMoving=1 tracks=1") && line.contains(" fluidCalls=64 ")
-                    && line.contains(" bucketMax=5 ") && line.contains(" rcAvg=2 ") && line.contains(" simFrames=1 ")
+                    && line.contains(" bucketMax=7 ") && line.contains(" rcAvg=4 ") && line.contains(" precipFrames=32/64 ")
+                    && line.contains(" petrolRcAvg=1 petrolRcMax=1 ") && line.contains(" simFrames=1 ")
                     && line.contains(" animals=4 ") && line.contains(" wouldPct=50.0 ") && line.contains(" pregStress=1.0 ")
                     && line.contains(" anomalies=0"));
         } else {
@@ -329,8 +342,8 @@ public final class MdcAnimalProbesTest {
         return ch;
     }
 
-    /** 未初始化的 IsoObject，ComponentContainer 有 bucketBits；rainCatcher 是 NaN 時不放液體容器。 */
-    static IsoObject entity(float rainCatcher) throws Exception {
+    /** 未初始化的 IsoObject，ComponentContainer 有 bucketBits；rainCatcher 是 NaN 時不放液體容器；fluidType 不是 null 時可倒、有量、裝一種液體。 */
+    static IsoObject entity(float rainCatcher, String fluidType) throws Exception {
         IsoObject o = alloc(IsoObject.class);
         ComponentContainer cc = alloc(ComponentContainer.class);
         Array<Component> list = new Array<>(false, 1);
@@ -338,6 +351,17 @@ public final class MdcAnimalProbesTest {
         if (!Float.isNaN(rainCatcher)) {
             FluidContainer fc = alloc(FluidContainer.class);
             set(FluidContainer.class, fc, "rainCatcher", rainCatcher);
+            if (fluidType != null) {
+                Fluid f = alloc(Fluid.class);
+                set(Fluid.class, f, "fluidTypeStr", fluidType);
+                FluidInstance fi = alloc(FluidInstance.class);
+                set(FluidInstance.class, fi, "fluid", f);
+                ArrayList<FluidInstance> fluids = new ArrayList<>();
+                fluids.add(fi);
+                set(FluidContainer.class, fc, "fluids", fluids);
+                set(FluidContainer.class, fc, "canPlayerEmpty", true);
+                set(FluidContainer.class, fc, "amountCache", 1.0F);
+            }
             byId[ComponentType.FluidContainer.GetID()] = fc;
             list.add(fc);
         } else {

@@ -15,7 +15,9 @@ import zombie.debug.DebugLog;
 import zombie.entity.EntityBucket;
 import zombie.entity.GameEntity;
 import zombie.entity.components.fluids.FluidContainer;
+import zombie.entity.components.fluids.Fluid;
 import zombie.entity.util.ImmutableArray;
+import zombie.iso.weather.ClimateManager;
 import zombie.network.GameServer;
 
 /**
@@ -27,8 +29,9 @@ import zombie.network.GameServer;
  *       數 cell、chunk、虛擬動物（沒有遷徙定義＝idle，原版 {@code VirtualAnimal.update} 第一行就 return）、足跡，附 JVM uptime，
  *       看規模是否隨開服時間長大。放在本 package 才讀得到 package-private 的 {@code loadedCells}／{@code chunks}／{@code animals}。</li>
  *   <li><b>F1 液體容器</b>：{@code FluidContainerUpdateSystem.updateSimulation} offset 19 唯一的 {@code EntityBucket.getEntities()}
- *       同形改道 {@link #fluidEntities}：照原版回傳同一個陣列，記 bucket 大小；每 64 次掃一次 rainCatcher &gt; 0 的數量並量這次唯讀掃描的
- *       µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，這個比例就是 W35 式索引能省的部分）。</li>
+ *       同形改道 {@link #fluidEntities}：照原版回傳同一個陣列，記 bucket 大小與有降水的幀數 {@code precipFrames}；每 64 次掃一次
+ *       rainCatcher &gt; 0 的數量與其中符合原版 {@code updateEntity} 汽油蒸發分支條件的數量（{@code petrolRcAvg}／{@code petrolRcMax}），
+ *       並量這次唯讀掃描的 µs（迴圈對 rainCatcher ≤ 0 的實體什麼都不做，這個比例就是 W35 式索引能省的部分）。</li>
  *   <li><b>sim 動物降頻候選</b>：W89 {@code IdleVehicleThrottle.add} 入口對每隻 {@code IsoAnimal} 呼叫 {@link #sim}（不改 W89 對車的行為）。
  *       每 16 幀抽一幀，數「沒有任何連線收得到（原版送出半徑再加 16 格）而且沒在移動」的動物比例 {@code wouldPct}，以及其中懷孕且壓力
  *       &gt; 80 的隻數 {@code pregStress}。</li>
@@ -60,7 +63,7 @@ public final class MdcAnimalProbes {
     // a0
     private static long vaCalls, vaNs, vaMaxNs;
     // F1
-    private static long fluidCalls, bucketSum, bucketMax, fluidScans, rcSum, fluidScanNs;
+    private static long fluidCalls, bucketSum, bucketMax, fluidScans, rcSum, fluidScanNs, precipFrames, petrolRcSum, petrolRcMax;
     // sim
     private static long simFrame = Long.MIN_VALUE;
     private static boolean simSampled;
@@ -108,19 +111,33 @@ public final class MdcAnimalProbes {
             if (n > bucketMax) {
                 bucketMax = n;
             }
+            ClimateManager cm = ClimateManager.getInstance();
+            if (cm != null && cm.getPrecipitationIntensity() > 0.0F) {
+                precipFrames++;
+            }
             if ((fluidCalls & FLUID_SCAN_MASK) == 0) {
                 long t0 = System.nanoTime();
                 int rc = 0;
+                int petrol = 0;
                 for (int i = 0; i < n; i++) {
                     GameEntity e = entities.get(i);
                     FluidContainer fc = e == null ? null : e.getFluidContainer();
                     if (fc != null && fc.getRainCatcher() > 0.0F) {
                         rc++;
+                        // 原版 updateEntity 蒸發分支的條件（getPrimaryFluid 多一個 null 防護）
+                        Fluid primary = fc.canPlayerEmpty() && !fc.isEmpty() ? fc.getPrimaryFluid() : null;
+                        if (primary != null && "Petrol".equals(primary.getFluidTypeString())) {
+                            petrol++;
+                        }
                     }
                 }
                 fluidScanNs += System.nanoTime() - t0;
                 fluidScans++;
                 rcSum += rc;
+                petrolRcSum += petrol;
+                if (petrol > petrolRcMax) {
+                    petrolRcMax = petrol;
+                }
             }
         } catch (RuntimeException | LinkageError t) {
             anomaly("F1", t);
@@ -273,14 +290,15 @@ public final class MdcAnimalProbes {
                 + " vaCalls=" + vaCalls + " vaUsAvg=" + avgUs(vaNs, vaCalls) + " vaUsMax=" + vaMaxNs / 1000 + " " + scan
                 + " fluidCalls=" + fluidCalls + " bucketAvg=" + (fluidCalls == 0 ? 0 : bucketSum / fluidCalls) + " bucketMax=" + bucketMax
                 + " rcAvg=" + (fluidScans == 0 ? 0 : rcSum / fluidScans) + " fluidScanUsAvg=" + avgUs(fluidScanNs, fluidScans)
-                + " fluidScans=" + fluidScans
+                + " fluidScans=" + fluidScans + " precipFrames=" + precipFrames + "/" + fluidCalls
+                + " petrolRcAvg=" + (fluidScans == 0 ? 0 : petrolRcSum / fluidScans) + " petrolRcMax=" + petrolRcMax
                 + " simFrames=" + simFrames + " animals=" + (simFrames == 0 ? 0 : simAnimals / simFrames)
                 + " unseenPct=" + pct(simUnseen, simAnimals) + " stillPct=" + pct(simStill, simAnimals)
                 + " wouldPct=" + pct(simWould, simAnimals)
                 + " pregStress=" + (simFrames == 0 ? "0" : String.format(Locale.ROOT, "%.1f", (double) simPregStress / simFrames))
                 + " simUsAvg=" + avgUs(simNs, simTimed) + " anomalies=" + anomalies;
         vaCalls = vaNs = vaMaxNs = 0;
-        fluidCalls = bucketSum = bucketMax = fluidScans = rcSum = fluidScanNs = 0;
+        fluidCalls = bucketSum = bucketMax = fluidScans = rcSum = fluidScanNs = precipFrames = petrolRcSum = petrolRcMax = 0;
         simFrames = simAnimals = simUnseen = simStill = simWould = simPregStress = simNs = simTimed = 0;
         lastBeatLine = line;
         log(line);
@@ -323,6 +341,8 @@ public final class MdcAnimalProbes {
     static long fluidCallsForTest() { return fluidCalls; }
     static long fluidScansForTest() { return fluidScans; }
     static long rcSumForTest() { return rcSum; }
+    static long precipFramesForTest() { return precipFrames; }
+    static long petrolRcSumForTest() { return petrolRcSum; }
     static long simAnimalsForTest() { return simAnimals; }
     static long simWouldForTest() { return simWould; }
     static long simPregStressForTest() { return simPregStress; }
