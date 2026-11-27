@@ -311,9 +311,7 @@ public final class IsoObjectUpdateGate {
             compare(next);
         }
         if (alDisabled) {
-            built = false;
-            fresh.clear();
-            next.clear();
+            alRelease();
             return;
         }
         ArrayList<IsoObject> old = active;
@@ -342,7 +340,7 @@ public final class IsoObjectUpdateGate {
         built = true;
     }
 
-    /** 缺＝原版這輪 update 了但不在舊子清單（也不是這輪才點亮的燈）；多＝舊子清單有、原版這輪沒 update 且仍不可跳過。 */
+    /** 缺＝原版這輪 update 了但不在舊子清單；多＝舊子清單有、原版這輪沒 update 且仍不可跳過。兩邊都排除這輪才點亮的燈（輪到它時可能還沒亮、被跳過）。 */
     private static void compare(Set<IsoObject> freshSet) {
         int missing = 0, extra = 0;
         IsoObject firstMissing = null, firstExtra = null;
@@ -354,7 +352,7 @@ public final class IsoObjectUpdateGate {
         }
         for (int i = 0, n = active.size(); i < n; i++) {
             IsoObject o = active.get(i);
-            if (!freshSet.contains(o) && !skippable(o) && extra++ == 0) {
+            if (!freshSet.contains(o) && !skippable(o) && !LIT_NOW.contains(o) && extra++ == 0) {
                 firstExtra = o;
             }
         }
@@ -365,6 +363,9 @@ public final class IsoObjectUpdateGate {
         if (AL_MODE == ON) {
             alDisabled = true;
         }
+        if (mismatches > DETAIL_LIMIT) {
+            return;   // observe 每個完整輪都可能再不一致：只印前幾次，計數照加（心跳有 mismatches）
+        }
         try {
             log("activeList MISMATCH missing=" + missing + (firstMissing == null ? "" : "(" + firstMissing.getClass().getSimpleName() + ")")
                     + " extra=" + extra + (firstExtra == null ? "" : "(" + firstExtra.getClass().getSimpleName() + ")")
@@ -374,9 +375,25 @@ public final class IsoObjectUpdateGate {
         }
     }
 
+    /**
+     * 永久停用時放掉子清單持有的物件參照。呼叫點只在輪首（drainLit）與完整輪輪尾（finishFull／rebuild），
+     * 都不在子清單輪中途，size／get 不會拿到換掉的清單。
+     */
+    private static void alRelease() {
+        built = false;
+        tracked = null;
+        active = new ArrayList<>(0);
+        fresh = new ArrayList<>(0);
+        activeSet = Collections.newSetFromMap(new IdentityHashMap<>());
+        spareSet = Collections.newSetFromMap(new IdentityHashMap<>());
+        LIT_NOW.clear();
+        LIT_NOW.trimToSize();
+        LIT.clear();
+    }
+
     private static void alFail(String reason) {
         alDisabled = true;
-        built = false;
+        alRelease();
         anomalies.incrementAndGet();
         try {
             log("activeList DISABLED（本次啟動永久回完整輪）reason=" + reason);
