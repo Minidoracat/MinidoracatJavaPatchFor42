@@ -4482,7 +4482,7 @@ console（第一幀一行首次生效，之後每 5 分鐘一行；frames／pass
 
 **不處理**：
 - 洗衣機／烘衣機閒置時每幀查電力、堆肥箱幾乎每幀掃容器兩遍：有寫入，不是空操作，不能套同一種跳過；看心跳 `timed` 再另案。
-- 「只迭代活躍子集」（連 thumpable 的 header 都不碰）：要追蹤 6 個 `putfield lifeLeft` 與 Lua 經 getter 改清單，複雜度等同 W45；等 on 之後殘餘仍 ≥ 2 ms 再評估。
+- 「只迭代活躍子集」：已做成第二刀（見下方「第二刀：活躍子清單」），預設 observe。
 - `removeAll` 改寫：保序是原版與 MinidoracatFixesFor42 `MDFX_ChargerIdleGuard` 的前提；identity 掃描在 ZGC 下實測沒有比較快。
 
 **守門與驗證**：
@@ -4494,6 +4494,43 @@ console（第一幀一行首次生效，之後每 5 分鐘一行；frames／pass
 ### 2026-11-10 42.22.2 對版
 
 `IsoCell.ProcessIsoObject`／`addToProcessIsoObject`／`addToProcessIsoObjectRemove` 與 `IsoThumpable.update`（SHA 不變）逐指令未變，原樣保留。`IsoObject.getObjectIndex` 有變：`PZArrayList` 刪除，改成 `getObjects()Ljava/util/List;` 加 `List.indexOf`。重估：`IsoGridSquare.objects` 是 final 的 `List`、全 class 只在建構子 `new ArrayList(2)` 寫一次，`ArrayList.indexOf` 只呼叫參數的 `equals`、沒有寫入；IsoThumpable 繼承鏈沒有覆寫 `equals`（原有普查）——跳過條件的「無副作用」前提仍成立。SmokeCheck 換釘 `getObjectIndex` 的 SHA（42.21 `f82a5485…` → 42.22.2 `5add6b9b…`），PZArrayList 的 indexOf／objectsEqual 無寫入檢查改成上面三項。`IsoObjectUpdateGateTest` 四組態通過；測試格子的物件清單由 `PZArrayList` 改成 `ArrayList`。
+
+### 第二刀：活躍子清單（2026-11-27，預設 observe）
+
+**目的**：第一刀 on 之後迴圈仍要逐件讀可跳過 thumpable 的 header（`getClass`、`lifeLeft`）；第二刀讓迴圈平常只走「不可跳過的物件」組成的子清單，可跳過的建造物整輪不碰。
+
+**開關**：`-Dmdc.isoObjectActiveList=0|off`（不動作）、`1|on`（平常只走子清單）、`2|observe`（預設：每輪照原版整串走，同時建子清單並比對）；未知值當 observe，需重啟。只在 `-Dmdc.isoObjectGate=on` 時動作，第一刀不是 on 時心跳顯示 `activeList=inactive`。
+
+**手術**（沿用 `IsoCell` ClassPatch，新增 `IsoThumpable` ClassPatch）：`ProcessIsoObject` 的兩個 `ArrayList.size()`（offset 51、90）與 `ArrayList.get(int)`（offset 67）同形改道 `IsoObjectUpdateGate.size`／`get`（命中 4→7）；`addToProcessIsoObject` 的 `ArrayList.add`（offset 34）改道 `IsoObjectUpdateGate.add`（命中 1→2）；`IsoThumpable.setLifeLeft` 在寫入後尾部呼叫 `afterLifeLeft(IsoThumpable)`（命中 1）。共多 1 個 patched class、5 個命中點，沒有新 helper class。
+
+**子清單規則**：
+- 內容＝真正清單裡不可跳過的元素，同順序、重複照留；「可跳過」用第一刀同一個 `skippable`。
+- 完整輪：照原版整串走（第一刀逐件判斷），依序記下每件交給 update 的物件；輪末用它換掉子清單，再補登記這一輪中途加到清單尾端的物件（`size` 記下的長度之後那段）。
+- 子清單輪：`size` 回子清單長度、`get` 回子清單元素，原版迴圈的 null 略過與「清單變短時 `n--`、`size--`」照常運作。輪中 `add` 把不可跳過的新物件附加到子清單尾端（原版也附加在清單尾端，兩邊當輪都不 update）；`removeAll` 從子清單拿掉同一批物件（同為 `contains` 語意）。
+- 點燈：`setLifeLeft` 寫入後 `lifeLeft > -1` 就把物件放進 `ConcurrentLinkedQueue`（任何執行緒都可以），下一輪開頭由主執行緒排空，還在清單裡、不在子清單、不可跳過的才附加到子清單尾端。燈燒完（`lifeLeft` 回 -1）先留在子清單，第一刀逐件判斷照常跳過，下一個完整輪拿掉。
+- 何時走完整輪：第一輪、每 600 輪一次（60 FPS 約 10 秒）、計時幀、清單換了一個、清單長度和掛點維護的預期長度不符（有人繞過掛點改清單，計 `resyncs`）、上一輪後有非主執行緒經 `add` 寫清單、上一個完整輪中途長度不符、上一輪被某件 `update()` 往外拋的例外打斷而沒走到輪尾（計 `aborted`；完整輪中途加入的物件沒補進子清單，所以重建、不比對）。其餘輪在 on 時走子清單；observe 每輪都是完整輪。
+- 比對：每個完整輪（observe 是每輪）把這一輪實際交給 update 的物件與上一輪的子清單比對。「缺」＝這輪有 update、子清單沒有、也不是這輪才點的燈；「多」＝子清單有、這輪沒 update、也不可跳過。不一致就計 `mismatches` 並印一行 `activeList MISMATCH missing=<n>(<類別>) extra=<n>(<類別>)`；on 時本次啟動永久回到每輪完整輪（第一刀照常）。helper 內有反射的排空與重建若拋例外，計 `anomalies` 並同樣永久停用。
+
+**和原版的兩項已知差別**（只在 on 的子清單輪）：
+1. 兩輪之間被點亮、不在清單尾端的燈附加在子清單尾端：到下一個完整輪前，它在一輪裡的 update 順序比原版晚（同一批物件，只差順序），完整輪後回到原位。
+2. 在迴圈中途被排在它前面的物件點亮的燈：原版同一輪就輪到它，子清單輪要下一輪才 update（晚一幀），之後同第 1 項。
+
+燈的 update 只做燃料遞減與光源開關，順序晚幾件或晚一幀不影響結果；兩項差別的確切形狀都有測試釘住。
+
+**`loadChange` 不掛**：`IsoThumpable.loadChange` 對 `lifeLeft` 的寫入在伺服器走不到。42.22.2 jar 全掃描：以 `IsoObject` 為 owner 呼叫 `loadChange` 的只有 `ObjectChangePacket.parseObjectChange` 兩處，以 `IsoThumpable` 為 owner 的沒有；`parseObjectChange` 的呼叫者只有 `ObjectChangePacket.parse` 與 `SinglePlayerClient.receiveObjectChange`；`ObjectChangePacket` 的 `@PacketSetting` `handlingType=2`，伺服器只在 `handlingType & 1` 不為 0 時解析。SmokeCheck 釘住這條鏈，任一環改變就轉紅。萬一漏了，完整輪的比對會以「缺」抓到。
+
+**`setLifeLeft` 用尾部呼叫**：設計原寫頭部呼叫 `onLifeLeft(IsoThumpable, float)`，但 Patcher 的頭部呼叫不能傳 float 參數；改成寫入之後的尾部呼叫 `afterLifeLeft(IsoThumpable)` 讀欄位，結果相同。
+
+**心跳**：首次生效行加 `activeList=<模式> alRaw=<原始值>`；beat 行末尾加 `activeList=<off|disabled|inactive|on|observe> active=<子清單長度> fullPasses=<n> subPasses=<n> mismatches=<n> resyncs=<n> aborted=<被例外打斷的輪數> lifeQueued=<n> lifeAdded=<n>`（累計值）。
+
+**判讀與開 on 的條件**：observe 跑過幾次晚峰、`mismatches` 一直是 0 才切 on；切 on 後 `subPasses` 應遠多於 `fullPasses`，`passAvgMs` 應再降；出現 `MISMATCH` 或 `activeList=disabled` 就撤回 observe，帶 log 另查是哪個寫入點沒掛到。
+
+**守門與驗證**：
+- SmokeCheck 原版前提：`ProcessIsoObject` 恰 2 個 `ArrayList.size()`、1 個 `ArrayList.get(int)`，前一條都是 `getfield processIsoObject`（`get` 前多一個 `iload`）；`addToProcessIsoObject` 恰 1 個 `ArrayList.add`，接收者是 `processIsoObject`；全 jar 讀 `processIsoObject` 的只有 `ProcessIsoObject`×4、`addToProcessIsoObject`×1、`getProcessIsoObjects`×1，寫入只有建構子一次；`processIsoObjectSet` 只在 `IsoCell` 內讀、只在建構子寫；`lifeLeft` 的寫入只有 4 個建構子（都寫 -1）、`setLifeLeft`（4 條指令的 setter）與 `loadChange`；`loadChange` 伺服器走不到的那條鏈（見上）。手術後 `ProcessIsoObject` 多 3 個改道、不再有原版 `size`／`get`、真指令仍 +4；`addToProcessIsoObject` 的 `add` 改道、仍 +3；`setLifeLeft` 尾部呼叫正確、+2，`IsoThumpable` 其餘方法逐指令不變。helper 的 `add` 第一件事是原版 `ArrayList.add`，`get` 只呼叫 `ArrayList.get`。
+- `IsoObjectUpdateGateTest`（`build.ps1` [9zo/10] 另加三個 JVM：`isoObjectGate=on` × `isoObjectActiveList` 0／observe／on，各自驗模式）：dist 內手術後的真 `IsoCell` 與照 javap 寫的原版迴圈模擬跑同一份 1300 輪腳本（加入一般物件／牆／亮著的燈、移除、別的執行緒點亮清單尾端的牆、燈燒完、非主執行緒 `add`、繞過掛點直接改清單含加 null、迴圈中途加入與移除），每輪比對「有作用的 update 序列」（一般物件每次 update、燈經格子 `objects.indexOf` 記錄）與 `getProcessIsoObjects()` 的內容順序，三種模式都要逐輪相同；on 另驗子清單輪多於 1000 輪、出現間隔恰 600 輪的完整輪、非主執行緒 `add` 與繞過掛點的那一輪走完整輪、`resyncs`=2、點燈有加進子清單；observe 驗每輪都是完整輪；off 驗不建子清單、不計數、點燈不入列。on／observe 再驗兩項已知差別的確切形狀（on：第 1 項到完整輪前排在尾端、之後回原位；第 2 項當輪少它、之後排在尾端、完整輪後回原位且比對不誤判；observe：都與原版相同）、心跳欄位，以及子清單故意漏一件（on：子清單輪看得到差異當負對照，完整輪抓到後永久停用、之後與原版相同；observe：下一輪計數、不停用）與多一件（observe 計數）。原有四個 JVM 另驗第二刀預設 observe：第一刀 on 時每輪完整輪、沒有子清單輪、點燈入列；第一刀不是 on 時完全不動作。
+- 同一測試（on）另驗被例外打斷的輪：完整輪中途先經 `add` 加入一個不可跳過的物件、再由某件 `update()` 丟例外打斷，下一輪走完整輪重建，該物件從那一輪起每輪都 update、到下一個定期完整輪都與原版相同、`mismatches` 仍是 0、沒有停用；子清單輪被例外打斷時下一輪同樣走完整輪、序列與原版相同；兩次都計 `aborted`。
+
+**部署**：`IsoThumpable.class` 新增進 manifest（198 → 199 個 class：89 個 patched class、270 個命中點、110 個 helper），`IsoCell.class`、`IsoObjectUpdateGate.class` 換新。上線後首次生效行應為 `activeList=observe`。
 
 <a id="2ci"></a>
 ## 2ci. 尋路執行緒觀測（W74，server，預設 on，純觀測）

@@ -742,7 +742,7 @@ Assert-Ok "HutchEggRegionTest（observe，只計數照原版）"
 java -Xverify:all "-Dmdc.hutchEggRegion=0" -cp "$R\work\out;$ASM_CP;$R\dist\java;$TJ" zombie.mdc.HutchEggRegionTest "$TJ" "$R\dist\java" off
 Assert-Ok "HutchEggRegionTest（off，kill switch 回原版）"
 
-Write-Host "[9zo/10] IsoObject 每幀更新閘（W73）：真 IsoThumpable.update 與閘門逐欄位差分（伺服器／客戶端 × lifeLeft 含 NaN、±Inf、-0、-1 × 格子狀態 × 子類別）、燈的原版負對照、mutant、真 ProcessIsoObject（removeAll、心跳欄位、非主執行緒寫入）、on 抽樣比對與停用、off 不計數..."
+Write-Host "[9zo/10] IsoObject 每幀更新閘（W73）：真 IsoThumpable.update 與閘門逐欄位差分（伺服器／客戶端 × lifeLeft 含 NaN、±Inf、-0、-1 × 格子狀態 × 子類別）、燈的原版負對照、mutant、真 ProcessIsoObject（removeAll、心跳欄位、非主執行緒寫入）、on 抽樣比對與停用、off 不計數；第二刀活躍子清單 off／observe／on 與原版迴圈逐輪比對 update 序列與清單、兩項已知差別、漏一件／多一件偵測與停用..."
 # observe＝出貨組態（照原版逐件 update、只量）；on＝跳過伺服器上 lifeLeft 不是 > -1 的 IsoThumpable；off＝純委派；
 # 未知值落回 observe。測試自驗 argv 與實際 MODE 相符，property 拼錯不得假綠。
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest observe
@@ -753,6 +753,14 @@ java -Xverify:all "-Dmdc.isoObjectGate=0" -cp "$R\work\out;$R\dist\java;$TJ" zom
 Assert-Ok "IsoObjectUpdateGateTest（0，純委派）"
 java -Xverify:all "-Dmdc.isoObjectGate=bogus" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest unknown
 Assert-Ok "IsoObjectUpdateGateTest（未知值落回 observe）"
+# 第二刀活躍子清單（-Dmdc.isoObjectActiveList，只在 isoObjectGate=on 時動作）：observe＝出貨預設（每輪完整輪、只比對）；
+# on＝平常只走子清單；0＝不動作。三種都跑真 IsoCell 對原版迴圈模擬的 1300 輪腳本。
+java -Xverify:all "-Dmdc.isoObjectGate=on" "-Dmdc.isoObjectActiveList=0" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest al-off
+Assert-Ok "IsoObjectUpdateGateTest（第二刀 0，不動作）"
+java -Xverify:all "-Dmdc.isoObjectGate=on" "-Dmdc.isoObjectActiveList=2" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest al-observe
+Assert-Ok "IsoObjectUpdateGateTest（第二刀 observe，出貨預設只比對）"
+java -Xverify:all "-Dmdc.isoObjectGate=on" "-Dmdc.isoObjectActiveList=1" -cp "$R\work\out;$R\dist\java;$TJ" zombie.mdc.IsoObjectUpdateGateTest al-on
+Assert-Ok "IsoObjectUpdateGateTest（第二刀 on，只走子清單）"
 
 Write-Host "[9zp/10] 尋路執行緒觀測（W74）：真 updateThread／findPath／PathRequestTask.execute（native 換成原樣上拋的 UnsatisfiedLinkError），任務照原順序執行、請求進同一佇列、回傳值與參數同一物件、例外原樣上拋、off 零計數，並量每次 findPath 的探針成本..."
 java -Xverify:all -cp "$R\work\out;$R\dist\java;$TJ" zombie.pathfind.nativeCode.MdcPathfindProbeTest on
